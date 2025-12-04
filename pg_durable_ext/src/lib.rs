@@ -3,6 +3,14 @@ use pgrx::bgworkers::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::time::Duration;
+use std::sync::Arc;
+
+// Duroxide imports
+use duroxide::{
+    ActivityContext, OrchestrationContext, OrchestrationRegistry,
+    runtime::{self, registry::ActivityRegistry},
+    Client,
+};
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -236,6 +244,82 @@ fn execute_sql_node(node_id: &str, query: &str) -> Result<Option<String>, String
     });
     
     result
+}
+
+// ============================================================================
+// Duroxide Integration - Hello World Test
+// ============================================================================
+
+/// Run a simple duroxide hello world orchestration to verify integration works.
+/// This uses an in-memory SQLite store for testing.
+fn run_duroxide_hello_world(name: &str) -> Result<String, String> {
+    // Create a tokio runtime for async execution
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+    
+    rt.block_on(async {
+        // Use in-memory SQLite for this test (simpler than Postgres for now)
+        let store = Arc::new(
+            duroxide::providers::sqlite::SqliteProvider::new_in_memory()
+                .await
+                .map_err(|e| format!("Failed to create SQLite provider: {}", e))?
+        );
+        
+        // Register a simple "Greet" activity
+        let activities = ActivityRegistry::builder()
+            .register("Greet", |_ctx: ActivityContext, input: String| async move {
+                Ok(format!("Hello, {}!", input))
+            })
+            .build();
+        
+        // Define the orchestration
+        let orchestration = |ctx: OrchestrationContext, input: String| async move {
+            ctx.trace_info("Starting hello world orchestration");
+            let greeting = ctx.schedule_activity("Greet", input)
+                .into_activity()
+                .await?;
+            ctx.trace_info(format!("Got greeting: {}", greeting));
+            Ok(greeting)
+        };
+        
+        // Register the orchestration
+        let orchestrations = OrchestrationRegistry::builder()
+            .register("HelloWorld", orchestration)
+            .build();
+        
+        // Start the runtime
+        let runtime = runtime::Runtime::start_with_store(
+            store.clone(),
+            Arc::new(activities),
+            orchestrations
+        ).await;
+        
+        // Create client and start orchestration
+        let client = Client::new(store.clone());
+        let instance_id = format!("hello-{}", Uuid::new_v4());
+        
+        client.start_orchestration(&instance_id, "HelloWorld", name)
+            .await
+            .map_err(|e| format!("Failed to start orchestration: {:?}", e))?;
+        
+        // Wait for completion
+        let result = client.wait_for_orchestration(&instance_id, Duration::from_secs(5))
+            .await
+            .map_err(|e| format!("Failed to wait for orchestration: {:?}", e))?;
+        
+        // Shutdown runtime
+        runtime.shutdown(None).await;
+        
+        match result {
+            runtime::OrchestrationStatus::Completed { output } => Ok(output),
+            runtime::OrchestrationStatus::Failed { details } => {
+                Err(format!("Orchestration failed: {}", details.display_message()))
+            }
+            other => Err(format!("Unexpected status: {:?}", other)),
+        }
+    })
 }
 
 /// Declare the 'durable' schema that contains all pg_durable functions
@@ -519,16 +603,28 @@ fn result(instance_id: &str) -> Option<String> {
     Spi::get_one::<String>(&sql).expect("failed to get instance result")
 }
 
-/// A simple hello world function to demonstrate the extension.
-/// This will eventually trigger a duroxide orchestration.
+/// A hello world function that runs a duroxide orchestration.
+/// This demonstrates duroxide integration is working.
+/// 
+/// Example: SELECT durable.hello('World');
+/// Returns: "Hello, World!" (via duroxide orchestration)
 #[pg_extern(schema = "durable")]  
 fn hello(name: &str) -> String {
-    // For now, just return a greeting synchronously
-    // Full implementation would:
-    // 1. Start a duroxide orchestration
-    // 2. Return the instance ID
-    // 3. Background worker would run the orchestration
-    format!("Hello, {}! (workflow would run here)", name)
+    match run_duroxide_hello_world(name) {
+        Ok(result) => result,
+        Err(e) => format!("duroxide error: {}", e),
+    }
+}
+
+/// Test function to verify duroxide integration without going through orchestration.
+/// 
+/// Example: SELECT durable.duroxide_test();
+#[pg_extern(schema = "durable")]
+fn duroxide_test() -> String {
+    match run_duroxide_hello_world("duroxide") {
+        Ok(result) => format!("SUCCESS: {}", result),
+        Err(e) => format!("FAILED: {}", e),
+    }
 }
 
 // Create custom SQL operators for workflow chaining
