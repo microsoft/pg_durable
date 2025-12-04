@@ -8,6 +8,53 @@ use uuid::Uuid;
 #[pg_schema]
 mod durable {}
 
+// ============================================================================
+// Schema and Table Definitions
+// ============================================================================
+
+// Create the workflow storage tables when extension is created
+extension_sql!(
+    r#"
+-- Table to store workflow nodes (SQL steps, THEN chains, etc.)
+CREATE TABLE IF NOT EXISTS durable.nodes (
+    id UUID PRIMARY KEY,
+    instance_id UUID,
+    node_type TEXT NOT NULL,
+    query TEXT,
+    result_name TEXT,
+    left_node UUID,
+    right_node UUID,
+    status TEXT DEFAULT 'pending',
+    result JSONB,
+    error TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Table to store workflow instances
+CREATE TABLE IF NOT EXISTS durable.instances (
+    id UUID PRIMARY KEY,
+    root_node UUID NOT NULL,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    completed_at TIMESTAMPTZ
+);
+
+-- Index for finding pending instances
+CREATE INDEX IF NOT EXISTS idx_instances_status ON durable.instances(status);
+
+-- Index for finding nodes by instance
+CREATE INDEX IF NOT EXISTS idx_nodes_instance ON durable.nodes(instance_id);
+"#,
+    name = "create_tables",
+    requires = [durable]
+);
+
+// ============================================================================
+// Durofut Type - Represents a workflow node reference
+// ============================================================================
+
 /// The Durofut type represents a "durable future" - a reference to a node in the workflow graph.
 /// For the MVP, we serialize this as JSON and pass it as text between SQL function calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +85,39 @@ impl Durofut {
     fn from_json(s: &str) -> Self {
         serde_json::from_str(s).expect("failed to deserialize Durofut")
     }
+
+    /// Insert this node into the durable.nodes table
+    fn insert_node(&self) {
+        let query_escaped = self.query.as_ref()
+            .map(|q| q.replace('\'', "''"))
+            .map(|q| format!("'{}'", q))
+            .unwrap_or_else(|| "NULL".to_string());
+        
+        let result_name_escaped = self.result_name.as_ref()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .unwrap_or_else(|| "NULL".to_string());
+        
+        let left_node = self.left_node.as_ref()
+            .map(|id| format!("'{}'::uuid", id))
+            .unwrap_or_else(|| "NULL".to_string());
+        
+        let right_node = self.right_node.as_ref()
+            .map(|id| format!("'{}'::uuid", id))
+            .unwrap_or_else(|| "NULL".to_string());
+
+        let sql = format!(
+            r#"INSERT INTO durable.nodes (id, node_type, query, result_name, left_node, right_node)
+               VALUES ('{}', '{}', {}, {}, {}, {})"#,
+            self.node_id, self.node_type, query_escaped, result_name_escaped, left_node, right_node
+        );
+        
+        Spi::run(&sql).expect("failed to insert node");
+    }
 }
+
+// ============================================================================
+// Public SQL Functions
+// ============================================================================
 
 /// Simple hello world function to verify extension works
 #[pg_extern]
@@ -61,6 +140,8 @@ fn sql(query: &str) -> String {
         query: Some(query.to_string()),
         result_name: None,
     };
+    // Store the node in the database
+    durofut.insert_node();
     durofut.to_json()
 }
 
@@ -82,6 +163,8 @@ fn then_fn(a: &str, b: &str) -> String {
         query: None,
         result_name: None,
     };
+    // Store the THEN node in the database
+    durofut.insert_node();
     durofut.to_json()
 }
 
@@ -94,6 +177,15 @@ fn then_fn(a: &str, b: &str) -> String {
 fn as_named(name: &str, fut: &str) -> String {
     let mut durofut = Durofut::from_json(fut);
     durofut.result_name = Some(name.to_string());
+    
+    // Update the node's result_name in the database
+    let name_escaped = name.replace('\'', "''");
+    let sql = format!(
+        "UPDATE durable.nodes SET result_name = '{}' WHERE id = '{}'::uuid",
+        name_escaped, durofut.node_id
+    );
+    Spi::run(&sql).expect("failed to update node result_name");
+    
     durofut.to_json()
 }
 
@@ -101,20 +193,55 @@ fn as_named(name: &str, fut: &str) -> String {
 /// 
 /// Example: SELECT durable.start(durable.sql('SELECT 1') ~> durable.sql('SELECT 2'));
 /// 
-/// For the MVP, this just returns an instance ID. 
-/// The full implementation will:
-/// 1. Create instance in duro_instances table
-/// 2. Store all nodes in duro_nodes table
-/// 3. Trigger the runtime to pick up the new instance
+/// This function:
+/// 1. Creates an instance in durable.instances
+/// 2. Links all nodes to the instance
+/// 3. Returns the instance ID for tracking
 #[pg_extern(schema = "durable")]
 fn start(fut: &str) -> String {
-    let _durofut = Durofut::from_json(fut);
+    let durofut = Durofut::from_json(fut);
     let instance_id = Uuid::new_v4().to_string();
     
-    // TODO: Store workflow in database and trigger runtime
-    // For now, just return the instance ID
+    // Update all nodes in the workflow tree with this instance_id
+    // This is a simple recursive update via SQL
+    let update_nodes_sql = format!(
+        r#"
+        WITH RECURSIVE node_tree AS (
+            -- Start with the root node
+            SELECT id, left_node, right_node FROM durable.nodes WHERE id = '{}'::uuid
+            UNION ALL
+            -- Recursively find all child nodes
+            SELECT n.id, n.left_node, n.right_node 
+            FROM durable.nodes n
+            INNER JOIN node_tree t ON n.id = t.left_node OR n.id = t.right_node
+        )
+        UPDATE durable.nodes SET instance_id = '{}'::uuid
+        WHERE id IN (SELECT id FROM node_tree)
+        "#,
+        durofut.node_id, instance_id
+    );
+    Spi::run(&update_nodes_sql).expect("failed to update nodes with instance_id");
+
+    // Create the instance record
+    let create_instance_sql = format!(
+        "INSERT INTO durable.instances (id, root_node, status) VALUES ('{}'::uuid, '{}'::uuid, 'pending')",
+        instance_id, durofut.node_id
+    );
+    Spi::run(&create_instance_sql).expect("failed to create instance");
     
     instance_id
+}
+
+/// Get the status of a workflow instance.
+/// 
+/// Example: SELECT durable.status('instance-uuid');
+#[pg_extern(schema = "durable")]
+fn status(instance_id: &str) -> Option<String> {
+    let sql = format!(
+        "SELECT status FROM durable.instances WHERE id = '{}'::uuid",
+        instance_id
+    );
+    Spi::get_one::<String>(&sql).expect("failed to get instance status")
 }
 
 /// A simple hello world function to demonstrate the extension.
