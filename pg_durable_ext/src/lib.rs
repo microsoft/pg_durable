@@ -1,8 +1,242 @@
 use pgrx::prelude::*;
+use pgrx::bgworkers::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use std::time::Duration;
 
 ::pgrx::pg_module_magic!(name, version);
+
+// ============================================================================
+// Background Worker
+// ============================================================================
+
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    // Register the background worker when the extension is loaded
+    BackgroundWorkerBuilder::new("pg_durable_worker")
+        .set_function("background_worker_main")
+        .set_library("pg_durable_ext")
+        .set_argument(0i32.into_datum())
+        .enable_spi_access()
+        .set_start_time(BgWorkerStartTime::RecoveryFinished)
+        .set_restart_time(Some(Duration::from_secs(5)))
+        .load();
+}
+
+/// Main background worker function - polls for pending workflows and executes them
+#[pg_guard]
+#[no_mangle]
+pub extern "C-unwind" fn background_worker_main(_arg: pg_sys::Datum) {
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+    
+    log!(
+        "pg_durable background worker started, polling for pending workflows..."
+    );
+    
+    // Connect to the database
+    BackgroundWorker::connect_worker_to_spi(Some("pg_durable_ext"), None);
+    
+    // Main work loop
+    while BackgroundWorker::wait_latch(Some(Duration::from_secs(2))) {
+        if BackgroundWorker::sighup_received() {
+            // Reload configuration if needed
+        }
+        
+        if BackgroundWorker::sigterm_received() {
+            log!("pg_durable background worker shutting down");
+            break;
+        }
+        
+        // Process pending workflows
+        BackgroundWorker::transaction(|| {
+            process_pending_workflows();
+        });
+    }
+    
+    log!("pg_durable background worker terminated");
+}
+
+/// Process any pending workflow instances
+fn process_pending_workflows() {
+    // Find pending instances
+    let result = Spi::connect(|client| {
+        let query = "SELECT id::text, root_node::text FROM durable.instances WHERE status = 'pending' LIMIT 10";
+        
+        let mut pending = Vec::new();
+        
+        if let Ok(table) = client.select(query, None, &[]) {
+            for row in table {
+                let id: Option<String> = row.get(1).ok().flatten();
+                let root_node: Option<String> = row.get(2).ok().flatten();
+                if let (Some(id), Some(root)) = (id, root_node) {
+                    pending.push((id, root));
+                }
+            }
+        }
+        
+        pending
+    });
+    
+    // Execute each pending workflow
+    for (instance_id, root_node) in result {
+        log!("Processing workflow instance: {}", instance_id);
+        execute_workflow(&instance_id, &root_node);
+    }
+}
+
+/// Execute a workflow starting from the root node
+fn execute_workflow(instance_id: &str, root_node_id: &str) {
+    // Update instance to 'running'
+    let update_sql = format!(
+        "UPDATE durable.instances SET status = 'running', updated_at = now() WHERE id = '{}'::uuid",
+        instance_id
+    );
+    if let Err(e) = Spi::run(&update_sql) {
+        log!("Failed to update instance status: {:?}", e);
+        return;
+    }
+    
+    // Execute the node tree recursively
+    match execute_node(root_node_id) {
+        Ok(result) => {
+            // Mark instance as completed
+            let complete_sql = format!(
+                "UPDATE durable.instances SET status = 'completed', completed_at = now(), updated_at = now() WHERE id = '{}'::uuid",
+                instance_id
+            );
+            let _ = Spi::run(&complete_sql);
+            log!("Workflow {} completed with result: {:?}", instance_id, result);
+        }
+        Err(err) => {
+            // Mark instance as failed
+            let err_escaped = err.replace('\'', "''");
+            let fail_sql = format!(
+                "UPDATE durable.instances SET status = 'failed', updated_at = now() WHERE id = '{}'::uuid",
+                instance_id
+            );
+            let _ = Spi::run(&fail_sql);
+            log!("Workflow {} failed: {}", instance_id, err_escaped);
+        }
+    }
+}
+
+/// Execute a single node and return its result
+fn execute_node(node_id: &str) -> Result<Option<String>, String> {
+    // Fetch node info
+    let node_sql = format!(
+        "SELECT node_type, query, left_node::text, right_node::text, result_name, status 
+         FROM durable.nodes WHERE id = '{}'::uuid",
+        node_id
+    );
+    
+    let node_info = Spi::connect(|client| {
+        if let Ok(table) = client.select(&node_sql, None, &[]) {
+            for row in table {
+                let node_type: Option<String> = row.get(1).ok().flatten();
+                let query: Option<String> = row.get(2).ok().flatten();
+                let left_node: Option<String> = row.get(3).ok().flatten();
+                let right_node: Option<String> = row.get(4).ok().flatten();
+                let result_name: Option<String> = row.get(5).ok().flatten();
+                let status: Option<String> = row.get(6).ok().flatten();
+                return Some((node_type, query, left_node, right_node, result_name, status));
+            }
+        }
+        None
+    });
+    
+    let (node_type, query, left_node, right_node, _result_name, status) = 
+        node_info.ok_or_else(|| format!("Node {} not found", node_id))?;
+    
+    let node_type = node_type.ok_or_else(|| "Node has no type".to_string())?;
+    
+    // Skip if already completed
+    if status.as_deref() == Some("completed") {
+        // Return cached result
+        let result_sql = format!(
+            "SELECT result::text FROM durable.nodes WHERE id = '{}'::uuid",
+            node_id
+        );
+        return Ok(Spi::get_one::<String>(&result_sql).unwrap_or(None));
+    }
+    
+    // Mark node as running
+    let running_sql = format!(
+        "UPDATE durable.nodes SET status = 'running', updated_at = now() WHERE id = '{}'::uuid",
+        node_id
+    );
+    let _ = Spi::run(&running_sql);
+    
+    // Execute based on node type
+    let result = match node_type.as_str() {
+        "SQL" => {
+            let q = query.ok_or_else(|| "SQL node has no query".to_string())?;
+            execute_sql_node(node_id, &q)
+        }
+        "THEN" => {
+            let left = left_node.ok_or_else(|| "THEN node has no left node".to_string())?;
+            let right = right_node.ok_or_else(|| "THEN node has no right node".to_string())?;
+            
+            // Execute left node first
+            execute_node(&left)?;
+            // Then execute right node
+            execute_node(&right)
+        }
+        other => Err(format!("Unknown node type: {}", other)),
+    }?;
+    
+    // Mark node as completed and store result
+    let result_json = result.as_ref()
+        .map(|r| format!("'{}'", r.replace('\'', "''")))
+        .unwrap_or_else(|| "NULL".to_string());
+    
+    let complete_sql = format!(
+        "UPDATE durable.nodes SET status = 'completed', result = {}, updated_at = now() WHERE id = '{}'::uuid",
+        result_json, node_id
+    );
+    let _ = Spi::run(&complete_sql);
+    
+    Ok(result)
+}
+
+/// Execute a SQL node and return the result as JSON
+fn execute_sql_node(node_id: &str, query: &str) -> Result<Option<String>, String> {
+    log!("Executing SQL node {}: {}", node_id, query);
+    
+    // Execute the query and capture result
+    let result = Spi::connect(|client| {
+        match client.select(query, None, &[]) {
+            Ok(table) => {
+                // Convert first row to JSON-ish format
+                let mut rows = Vec::new();
+                for row in table {
+                    let mut cols = Vec::new();
+                    // Try to get columns (simple approach for MVP)
+                    for i in 1..=10 {
+                        if let Ok(Some(val)) = row.get::<String>(i) {
+                            cols.push(val);
+                        } else if let Ok(Some(val)) = row.get::<i64>(i) {
+                            cols.push(val.to_string());
+                        } else if let Ok(Some(val)) = row.get::<i32>(i) {
+                            cols.push(val.to_string());
+                        }
+                    }
+                    if !cols.is_empty() {
+                        rows.push(cols);
+                    }
+                }
+                if rows.is_empty() {
+                    Ok(None)
+                } else {
+                    // Simple JSON representation
+                    Ok(Some(format!("{:?}", rows)))
+                }
+            }
+            Err(e) => Err(format!("Query failed: {:?}", e)),
+        }
+    });
+    
+    result
+}
 
 /// Declare the 'durable' schema that contains all pg_durable functions
 #[pg_schema]
@@ -242,6 +476,47 @@ fn status(instance_id: &str) -> Option<String> {
         instance_id
     );
     Spi::get_one::<String>(&sql).expect("failed to get instance status")
+}
+
+/// Manually run pending workflows (for testing, or when background worker isn't available).
+/// 
+/// Example: SELECT durable.run();  -- runs all pending workflows
+/// Example: SELECT durable.run('instance-uuid');  -- runs specific workflow
+#[pg_extern(schema = "durable")]
+fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
+    if let Some(id) = instance_id {
+        // Run specific instance
+        let root_sql = format!(
+            "SELECT root_node::text FROM durable.instances WHERE id = '{}'::uuid AND status = 'pending'",
+            id
+        );
+        if let Some(root_node) = Spi::get_one::<String>(&root_sql).expect("failed to get root node") {
+            execute_workflow(id, &root_node);
+            format!("Executed workflow {}", id)
+        } else {
+            format!("No pending workflow found with id {}", id)
+        }
+    } else {
+        // Run all pending instances
+        process_pending_workflows();
+        "Processed all pending workflows".to_string()
+    }
+}
+
+/// Get detailed result of a workflow instance.
+/// 
+/// Example: SELECT durable.result('instance-uuid');
+#[pg_extern(schema = "durable")]
+fn result(instance_id: &str) -> Option<String> {
+    // Get the root node's result
+    let sql = format!(
+        r#"SELECT n.result::text 
+           FROM durable.instances i 
+           JOIN durable.nodes n ON n.id = i.root_node 
+           WHERE i.id = '{}'::uuid"#,
+        instance_id
+    );
+    Spi::get_one::<String>(&sql).expect("failed to get instance result")
 }
 
 /// A simple hello world function to demonstrate the extension.
