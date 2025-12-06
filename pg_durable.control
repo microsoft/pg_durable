@@ -1,0 +1,8 @@
+comment = 'pg_durable: SQL-native durable workflows for PostgreSQL'
+default_version = '@CARGO_VERSION@'
+module_pathname = 'pg_durable'
+relocatable = false
+superuser = true
+trusted = false
+
+

@@ -1,5 +1,5 @@
 [package]
-name = "pg_durable_ext"
+name = "pg_durable"
 version = "0.0.0"
 edition = "2021"
 
@@ -7,11 +7,11 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [[bin]]
-name = "pgrx_embed_pg_durable_ext"
+name = "pgrx_embed_pg_durable"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]
-default = ["pg13"]
+default = ["pg17"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15" ]
@@ -31,6 +31,16 @@ duroxide = "0.1.0"
 duroxide-pg = "0.1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
+# For ExecuteSQL activity (connecting back to PostgreSQL)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json"] }
+
+# For cron expression parsing (wait_for_schedule)
+cron = "0.13"
+chrono = "0.4"
+
+# For parallel execution (join)
+futures = "0.3"
+
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 
@@ -42,3 +52,5 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+

@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: pg_durable_postgres:latest
+    # To rebuild: docker build --no-cache -t pg_durable_postgres:latest .
+    container_name: pg_durable
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pg_durable
+    ports:
+      - "5433:5432"  # Use 5433 to avoid conflict with local PostgreSQL
+    volumes:
+      - pg_durable_data:/var/lib/postgresql/data
+      # Mount duroxide SQLite store (optional, for persistence across container restarts)
+      - ./data:/var/lib/postgresql/duroxide
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_durable
+      -c log_statement=all
+      -c log_destination=stderr
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pg_durable"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_durable_data:
+

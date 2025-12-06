@@ -1,0 +1,359 @@
+//! Monitoring functions for pg_durable - using Duroxide Client Management API
+
+use pgrx::prelude::*;
+use std::sync::Arc;
+use duroxide::Client;
+
+use crate::types::duroxide_db_path;
+
+// ============================================================================
+// Monitoring Functions
+// ============================================================================
+
+/// List all orchestration instances, optionally filtered by status.
+#[pg_extern(schema = "durable")]
+pub fn list_instances(
+    status_filter: default!(Option<&str>, "NULL"),
+    limit_count: default!(i32, "100")
+) -> TableIterator<'static, (
+    name!(instance_id, String),
+    name!(label, Option<String>),
+    name!(orchestration_name, String),
+    name!(status, String),
+    name!(execution_count, i64),
+    name!(output, Option<String>),
+)> {
+    let db_path = duroxide_db_path();
+    
+    // Fetch labels from PostgreSQL
+    let labels: std::collections::HashMap<String, Option<String>> = Spi::connect(|client| {
+        let mut map = std::collections::HashMap::new();
+        if let Ok(table) = client.select("SELECT id, label FROM durable.instances", None, &[]) {
+            for row in table {
+                if let Ok(Some(id)) = row.get::<String>(1) {
+                    let label: Option<String> = row.get(2).ok().flatten();
+                    map.insert(id, label);
+                }
+            }
+        }
+        map
+    });
+    
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build() {
+            Ok(rt) => rt,
+            Err(_) => return TableIterator::new(vec![]),
+        };
+    
+    let results = rt.block_on(async {
+        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+            Ok(s) => Arc::new(s),
+            Err(_) => return vec![],
+        };
+        
+        let client = Client::new(store);
+        
+        let instance_ids = if let Some(status) = status_filter {
+            client.list_instances_by_status(status).await.unwrap_or_default()
+        } else {
+            client.list_all_instances().await.unwrap_or_default()
+        };
+        
+        let limited: Vec<_> = instance_ids.into_iter().take(limit_count as usize).collect();
+        
+        let mut rows = Vec::new();
+        for id in limited {
+            if let Ok(info) = client.get_instance_info(&id).await {
+                let label = labels.get(&info.instance_id).cloned().flatten();
+                rows.push((
+                    info.instance_id,
+                    label,
+                    info.orchestration_name,
+                    info.status,
+                    info.current_execution_id as i64,
+                    info.output,
+                ));
+            }
+        }
+        rows
+    });
+    
+    TableIterator::new(results)
+}
+
+/// Get detailed info about a specific orchestration instance.
+#[pg_extern(schema = "durable")]
+pub fn instance_info(instance_id: &str) -> TableIterator<'static, (
+    name!(instance_id, String),
+    name!(label, Option<String>),
+    name!(orchestration_name, String),
+    name!(orchestration_version, String),
+    name!(current_execution_id, i64),
+    name!(status, String),
+    name!(output, Option<String>),
+)> {
+    let db_path = duroxide_db_path();
+    let instance_id_str = instance_id.to_string();
+    
+    let label: Option<String> = Spi::get_one(&format!(
+        "SELECT label FROM durable.instances WHERE id = '{}'",
+        instance_id.replace('\'', "''")
+    )).ok().flatten();
+    
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build() {
+            Ok(rt) => rt,
+            Err(_) => return TableIterator::new(vec![]),
+        };
+    
+    let results = rt.block_on(async {
+        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+            Ok(s) => Arc::new(s),
+            Err(_) => return vec![],
+        };
+        
+        let client = Client::new(store);
+        
+        match client.get_instance_info(&instance_id_str).await {
+            Ok(info) => vec![(
+                info.instance_id,
+                label,
+                info.orchestration_name,
+                info.orchestration_version,
+                info.current_execution_id as i64,
+                info.status,
+                info.output,
+            )],
+            Err(_) => vec![],
+        }
+    });
+    
+    TableIterator::new(results)
+}
+
+/// Get the last N executions for an eternal orchestration (loop).
+#[pg_extern(schema = "durable")]
+pub fn instance_executions(instance_id: &str, limit_count: default!(i32, "5")) -> TableIterator<'static, (
+    name!(execution_id, i64),
+    name!(status, String),
+    name!(event_count, i64),
+    name!(duration_ms, i64),
+    name!(output, Option<String>),
+)> {
+    let db_path = duroxide_db_path();
+    let instance_id = instance_id.to_string();
+    
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build() {
+            Ok(rt) => rt,
+            Err(_) => return TableIterator::new(vec![]),
+        };
+    
+    let results = rt.block_on(async {
+        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+            Ok(s) => Arc::new(s),
+            Err(_) => return vec![],
+        };
+        
+        let client = Client::new(store);
+        
+        let execution_ids = match client.list_executions(&instance_id).await {
+            Ok(ids) => ids,
+            Err(_) => return vec![],
+        };
+        
+        let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
+        sorted_ids.sort_by(|a, b| b.cmp(a));
+        let limited: Vec<_> = sorted_ids.into_iter().take(limit_count as usize).collect();
+        
+        let mut rows = Vec::new();
+        for exec_id in limited {
+            if let Ok(info) = client.get_execution_info(&instance_id, exec_id).await {
+                let duration_ms = info.completed_at
+                    .map(|end| end.saturating_sub(info.started_at))
+                    .unwrap_or(0);
+                
+                rows.push((
+                    info.execution_id as i64,
+                    info.status,
+                    info.event_count as i64,
+                    duration_ms as i64,
+                    info.output,
+                ));
+            }
+        }
+        rows
+    });
+    
+    TableIterator::new(results)
+}
+
+/// Get system-wide orchestration metrics.
+#[pg_extern(schema = "durable")]
+pub fn metrics() -> TableIterator<'static, (
+    name!(total_instances, i64),
+    name!(running_instances, i64),
+    name!(completed_instances, i64),
+    name!(failed_instances, i64),
+    name!(total_executions, i64),
+    name!(total_events, i64),
+)> {
+    let db_path = duroxide_db_path();
+    
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build() {
+            Ok(rt) => rt,
+            Err(_) => return TableIterator::new(vec![]),
+        };
+    
+    let results = rt.block_on(async {
+        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+            Ok(s) => Arc::new(s),
+            Err(_) => return vec![],
+        };
+        
+        let client = Client::new(store);
+        
+        match client.get_system_metrics().await {
+            Ok(m) => vec![(
+                m.total_instances as i64,
+                m.running_instances as i64,
+                m.completed_instances as i64,
+                m.failed_instances as i64,
+                m.total_executions as i64,
+                m.total_events as i64,
+            )],
+            Err(_) => vec![],
+        }
+    });
+    
+    TableIterator::new(results)
+}
+
+/// Get workflow nodes for an instance with execution history.
+#[pg_extern(schema = "durable")]
+pub fn instance_nodes(
+    instance_id_param: &str,
+    last_n_executions: default!(i32, "5")
+) -> TableIterator<'static, (
+    name!(execution_id, i64),
+    name!(node_id, String),
+    name!(node_type, String),
+    name!(query, Option<String>),
+    name!(result_name, Option<String>),
+    name!(left_node, Option<String>),
+    name!(right_node, Option<String>),
+    name!(status, Option<String>),
+    name!(result, Option<String>),
+)> {
+    let instance_id = instance_id_param.to_string();
+    let db_path = duroxide_db_path();
+    
+    // Get node definitions from PostgreSQL
+    let node_defs: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>)> = 
+        Spi::connect(|client| {
+            let sql = format!(
+                r#"SELECT id::text, node_type, query, result_name, left_node::text, right_node::text
+                   FROM durable.nodes WHERE instance_id = '{}'"#,
+                instance_id
+            );
+            let mut nodes = Vec::new();
+            if let Ok(table) = client.select(&sql, None, &[]) {
+                for row in table {
+                    if let Ok(Some(id)) = row.get::<String>(1) {
+                        let node_type: String = row.get(2).ok().flatten().unwrap_or_default();
+                        let query: Option<String> = row.get(3).ok().flatten();
+                        let result_name: Option<String> = row.get(4).ok().flatten();
+                        let left_node: Option<String> = row.get(5).ok().flatten();
+                        let right_node: Option<String> = row.get(6).ok().flatten();
+                        nodes.push((id, node_type, query, result_name, left_node, right_node));
+                    }
+                }
+            }
+            nodes
+        });
+    
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build() {
+            Ok(rt) => rt,
+            Err(_) => return TableIterator::new(vec![]),
+        };
+    
+    let results = rt.block_on(async {
+        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+            Ok(s) => Arc::new(s),
+            Err(_) => return vec![],
+        };
+        
+        let client = Client::new(store);
+        
+        let execution_ids = match client.list_executions(&instance_id).await {
+            Ok(ids) => ids,
+            Err(_) => return vec![],
+        };
+        
+        let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
+        sorted_ids.sort_by(|a, b| b.cmp(a));
+        let limited: Vec<_> = sorted_ids.into_iter().take(last_n_executions as usize).collect();
+        
+        let mut rows = Vec::new();
+        
+        for exec_id in limited {
+            let exec_status = client.get_execution_info(&instance_id, exec_id).await
+                .map(|info| info.status)
+                .unwrap_or_else(|_| "unknown".to_string());
+            
+            let exec_output = client.get_execution_info(&instance_id, exec_id).await
+                .ok()
+                .and_then(|info| info.output);
+            
+            for (node_id, node_type, query, result_name, left_node, right_node) in &node_defs {
+                let node_status = match exec_status.as_str() {
+                    "Completed" | "ContinuedAsNew" => Some("completed".to_string()),
+                    "Running" => Some("running".to_string()),
+                    "Failed" | "Canceled" => Some("failed".to_string()),
+                    _ => Some("pending".to_string()),
+                };
+                
+                rows.push((
+                    exec_id as i64,
+                    node_id.clone(),
+                    node_type.clone(),
+                    query.clone(),
+                    result_name.clone(),
+                    left_node.clone(),
+                    right_node.clone(),
+                    node_status,
+                    exec_output.clone(),
+                ));
+            }
+        }
+        
+        // If no executions found, return static node definitions
+        if rows.is_empty() {
+            for (node_id, node_type, query, result_name, left_node, right_node) in node_defs {
+                rows.push((
+                    0i64,
+                    node_id,
+                    node_type,
+                    query,
+                    result_name,
+                    left_node,
+                    right_node,
+                    Some("pending".to_string()),
+                    None,
+                ));
+            }
+        }
+        
+        rows
+    });
+    
+    TableIterator::new(results)
+}
+

@@ -1,0 +1,26 @@
+# Build artifacts
+target/
+*.rlib
+*.d
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# pgrx local data
+.pgrx/
+
+# Documentation (keep for reference but not needed in container)
+docs/
+*.md
+!README.md
+
+# Test data
+data/
+

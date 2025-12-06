@@ -20,3 +20,11 @@ Thumbs.db
 *.so
 *.dylib
 *.dll
+
+# Environment files (secrets)
+.env
+.env.local
+.env.*.local
+
+# Docker data
+data/

@@ -1,6 +1,0 @@
-comment = 'pg_durable_ext:  Created by pgrx'
-default_version = '@CARGO_VERSION@'
-module_pathname = 'pg_durable_ext'
-relocatable = false
-superuser = true
-trusted = false

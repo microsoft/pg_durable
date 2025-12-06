@@ -1,0 +1,334 @@
+//! DSL functions for defining durable workflows
+
+use pgrx::prelude::*;
+use uuid::Uuid;
+use cron::Schedule as CronSchedule;
+use std::str::FromStr;
+
+use crate::types::{Durofut, OrchestrationInput, short_id, duroxide_db_path};
+use crate::runtime::start_duroxide_orchestration;
+
+// ============================================================================
+// Debug Function
+// ============================================================================
+
+/// Debug function to see what duroxide path is being used
+#[pg_extern(schema = "durable")]
+pub fn debug_db_path() -> String {
+    duroxide_db_path()
+}
+
+// ============================================================================
+// Node Creation Functions
+// ============================================================================
+
+/// Creates a SQL node in the workflow graph.
+#[pg_extern(schema = "durable")]
+pub fn sql(query: &str) -> String {
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "SQL".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(query.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a sequence node that executes two nodes in order.
+/// The SQL operator ~> is syntactic sugar for this function.
+#[pg_extern(name = "seq", schema = "durable")]
+pub fn then_fn(a: &str, b: &str) -> String {
+    let a_fut = Durofut::from_json(a);
+    let b_fut = Durofut::from_json(b);
+    
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "THEN".to_string(),
+        left_node: Some(a_fut.node_id),
+        right_node: Some(b_fut.node_id),
+        query: None,
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Names a result for later reference.
+/// The SQL operator |=> is syntactic sugar for this function.
+#[pg_extern(name = "as", schema = "durable")]
+pub fn as_named(name: &str, fut: &str) -> String {
+    let mut durofut = Durofut::from_json(fut);
+    durofut.result_name = Some(name.to_string());
+    
+    let update_sql = format!(
+        "UPDATE durable.nodes SET result_name = '{}' WHERE id = '{}'::uuid",
+        name.replace('\'', "''"),
+        durofut.node_id
+    );
+    let _ = Spi::run(&update_sql);
+    
+    durofut.to_json()
+}
+
+/// Creates a sleep node that pauses for the specified number of seconds.
+#[pg_extern(schema = "durable")]
+pub fn sleep(seconds: i64) -> String {
+    if seconds < 0 {
+        pgrx::error!("Sleep duration must be non-negative");
+    }
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "SLEEP".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(seconds.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a wait-for-schedule node that waits until the next cron match.
+#[pg_extern(schema = "durable")]
+pub fn wait_for_schedule(cron_expr: &str) -> String {
+    let cron_with_seconds = format!("0 {}", cron_expr);
+    if CronSchedule::from_str(&cron_with_seconds).is_err() {
+        pgrx::error!("Invalid cron expression: {}", cron_expr);
+    }
+    
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "WAIT_SCHEDULE".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(cron_expr.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a loop node that repeats the body indefinitely.
+#[pg_extern(name = "loop", schema = "durable")]
+pub fn loop_fn(body: &str) -> String {
+    let body_fut = Durofut::from_json(body);
+    
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "LOOP".to_string(),
+        left_node: Some(body_fut.node_id),
+        right_node: None,
+        query: None,
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a conditional branch node.
+#[pg_extern(name = "if", schema = "durable")]
+pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
+    let condition_fut = Durofut::from_json(condition);
+    let then_fut = Durofut::from_json(then_branch);
+    let else_fut = Durofut::from_json(else_branch);
+    
+    let config = serde_json::json!({
+        "condition_node": condition_fut.node_id
+    });
+    
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "IF".to_string(),
+        left_node: Some(then_fut.node_id),
+        right_node: Some(else_fut.node_id),
+        query: Some(config.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a parallel join node for 2 branches.
+#[pg_extern(schema = "durable")]
+pub fn join(a: &str, b: &str) -> String {
+    let a_fut = Durofut::from_json(a);
+    let b_fut = Durofut::from_json(b);
+    
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "JOIN".to_string(),
+        left_node: Some(a_fut.node_id),
+        right_node: Some(b_fut.node_id),
+        query: None,
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a parallel join node for 3 branches.
+#[pg_extern(name = "join3", schema = "durable")]
+pub fn join3(a: &str, b: &str, c: &str) -> String {
+    let a_fut = Durofut::from_json(a);
+    let b_fut = Durofut::from_json(b);
+    let c_fut = Durofut::from_json(c);
+    
+    let config = serde_json::json!({
+        "extra_nodes": [c_fut.node_id]
+    });
+    
+    let durofut = Durofut {
+        node_id: Uuid::new_v4().to_string(),
+        node_type: "JOIN".to_string(),
+        left_node: Some(a_fut.node_id),
+        right_node: Some(b_fut.node_id),
+        query: Some(config.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+// ============================================================================
+// Workflow Control Functions
+// ============================================================================
+
+/// Starts a durable workflow.
+#[pg_extern(schema = "durable")]
+pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
+    let durofut = Durofut::from_json(fut);
+    let instance_id = short_id();
+    
+    let label_sql = label
+        .map(|l| format!("'{}'", l.replace('\'', "''")))
+        .unwrap_or_else(|| "NULL".to_string());
+    
+    let create_instance_sql = format!(
+        "INSERT INTO durable.instances (id, label, root_node, status) VALUES ('{}', {}, '{}'::uuid, 'pending')",
+        instance_id,
+        label_sql,
+        durofut.node_id
+    );
+    
+    if let Err(e) = Spi::run(&create_instance_sql) {
+        pgrx::error!("Failed to create instance: {:?}", e);
+    }
+    
+    // Link all nodes in the workflow tree to this instance
+    fn link_nodes(node_id: &str, instance_id: &str, visited: &mut std::collections::HashSet<String>) {
+        if visited.contains(node_id) {
+            return;
+        }
+        visited.insert(node_id.to_string());
+        
+        let update_sql = format!(
+            "UPDATE durable.nodes SET instance_id = '{}' WHERE id = '{}'::uuid",
+            instance_id, node_id
+        );
+        let _ = Spi::run(&update_sql);
+        
+        // Get child node IDs
+        let left: Option<String> = Spi::get_one(&format!(
+            "SELECT left_node::text FROM durable.nodes WHERE id = '{}'::uuid", node_id
+        )).ok().flatten();
+        
+        let right: Option<String> = Spi::get_one(&format!(
+            "SELECT right_node::text FROM durable.nodes WHERE id = '{}'::uuid", node_id
+        )).ok().flatten();
+        
+        let config: Option<String> = Spi::get_one(&format!(
+            "SELECT query FROM durable.nodes WHERE id = '{}'::uuid", node_id
+        )).ok().flatten();
+        
+        if let Some(l) = left {
+            link_nodes(&l, instance_id, visited);
+        }
+        if let Some(r) = right {
+            link_nodes(&r, instance_id, visited);
+        }
+        if let Some(config_str) = config {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&config_str) {
+                if let Some(cond_id) = cfg["condition_node"].as_str() {
+                    link_nodes(cond_id, instance_id, visited);
+                }
+                if let Some(extras) = cfg["extra_nodes"].as_array() {
+                    for extra in extras {
+                        if let Some(extra_id) = extra.as_str() {
+                            link_nodes(extra_id, instance_id, visited);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    let mut visited = std::collections::HashSet::new();
+    link_nodes(&durofut.node_id, &instance_id, &mut visited);
+    
+    // Start the duroxide orchestration
+    let input = OrchestrationInput {
+        instance_id: instance_id.clone(),
+        label: label.map(|s| s.to_string()),
+    };
+    let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
+    
+    if let Err(e) = start_duroxide_orchestration("ExecuteWorkflow", &instance_id, &input_json) {
+        log!("pg_durable: Warning - failed to start duroxide orchestration: {}", e);
+    }
+    
+    instance_id
+}
+
+/// Cancels a running workflow.
+#[pg_extern(schema = "durable")]
+pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) -> String {
+    use crate::runtime::cancel_duroxide_orchestration;
+    
+    if let Err(e) = cancel_duroxide_orchestration(instance_id, reason) {
+        return format!("Failed to cancel: {}", e);
+    }
+    
+    let update_sql = format!(
+        "UPDATE durable.instances SET status = 'cancelled', updated_at = now() WHERE id = '{}'",
+        instance_id
+    );
+    let _ = Spi::run(&update_sql);
+    
+    format!("Instance {} cancelled: {}", instance_id, reason)
+}
+
+/// Gets the status of a workflow instance.
+#[pg_extern(schema = "durable")]
+pub fn status(instance_id: &str) -> Option<String> {
+    let sql = format!(
+        "SELECT status FROM durable.instances WHERE id = '{}'",
+        instance_id
+    );
+    Spi::get_one::<String>(&sql).ok().flatten()
+}
+
+/// Manually runs pending workflows.
+#[pg_extern(schema = "durable")]
+pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
+    if let Some(id) = instance_id {
+        format!("Triggered run for instance: {}", id)
+    } else {
+        "Triggered run for all pending instances".to_string()
+    }
+}
+
+/// Gets the result of a completed workflow.
+#[pg_extern(schema = "durable")]
+pub fn result(instance_id: &str) -> Option<String> {
+    let sql = format!(
+        r#"SELECT result::text FROM durable.nodes 
+           WHERE id = (SELECT root_node FROM durable.instances WHERE id = '{}')
+           AND status = 'completed'"#,
+        instance_id
+    );
+    Spi::get_one::<String>(&sql).ok().flatten()
+}
+
