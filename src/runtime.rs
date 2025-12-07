@@ -14,7 +14,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Column, Row};
 
 use crate::types::{
-    OrchestrationGraph, OrchestrationNode, OrchestrationInput,
+    FunctionGraph, FunctionNode, FunctionInput,
     duroxide_db_path, duroxide_connection_string, postgres_connection_string,
     calculate_cron_wait, evaluate_condition, substitute_variables,
 };
@@ -161,10 +161,10 @@ async fn run_duroxide_runtime_with_shutdown() {
                 }
             }
         })
-        .register("LoadOrchestrationGraph", move |ctx: ActivityContext, instance_id: String| {
+        .register("LoadFunctionGraph", move |ctx: ActivityContext, instance_id: String| {
             let pool = graph_pool.clone();
             async move {
-                ctx.trace_info(format!("Loading orchestration graph for instance: {}", instance_id));
+                ctx.trace_info(format!("Loading function graph for instance: {}", instance_id));
                 
                 let instance_query = format!(
                     "SELECT root_node FROM durable.instances WHERE id = '{}'",
@@ -191,13 +191,13 @@ async fn run_duroxide_runtime_with_shutdown() {
                     .await
                 {
                     Ok(rows) => rows,
-                    Err(e) => return Err(format!("Failed to load orchestration nodes: {}", e)),
+                    Err(e) => return Err(format!("Failed to load function nodes: {}", e)),
                 };
                 
                 let mut nodes = std::collections::HashMap::new();
                 for row in rows {
                     let id: String = row.get("id");
-                    let node = OrchestrationNode {
+                    let node = FunctionNode {
                         id: id.clone(),
                         node_type: row.get("node_type"),
                         query: row.get("query"),
@@ -208,13 +208,13 @@ async fn run_duroxide_runtime_with_shutdown() {
                     nodes.insert(id, node);
                 }
                 
-                let graph = OrchestrationGraph {
+                let graph = FunctionGraph {
                     instance_id,
                     root_node_id,
                     nodes,
                 };
                 
-                ctx.trace_info(format!("Loaded orchestration graph with {} nodes", graph.nodes.len()));
+                ctx.trace_info(format!("Loaded function graph with {} nodes", graph.nodes.len()));
                 
                 serde_json::to_string(&graph)
                     .map_err(|e| format!("Failed to serialize graph: {}", e))
@@ -292,11 +292,11 @@ async fn run_duroxide_runtime_with_shutdown() {
         })
         .build();
     
-    // Register orchestrations
-    let orchestrations = OrchestrationRegistry::builder()
+    // Register durable functions
+    let functions = OrchestrationRegistry::builder()
         .register("ExecuteWorkflow", |ctx: OrchestrationContext, input_json: String| async move {
             let (instance_id, label) = if input_json.starts_with('{') {
-                match serde_json::from_str::<OrchestrationInput>(&input_json) {
+                match serde_json::from_str::<FunctionInput>(&input_json) {
                     Ok(input) => (input.instance_id, input.label),
                     Err(_) => (input_json.clone(), None),
                 }
@@ -307,23 +307,23 @@ async fn run_duroxide_runtime_with_shutdown() {
             let label_info = label.as_ref().map(|l| format!(" ({})", l)).unwrap_or_default();
             ctx.trace_info(format!("Starting ExecuteWorkflow for instance: {}{}", instance_id, label_info));
             
-            let graph_json = ctx.schedule_activity("LoadOrchestrationGraph", instance_id.clone())
+            let graph_json = ctx.schedule_activity("LoadFunctionGraph", instance_id.clone())
                 .into_activity()
                 .await?;
             
-            let graph: OrchestrationGraph = serde_json::from_str(&graph_json)
-                .map_err(|e| format!("Failed to parse orchestration graph: {}", e))?;
+            let graph: FunctionGraph = serde_json::from_str(&graph_json)
+                .map_err(|e| format!("Failed to parse function graph: {}", e))?;
             
-            ctx.trace_info(format!("Executing orchestration with {} nodes, root: {}", 
+            ctx.trace_info(format!("Executing function with {} nodes, root: {}", 
                 graph.nodes.len(), graph.root_node_id));
             
             let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             
-            let orchestration_result = execute_orchestration_node(&ctx, &graph, &graph.root_node_id, &mut results).await;
+            let function_result = execute_function_node(&ctx, &graph, &graph.root_node_id, &mut results).await;
             
-            match &orchestration_result {
+            match &function_result {
                 Ok(result) => {
-                    ctx.trace_info(format!("Orchestration completed with result: {}", result));
+                    ctx.trace_info(format!("Function completed with result: {}", result));
                     let status_input = serde_json::json!({
                         "instance_id": instance_id,
                         "status": "completed"
@@ -333,7 +333,7 @@ async fn run_duroxide_runtime_with_shutdown() {
                         .await;
                 }
                 Err(err) => {
-                    ctx.trace_info(format!("Orchestration failed with error: {}", err));
+                    ctx.trace_info(format!("Function failed with error: {}", err));
                     let status_input = serde_json::json!({
                         "instance_id": instance_id,
                         "status": "failed"
@@ -344,7 +344,7 @@ async fn run_duroxide_runtime_with_shutdown() {
                 }
             }
             
-            orchestration_result
+            function_result
         })
         .register("ExecuteSubtree", |ctx: OrchestrationContext, input_json: String| async move {
             let input: serde_json::Value = serde_json::from_str(&input_json)
@@ -354,14 +354,14 @@ async fn run_duroxide_runtime_with_shutdown() {
             let node_id = input["node_id"].as_str().ok_or("Missing node_id in ExecuteSubtree input")?;
             let results_json = input["results"].as_str().ok_or("Missing results in ExecuteSubtree input")?;
             
-            let graph: OrchestrationGraph = serde_json::from_str(graph_json)
+            let graph: FunctionGraph = serde_json::from_str(graph_json)
                 .map_err(|e| format!("Failed to parse graph in ExecuteSubtree: {}", e))?;
             let mut results: std::collections::HashMap<String, String> = serde_json::from_str(results_json)
                 .map_err(|e| format!("Failed to parse results in ExecuteSubtree: {}", e))?;
             
             ctx.trace_info(format!("ExecuteSubtree: executing node {}", node_id));
             
-            let result = execute_orchestration_node(&ctx, &graph, node_id, &mut results).await?;
+            let result = execute_function_node(&ctx, &graph, node_id, &mut results).await?;
             
             ctx.trace_info(format!("ExecuteSubtree: node {} completed", node_id));
             Ok(result)
@@ -371,10 +371,10 @@ async fn run_duroxide_runtime_with_shutdown() {
     let duroxide_runtime = runtime::Runtime::start_with_store(
         store.clone(),
         Arc::new(activities),
-        orchestrations
+        functions
     ).await;
     
-    log!("pg_durable: duroxide runtime started, processing orchestrations...");
+    log!("pg_durable: duroxide runtime started, processing durable functions...");
     
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -398,10 +398,10 @@ async fn run_duroxide_runtime_with_shutdown() {
 // Node Execution
 // ============================================================================
 
-/// Recursively execute orchestration nodes
-async fn execute_orchestration_node(
+/// Recursively execute function nodes
+async fn execute_function_node(
     ctx: &OrchestrationContext,
-    graph: &OrchestrationGraph,
+    graph: &FunctionGraph,
     node_id: &str,
     results: &mut std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
@@ -451,9 +451,9 @@ async fn execute_orchestration_node(
 /// Inner function that actually executes the node logic
 async fn execute_node_inner(
     ctx: &OrchestrationContext,
-    graph: &OrchestrationGraph,
+    graph: &FunctionGraph,
     node_id: &str,
-    node: &OrchestrationNode,
+    node: &FunctionNode,
     results: &mut std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     match node.node_type.to_lowercase().as_str() {
@@ -481,8 +481,8 @@ async fn execute_node_inner(
             let right_id = node.right_node.as_ref()
                 .ok_or_else(|| format!("THEN node {} has no right_node", node_id))?;
             
-            let _left_result = Box::pin(execute_orchestration_node(ctx, graph, left_id, results)).await?;
-            let right_result = Box::pin(execute_orchestration_node(ctx, graph, right_id, results)).await?;
+            let _left_result = Box::pin(execute_function_node(ctx, graph, left_id, results)).await?;
+            let right_result = Box::pin(execute_function_node(ctx, graph, right_id, results)).await?;
             
             Ok(right_result)
         }
@@ -514,7 +514,7 @@ async fn execute_node_inner(
                 .ok_or_else(|| format!("LOOP node {} has no body", node_id))?;
             
             ctx.trace_info("Executing loop iteration");
-            let body_result = Box::pin(execute_orchestration_node(ctx, graph, body_id, results)).await?;
+            let body_result = Box::pin(execute_function_node(ctx, graph, body_id, results)).await?;
             
             ctx.trace_info("Continuing as new for next loop iteration");
             ctx.continue_as_new(graph.instance_id.clone());
@@ -536,15 +536,15 @@ async fn execute_node_inner(
                 .ok_or_else(|| format!("IF node {} has no else branch", node_id))?;
             
             ctx.trace_info("Evaluating IF condition");
-            let condition_result = Box::pin(execute_orchestration_node(ctx, graph, condition_node_id, results)).await?;
+            let condition_result = Box::pin(execute_function_node(ctx, graph, condition_node_id, results)).await?;
             
             let is_true = evaluate_condition(&condition_result)?;
             ctx.trace_info(format!("Condition evaluated to: {}", is_true));
             
             if is_true {
-                Box::pin(execute_orchestration_node(ctx, graph, then_id, results)).await
+                Box::pin(execute_function_node(ctx, graph, then_id, results)).await
             } else {
-                Box::pin(execute_orchestration_node(ctx, graph, else_id, results)).await
+                Box::pin(execute_function_node(ctx, graph, else_id, results)).await
             }
         }
         "join" => {
@@ -621,14 +621,14 @@ async fn execute_node_inner(
 // Client Functions
 // ============================================================================
 
-/// Start a duroxide orchestration via the shared SQLite store.
-pub fn start_duroxide_orchestration(
-    orchestration_name: &str, 
+/// Start a durable function via the shared SQLite store.
+pub fn start_durable_function(
+    function_name: &str, 
     instance_id: &str, 
     input: &str
 ) -> Result<(), String> {
     let db_path = duroxide_db_path();
-    log!("pg_durable: start_duroxide_orchestration - using db_path: {}", db_path);
+    log!("pg_durable: start_durable_function - using db_path: {}", db_path);
     
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -643,16 +643,16 @@ pub fn start_duroxide_orchestration(
         );
         
         let client = Client::new(store);
-        client.start_orchestration(instance_id, orchestration_name, input)
+        client.start_orchestration(instance_id, function_name, input)
             .await
-            .map_err(|e| format!("Failed to start orchestration: {:?}", e))?;
+            .map_err(|e| format!("Failed to start durable function: {:?}", e))?;
         
         Ok(())
     })
 }
 
-/// Cancel a duroxide orchestration.
-pub fn cancel_duroxide_orchestration(instance_id: &str, reason: &str) -> Result<(), String> {
+/// Cancel a durable function.
+pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), String> {
     let db_path = duroxide_db_path();
     
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -670,7 +670,7 @@ pub fn cancel_duroxide_orchestration(instance_id: &str, reason: &str) -> Result<
         let client = Client::new(store);
         client.cancel_instance(instance_id, reason)
             .await
-            .map_err(|e| format!("Failed to cancel orchestration: {:?}", e))?;
+            .map_err(|e| format!("Failed to cancel durable function: {:?}", e))?;
         
         Ok(())
     })

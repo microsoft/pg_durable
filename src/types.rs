@@ -175,12 +175,12 @@ pub fn substitute_variables(query: &str, results: &std::collections::HashMap<Str
 }
 
 // ============================================================================
-// Orchestration Graph Types
+// Function Graph Types
 // ============================================================================
 
-/// Represents a node in the orchestration graph
+/// Represents a node in the function graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestrationNode {
+pub struct FunctionNode {
     pub id: String,
     pub node_type: String,
     pub query: Option<String>,
@@ -189,27 +189,27 @@ pub struct OrchestrationNode {
     pub right_node: Option<String>,
 }
 
-/// Represents the entire orchestration graph for an instance
+/// Represents the entire function graph for an instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestrationGraph {
+pub struct FunctionGraph {
     pub instance_id: String,
     pub root_node_id: String,
-    pub nodes: std::collections::HashMap<String, OrchestrationNode>,
+    pub nodes: std::collections::HashMap<String, FunctionNode>,
 }
 
-/// Input structure passed to duroxide orchestrations
+/// Input structure passed to duroxide functions
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestrationInput {
+pub struct FunctionInput {
     pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
 // ============================================================================
-// Durofut Type - Represents an orchestration node reference
+// Durofut Type - Represents a function node reference
 // ============================================================================
 
-/// The Durofut type represents a "durable future" - a reference to a node in the orchestration graph.
+/// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Durofut {
     pub node_id: String,

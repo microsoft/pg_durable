@@ -1,6 +1,6 @@
-//! pg_durable - Durable PostgreSQL orchestrations
+//! pg_durable - Durable SQL Functions for PostgreSQL
 //!
-//! This extension provides durable, fault-tolerant orchestration execution within PostgreSQL
+//! This extension provides durable, fault-tolerant function execution within PostgreSQL
 //! using the Duroxide runtime for persistence.
 
 use pgrx::prelude::*;
@@ -40,7 +40,7 @@ mod durable {}
 
 extension_sql!(
     r#"
--- Table to store orchestration nodes (SQL steps, THEN chains, etc.)
+-- Table to store function nodes (SQL steps, THEN chains, etc.)
 CREATE TABLE IF NOT EXISTS durable.nodes (
     id VARCHAR(8) PRIMARY KEY,
     instance_id VARCHAR(8),
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS durable.nodes (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Table to store orchestration instances
+-- Table to store function instances
 CREATE TABLE IF NOT EXISTS durable.instances (
     id VARCHAR(8) PRIMARY KEY,
     label TEXT,
@@ -156,7 +156,7 @@ mod tests {
         })
     }
 
-    /// Wait for an orchestration to complete, polling Duroxide status
+    /// Wait for a durable function to complete, polling Duroxide status
     fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
         use std::time::{Duration, Instant};
         use duroxide::Client;
@@ -324,7 +324,7 @@ mod tests {
     #[pg_test]
     fn test_start_with_label() {
         let fut = crate::dsl::sql("SELECT 1");
-        let instance_id = crate::dsl::start(&fut, Some("my-test-orchestration"));
+        let instance_id = crate::dsl::start(&fut, Some("my-test-function"));
         assert_eq!(instance_id.len(), 8);
     }
 
@@ -553,7 +553,7 @@ mod tests {
 
     #[pg_test]
     fn test_autowrap_start_plain_sql() {
-        // Start with plain SQL - simplest possible orchestration
+        // Start with plain SQL - simplest possible durable function
         let instance_id = crate::dsl::start("SELECT 42", Some("autowrap-test"));
         assert_eq!(instance_id.len(), 8);
         
@@ -600,7 +600,7 @@ mod tests {
     // 
     // LIMITATION: pgrx test framework doesn't apply shared_preload_libraries,
     // so the background worker never starts. These tests timeout waiting for
-    // orchestrations that never get processed.
+    // functions that never get processed.
     //
     // To run E2E tests:
     //   1. cargo pgrx run pg17
@@ -615,13 +615,13 @@ mod tests {
         Spi::run("CREATE TABLE IF NOT EXISTS test_e2e_simple (id SERIAL PRIMARY KEY, val TEXT)").unwrap();
         Spi::run("TRUNCATE test_e2e_simple").unwrap();
         
-        // Start orchestration
+        // Start durable function
         let sql = crate::dsl::sql("INSERT INTO test_e2e_simple (val) VALUES ('hello') RETURNING id");
         let instance_id = crate::dsl::start(&sql, Some("test-e2e-simple"));
         
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         // Verify result contains the inserted row
         let output = result.unwrap();
@@ -649,7 +649,7 @@ mod tests {
         
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         // Verify both rows exist in order
         let steps: Vec<i32> = Spi::connect(|client| {
@@ -675,7 +675,7 @@ mod tests {
         Spi::run("TRUNCATE test_e2e_vars").unwrap();
         Spi::run("INSERT INTO test_e2e_vars (source_id) VALUES (42)").unwrap();
         
-        // Create orchestration: get value, use it in next query
+        // Create durable function: get value, use it in next query
         let get_val = crate::dsl::sql("SELECT source_id FROM test_e2e_vars LIMIT 1");
         let named = crate::dsl::as_named("src", &get_val);
         let use_val = crate::dsl::sql("INSERT INTO test_e2e_vars (copied_id) VALUES ($src) RETURNING copied_id");
@@ -685,7 +685,7 @@ mod tests {
         
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         // Verify the value was copied
         let copied = Spi::get_one::<i32>("SELECT copied_id FROM test_e2e_vars WHERE copied_id IS NOT NULL")
@@ -711,7 +711,7 @@ mod tests {
         
         // Wait for completion (with extra time for sleep)
         let result = wait_for_completion(&instance_id, 15);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         let elapsed = start_time.elapsed();
         assert!(elapsed.as_secs() >= 2, "Expected at least 2s sleep, got {}s", elapsed.as_secs());
@@ -728,7 +728,7 @@ mod tests {
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-true"));
         
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         let output = result.unwrap();
         assert!(output.contains("yes"), "Expected 'yes' in output: {}", output);
@@ -745,7 +745,7 @@ mod tests {
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-false"));
         
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         let output = result.unwrap();
         assert!(output.contains("no"), "Expected 'no' in output: {}", output);
@@ -763,7 +763,7 @@ mod tests {
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-zero"));
         
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         let output = result.unwrap();
         assert!(output.contains("falsy"), "Expected 'falsy' for 0 condition: {}", output);
@@ -784,7 +784,7 @@ mod tests {
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join"));
         
         let result = wait_for_completion(&instance_id, 15);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         // Verify both branches executed
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM test_e2e_join").unwrap().unwrap();
@@ -808,7 +808,7 @@ mod tests {
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join3"));
         
         let result = wait_for_completion(&instance_id, 15);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         // Result should be an array of 3 results
         let output = result.unwrap();
@@ -849,7 +849,7 @@ mod tests {
     #[pg_test]
     #[ignore = "pgrx doesn't support shared_preload_libraries"]
     fn test_e2e_list_instances() {
-        // Start a few orchestrations
+        // Start a few durable functions
         let sql1 = crate::dsl::sql("SELECT 1");
         let sql2 = crate::dsl::sql("SELECT 2");
         let id1 = crate::dsl::start(&sql1, Some("test-list-1"));
@@ -882,12 +882,12 @@ mod tests {
         
         // Query instance_info
         let orch_name = Spi::get_one::<String>(&format!(
-            "SELECT orchestration_name FROM durable.instance_info('{}')", instance_id
+            "SELECT function_name FROM durable.instance_info('{}')", instance_id
         ));
         
         assert!(orch_name.is_ok(), "instance_info should be callable");
         if let Ok(Some(name)) = orch_name {
-            assert_eq!(name, "ExecuteWorkflow", "Expected ExecuteWorkflow orchestration");
+            assert_eq!(name, "ExecuteWorkflow", "Expected ExecuteWorkflow function");
         }
     }
 
@@ -920,7 +920,7 @@ mod tests {
         let result = wait_for_completion(&instance_id, 10);
         
         // Should fail
-        assert!(result.is_err(), "Expected orchestration to fail");
+        assert!(result.is_err(), "Expected function to fail");
         let err = result.unwrap_err();
         assert!(err.contains("Failed") || err.contains("does not exist"), 
             "Expected error about non-existent table: {}", err);
@@ -933,7 +933,7 @@ mod tests {
         let instance_id = crate::dsl::start(&sql, Some("test-status-sync"));
         
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Orchestration failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {:?}", result);
         
         // Check PostgreSQL table status
         let pg_status = Spi::get_one::<String>(&format!(

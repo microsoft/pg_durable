@@ -1,4 +1,4 @@
-//! Visual explain functionality for durable orchestrations
+//! Visual explain functionality for durable SQL functions
 
 use pgrx::prelude::*;
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ struct ExplainNode {
     result: Option<String>,
 }
 
-/// Explain an orchestration - either an existing instance or a DSL expression
+/// Explain a durable function - either an existing instance or a DSL expression
 /// 
 /// Usage:
 /// ```sql
@@ -45,7 +45,7 @@ pub fn explain(input: &str) -> String {
     }
 }
 
-/// Explain an existing orchestration instance
+/// Explain an existing durable function instance
 fn explain_instance(instance_id: &str) -> String {
     // Get instance info from PostgreSQL
     let instance_info: Option<(String, Option<String>, String)> = Spi::connect(|client| {
@@ -251,7 +251,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
     nodes
 }
 
-/// Build a tree visualization of the orchestration
+/// Build a tree visualization of the function graph
 fn build_tree_visualization(root_id: &str, nodes: &HashMap<String, ExplainNode>, show_status: bool) -> String {
     let mut output = String::new();
     build_tree_recursive(root_id, nodes, "", true, &mut output, show_status);

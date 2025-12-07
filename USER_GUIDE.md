@@ -1,8 +1,8 @@
 # pg_durable User Guide
 
-**Durable Orchestrations for PostgreSQL**
+**Durable SQL Functions for PostgreSQL**
 
-pg_durable is a PostgreSQL extension that brings durable, fault-tolerant orchestration execution directly into your database. Define orchestrations using a SQL-native DSL, and let the extension handle persistence, retries, and scheduling.
+pg_durable is a PostgreSQL extension that brings durable, fault-tolerant function execution directly into your database. Define durable SQL functions using a SQL-native DSL, and let the extension handle persistence, retries, and scheduling.
 
 ---
 
@@ -13,10 +13,10 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant orchest
 3. [Test Data Setup](#test-data-setup)
 4. [Core Concepts](#core-concepts)
 5. [DSL Reference](#dsl-reference)
-6. [Orchestration Examples](#orchestration-examples)
+6. [Function Examples](#function-examples)
 7. [Loops & Cron Jobs](#loops--cron-jobs)
-8. [Monitoring Functions](#monitoring-functions)
-9. [Troubleshooting](#troubleshooting)
+8. [Visualizing Functions](#visualizing-functions)
+9. [Monitoring](#monitoring)
 
 ---
 
@@ -24,19 +24,19 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant orchest
 
 ### What is pg_durable?
 
-pg_durable enables you to define and execute **durable orchestrations** entirely within PostgreSQL. Unlike traditional job queues or external orchestration engines, pg_durable:
+pg_durable enables you to define and execute **durable SQL functions** entirely within PostgreSQL. Unlike traditional job queues or external workflow engines, pg_durable:
 
 - **Lives in your database** - No external services to manage
-- **Uses SQL syntax** - Define orchestrations with familiar SQL functions and operators
-- **Is fault-tolerant** - Orchestrations survive crashes and restarts
+- **Uses SQL syntax** - Define functions with familiar SQL operators
+- **Is fault-tolerant** - Functions survive crashes and restarts
 - **Supports scheduling** - Built-in cron-style scheduling for recurring jobs
-- **Provides visibility** - Monitor orchestration status directly via SQL queries
+- **Provides visibility** - Monitor function status directly via SQL queries
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **SQL DSL** | Define orchestrations using `durable.sql()`, `~>`, `\|=>` operators |
+| **SQL DSL** | Define functions using plain SQL strings with `~>`, `\|=>` operators |
 | **Sequential Execution** | Chain steps with `~>` operator |
 | **Parallel Execution** | Run steps concurrently with `durable.join()` |
 | **Conditional Logic** | Branch with `durable.if()` |
@@ -44,8 +44,9 @@ pg_durable enables you to define and execute **durable orchestrations** entirely
 | **Cron Scheduling** | Schedule with `durable.wait_for_schedule()` |
 | **Eternal Loops** | Create forever-running jobs with `durable.loop()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
-| **Labels** | Tag orchestrations with friendly names |
-| **Monitoring** | Query orchestration status, history, and metrics |
+| **Labels** | Tag functions with friendly names |
+| **Visualization** | Preview function structure with `durable.explain()` |
+| **Monitoring** | Query function status, history, and metrics |
 
 ---
 
@@ -57,20 +58,18 @@ pg_durable enables you to define and execute **durable orchestrations** entirely
 CREATE EXTENSION pg_durable;
 ```
 
-### Your First Orchestration
+### Your First Durable Function
 
 ```sql
--- Execute a simple SQL query as a durable orchestration
-SELECT durable.start(
-    durable.sql('SELECT ''Hello, durable world!''')
-);
+-- Execute a simple SQL query as a durable function
+SELECT durable.start('SELECT ''Hello, durable world!''');
 -- Returns: a1b2c3d4 (8-character instance ID)
 ```
 
 ### Check the Result
 
 ```sql
--- List all orchestrations
+-- List all functions
 SELECT * FROM durable.list_instances();
 
 -- Get result of a specific instance
@@ -86,7 +85,7 @@ Copy and paste this script into `psql` to create test schemas and sample data fo
 ```sql
 -- ============================================================================
 -- pg_durable Test Data Setup
--- Run this script to create sample schemas and data for testing orchestrations
+-- Run this script to create sample schemas and data for testing functions
 -- ============================================================================
 
 -- Create a playground schema for testing
@@ -122,7 +121,7 @@ CREATE TABLE IF NOT EXISTS playground.task_queue (
     completed_at TIMESTAMP
 );
 
--- Logs table for orchestration output
+-- Logs table for function output
 CREATE TABLE IF NOT EXISTS playground.logs (
     id SERIAL PRIMARY KEY,
     msg TEXT NOT NULL,
@@ -223,13 +222,13 @@ SELECT 'Orders: ' || COUNT(*) FROM playground.orders;
 SELECT 'Tasks: ' || COUNT(*) FROM playground.task_queue;
 ```
 
-After running this script, you can test orchestrations against the `playground` schema.
+After running this script, you can test durable functions against the `playground` schema.
 
 ---
 
 ## Core Concepts
 
-### Orchestration Lifecycle
+### Function Lifecycle
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -247,14 +246,14 @@ After running this script, you can test orchestrations against the `playground` 
 
 ### Instance IDs
 
-Every orchestration gets a unique 8-character hex ID (e.g., `a1b2c3d4`). Use this ID to:
+Every durable function gets a unique 8-character hex ID (e.g., `a1b2c3d4`). Use this ID to:
 - Check status: `SELECT durable.status('a1b2c3d4')`
 - Get result: `SELECT durable.result('a1b2c3d4')`
 - Cancel: `SELECT durable.cancel('a1b2c3d4')`
 
 ### Durability
 
-Orchestrations are persisted to disk. If PostgreSQL crashes:
+Functions are persisted to disk. If PostgreSQL crashes:
 - Completed steps are not re-executed
 - In-progress steps resume from the last checkpoint
 - Pending steps execute when the server restarts
@@ -263,28 +262,38 @@ Orchestrations are persisted to disk. If PostgreSQL crashes:
 
 ## DSL Reference
 
+### Auto-Wrap SQL
+
+Plain SQL strings are automatically wrapped - no need for explicit `durable.sql()` calls:
+
+```sql
+-- These are equivalent:
+'SELECT 1' ~> 'SELECT 2'
+durable.sql('SELECT 1') ~> durable.sql('SELECT 2')
+```
+
 ### Functions
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `durable.sql(query)` | Execute a SQL query | `durable.sql('SELECT 1')` |
 | `durable.sleep(seconds)` | Pause for N seconds | `durable.sleep(60)` |
-| `durable.wait_for_schedule(cron)` | Wait until cron expression matches | `durable.wait_for_schedule('0 * * * *')` |
-| `durable.join(a, b)` | Execute a and b in parallel | `durable.join(a, b)` |
-| `durable.join3(a, b, c)` | Execute three in parallel | `durable.join3(a, b, c)` |
-| `durable.if(cond, then, else)` | Conditional branching | `durable.if(cond, then_branch, else_branch)` |
-| `durable.loop(body)` | Repeat forever (eternal) | `durable.loop(body)` |
-| `durable.start(orchestration, label)` | Start a orchestration | `durable.start(wf, 'my-job')` |
-| `durable.cancel(id, reason)` | Cancel a orchestration | `durable.cancel('a1b2c3d4', 'Done')` |
-| `durable.status(id)` | Get orchestration status | `durable.status('a1b2c3d4')` |
-| `durable.result(id)` | Get orchestration result | `durable.result('a1b2c3d4')` |
+| `durable.wait_for_schedule(cron)` | Wait until cron matches | `durable.wait_for_schedule('0 * * * *')` |
+| `durable.join(a, b)` | Execute in parallel | `durable.join('SELECT 1', 'SELECT 2')` |
+| `durable.join3(a, b, c)` | Three in parallel | `durable.join3(a, b, c)` |
+| `durable.if(cond, then, else)` | Conditional branch | `durable.if('SELECT true', a, b)` |
+| `durable.loop(body)` | Repeat forever | `durable.loop(body)` |
+| `durable.start(func, label)` | Start function | `durable.start('SELECT 1', 'job')` |
+| `durable.cancel(id, reason)` | Cancel function | `durable.cancel('a1b2c3d4', 'Done')` |
+| `durable.status(id)` | Get status | `durable.status('a1b2c3d4')` |
+| `durable.result(id)` | Get result | `durable.result('a1b2c3d4')` |
+| `durable.explain(input)` | Visualize graph | `durable.explain('a1b2c3d4')` |
 
 ### Operators
 
 | Operator | Name | Description | Example |
 |----------|------|-------------|---------|
-| `~>` | Sequence | Run left, then right | `a ~> b ~> c` |
-| `\|=>` | Name | Name the result for later use | `durable.sql('...') \|=> 'myvar'` |
+| `~>` | Sequence | Run left, then right | `'SELECT 1' ~> 'SELECT 2'` |
+| `\|=>` | Name | Name result for later use | `'SELECT 1' \|=> 'myvar'` |
 
 ### Variable Substitution
 
@@ -292,8 +301,8 @@ Use `$name` to reference named results in subsequent steps:
 
 ```sql
 SELECT durable.start(
-    durable.sql('SELECT 100 as amount') |=> 'total' ~>
-    durable.sql('SELECT $total * 2 as doubled')
+    'SELECT 100 as amount' |=> 'total'        -- save result as $total
+    ~> 'SELECT $total * 2 as doubled'         -- use $total in next step
 );
 ```
 
@@ -320,13 +329,13 @@ SELECT durable.start(
 
 ---
 
-## Orchestration Examples
+## Function Examples
 
 ### 1. Simple Query
 
 ```sql
 SELECT durable.start(
-    durable.sql('SELECT COUNT(*) FROM playground.users WHERE active = true'),
+    'SELECT COUNT(*) FROM playground.users WHERE active = true',
     'count-active-users'
 );
 ```
@@ -335,10 +344,10 @@ SELECT durable.start(
 
 ```sql
 SELECT durable.start(
-    durable.sql('INSERT INTO playground.logs (msg) VALUES (''Step 1: Starting'')') ~>
-    durable.sql('INSERT INTO playground.logs (msg) VALUES (''Step 2: Processing'')') ~>
-    durable.sql('INSERT INTO playground.logs (msg) VALUES (''Step 3: Complete'')'),
-    'three-step-orchestration'
+    'INSERT INTO playground.logs (msg) VALUES (''Step 1: Starting'')'
+    ~> 'INSERT INTO playground.logs (msg) VALUES (''Step 2: Processing'')'
+    ~> 'INSERT INTO playground.logs (msg) VALUES (''Step 3: Complete'')',
+    'three-step-function'
 );
 ```
 
@@ -346,11 +355,13 @@ SELECT durable.start(
 
 ```sql
 SELECT durable.start(
-    durable.sql('DELETE FROM playground.target WHERE loaded_at < now() - interval ''1 day''') ~>
-    durable.sql('UPDATE playground.staging SET processed_at = now() WHERE processed_at IS NULL') ~>
-    durable.sql('INSERT INTO playground.target (data, source_id, processed_at) 
-                 SELECT data, source_id, processed_at FROM playground.staging 
-                 WHERE processed_at IS NOT NULL'),
+    'DELETE FROM playground.target 
+     WHERE loaded_at < now() - interval ''1 day'''                    -- cleanup
+    ~> 'UPDATE playground.staging 
+        SET processed_at = now() WHERE processed_at IS NULL'          -- mark
+    ~> 'INSERT INTO playground.target (data, source_id, processed_at) 
+        SELECT data, source_id, processed_at FROM playground.staging 
+        WHERE processed_at IS NOT NULL',                              -- load
     'daily-etl'
 );
 ```
@@ -359,10 +370,14 @@ SELECT durable.start(
 
 ```sql
 SELECT durable.start(
-    durable.sql('SELECT id FROM playground.orders WHERE status = ''pending'' LIMIT 1') |=> 'order_id' ~>
-    durable.sql('UPDATE playground.orders SET status = ''processing'' WHERE id = $order_id') ~>
-    durable.sleep(2) ~>
-    durable.sql('UPDATE playground.orders SET status = ''completed'', processed_at = now() WHERE id = $order_id'),
+    'SELECT id FROM playground.orders 
+     WHERE status = ''pending'' LIMIT 1' |=> 'order_id'               -- get order
+    ~> 'UPDATE playground.orders 
+        SET status = ''processing'' WHERE id = $order_id'             -- mark processing
+    ~> durable.sleep(2)                                               -- simulate work
+    ~> 'UPDATE playground.orders 
+        SET status = ''completed'', processed_at = now() 
+        WHERE id = $order_id',                                        -- complete
     'process-order'
 );
 ```
@@ -372,10 +387,11 @@ SELECT durable.start(
 ```sql
 SELECT durable.start(
     durable.join(
-        durable.sql('SELECT COUNT(*) as user_count FROM playground.users'),
-        durable.sql('SELECT COUNT(*) as order_count FROM playground.orders')
-    ) ~>
-    durable.sql('INSERT INTO playground.logs (msg) VALUES (''Parallel counts complete'')'),
+        'SELECT COUNT(*) as user_count FROM playground.users',        -- branch 1
+        'SELECT COUNT(*) as order_count FROM playground.orders'       -- branch 2
+    )                                                                 -- waits for both
+    ~> 'INSERT INTO playground.logs (msg) 
+        VALUES (''Parallel counts complete'')',
     'parallel-counts'
 );
 ```
@@ -385,9 +401,12 @@ SELECT durable.start(
 ```sql
 SELECT durable.start(
     durable.if(
-        durable.sql('SELECT COUNT(*) > 3 FROM playground.task_queue WHERE status = ''pending'''),
-        durable.sql('INSERT INTO playground.logs (msg, level) VALUES (''High task load detected!'', ''warning'')'),
-        durable.sql('INSERT INTO playground.logs (msg) VALUES (''Task queue normal'')')
+        'SELECT COUNT(*) > 3 FROM playground.task_queue 
+         WHERE status = ''pending''',                                 -- condition
+        'INSERT INTO playground.logs (msg, level) 
+         VALUES (''High task load!'', ''warning'')',                  -- then
+        'INSERT INTO playground.logs (msg) 
+         VALUES (''Task queue normal'')'                              -- else
     ),
     'check-task-load'
 );
@@ -397,24 +416,20 @@ SELECT durable.start(
 
 ```sql
 SELECT durable.start(
-    durable.sql('
-        UPDATE playground.task_queue 
-        SET status = ''processing'', started_at = now()
-        WHERE id = (
-            SELECT id FROM playground.task_queue 
-            WHERE status = ''pending'' 
-            ORDER BY priority DESC, created_at 
-            LIMIT 1 
-            FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id, payload
-    ') |=> 'task' ~>
-    durable.sleep(1) ~>
-    durable.sql('
-        UPDATE playground.task_queue 
+    'UPDATE playground.task_queue 
+     SET status = ''processing'', started_at = now()
+     WHERE id = (
+         SELECT id FROM playground.task_queue 
+         WHERE status = ''pending'' 
+         ORDER BY priority DESC, created_at 
+         LIMIT 1 
+         FOR UPDATE SKIP LOCKED
+     )
+     RETURNING id, payload' |=> 'task'                                -- claim task
+    ~> durable.sleep(1)                                               -- process
+    ~> 'UPDATE playground.task_queue 
         SET status = ''completed'', completed_at = now()
-        WHERE status = ''processing''
-    '),
+        WHERE status = ''processing''',                               -- complete
     'process-next-task'
 );
 ```
@@ -425,14 +440,14 @@ SELECT durable.start(
 
 ### Eternal Loops
 
-Use `durable.loop()` to create orchestrations that run forever. Each iteration creates a new execution with fresh state (via continue-as-new).
+Use `durable.loop()` to create functions that run forever. Each iteration creates a new execution with fresh state (via continue-as-new).
 
 ```sql
 -- Simple heartbeat every 30 seconds
 SELECT durable.start(
     durable.loop(
-        durable.sql('INSERT INTO playground.heartbeats (ts) VALUES (now())') ~>
-        durable.sleep(30)
+        'INSERT INTO playground.heartbeats (ts) VALUES (now())'
+        ~> durable.sleep(30)
     ),
     'heartbeat-30s'
 );
@@ -446,8 +461,9 @@ Use `durable.wait_for_schedule()` with a cron expression:
 -- Every minute: log a tick
 SELECT durable.start(
     durable.loop(
-        durable.wait_for_schedule('* * * * *') ~>
-        durable.sql('INSERT INTO playground.logs (msg) VALUES (''Minute tick: '' || now()::text)')
+        durable.wait_for_schedule('* * * * *')
+        ~> 'INSERT INTO playground.logs (msg) 
+            VALUES (''Minute tick: '' || now()::text)'
     ),
     'every-minute-tick'
 );
@@ -455,9 +471,11 @@ SELECT durable.start(
 -- Every 5 minutes: check for pending tasks
 SELECT durable.start(
     durable.loop(
-        durable.wait_for_schedule('*/5 * * * *') ~>
-        durable.sql('SELECT COUNT(*) as pending FROM playground.task_queue WHERE status = ''pending''') |=> 'count' ~>
-        durable.sql('INSERT INTO playground.logs (msg) VALUES (''Pending tasks: '' || $count)')
+        durable.wait_for_schedule('*/5 * * * *')
+        ~> 'SELECT COUNT(*) as pending FROM playground.task_queue 
+            WHERE status = ''pending''' |=> 'count'
+        ~> 'INSERT INTO playground.logs (msg) 
+            VALUES (''Pending tasks: '' || $count)'
     ),
     'task-monitor-5min'
 );
@@ -465,8 +483,9 @@ SELECT durable.start(
 -- Hourly: clean up old logs
 SELECT durable.start(
     durable.loop(
-        durable.wait_for_schedule('0 * * * *') ~>
-        durable.sql('DELETE FROM playground.logs WHERE created_at < now() - interval ''24 hours''')
+        durable.wait_for_schedule('0 * * * *')
+        ~> 'DELETE FROM playground.logs 
+            WHERE created_at < now() - interval ''24 hours'''
     ),
     'hourly-log-cleanup'
 );
@@ -474,13 +493,11 @@ SELECT durable.start(
 -- Daily at midnight: archive completed orders
 SELECT durable.start(
     durable.loop(
-        durable.wait_for_schedule('0 0 * * *') ~>
-        durable.sql('
-            UPDATE playground.orders 
+        durable.wait_for_schedule('0 0 * * *')
+        ~> 'UPDATE playground.orders 
             SET status = ''archived'' 
             WHERE status = ''completed'' 
-            AND processed_at < now() - interval ''7 days''
-        ')
+            AND processed_at < now() - interval ''7 days'''
     ),
     'daily-order-archive'
 );
@@ -488,8 +505,8 @@ SELECT durable.start(
 -- Weekdays at 9am: generate report
 SELECT durable.start(
     durable.loop(
-        durable.wait_for_schedule('0 9 * * 1-5') ~>
-        durable.sql('SELECT playground.generate_report(''daily_summary'')')
+        durable.wait_for_schedule('0 9 * * 1-5')
+        ~> 'SELECT playground.generate_report(''daily_summary'')'
     ),
     'weekday-morning-report'
 );
@@ -509,7 +526,91 @@ SELECT durable.cancel('found_id', 'Stopping cron job');
 
 ---
 
-## Monitoring Functions
+## Visualizing Functions
+
+### durable.explain()
+
+Use `durable.explain()` to visualize function structure. It works in two modes:
+
+**1. Live Instance** - Pass an instance ID to see execution status:
+
+```sql
+SELECT durable.explain('a1b2c3d4');
+```
+
+Output shows status markers for each node:
+```
+Instance: a1b2c3d4 (my-job)
+Status:   ✓ Completed
+Output:   {"result": 42}
+
+SQL |=> 'step1': SELECT 1                    ✓ Completed
+→ SQL |=> 'step2': SELECT 2                  ✓ Completed
+→ SQL: INSERT INTO results...               ✓ Completed
+```
+
+**2. Dry-Run Preview** - Pass a DSL expression to visualize without executing:
+
+```sql
+SELECT durable.explain($$
+    'SELECT 1' |=> 'a'
+    ~> 'SELECT 2' |=> 'b'
+    ~> durable.if(
+        'SELECT $a > 0',
+        'SELECT ''yes''',
+        'SELECT ''no'''
+    )
+$$);
+```
+
+Output shows the graph structure:
+```
+SQL |=> 'a': SELECT 1
+→ SQL |=> 'b': SELECT 2
+→ IF
+    ✓ then:
+      SQL: SELECT 'yes'
+    ✗ else:
+      SQL: SELECT 'no'
+```
+
+### Status Markers
+
+| Marker | Meaning |
+|--------|---------|
+| `✓ Completed` | Node finished successfully |
+| `✗ Failed` | Node encountered an error |
+| `⏳ Running` | Node currently executing |
+| `○ Pending` | Node waiting to execute |
+
+### Visualizing Complex Structures
+
+```sql
+-- Parallel branches
+SELECT durable.explain($$
+    durable.join(
+        'SELECT 1' |=> 'a',
+        'SELECT 2' |=> 'b'
+    )
+    ~> 'SELECT $a + $b'
+$$);
+
+-- Loop with conditional
+SELECT durable.explain($$
+    durable.loop(
+        'SELECT COUNT(*) FROM tasks WHERE status = ''pending''' |=> 'cnt'
+        ~> durable.if(
+            'SELECT $cnt > 0',
+            'UPDATE tasks SET status = ''done'' WHERE id = 1',
+            durable.sleep(60)
+        )
+    )
+$$);
+```
+
+---
+
+## Monitoring
 
 ### List All Instances
 
@@ -526,7 +627,7 @@ SELECT * FROM durable.list_instances('Failed');
 SELECT * FROM durable.list_instances(NULL, 10);
 ```
 
-**Columns:** `instance_id`, `label`, `orchestration_name`, `status`, `execution_count`, `output`
+**Columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`
 
 ### Instance Details
 
@@ -534,11 +635,11 @@ SELECT * FROM durable.list_instances(NULL, 10);
 SELECT * FROM durable.instance_info('a1b2c3d4');
 ```
 
-**Columns:** `instance_id`, `label`, `orchestration_name`, `orchestration_version`, `current_execution_id`, `status`, `output`
+**Columns:** `instance_id`, `label`, `function_name`, `function_version`, `current_execution_id`, `status`, `output`
 
 ### Execution History
 
-For loops and retried orchestrations, see the execution history:
+For loops and retried functions, see the execution history:
 
 ```sql
 -- Last 5 executions (default)
@@ -550,9 +651,9 @@ SELECT * FROM durable.instance_executions('a1b2c3d4', 20);
 
 **Columns:** `execution_id`, `status`, `event_count`, `duration_ms`, `output`
 
-### Orchestration Nodes
+### Function Nodes
 
-See the orchestration graph structure:
+See the function graph structure:
 
 ```sql
 -- Last 5 executions (default)
@@ -584,84 +685,40 @@ SELECT durable.result('a1b2c3d4');
 
 ---
 
-## Troubleshooting
-
-### Extension Not Loading
-
-```sql
--- Check if extension is installed
-SELECT * FROM pg_extension WHERE extname = 'pg_durable';
-
--- Check shared_preload_libraries
-SHOW shared_preload_libraries;
-```
-
-### Background Worker Not Starting
-
-Check PostgreSQL logs for:
-```
-LOG:  pg_durable: duroxide background worker starting...
-LOG:  pg_durable: duroxide runtime started, processing orchestrations...
-```
-
-### Orchestration Stuck in "Running"
-
-```sql
--- Check execution history
-SELECT * FROM durable.instance_executions('instance_id');
-
--- Check if there are errors
-SELECT * FROM durable.instance_info('instance_id');
-
--- Cancel if needed
-SELECT durable.cancel('instance_id', 'Manual intervention');
-```
-
-### View Running Orchestrations
-
-```sql
--- See all running orchestrations with labels
-SELECT instance_id, label, status 
-FROM durable.list_instances('Running');
-```
-
-### Debug Database Path
-
-```sql
-SELECT durable.debug_db_path();
-```
-
----
-
 ## Quick Reference Card
 
 ```sql
--- Start a orchestration
-SELECT durable.start(durable.sql('...'), 'optional-label');
+-- Start a durable function (plain SQL auto-wrapped)
+SELECT durable.start('SELECT 1', 'optional-label');
 
--- Chain steps
-SELECT durable.start(step1 ~> step2 ~> step3);
+-- Chain steps with ~>
+SELECT durable.start(
+    'SELECT 1' ~> 'SELECT 2' ~> 'SELECT 3'
+);
 
--- Name a result
-SELECT durable.start(durable.sql('SELECT 1') |=> 'myvar' ~> ...);
-
--- Use a named result  
-durable.sql('SELECT $myvar * 2')
+-- Name a result with |=>
+SELECT durable.start(
+    'SELECT 1' |=> 'myvar' ~> 'SELECT $myvar * 2'
+);
 
 -- Sleep
-durable.sleep(60)  -- 60 seconds
+durable.sleep(60)                             -- 60 seconds
 
--- Cron schedule
-durable.wait_for_schedule('*/5 * * * *')  -- every 5 min
+-- Cron schedule  
+durable.wait_for_schedule('*/5 * * * *')      -- every 5 min
 
--- Parallel
-durable.join(a, b)
+-- Parallel execution
+durable.join('SELECT 1', 'SELECT 2')
 
 -- Conditional
-durable.if(condition, then_branch, else_branch)
+durable.if('SELECT true', 'yes branch', 'no branch')
 
 -- Loop forever
 durable.loop(body)
+
+-- Visualize
+SELECT durable.explain('instance_id');        -- live instance
+SELECT durable.explain($$ 'a' ~> 'b' $$);     -- dry-run preview
 
 -- Monitor
 SELECT * FROM durable.list_instances();

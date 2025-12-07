@@ -5,7 +5,7 @@
 ## Goal
 
 Prove the core architecture works end-to-end:
-1. SQL DSL functions build an orchestration graph
+1. SQL DSL operators build a function graph
 2. Graph is stored in PostgreSQL tables
 3. Duroxide runtime loads and executes the graph
 4. Execution is durable (survives restarts)
@@ -14,7 +14,7 @@ Prove the core architecture works end-to-end:
 
 ## MVP Scope
 
-### Functions
+### DSL Functions
 
 | Function | Description |
 |----------|-------------|
@@ -23,7 +23,7 @@ Prove the core architecture works end-to-end:
 | `durable.if(cond, then, else)` | Conditional branching |
 | `durable.join(a, b)` | Parallel execution, wait for all |
 | `durable.loop(body)` | Infinite loop (use with break conditions) |
-| `durable.start(fut, label)` | Start an orchestration, return instance ID |
+| `durable.start(func, label)` | Start a durable function, return instance ID |
 
 ### Operators
 
@@ -53,7 +53,7 @@ Results can be referenced in subsequent steps:
 
 ## What Users Can Build with MVP
 
-### Example 1: Sequential SQL Orchestration
+### Example 1: Sequential SQL Function
 
 ```sql
 SELECT durable.start(
@@ -71,7 +71,7 @@ SELECT durable.start(
 
 **Why it's useful:**
 - Each step is checkpointed — if the runtime crashes after step 2, it resumes at step 3
-- The orchestration survives database restarts (state is in tables)
+- The function survives database restarts (state is in tables)
 - No external job scheduler needed
 
 ### Example 2: ETL Pipeline
@@ -185,13 +185,13 @@ SELECT durable.start(
 
 ## Monitoring & Visualization
 
-### Check Orchestration Status
+### Check Function Status
 
 ```sql
 SELECT * FROM durable.instance_info('abc12345');
 ```
 
-### View Orchestration Graph
+### View Function Graph
 
 ```sql
 -- Live instance with execution status
@@ -247,8 +247,8 @@ SELECT * FROM durable.list_instances();
 │  │  │                                                    │  │  │
 │  │  │  • Runs as background worker in PostgreSQL         │  │  │
 │  │  │  • Polls durable.instances for new work            │  │  │
-│  │  │  • Loads orchestration graph from durable.nodes    │  │  │
-│  │  │  • Executes as duroxide orchestration              │  │  │
+│  │  │  • Loads function graph from durable.nodes         │  │  │
+│  │  │  • Executes as duroxide function                   │  │  │
 │  │  │  • Each step = duroxide activity (checkpointed)    │  │  │
 │  │  │  • Survives crash via replay                       │  │  │
 │  │  │                                                    │  │  │
@@ -294,7 +294,7 @@ Plain SQL strings are automatically wrapped:
 
 ### Detection Logic
 
-The system detects whether a string is already a `Durofut` (orchestration node) or plain SQL:
+The system detects whether a string is already a `Durofut` (function node) or plain SQL:
 
 ```rust
 // A Durofut is valid JSON with node_id (8 hex chars) and node_type
@@ -410,4 +410,4 @@ Each activity execution is checkpointed to SQLite:
 3. **Replay**: Duroxide replays from SQLite - completed activities return cached results
 4. **Continue**: Execution resumes from where it left off
 
-This is why orchestrations survive crashes without re-executing completed steps.
+This is why durable functions survive crashes without re-executing completed steps.

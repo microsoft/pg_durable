@@ -10,7 +10,7 @@ use crate::types::duroxide_db_path;
 // Monitoring Functions
 // ============================================================================
 
-/// List all orchestration instances, optionally filtered by status.
+/// List all durable function instances, optionally filtered by status.
 #[pg_extern(schema = "durable")]
 pub fn list_instances(
     status_filter: default!(Option<&str>, "NULL"),
@@ -18,7 +18,7 @@ pub fn list_instances(
 ) -> TableIterator<'static, (
     name!(instance_id, String),
     name!(label, Option<String>),
-    name!(orchestration_name, String),
+    name!(function_name, String),
     name!(status, String),
     name!(execution_count, i64),
     name!(output, Option<String>),
@@ -82,13 +82,13 @@ pub fn list_instances(
     TableIterator::new(results)
 }
 
-/// Get detailed info about a specific orchestration instance.
+/// Get detailed info about a specific durable function instance.
 #[pg_extern(schema = "durable")]
 pub fn instance_info(instance_id: &str) -> TableIterator<'static, (
     name!(instance_id, String),
     name!(label, Option<String>),
-    name!(orchestration_name, String),
-    name!(orchestration_version, String),
+    name!(function_name, String),
+    name!(function_version, String),
     name!(current_execution_id, i64),
     name!(status, String),
     name!(output, Option<String>),
@@ -133,7 +133,7 @@ pub fn instance_info(instance_id: &str) -> TableIterator<'static, (
     TableIterator::new(results)
 }
 
-/// Get the last N executions for an eternal orchestration (loop).
+/// Get the last N executions for an eternal durable function (loop).
 #[pg_extern(schema = "durable")]
 pub fn instance_executions(instance_id: &str, limit_count: default!(i32, "5")) -> TableIterator<'static, (
     name!(execution_id, i64),
@@ -191,7 +191,7 @@ pub fn instance_executions(instance_id: &str, limit_count: default!(i32, "5")) -
     TableIterator::new(results)
 }
 
-/// Get system-wide orchestration metrics.
+/// Get system-wide durable function metrics.
 #[pg_extern(schema = "durable")]
 pub fn metrics() -> TableIterator<'static, (
     name!(total_instances, i64),
@@ -234,7 +234,7 @@ pub fn metrics() -> TableIterator<'static, (
     TableIterator::new(results)
 }
 
-/// Get orchestration nodes for an instance with execution history.
+/// Get function nodes for an instance with execution history.
 #[pg_extern(schema = "durable")]
 pub fn instance_nodes(
     instance_id_param: &str,

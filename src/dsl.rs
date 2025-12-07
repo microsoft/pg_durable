@@ -1,11 +1,11 @@
-//! DSL functions for defining durable orchestrations
+//! DSL functions for defining durable SQL functions
 
 use pgrx::prelude::*;
 use cron::Schedule as CronSchedule;
 use std::str::FromStr;
 
-use crate::types::{Durofut, OrchestrationInput, short_id, duroxide_db_path};
-use crate::runtime::start_duroxide_orchestration;
+use crate::types::{Durofut, FunctionInput, short_id, duroxide_db_path};
+use crate::runtime::start_durable_function;
 
 // ============================================================================
 // Version & Debug Functions
@@ -31,7 +31,7 @@ pub fn debug_db_path() -> String {
 // Node Creation Functions
 // ============================================================================
 
-/// Creates a SQL node in the orchestration graph.
+/// Creates a SQL node in the function graph.
 #[pg_extern(schema = "durable")]
 pub fn sql(query: &str) -> String {
     let durofut = Durofut {
@@ -211,7 +211,7 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
 // Orchestration Control Functions
 // ============================================================================
 
-/// Starts a durable orchestration.
+/// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
 #[pg_extern(schema = "durable")]
 pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
@@ -233,7 +233,7 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         pgrx::error!("Failed to create instance: {:?}", e);
     }
     
-    // Link all nodes in the orchestration tree to this instance
+    // Link all nodes in the function graph to this instance
     fn link_nodes(node_id: &str, instance_id: &str, visited: &mut std::collections::HashSet<String>) {
         if visited.contains(node_id) {
             return;
@@ -284,26 +284,26 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     let mut visited = std::collections::HashSet::new();
     link_nodes(&durofut.node_id, &instance_id, &mut visited);
     
-    // Start the duroxide orchestration
-    let input = OrchestrationInput {
+    // Start the durable function
+    let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
     
-    if let Err(e) = start_duroxide_orchestration("ExecuteWorkflow", &instance_id, &input_json) {
-        log!("pg_durable: Warning - failed to start duroxide orchestration: {}", e);
+    if let Err(e) = start_durable_function("ExecuteWorkflow", &instance_id, &input_json) {
+        log!("pg_durable: Warning - failed to start durable function: {}", e);
     }
     
     instance_id
 }
 
-/// Cancels a running orchestration.
+/// Cancels a running durable function.
 #[pg_extern(schema = "durable")]
 pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) -> String {
-    use crate::runtime::cancel_duroxide_orchestration;
+    use crate::runtime::cancel_durable_function;
     
-    if let Err(e) = cancel_duroxide_orchestration(instance_id, reason) {
+    if let Err(e) = cancel_durable_function(instance_id, reason) {
         return format!("Failed to cancel: {}", e);
     }
     
@@ -316,7 +316,7 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
     format!("Instance {} cancelled: {}", instance_id, reason)
 }
 
-/// Gets the status of an orchestration instance.
+/// Gets the status of a durable function instance.
 #[pg_extern(schema = "durable")]
 pub fn status(instance_id: &str) -> Option<String> {
     let sql = format!(
@@ -326,7 +326,7 @@ pub fn status(instance_id: &str) -> Option<String> {
     Spi::get_one::<String>(&sql).ok().flatten()
 }
 
-/// Manually runs pending orchestrations.
+/// Manually runs pending durable functions.
 #[pg_extern(schema = "durable")]
 pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
     if let Some(id) = instance_id {
@@ -336,7 +336,7 @@ pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
     }
 }
 
-/// Gets the result of a completed orchestration.
+/// Gets the result of a completed durable function.
 #[pg_extern(schema = "durable")]
 pub fn result(instance_id: &str) -> Option<String> {
     let sql = format!(
