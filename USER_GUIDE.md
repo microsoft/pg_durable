@@ -514,6 +514,44 @@ LOOP
             SQL: SELECT 'nothing to clean'
 ```
 
+**Daily Midnight Order Archive (from Examples section):**
+
+```sql
+-- Visualize the daily-order-archive function before starting it
+SELECT durable.explain($$
+    durable.loop(
+        durable.wait_for_schedule('0 0 * * *')
+        ~> 'SELECT COUNT(*) as cnt FROM playground.orders 
+            WHERE status = ''completed'' 
+            AND processed_at < now() - interval ''7 days''' |=> 'to_archive'
+        ~> durable.if(
+            'SELECT $to_archive > 0',
+            'UPDATE playground.orders SET status = ''archived'' 
+             WHERE status = ''completed'' 
+             AND processed_at < now() - interval ''7 days''' |=> 'archived'
+                ~> 'INSERT INTO playground.logs (msg, level) 
+                    VALUES (''Archived '' || $archived || '' orders'', ''info'')',
+            'INSERT INTO playground.logs (msg) 
+             VALUES (''No orders to archive'')'
+        )
+    )
+$$);
+```
+
+Output:
+```
+LOOP
+    ↻ body:
+      WAIT_SCHEDULE '0 0 * * *'
+      → SQL |=> 'to_archive': SELECT COUNT(*) as cnt FROM playground.orders WHERE status = 'completed' AND processed_at < now() - interval '7 days'
+      → IF
+          ✓ then:
+            SQL |=> 'archived': UPDATE playground.orders SET status = 'archived' WHERE status = 'completed' AND processed_at < now() - interval '7 days'
+            → SQL: INSERT INTO playground.logs (msg, level) VALUES ('Archived ' || $archived || ' orders', 'info')
+          ✗ else:
+            SQL: INSERT INTO playground.logs (msg) VALUES ('No orders to archive')
+```
+
 ---
 
 ## Monitoring
