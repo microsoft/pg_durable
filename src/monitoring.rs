@@ -4,7 +4,8 @@ use pgrx::prelude::*;
 use std::sync::Arc;
 use duroxide::Client;
 
-use crate::types::duroxide_db_path;
+use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+use duroxide_pg::PostgresProvider;
 
 // ============================================================================
 // Monitoring Functions
@@ -23,7 +24,7 @@ pub fn list_instances(
     name!(execution_count, i64),
     name!(output, Option<String>),
 )> {
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     
     // Fetch labels from PostgreSQL
     let labels: std::collections::HashMap<String, Option<String>> = Spi::connect(|client| {
@@ -47,7 +48,7 @@ pub fn list_instances(
         };
     
     let results = rt.block_on(async {
-        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
         };
@@ -93,7 +94,7 @@ pub fn instance_info(instance_id: &str) -> TableIterator<'static, (
     name!(status, String),
     name!(output, Option<String>),
 )> {
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     let instance_id_str = instance_id.to_string();
     
     let label: Option<String> = Spi::get_one(&format!(
@@ -109,7 +110,7 @@ pub fn instance_info(instance_id: &str) -> TableIterator<'static, (
         };
     
     let results = rt.block_on(async {
-        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
         };
@@ -142,7 +143,7 @@ pub fn instance_executions(instance_id: &str, limit_count: default!(i32, "5")) -
     name!(duration_ms, i64),
     name!(output, Option<String>),
 )> {
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     let instance_id = instance_id.to_string();
     
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -153,7 +154,7 @@ pub fn instance_executions(instance_id: &str, limit_count: default!(i32, "5")) -
         };
     
     let results = rt.block_on(async {
-        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
         };
@@ -201,7 +202,7 @@ pub fn metrics() -> TableIterator<'static, (
     name!(total_executions, i64),
     name!(total_events, i64),
 )> {
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -211,7 +212,7 @@ pub fn metrics() -> TableIterator<'static, (
         };
     
     let results = rt.block_on(async {
-        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
         };
@@ -254,7 +255,7 @@ pub fn instance_nodes(
     use pgrx::datum::TimestampWithTimeZone;
     
     let instance_id = instance_id_param.to_string();
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     
     // Get node definitions from PostgreSQL (including status, result and updated_at)
     let node_defs: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<TimestampWithTimeZone>)> = 
@@ -291,7 +292,7 @@ pub fn instance_nodes(
         };
     
     let results = rt.block_on(async {
-        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
         };

@@ -4,7 +4,7 @@ use pgrx::prelude::*;
 use cron::Schedule as CronSchedule;
 use std::str::FromStr;
 
-use crate::types::{Durofut, FunctionInput, short_id, duroxide_db_path};
+use crate::types::{Durofut, FunctionInput, short_id};
 use crate::runtime::start_durable_function;
 
 // ============================================================================
@@ -21,10 +21,11 @@ pub fn version() -> String {
     )
 }
 
-/// Debug function to see what duroxide path is being used
+/// Debug function to see what duroxide connection is being used
 #[pg_extern(schema = "durable")]
-pub fn debug_db_path() -> String {
-    duroxide_db_path()
+pub fn debug_connection() -> String {
+    use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+    format!("{} (schema: {})", postgres_connection_string(), DUROXIDE_SCHEMA)
 }
 
 // ============================================================================

@@ -15,9 +15,10 @@ use sqlx::{Column, Row};
 
 use crate::types::{
     FunctionGraph, FunctionNode, FunctionInput,
-    duroxide_db_path, duroxide_connection_string, postgres_connection_string,
+    postgres_connection_string, DUROXIDE_SCHEMA,
     calculate_cron_wait, evaluate_condition, substitute_variables,
 };
+use duroxide_pg::PostgresProvider;
 
 // ============================================================================
 // Background Worker Setup
@@ -74,21 +75,20 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
 
 /// Run the duroxide runtime with proper shutdown handling
 async fn run_duroxide_runtime_with_shutdown() {
-    log!("pg_durable: initializing duroxide runtime with SQLite store...");
+    log!("pg_durable: initializing duroxide runtime with PostgreSQL store...");
     
-    let db_path = duroxide_connection_string();
-    let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+    let pg_conn_str = postgres_connection_string();
+    log!("pg_durable: connecting to PostgreSQL at {} (schema: {})", pg_conn_str, DUROXIDE_SCHEMA);
+    
+    let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            log!("pg_durable: failed to create SQLite store at {}: {}", db_path, e);
+            log!("pg_durable: failed to create PostgreSQL store: {}", e);
             return;
         }
     };
     
-    log!("pg_durable: SQLite store created at {}", duroxide_db_path());
-    
-    let pg_conn_str = postgres_connection_string();
-    log!("pg_durable: connecting to PostgreSQL at {}", pg_conn_str);
+    log!("pg_durable: PostgreSQL store created in schema '{}'", DUROXIDE_SCHEMA);
     
     let pg_pool = match PgPoolOptions::new()
         .max_connections(5)
@@ -621,14 +621,14 @@ async fn execute_node_inner(
 // Client Functions
 // ============================================================================
 
-/// Start a durable function via the shared SQLite store.
+/// Start a durable function via the shared PostgreSQL store.
 pub fn start_durable_function(
     function_name: &str, 
     instance_id: &str, 
     input: &str
 ) -> Result<(), String> {
-    let db_path = duroxide_db_path();
-    log!("pg_durable: start_durable_function - using db_path: {}", db_path);
+    let pg_conn_str = postgres_connection_string();
+    log!("pg_durable: start_durable_function - connecting to PostgreSQL");
     
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -637,7 +637,7 @@ pub fn start_durable_function(
     
     rt.block_on(async {
         let store = Arc::new(
-            duroxide::providers::sqlite::SqliteProvider::new(&db_path, None)
+            PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
                 .await
                 .map_err(|e| format!("Failed to connect to duroxide store: {}", e))?
         );
@@ -653,7 +653,7 @@ pub fn start_durable_function(
 
 /// Cancel a durable function.
 pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), String> {
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -662,7 +662,7 @@ pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), St
     
     rt.block_on(async {
         let store = Arc::new(
-            duroxide::providers::sqlite::SqliteProvider::new(&db_path, None)
+            PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
                 .await
                 .map_err(|e| format!("Failed to connect to duroxide store: {}", e))?
         );

@@ -18,44 +18,7 @@ pub fn short_id() -> String {
     uuid.to_string().chars().rev().take(8).collect::<String>().chars().rev().collect()
 }
 
-/// Path to the shared SQLite database for duroxide.
-/// Priority: 1) Explicit env var, 2) PGDATA env, 3) PostgreSQL data_directory (via SPI), 4) pgrx dev paths
-pub fn duroxide_db_path() -> String {
-    // 1. Explicit configuration takes precedence
-    if let Ok(path) = std::env::var("PG_DURABLE_STORE_PATH") {
-        return path;
-    }
-    
-    // 2. PGDATA environment variable (background worker context sets this)
-    if let Ok(pgdata) = std::env::var("PGDATA") {
-        return format!("{}/pg_durable_duroxide.db", pgdata);
-    }
-    
-    // 3. Try to get data_directory from PostgreSQL via SPI
-    // This is safe to call within a transaction context
-    if let Ok(Some(data_dir)) = Spi::get_one::<String>("SELECT current_setting('data_directory')") {
-        return format!("{}/pg_durable_duroxide.db", data_dir);
-    }
-    
-    // 4. pgrx development paths fallback  
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    for version in &["17", "16", "15", "14", "13"] {
-        let pgrx_data = format!("{}/.pgrx/data-{}", home, version);
-        if std::path::Path::new(&pgrx_data).exists() {
-            return format!("{}/pg_durable_duroxide.db", pgrx_data);
-        }
-    }
-    
-    // 5. Final fallback
-    format!("{}/pg_durable_duroxide.db", home)
-}
-
-/// Connection string for the duroxide SQLite store
-pub fn duroxide_connection_string() -> String {
-    duroxide_db_path()
-}
-
-/// PostgreSQL connection string for the background worker
+/// PostgreSQL connection string for the background worker and Duroxide runtime
 pub fn postgres_connection_string() -> String {
     let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PGPORT").unwrap_or_else(|_| {
@@ -78,6 +41,9 @@ pub fn postgres_connection_string() -> String {
     
     format!("postgres://{}@{}:{}/{}", user, host, port, database)
 }
+
+/// Schema name for Duroxide internal tables
+pub const DUROXIDE_SCHEMA: &str = "duroxide";
 
 /// Calculate the duration until the next cron schedule match
 pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {

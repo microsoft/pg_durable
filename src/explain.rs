@@ -121,11 +121,12 @@ fn explain_instance(instance_id: &str) -> String {
 
 /// Get instance info from Duroxide store
 fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
-    use crate::types::duroxide_db_path;
+    use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+    use duroxide_pg::PostgresProvider;
     use std::sync::Arc;
     use duroxide::Client;
     
-    let db_path = duroxide_db_path();
+    let pg_conn_str = postgres_connection_string();
     
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -135,7 +136,7 @@ fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
         };
     
     rt.block_on(async {
-        let store = match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
+        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
             Ok(s) => Arc::new(s),
             Err(_) => return (String::new(), None),
         };

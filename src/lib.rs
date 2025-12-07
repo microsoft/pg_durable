@@ -123,31 +123,27 @@ mod tests {
     /// Ensure the Duroxide store exists and is ready
     fn ensure_store_ready() -> Result<String, String> {
         use std::time::{Duration, Instant};
+        use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+        use duroxide_pg::PostgresProvider;
         
-        let db_path = crate::types::duroxide_db_path();
-        
-        // Ensure parent directory exists with full permissions
-        if let Some(parent) = std::path::Path::new(&db_path).parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
-        }
+        let pg_conn_str = postgres_connection_string();
         
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("Failed to create runtime: {}", e))?;
         
-        // Try to initialize the store (creates DB if it doesn't exist)
+        // Try to initialize the store (creates schema if it doesn't exist)
         rt.block_on(async {
             let start = Instant::now();
             let timeout = Duration::from_secs(10);
             
             loop {
-                match duroxide::providers::sqlite::SqliteProvider::new(&db_path, None).await {
-                    Ok(_) => return Ok(db_path.clone()),
+                match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
+                    Ok(_) => return Ok(format!("{} (schema: {})", pg_conn_str, DUROXIDE_SCHEMA)),
                     Err(e) => {
                         if start.elapsed() > timeout {
-                            return Err(format!("Failed to initialize store at {} after {}s: {}", db_path, timeout.as_secs(), e));
+                            return Err(format!("Failed to initialize store after {}s: {}", timeout.as_secs(), e));
                         }
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
@@ -160,11 +156,13 @@ mod tests {
     fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
         use std::time::{Duration, Instant};
         use duroxide::Client;
+        use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+        use duroxide_pg::PostgresProvider;
         
         // Ensure store is ready first
         let _ = ensure_store_ready()?;
         
-        let db_path = crate::types::duroxide_db_path();
+        let pg_conn_str = postgres_connection_string();
         let start = Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
         
@@ -175,7 +173,7 @@ mod tests {
         
         rt.block_on(async {
             let store = Arc::new(
-                duroxide::providers::sqlite::SqliteProvider::new(&db_path, None)
+                PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
                     .await
                     .map_err(|e| format!("Failed to connect to store: {}", e))?
             );
@@ -213,11 +211,11 @@ mod tests {
     /// Get the current status from Duroxide
     fn get_duroxide_status(instance_id: &str) -> Option<String> {
         use duroxide::Client;
+        use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+        use duroxide_pg::PostgresProvider;
         
-        let db_path = match ensure_store_ready() {
-            Ok(path) => path,
-            Err(_) => return None,
-        };
+        let _ = ensure_store_ready().ok()?;
+        let pg_conn_str = postgres_connection_string();
         
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -226,7 +224,7 @@ mod tests {
         
         rt.block_on(async {
             let store = Arc::new(
-                duroxide::providers::sqlite::SqliteProvider::new(&db_path, None)
+                PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
                     .await
                     .ok()?
             );
@@ -377,9 +375,10 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_debug_db_path_returns_path() {
-        let path = crate::dsl::debug_db_path();
-        assert!(!path.is_empty());
+    fn test_debug_connection_returns_info() {
+        let conn_info = crate::dsl::debug_connection();
+        assert!(!conn_info.is_empty());
+        assert!(conn_info.contains("duroxide")); // Should contain schema name
     }
 
     // ========================================================================
