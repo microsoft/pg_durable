@@ -77,4 +77,4 @@ The runtime is powered by [duroxide](https://github.com/anthropics/duroxide), a 
 
 ## License
 
-Apache 2.0
+MIT
