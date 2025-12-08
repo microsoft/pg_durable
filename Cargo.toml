@@ -2,6 +2,9 @@
 name = "pg_durable"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/Azure/pg_durable"
+description = "Durable SQL Functions for PostgreSQL"
 
 [lib]
 crate-type = ["cdylib", "lib"]
