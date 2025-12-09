@@ -158,7 +158,7 @@ start_server
 
 # Show version
 echo -n "pg_durable version: "
-"$PSQL" -h localhost -p $PG_PORT -d $PG_DB -t -c "SELECT durable.version();" 2>/dev/null | tr -d ' \n'
+"$PSQL" -h localhost -p $PG_PORT -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
 echo ""
 echo ""
 

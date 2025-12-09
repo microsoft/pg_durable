@@ -123,7 +123,92 @@ SELECT 'TEST PASSED' AS result;
 psql -h localhost -p 28817 -d postgres
 ```
 
-## Step 4: Validation Checklist
+## Step 4: Ensure USER_GUIDE Examples Have E2E Coverage
+
+Every example in `USER_GUIDE.md` should have a corresponding E2E test to ensure documentation stays accurate as code evolves.
+
+### USER_GUIDE Example → E2E Test Mapping
+
+| USER_GUIDE Section | Example | E2E Test File |
+|--------------------|---------|---------------|
+| Getting Started | Simple query | `01_simple_sql.sql` |
+| Function Examples | 1. Simple Query | `01_simple_sql.sql` |
+| Function Examples | 2. Sequential Steps | `02_sequence.sql`, `15_scenario_three_step.sql` |
+| Function Examples | 3. Multi-Step ETL | `11_scenario_etl.sql` |
+| Function Examples | 4. With Variables | `03_variables.sql`, `14_scenario_order_processing.sql` |
+| Function Examples | 5. Parallel Execution | `04_parallel_join.sql`, `12_scenario_parallel_counts.sql`, `16_scenario_join3.sql` |
+| Function Examples | 6. Conditional Logic | `05_conditional_true.sql`, `06_conditional_false.sql`, `13_scenario_conditional_load.sql` |
+| Function Examples | 7. Task Queue Processor | `14_scenario_order_processing.sql` (similar pattern) |
+| Loops & Cron Jobs | Eternal Loops | `08_loop_cancel.sql` |
+| Loops & Cron Jobs | df.sleep() | `07_sleep.sql` |
+| DSL Reference | Race operator | `17_race.sql` |
+| Monitoring | df.explain() | `10_explain.sql` |
+| Monitoring | list_instances, status, result | `09_monitoring.sql` |
+
+### Checking Coverage
+
+**Run this checklist when updating USER_GUIDE.md:**
+
+1. **List all examples in USER_GUIDE.md:**
+   ```bash
+   grep -n "SELECT df.start" USER_GUIDE.md | head -30
+   ```
+
+2. **List all E2E tests:**
+   ```bash
+   ls tests/e2e/sql/*.sql
+   ```
+
+3. **For each USER_GUIDE example, verify:**
+   - [ ] There's an E2E test that exercises the same pattern
+   - [ ] The E2E test uses the same syntax (operators vs functions)
+   - [ ] The E2E test actually passes
+
+4. **If an example lacks coverage:**
+   - Create a new scenario test in `tests/e2e/sql/`
+   - Name it appropriately (e.g., `18_scenario_<pattern>.sql`)
+   - Follow the test file structure from Step 3
+
+### Example Coverage Audit
+
+Before finalizing documentation changes, run this audit:
+
+```bash
+# Run all E2E tests to ensure they pass
+./scripts/test-e2e-local.sh
+
+# Count examples in USER_GUIDE vs tests
+echo "USER_GUIDE examples:"
+grep -c "SELECT df.start" USER_GUIDE.md
+
+echo "E2E scenario tests:"
+ls tests/e2e/sql/*scenario*.sql | wc -l
+```
+
+### Adding Missing Coverage
+
+If USER_GUIDE has an example without E2E coverage:
+
+1. **Identify the pattern** - What DSL features does it use?
+2. **Check existing tests** - Maybe coverage exists under a different name
+3. **Create new test if needed** - Use `@pg_durable-create-scenario-test.md` prompt
+4. **Verify the example works** - Copy-paste from USER_GUIDE into test
+
+### What Requires E2E Coverage
+
+**Must have tests:**
+- Every operator (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`)
+- Every DSL function (`df.sql`, `df.sleep`, `df.join`, `df.race`, `df.if`, `df.loop`)
+- Every monitoring function (`df.status`, `df.result`, `df.list_instances`, etc.)
+- Variable substitution patterns
+- Complex nested structures (loops containing conditionals, etc.)
+
+**Nice to have:**
+- Edge cases mentioned in documentation
+- Error handling examples
+- Performance-sensitive patterns
+
+## Step 5: Validation Checklist
 
 ### Documentation
 - [ ] USER_GUIDE.md examples use current syntax (`df.` schema)
@@ -192,7 +277,7 @@ If documentation updates require:
 
 Then summarize the proposed changes and ask for confirmation before proceeding.
 
-## Final Validation
+## Step 6: Final Validation
 
 After completing documentation and test updates:
 

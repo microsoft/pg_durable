@@ -89,7 +89,9 @@ echo -e "${YELLOW}Pushing to ACR...${NC}"
 if ! docker push "$ACR_FULL"; then
     echo ""
     echo -e "${RED}Push failed. Make sure you're logged in:${NC}"
-    echo "  az acr login --name toygresacr"
+    # Extract registry name from URL (e.g., toygresacr.azurecr.io -> toygresacr)
+    REGISTRY_NAME="${ACR_REGISTRY%%.*}"
+    echo "  az acr login --name $REGISTRY_NAME"
     exit 1
 fi
 

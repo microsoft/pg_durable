@@ -1,11 +1,11 @@
 //! DSL functions for defining durable SQL functions
 
-use pgrx::prelude::*;
 use cron::Schedule as CronSchedule;
+use pgrx::prelude::*;
 use std::str::FromStr;
 
-use crate::types::{Durofut, FunctionInput, short_id};
 use crate::runtime::start_durable_function;
+use crate::types::{short_id, Durofut, FunctionInput};
 
 // ============================================================================
 // Version & Debug Functions
@@ -25,7 +25,11 @@ pub fn version() -> String {
 #[pg_extern(schema = "df")]
 pub fn debug_connection() -> String {
     use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
-    format!("{} (schema: {})", postgres_connection_string(), DUROXIDE_SCHEMA)
+    format!(
+        "{} (schema: {})",
+        postgres_connection_string(),
+        DUROXIDE_SCHEMA
+    )
 }
 
 // ============================================================================
@@ -54,7 +58,7 @@ pub fn sql(query: &str) -> String {
 pub fn then_fn(a: &str, b: &str) -> String {
     let a_fut = Durofut::ensure(a);
     let b_fut = Durofut::ensure(b);
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "THEN".to_string(),
@@ -74,14 +78,14 @@ pub fn then_fn(a: &str, b: &str) -> String {
 pub fn as_named(name: &str, fut: &str) -> String {
     let mut durofut = Durofut::ensure(fut);
     durofut.result_name = Some(name.to_string());
-    
+
     let update_sql = format!(
         "UPDATE df.nodes SET result_name = '{}' WHERE id = '{}'",
         name.replace('\'', "''"),
         durofut.node_id
     );
     let _ = Spi::run(&update_sql);
-    
+
     durofut.to_json()
 }
 
@@ -110,7 +114,7 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
     if CronSchedule::from_str(&cron_with_seconds).is_err() {
         pgrx::error!("Invalid cron expression: {}", cron_expr);
     }
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "WAIT_SCHEDULE".to_string(),
@@ -128,7 +132,7 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 #[pg_extern(name = "loop", schema = "df")]
 pub fn loop_fn(body: &str) -> String {
     let body_fut = Durofut::ensure(body);
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "LOOP".to_string(),
@@ -148,11 +152,11 @@ pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
     let condition_fut = Durofut::ensure(condition);
     let then_fut = Durofut::ensure(then_branch);
     let else_fut = Durofut::ensure(else_branch);
-    
+
     let config = serde_json::json!({
         "condition_node": condition_fut.node_id
     });
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "IF".to_string(),
@@ -171,7 +175,7 @@ pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
 pub fn join(a: &str, b: &str) -> String {
     let a_fut = Durofut::ensure(a);
     let b_fut = Durofut::ensure(b);
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "JOIN".to_string(),
@@ -191,11 +195,11 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
     let a_fut = Durofut::ensure(a);
     let b_fut = Durofut::ensure(b);
     let c_fut = Durofut::ensure(c);
-    
+
     let config = serde_json::json!({
         "extra_nodes": [c_fut.node_id]
     });
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "JOIN".to_string(),
@@ -214,7 +218,7 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
 pub fn race(a: &str, b: &str) -> String {
     let a_fut = Durofut::ensure(a);
     let b_fut = Durofut::ensure(b);
-    
+
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "RACE".to_string(),
@@ -237,48 +241,61 @@ pub fn race(a: &str, b: &str) -> String {
 pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     let durofut = Durofut::ensure(fut);
     let instance_id = short_id();
-    
+
     let label_sql = label
         .map(|l| format!("'{}'", l.replace('\'', "''")))
         .unwrap_or_else(|| "NULL".to_string());
-    
+
     let create_instance_sql = format!(
         "INSERT INTO df.instances (id, label, root_node, status) VALUES ('{}', {}, '{}', 'pending')",
         instance_id,
         label_sql,
         durofut.node_id
     );
-    
+
     if let Err(e) = Spi::run(&create_instance_sql) {
         pgrx::error!("Failed to create instance: {:?}", e);
     }
-    
+
     // Link all nodes in the function graph to this instance
-    fn link_nodes(node_id: &str, instance_id: &str, visited: &mut std::collections::HashSet<String>) {
+    fn link_nodes(
+        node_id: &str,
+        instance_id: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
         if visited.contains(node_id) {
             return;
         }
         visited.insert(node_id.to_string());
-        
+
         let update_sql = format!(
             "UPDATE df.nodes SET instance_id = '{}' WHERE id = '{}'",
             instance_id, node_id
         );
         let _ = Spi::run(&update_sql);
-        
+
         // Get child node IDs
         let left: Option<String> = Spi::get_one(&format!(
-            "SELECT left_node FROM df.nodes WHERE id = '{}'", node_id
-        )).ok().flatten();
-        
+            "SELECT left_node FROM df.nodes WHERE id = '{}'",
+            node_id
+        ))
+        .ok()
+        .flatten();
+
         let right: Option<String> = Spi::get_one(&format!(
-            "SELECT right_node FROM df.nodes WHERE id = '{}'", node_id
-        )).ok().flatten();
-        
+            "SELECT right_node FROM df.nodes WHERE id = '{}'",
+            node_id
+        ))
+        .ok()
+        .flatten();
+
         let config: Option<String> = Spi::get_one(&format!(
-            "SELECT query FROM df.nodes WHERE id = '{}'", node_id
-        )).ok().flatten();
-        
+            "SELECT query FROM df.nodes WHERE id = '{}'",
+            node_id
+        ))
+        .ok()
+        .flatten();
+
         if let Some(l) = left {
             link_nodes(&l, instance_id, visited);
         }
@@ -300,21 +317,24 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
             }
         }
     }
-    
+
     let mut visited = std::collections::HashSet::new();
     link_nodes(&durofut.node_id, &instance_id, &mut visited);
-    
+
     // Start the orchestration via duroxide
     let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
-    
+
     if let Err(e) = start_durable_function("ExecuteWorkflow", &instance_id, &input_json) {
-        pgrx::log!("pg_durable: Warning - failed to start durable function: {}", e);
+        pgrx::log!(
+            "pg_durable: Warning - failed to start durable function: {}",
+            e
+        );
     }
-    
+
     instance_id
 }
 
@@ -322,17 +342,17 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
 #[pg_extern(schema = "df")]
 pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) -> String {
     use crate::runtime::cancel_durable_function;
-    
+
     if let Err(e) = cancel_durable_function(instance_id, reason) {
         return format!("Failed to cancel: {}", e);
     }
-    
+
     let update_sql = format!(
         "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = '{}'",
         instance_id
     );
     let _ = Spi::run(&update_sql);
-    
+
     format!("Instance {} cancelled: {}", instance_id, reason)
 }
 
@@ -367,4 +387,3 @@ pub fn result(instance_id: &str) -> Option<String> {
     );
     Spi::get_one::<String>(&sql).ok().flatten()
 }
-

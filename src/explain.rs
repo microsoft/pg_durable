@@ -19,12 +19,12 @@ struct ExplainNode {
 }
 
 /// Explain a durable function - either an existing instance or a DSL expression
-/// 
+///
 /// Usage:
 /// ```sql
 /// -- Explain existing instance
 /// SELECT df.explain('abc12345');
-/// 
+///
 /// -- Explain a DSL expression (dry-run, no execution)
 /// SELECT df.explain($$
 ///     df.sql('SELECT 1') ~> df.sleep(60) ~> df.sql('SELECT 2')
@@ -33,11 +33,10 @@ struct ExplainNode {
 #[pg_extern(schema = "df")]
 pub fn explain(input: &str) -> String {
     let trimmed = input.trim();
-    
+
     // Detect if input is an instance_id (8 hex chars) or a DSL expression
-    let is_instance_id = trimmed.len() == 8 
-        && trimmed.chars().all(|c| c.is_ascii_hexdigit());
-    
+    let is_instance_id = trimmed.len() == 8 && trimmed.chars().all(|c| c.is_ascii_hexdigit());
+
     if is_instance_id {
         explain_instance(trimmed)
     } else {
@@ -65,34 +64,38 @@ fn explain_instance(instance_id: &str) -> String {
         }
         None
     });
-    
+
     let (root_id, label, pg_status) = match instance_info {
         Some(info) => info,
         None => return format!("Instance '{}' not found", instance_id),
     };
-    
+
     // Get status and output from Duroxide
     let (duroxide_status, output) = get_duroxide_instance_info(instance_id);
-    
+
     // Load all nodes for this instance
     let nodes = load_nodes_from_table("df.nodes", Some(instance_id));
-    
+
     if nodes.is_empty() {
         return format!("No nodes found for instance '{}'", instance_id);
     }
-    
+
     // Build header
     let mut result = String::new();
-    
+
     // Instance ID and label
     if let Some(lbl) = label {
         result.push_str(&format!("Instance: {} ({})\n", instance_id, lbl));
     } else {
         result.push_str(&format!("Instance: {}\n", instance_id));
     }
-    
+
     // Status with icon
-    let status = if !duroxide_status.is_empty() { &duroxide_status } else { &pg_status };
+    let status = if !duroxide_status.is_empty() {
+        &duroxide_status
+    } else {
+        &pg_status
+    };
     let status_icon = match status.to_lowercase().as_str() {
         "completed" | "continuedabnew" => "✓",
         "failed" | "canceled" => "✗",
@@ -100,7 +103,7 @@ fn explain_instance(instance_id: &str) -> String {
         _ => "○",
     };
     result.push_str(&format!("Status:   {} {}\n", status_icon, status));
-    
+
     // Output (truncated if too long)
     if let Some(out) = output {
         let truncated = if out.len() > 60 {
@@ -110,39 +113,41 @@ fn explain_instance(instance_id: &str) -> String {
         };
         result.push_str(&format!("Output:   {}\n", truncated));
     }
-    
+
     result.push_str("\n");
-    
+
     // Build tree visualization
     result.push_str(&build_tree_visualization(&root_id, &nodes, true));
-    
+
     result
 }
 
 /// Get instance info from Duroxide store
 fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
     use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+    use duroxide::Client;
     use duroxide_pg::PostgresProvider;
     use std::sync::Arc;
-    use duroxide::Client;
-    
+
     let pg_conn_str = postgres_connection_string();
-    
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build() {
-            Ok(rt) => rt,
-            Err(_) => return (String::new(), None),
-        };
-    
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return (String::new(), None),
+    };
+
     rt.block_on(async {
-        let store = match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
-            Ok(s) => Arc::new(s),
-            Err(_) => return (String::new(), None),
-        };
-        
+        let store =
+            match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
+                Ok(s) => Arc::new(s),
+                Err(_) => return (String::new(), None),
+            };
+
         let client = Client::new(store);
-        
+
         match client.get_instance_info(instance_id).await {
             Ok(info) => (info.status, info.output),
             Err(_) => (String::new(), None),
@@ -167,48 +172,48 @@ fn explain_expression(expr: &str) -> String {
             error TEXT,
             created_at TIMESTAMPTZ DEFAULT now(),
             updated_at TIMESTAMPTZ DEFAULT now()
-        )"#
+        )"#,
     ) {
         return format!("Failed to create temp table: {:?}", e);
     }
-    
+
     // Clear any previous dry-run nodes
     let _ = Spi::run("TRUNCATE _durable_explain_nodes");
-    
+
     // 2. Set explain mode flag
     let _ = Spi::run("SET LOCAL df._explain_mode = 'true'");
-    
+
     // 3. Execute the expression to populate temp table
     let durofut_json: Result<Option<String>, _> = Spi::get_one(&format!("SELECT {}", expr));
-    
+
     // 4. Reset explain mode
     let _ = Spi::run("RESET df._explain_mode");
-    
+
     let root_json = match durofut_json {
         Ok(Some(json)) => json,
         Ok(None) => return "Expression returned NULL".to_string(),
         Err(e) => return format!("Failed to evaluate expression: {:?}", e),
     };
-    
+
     // Parse the root node ID from the Durofut JSON
     let root_id = match serde_json::from_str::<serde_json::Value>(&root_json) {
         Ok(v) => v["node_id"].as_str().unwrap_or("").to_string(),
         Err(e) => return format!("Failed to parse result: {:?}", e),
     };
-    
+
     if root_id.is_empty() {
         return "Could not determine root node".to_string();
     }
-    
+
     // 5. Load nodes from temp table
     let nodes = load_nodes_from_table("_durable_explain_nodes", None);
-    
+
     // 6. Build visualization (without status markers for dry-run)
     let result = build_tree_visualization(&root_id, &nodes, false);
-    
+
     // 7. Cleanup temp table
     let _ = Spi::run("DROP TABLE IF EXISTS _durable_explain_nodes");
-    
+
     result
 }
 
@@ -218,7 +223,8 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
         format!(
             r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text
                FROM {} WHERE instance_id = '{}'"#,
-            table, id.replace('\'', "''")
+            table,
+            id.replace('\'', "''")
         )
     } else {
         format!(
@@ -226,9 +232,9 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
             table
         )
     };
-    
+
     let mut nodes = HashMap::new();
-    
+
     Spi::connect(|client| {
         if let Ok(table_result) = client.select(&sql, None, &[]) {
             for row in table_result {
@@ -248,21 +254,26 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
             }
         }
     });
-    
+
     nodes
 }
 
 /// Build a tree visualization of the function graph
-fn build_tree_visualization(root_id: &str, nodes: &HashMap<String, ExplainNode>, show_status: bool) -> String {
+fn build_tree_visualization(
+    root_id: &str,
+    nodes: &HashMap<String, ExplainNode>,
+    show_status: bool,
+) -> String {
     let mut output = String::new();
     build_tree_recursive(root_id, nodes, "", true, &mut output, show_status);
-    
+
     // Pad each line for cleaner output with trailing spaces
     let lines: Vec<&str> = output.trim_end().lines().collect();
     let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let padded_width = max_len + 4; // Add 4 spaces of padding
-    
-    lines.iter()
+
+    lines
+        .iter()
         .map(|line| format!("{:width$}", line, width = padded_width))
         .collect::<Vec<_>>()
         .join("\n")
@@ -281,7 +292,7 @@ fn build_tree_recursive(
         Some(n) => n,
         None => return,
     };
-    
+
     // Determine the connector
     let connector = if prefix.is_empty() {
         ""
@@ -290,7 +301,7 @@ fn build_tree_recursive(
     } else {
         "├─"
     };
-    
+
     // Get status marker
     let status_marker = if show_status {
         match node.status.as_deref() {
@@ -303,15 +314,15 @@ fn build_tree_recursive(
     } else {
         ""
     };
-    
+
     // Format the node line based on type
     let node_display = format_node_display(node);
-    
+
     // Handle THEN nodes specially - we want to show sequence with arrows
     if node.node_type == "THEN" {
         // For THEN, we flatten the sequence and show with arrows
         let sequence = collect_sequence(node_id, nodes);
-        
+
         for (i, seq_node_id) in sequence.iter().enumerate() {
             if let Some(seq_node) = nodes.get(seq_node_id) {
                 // All sequence items use the same prefix, just different connectors
@@ -320,7 +331,7 @@ fn build_tree_recursive(
                 } else {
                     "→ ".to_string()
                 };
-                
+
                 let seq_status = if show_status {
                     match seq_node.status.as_deref() {
                         Some("completed") => " ✓",
@@ -332,12 +343,19 @@ fn build_tree_recursive(
                 } else {
                     ""
                 };
-                
+
                 let seq_display = format_node_display(seq_node);
-                output.push_str(&format!("{}{}{}{}\n", prefix, seq_connector, seq_display, seq_status));
-                
+                output.push_str(&format!(
+                    "{}{}{}{}\n",
+                    prefix, seq_connector, seq_display, seq_status
+                ));
+
                 // If this node has children (not THEN), recurse
-                if seq_node.node_type != "THEN" && seq_node.node_type != "SQL" && seq_node.node_type != "SLEEP" && seq_node.node_type != "WAIT_SCHEDULE" {
+                if seq_node.node_type != "THEN"
+                    && seq_node.node_type != "SQL"
+                    && seq_node.node_type != "SLEEP"
+                    && seq_node.node_type != "WAIT_SCHEDULE"
+                {
                     let child_prefix = format!("{}    ", prefix);
                     render_children(seq_node, nodes, &child_prefix, output, show_status);
                 }
@@ -345,8 +363,11 @@ fn build_tree_recursive(
         }
     } else {
         // Regular node - output it
-        output.push_str(&format!("{}{}{}{}\n", prefix, connector, node_display, status_marker));
-        
+        output.push_str(&format!(
+            "{}{}{}{}\n",
+            prefix, connector, node_display, status_marker
+        ));
+
         // Recurse into children
         let child_prefix = if prefix.is_empty() {
             "    ".to_string()
@@ -355,7 +376,7 @@ fn build_tree_recursive(
         } else {
             format!("{}│   ", prefix)
         };
-        
+
         render_children(node, nodes, &child_prefix, output, show_status);
     }
 }
@@ -367,7 +388,11 @@ fn collect_sequence(node_id: &str, nodes: &HashMap<String, ExplainNode>) -> Vec<
     sequence
 }
 
-fn collect_sequence_recursive(node_id: &str, nodes: &HashMap<String, ExplainNode>, sequence: &mut Vec<String>) {
+fn collect_sequence_recursive(
+    node_id: &str,
+    nodes: &HashMap<String, ExplainNode>,
+    sequence: &mut Vec<String>,
+) {
     if let Some(node) = nodes.get(node_id) {
         if node.node_type == "THEN" {
             // Recurse into left (first in sequence)
@@ -397,28 +422,58 @@ fn render_children(
         "LOOP" => {
             if let Some(ref body_id) = node.left_node {
                 output.push_str(&format!("{}↻ body:\n", prefix));
-                build_tree_recursive(body_id, nodes, &format!("{}  ", prefix), true, output, show_status);
+                build_tree_recursive(
+                    body_id,
+                    nodes,
+                    &format!("{}  ", prefix),
+                    true,
+                    output,
+                    show_status,
+                );
             }
         }
         "IF" => {
             // Parse condition from query JSON
-            let condition_id = node.query.as_ref()
+            let condition_id = node
+                .query
+                .as_ref()
                 .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
                 .and_then(|v| v["condition_node"].as_str().map(|s| s.to_string()));
-            
+
             if let Some(ref cond_id) = condition_id {
                 output.push_str(&format!("{}? condition:\n", prefix));
-                build_tree_recursive(cond_id, nodes, &format!("{}  ", prefix), true, output, show_status);
+                build_tree_recursive(
+                    cond_id,
+                    nodes,
+                    &format!("{}  ", prefix),
+                    true,
+                    output,
+                    show_status,
+                );
             }
-            
+
             if let Some(ref then_id) = node.left_node {
                 output.push_str(&format!("{}✓ then:\n", prefix));
-                build_tree_recursive(then_id, nodes, &format!("{}  ", prefix), true, output, show_status);
+                build_tree_recursive(
+                    then_id,
+                    nodes,
+                    &format!("{}  ", prefix),
+                    true,
+                    output,
+                    show_status,
+                );
             }
-            
+
             if let Some(ref else_id) = node.right_node {
                 output.push_str(&format!("{}✗ else:\n", prefix));
-                build_tree_recursive(else_id, nodes, &format!("{}  ", prefix), true, output, show_status);
+                build_tree_recursive(
+                    else_id,
+                    nodes,
+                    &format!("{}  ", prefix),
+                    true,
+                    output,
+                    show_status,
+                );
             }
         }
         "JOIN" => {
@@ -429,7 +484,7 @@ fn render_children(
             if let Some(ref right_id) = node.right_node {
                 branches.push(right_id.clone());
             }
-            
+
             // Check for extra nodes in join3
             if let Some(ref query) = node.query {
                 if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(query) {
@@ -442,12 +497,19 @@ fn render_children(
                     }
                 }
             }
-            
+
             let branch_count = branches.len();
             for (i, branch_id) in branches.iter().enumerate() {
                 let is_last_branch = i == branch_count - 1;
                 output.push_str(&format!("{}║ branch {}:\n", prefix, i + 1));
-                build_tree_recursive(branch_id, nodes, &format!("{}  ", prefix), is_last_branch, output, show_status);
+                build_tree_recursive(
+                    branch_id,
+                    nodes,
+                    &format!("{}  ", prefix),
+                    is_last_branch,
+                    output,
+                    show_status,
+                );
             }
         }
         _ => {
@@ -458,10 +520,12 @@ fn render_children(
 
 /// Format a node for display
 fn format_node_display(node: &ExplainNode) -> String {
-    let name_suffix = node.result_name.as_ref()
+    let name_suffix = node
+        .result_name
+        .as_ref()
         .map(|n| format!(" |=> '{}'", n))
         .unwrap_or_default();
-    
+
     match node.node_type.as_str() {
         "SQL" => {
             let query = node.query.as_deref().unwrap_or("?");
@@ -485,8 +549,12 @@ fn format_node_display(node: &ExplainNode) -> String {
         "JOIN" => {
             // Count branches
             let mut count = 0;
-            if node.left_node.is_some() { count += 1; }
-            if node.right_node.is_some() { count += 1; }
+            if node.left_node.is_some() {
+                count += 1;
+            }
+            if node.right_node.is_some() {
+                count += 1;
+            }
             if let Some(ref query) = node.query {
                 if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(query) {
                     if let Some(extras) = cfg["extra_nodes"].as_array() {
@@ -500,5 +568,3 @@ fn format_node_display(node: &ExplainNode) -> String {
         _ => node.node_type.clone(),
     }
 }
-
-

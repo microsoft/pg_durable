@@ -135,7 +135,7 @@ fi
 
 # Show version
 echo -n "pg_durable version: "
-VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SELECT durable.version();" 2>&1)
+VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SELECT df.version();" 2>&1)
 if [ $? -ne 0 ]; then
     echo -e "${RED}Failed to get version:${NC}"
     echo "$VERSION"

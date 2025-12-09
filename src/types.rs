@@ -1,12 +1,12 @@
 //! Core types and configuration for pg_durable
 
+use chrono::{DateTime, Utc};
+use cron::Schedule as CronSchedule;
 use pgrx::prelude::*;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use std::time::Duration;
-use cron::Schedule as CronSchedule;
-use chrono::{DateTime, Utc};
 use std::str::FromStr;
+use std::time::Duration;
+use uuid::Uuid;
 
 // ============================================================================
 // Configuration Functions
@@ -15,7 +15,14 @@ use std::str::FromStr;
 /// Generate a short 8-character instance ID from a UUID
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();
-    uuid.to_string().chars().rev().take(8).collect::<String>().chars().rev().collect()
+    uuid.to_string()
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 /// PostgreSQL connection string for the background worker and Duroxide runtime
@@ -38,7 +45,7 @@ pub fn postgres_connection_string() -> String {
     let database = std::env::var("POSTGRES_DB")
         .or_else(|_| std::env::var("PGDATABASE"))
         .unwrap_or_else(|_| "postgres".to_string());
-    
+
     format!("postgres://{}@{}:{}/{}", user, host, port, database)
 }
 
@@ -48,19 +55,21 @@ pub const DUROXIDE_SCHEMA: &str = "duroxide";
 /// Calculate the duration until the next cron schedule match
 pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
     let cron_with_seconds = format!("0 {}", cron_expr);
-    
+
     let schedule = CronSchedule::from_str(&cron_with_seconds)
         .map_err(|e| format!("Invalid cron expression '{}': {}", cron_expr, e))?;
-    
+
     let now: DateTime<Utc> = Utc::now();
-    
-    let next = schedule.upcoming(Utc)
+
+    let next = schedule
+        .upcoming(Utc)
         .next()
         .ok_or_else(|| "No upcoming schedule found".to_string())?;
-    
-    let duration = (next - now).to_std()
+
+    let duration = (next - now)
+        .to_std()
         .map_err(|_| "Failed to calculate wait duration".to_string())?;
-    
+
     Ok(duration)
 }
 
@@ -78,23 +87,23 @@ pub fn evaluate_condition(result: &str) -> Result<bool, String> {
         }
         return Ok(is_truthy(&json));
     }
-    
+
     let lower = result.to_lowercase().trim().to_string();
-    Ok(matches!(lower.as_str(), "true" | "t" | "yes" | "1") || 
-       lower.parse::<i64>().map(|n| n != 0).unwrap_or(false))
+    Ok(matches!(lower.as_str(), "true" | "t" | "yes" | "1")
+        || lower.parse::<i64>().map(|n| n != 0).unwrap_or(false))
 }
 
 fn is_truthy(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Bool(b) => *b,
         serde_json::Value::Number(n) => {
-            n.as_i64().map(|i| i != 0).unwrap_or(false) ||
-            n.as_f64().map(|f| f != 0.0).unwrap_or(false)
+            n.as_i64().map(|i| i != 0).unwrap_or(false)
+                || n.as_f64().map(|f| f != 0.0).unwrap_or(false)
         }
         serde_json::Value::String(s) => {
             let lower = s.to_lowercase();
-            matches!(lower.as_str(), "true" | "t" | "yes" | "1") ||
-            s.parse::<i64>().map(|n| n != 0).unwrap_or(!s.is_empty())
+            matches!(lower.as_str(), "true" | "t" | "yes" | "1")
+                || s.parse::<i64>().map(|n| n != 0).unwrap_or(!s.is_empty())
         }
         serde_json::Value::Array(a) => !a.is_empty(),
         serde_json::Value::Object(o) => !o.is_empty(),
@@ -103,7 +112,10 @@ fn is_truthy(value: &serde_json::Value) -> bool {
 }
 
 /// Substitute $name variables in a query with values from results map
-pub fn substitute_variables(query: &str, results: &std::collections::HashMap<String, String>) -> String {
+pub fn substitute_variables(
+    query: &str,
+    results: &std::collections::HashMap<String, String>,
+) -> String {
     let mut result = query.to_string();
     for (name, value) in results {
         let pattern = format!("${}", name);
@@ -199,7 +211,7 @@ impl Durofut {
     pub fn from_json(s: &str) -> Self {
         serde_json::from_str(s).expect("failed to deserialize Durofut")
     }
-    
+
     /// Check if a string is a valid Durofut JSON
     /// Returns true if it's valid JSON with a node_id field that looks like our format
     pub fn is_durofut(s: &str) -> bool {
@@ -210,7 +222,7 @@ impl Durofut {
             false
         }
     }
-    
+
     /// Ensure a string is a Durofut - if it's already one, parse it; if not, treat as SQL and create a node
     pub fn ensure(s: &str) -> Self {
         if Self::is_durofut(s) {
@@ -232,20 +244,28 @@ impl Durofut {
 
     /// Insert this node into the appropriate table (df.nodes or temp table in explain mode)
     pub fn insert_node(&self) {
-        let query_escaped = self.query.as_ref()
+        let query_escaped = self
+            .query
+            .as_ref()
             .map(|q| q.replace('\'', "''"))
             .map(|q| format!("'{}'", q))
             .unwrap_or_else(|| "NULL".to_string());
-        
-        let result_name_escaped = self.result_name.as_ref()
+
+        let result_name_escaped = self
+            .result_name
+            .as_ref()
             .map(|n| format!("'{}'", n.replace('\'', "''")))
             .unwrap_or_else(|| "NULL".to_string());
-        
-        let left_node = self.left_node.as_ref()
+
+        let left_node = self
+            .left_node
+            .as_ref()
             .map(|id| format!("'{}'", id))
             .unwrap_or_else(|| "NULL".to_string());
-        
-        let right_node = self.right_node.as_ref()
+
+        let right_node = self
+            .right_node
+            .as_ref()
             .map(|id| format!("'{}'", id))
             .unwrap_or_else(|| "NULL".to_string());
 
@@ -259,9 +279,15 @@ impl Durofut {
         let sql = format!(
             r#"INSERT INTO {} (id, node_type, query, result_name, left_node, right_node)
                VALUES ('{}', '{}', {}, {}, {}, {})"#,
-            target_table, self.node_id, self.node_type, query_escaped, result_name_escaped, left_node, right_node
+            target_table,
+            self.node_id,
+            self.node_type,
+            query_escaped,
+            result_name_escaped,
+            left_node,
+            right_node
         );
-        
+
         Spi::run(&sql).expect("failed to insert node");
     }
 }
@@ -269,7 +295,9 @@ impl Durofut {
 /// Check if we're in explain mode (for dry-run graph visualization)
 pub fn is_explain_mode() -> bool {
     Spi::get_one::<bool>(
-        "SELECT COALESCE(current_setting('df._explain_mode', true), 'false') = 'true'"
-    ).ok().flatten().unwrap_or(false)
+        "SELECT COALESCE(current_setting('df._explain_mode', true), 'false') = 'true'",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
 }
-

@@ -95,6 +95,8 @@ Tests in a linux/amd64 container. Matches production environment.
 ./scripts/test-e2e-docker.sh --rebuild
 ```
 
+> ⚠️ **Important**: If you change Rust code (`src/`), you must use `--rebuild` to rebuild the Docker image. Test SQL file changes are picked up automatically.
+
 **Investigation mode (`--keep`):**
 ```bash
 # Run tests, keep container running

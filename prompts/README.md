@@ -25,6 +25,14 @@ This directory contains structured prompts for LLMs working on the pg_durable co
    - Modeling real-world durable function patterns
    - Testing complex control flow (loops, conditionals, joins, race)
 
+### Git Operations
+
+4. **[pg_durable-merge-main.md](pg_durable-merge-main.md)**
+   - Committing changes with proper messages
+   - Merging branches to main
+   - Pre-commit checklist
+   - Deploying to ACR after merge
+
 ## How to Use These Prompts
 
 ### For LLM Assistants
@@ -62,14 +70,14 @@ These prompts follow consistent patterns:
 3. @pg_durable-create-scenario-test.md   - Add E2E test
 4. @pg_durable-update-docs-tests.md      - Update documentation
 5. Run full test suite
-6. Commit and push
+6. @pg_durable-merge-main.md             - Commit and push
 ```
 
 ### Documentation & Test Update Cycle
 ```
 1. @pg_durable-update-docs-tests.md  - Review docs, propose tests
 2. @pg_durable-clean-warnings.md     - Clean up any code issues found
-3. Commit and push
+3. @pg_durable-merge-main.md         - Commit and push
 ```
 
 ## Key Directories
