@@ -7,6 +7,18 @@ use std::str::FromStr;
 use crate::runtime::start_durable_function;
 use crate::types::{short_id, Durofut, FunctionInput};
 
+/// Check if we're running inside a workflow context (background worker connection).
+/// The background worker sets df.in_workflow='true' on all its connections.
+fn is_in_workflow_context() -> bool {
+    // Check the session variable set by the background worker
+    // current_setting with missing_ok=true returns NULL if not set
+    let result: Option<String> = Spi::get_one("SELECT current_setting('df.in_workflow', true)")
+        .ok()
+        .flatten();
+
+    result.as_deref() == Some("true")
+}
+
 // ============================================================================
 // Version & Debug Functions
 // ============================================================================
@@ -30,6 +42,73 @@ pub fn debug_connection() -> String {
         postgres_connection_string(),
         DUROXIDE_SCHEMA
     )
+}
+
+// ============================================================================
+// Variable Functions
+// ============================================================================
+
+/// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
+/// Variables are captured at df.start() and remain immutable during execution.
+#[pg_extern(schema = "df")]
+pub fn setvar(name: &str, value: &str) -> String {
+    // Check if we're inside a workflow execution
+    if is_in_workflow_context() {
+        pgrx::error!("df.setvar() cannot be called inside a workflow - set variables before starting the workflow");
+    }
+
+    let sql = format!(
+        "INSERT INTO df.vars (name, value) VALUES ('{}', '{}')
+         ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+        name.replace('\'', "''"),
+        value.replace('\'', "''")
+    );
+    if let Err(e) = Spi::run(&sql) {
+        pgrx::error!("Failed to set variable: {:?}", e);
+    }
+    "OK".to_string()
+}
+
+/// Gets a workflow variable value.
+#[pg_extern(schema = "df")]
+pub fn getvar(name: &str) -> Option<String> {
+    let sql = format!(
+        "SELECT value FROM df.vars WHERE name = '{}'",
+        name.replace('\'', "''")
+    );
+    Spi::get_one::<String>(&sql).ok().flatten()
+}
+
+/// Removes a workflow variable.
+#[pg_extern(schema = "df")]
+pub fn unsetvar(name: &str) -> String {
+    // Check if we're inside a workflow execution
+    if is_in_workflow_context() {
+        pgrx::error!("df.unsetvar() cannot be called inside a workflow - manage variables before starting the workflow");
+    }
+
+    let sql = format!(
+        "DELETE FROM df.vars WHERE name = '{}'",
+        name.replace('\'', "''")
+    );
+    if let Err(e) = Spi::run(&sql) {
+        pgrx::error!("Failed to unset variable: {:?}", e);
+    }
+    "OK".to_string()
+}
+
+/// Clears all workflow variables.
+#[pg_extern(schema = "df")]
+pub fn clearvars() -> String {
+    // Check if we're inside a workflow execution
+    if is_in_workflow_context() {
+        pgrx::error!("df.clearvars() cannot be called inside a workflow - manage variables before starting the workflow");
+    }
+
+    if let Err(e) = Spi::run("DELETE FROM df.vars") {
+        pgrx::error!("Failed to clear variables: {:?}", e);
+    }
+    "OK".to_string()
 }
 
 // ============================================================================
@@ -291,6 +370,7 @@ pub fn http(
 
 /// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
+/// Variables from df.vars are captured and passed to the orchestration.
 #[pg_extern(schema = "df")]
 pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     let durofut = Durofut::ensure(fut);
@@ -375,14 +455,30 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     let mut visited = std::collections::HashSet::new();
     link_nodes(&durofut.node_id, &instance_id, &mut visited);
 
+    // Capture vars from df.vars table
+    let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
+        let mut vars = std::collections::HashMap::new();
+        if let Ok(table) = client.select("SELECT name, value FROM df.vars", None, &[]) {
+            for row in table {
+                if let (Ok(Some(name)), Ok(Some(value))) =
+                    (row.get::<String>(1), row.get::<String>(2))
+                {
+                    vars.insert(name, value);
+                }
+            }
+        }
+        vars
+    });
+
     // Start the orchestration via duroxide
     let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
+        vars,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 
-    if let Err(e) = start_durable_function("ExecuteWorkflow", &instance_id, &input_json) {
+    if let Err(e) = start_durable_function("ExecuteFunctionGraph", &instance_id, &input_json) {
         pgrx::log!(
             "pg_durable: Warning - failed to start durable function: {}",
             e

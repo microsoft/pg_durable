@@ -111,12 +111,41 @@ fn is_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
-/// Substitute $name variables in a query with values from results map
-pub fn substitute_variables(
+/// System variables available during workflow execution
+pub struct SystemVars {
+    pub instance_id: String,
+    pub label: Option<String>,
+}
+
+/// Substitute all variable types in a query:
+/// - {name} for user vars (from FunctionInput.vars) - values are inserted as-is
+/// - {sys_instance_id}, {sys_label} for system vars - inserted as-is
+/// - $name for result naming (from |=>) - may be quoted for JSON values
+///
+/// User vars and system vars are substituted without quoting - the user should
+/// handle SQL escaping in the original query if needed.
+pub fn substitute_all_with_options(
     query: &str,
     results: &std::collections::HashMap<String, String>,
+    vars: &std::collections::HashMap<String, String>,
+    sys_vars: &SystemVars,
+    quote_results_for_sql: bool,
 ) -> String {
     let mut result = query.to_string();
+
+    // 1. Substitute system vars: {sys_*} (inserted as-is)
+    result = result.replace("{sys_instance_id}", &sys_vars.instance_id);
+    result = result.replace("{sys_label}", sys_vars.label.as_deref().unwrap_or(""));
+
+    // 2. Substitute user vars: {name} (inserted as-is, no quoting)
+    for (name, value) in vars {
+        let pattern = format!("{{{}}}", name);
+        if result.contains(&pattern) {
+            result = result.replace(&pattern, value);
+        }
+    }
+
+    // 3. Substitute results: $name
     for (name, value) in results {
         let pattern = format!("${}", name);
         if result.contains(&pattern) {
@@ -127,7 +156,14 @@ pub fn substitute_variables(
                         if let Some(obj) = first_row.as_object() {
                             if let Some((_, val)) = obj.iter().next() {
                                 match val {
-                                    serde_json::Value::String(s) => s.clone(),
+                                    serde_json::Value::String(s) => {
+                                        if quote_results_for_sql {
+                                            let escaped = s.replace('\'', "''");
+                                            format!("'{}'", escaped)
+                                        } else {
+                                            s.clone()
+                                        }
+                                    }
                                     serde_json::Value::Number(n) => n.to_string(),
                                     serde_json::Value::Bool(b) => b.to_string(),
                                     _ => val.to_string(),
@@ -141,11 +177,14 @@ pub fn substitute_variables(
                     } else {
                         value.clone()
                     }
-                } else {
+                } else if quote_results_for_sql {
                     // This is a JSON object/array (like HTTP response) - quote it for SQL
                     // so it can be cast to jsonb: '{"key": "value"}'::jsonb
                     let escaped = value.replace('\'', "''");
                     format!("'{}'", escaped)
+                } else {
+                    // Raw mode - no quoting for non-SQL contexts
+                    value.clone()
                 }
             } else {
                 value.clone()
@@ -153,7 +192,44 @@ pub fn substitute_variables(
             result = result.replace(&pattern, &replacement);
         }
     }
+
     result
+}
+
+/// Substitute all variables with SQL quoting (default for SQL contexts)
+pub fn substitute_all(
+    query: &str,
+    results: &std::collections::HashMap<String, String>,
+    vars: &std::collections::HashMap<String, String>,
+    sys_vars: &SystemVars,
+) -> String {
+    substitute_all_with_options(query, results, vars, sys_vars, true)
+}
+
+/// Substitute all variables without SQL quoting (for URLs, headers, etc.)
+pub fn substitute_all_raw(
+    query: &str,
+    results: &std::collections::HashMap<String, String>,
+    vars: &std::collections::HashMap<String, String>,
+    sys_vars: &SystemVars,
+) -> String {
+    substitute_all_with_options(query, results, vars, sys_vars, false)
+}
+
+/// Legacy function for backward compatibility - only substitutes $name results
+pub fn substitute_variables(
+    query: &str,
+    results: &std::collections::HashMap<String, String>,
+) -> String {
+    substitute_all(
+        query,
+        results,
+        &std::collections::HashMap::new(),
+        &SystemVars {
+            instance_id: String::new(),
+            label: None,
+        },
+    )
 }
 
 // ============================================================================
@@ -186,6 +262,8 @@ pub struct FunctionInput {
     pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default)]
+    pub vars: std::collections::HashMap<String, String>,
 }
 
 /// Configuration for HTTP requests

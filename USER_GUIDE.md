@@ -13,10 +13,13 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 3. [Core Concepts](#core-concepts)
 4. [DSL Reference](#dsl-reference)
 5. [Function Examples](#function-examples)
-6. [Loops & Cron Jobs](#loops--cron-jobs)
-7. [Visualizing Functions](#visualizing-functions)
-8. [Monitoring](#monitoring)
-9. [Appendix: Test Data Setup](#appendix-test-data-setup)
+6. [HTTP Requests](#http-requests)
+7. [Durable Function Variables](#durable-function-variables)
+8. [Loops & Cron Jobs](#loops--cron-jobs)
+9. [Visualizing Functions](#visualizing-functions)
+10. [Monitoring](#monitoring)
+11. [Quick Reference Card](#quick-reference-card)
+12. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -146,6 +149,10 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
 | `df.explain(input)` | Visualize graph | `df.explain('a1b2c3d4')` |
+| `df.setvar(name, value)` | Set durable function variable | `df.setvar('api_url', 'https://...')` |
+| `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
+| `df.unsetvar(name)` | Remove durable function variable | `df.unsetvar('api_url')` |
+| `df.clearvars()` | Clear all durable function variables | `df.clearvars()` |
 
 ### Operators
 
@@ -506,15 +513,15 @@ SELECT df.start(
 );
 ```
 
-#### 9. Real-World Example: Fetch GitHub Pull Requests
+#### 9. Real-World Example: Scheduled GitHub PR Sync
 
-This example fetches the latest pull requests from a GitHub repository and stores them in a table.
+This example creates a scheduled durable function that fetches pull requests from a GitHub repository every 30 minutes and stores them in a table. It demonstrates variables, HTTP requests, and scheduled loops.
 
 ```sql
 -- Create table to store PR data
 CREATE TABLE IF NOT EXISTS github_prs (
     id SERIAL PRIMARY KEY,
-    pr_number INT,
+    pr_number INT UNIQUE,
     title TEXT,
     state TEXT,
     author TEXT,
@@ -523,37 +530,174 @@ CREATE TABLE IF NOT EXISTS github_prs (
     fetched_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Fetch PRs from GitHub API and store them
+-- Configure the sync URL using durable function variable
+SELECT df.setvar('github_url', 'https://api.github.com/repos/affandar/duroxide/pulls?state=all&per_page=10');
+
+-- Start scheduled PR sync (runs every 30 minutes)
 SELECT df.start(
-    (df.http(
-        'https://api.github.com/repos/affandar/duroxide/pulls?state=all&per_page=10',
-        'GET',
-        NULL,
-        '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable"}'::jsonb
-    ) |=> 'response')
-    ~> 'INSERT INTO github_prs (pr_number, title, state, author, created_at, url)
-        SELECT 
-            (pr->>''number'')::int,
-            pr->>''title'',
-            pr->>''state'',
-            pr->''user''->>''login'',
-            (pr->>''created_at'')::timestamptz,
-            pr->>''html_url''
-        FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS pr
-        ON CONFLICT DO NOTHING
-        RETURNING *',
-    'fetch-github-prs'
+    @> (
+        (df.http(
+            '{github_url}',
+            'GET',
+            NULL,
+            '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable"}'::jsonb
+        ) |=> 'response')
+        ~> 'INSERT INTO github_prs (pr_number, title, state, author, created_at, url)
+            SELECT 
+                (pr->>''number'')::int,
+                pr->>''title'',
+                pr->>''state'',
+                pr->''user''->>''login'',
+                (pr->>''created_at'')::timestamptz,
+                pr->>''html_url''
+            FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS pr
+            ON CONFLICT (pr_number) DO UPDATE SET
+                title = EXCLUDED.title,
+                state = EXCLUDED.state,
+                fetched_at = now()
+            RETURNING pr_number'
+        ~> df.wait_for_schedule('*/30 * * * *')  -- Every 30 minutes
+    ),
+    'github-pr-sync'
 );
 
 -- Check the results
 SELECT * FROM github_prs ORDER BY created_at DESC;
+
+-- To stop the sync:
+-- SELECT df.cancel('<instance_id>', 'Stopping PR sync');
 ```
 
 This demonstrates:
+- Configuring API endpoints with durable function variables
 - Calling a real REST API (GitHub)
 - Setting required headers (User-Agent, Accept)
-- Parsing JSON array response
-- Inserting multiple rows from API response
+- Parsing JSON array response with upsert (ON CONFLICT)
+- Creating a scheduled loop that runs every 30 minutes
+
+---
+
+## Durable Function Variables
+
+Durable function variables allow you to configure durable functions with external values like API endpoints, credentials, or configuration settings. Variables are set **before** starting a durable function and remain **immutable** during execution.
+
+### How Variables Work
+
+1. **Set variables** using `df.setvar()` before calling `df.start()`
+2. Variables are **captured** when `df.start()` is called
+3. Variables are **immutable** during durable function execution
+4. Use `{varname}` syntax in SQL to substitute variable values
+
+### Variable Functions
+
+| Function | Description |
+|----------|-------------|
+| `df.setvar(name, value)` | Set a variable (before durable function starts) |
+| `df.getvar(name)` | Get a variable value |
+| `df.unsetvar(name)` | Remove a variable |
+| `df.clearvars()` | Clear all variables |
+
+> **Important**: `df.setvar()`, `df.unsetvar()`, and `df.clearvars()` cannot be called from within a running durable function. They are for configuration only.
+
+### System Variables
+
+These read-only variables are automatically available during durable function execution:
+
+| Variable | Description |
+|----------|-------------|
+| `{sys_instance_id}` | Current durable function instance ID |
+| `{sys_label}` | Durable function label (if provided) |
+
+### Variable Substitution
+
+Use `{varname}` in SQL queries to substitute variable values:
+
+```sql
+-- Set up configuration
+SELECT df.setvar('api_base', 'https://api.example.com');
+SELECT df.setvar('api_key', 'secret123');
+
+-- Start durable function using variables
+SELECT df.start(
+    df.http('{api_base}/users', 'GET', NULL, '{"Authorization": "Bearer {api_key}"}'::jsonb)
+    ~> 'INSERT INTO playground.logs (msg) VALUES (''Fetched users'')',
+    'fetch-users'
+);
+```
+
+### Example: Configurable ETL Pipeline
+
+```sql
+-- Configure the pipeline
+SELECT df.setvar('source_table', 'raw_orders');
+SELECT df.setvar('target_table', 'processed_orders');
+SELECT df.setvar('batch_size', '100');
+
+-- Start the pipeline
+SELECT df.start(
+    'SELECT * FROM {source_table} LIMIT {batch_size}::int' |=> 'batch'
+    ~> 'INSERT INTO {target_table} SELECT * FROM ($batch) AS source',
+    'etl-pipeline'
+);
+```
+
+### Example: Using System Variables for Logging
+
+```sql
+SELECT df.start(
+    'INSERT INTO audit_log (instance_id, label, action, ts) 
+     VALUES (''{sys_instance_id}'', ''{sys_label}'', ''started'', now())'
+    ~> 'SELECT process_data()'
+    ~> 'INSERT INTO audit_log (instance_id, label, action, ts) 
+        VALUES (''{sys_instance_id}'', ''{sys_label}'', ''completed'', now())',
+    'audit-example'
+);
+```
+
+### Example: HTTP with Variables
+
+```sql
+-- Configure API endpoint
+SELECT df.setvar('webhook_url', 'https://hooks.example.com/notify');
+
+-- Durable function that calls the configured webhook
+SELECT df.start(
+    'SELECT id, status FROM orders WHERE id = 1' |=> 'order'
+    ~> df.http('{webhook_url}', 'POST', '{"order_id": "$order"}'),
+    'order-webhook'
+);
+```
+
+### Variable Lifecycle
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  User Session                                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ df.setvar('key', 'value')  ← Configure variables    │    │
+│  │ df.setvar('url', 'https://...')                     │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                           │                                 │
+│                           ▼                                 │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ df.start(workflow, 'label')                         │    │
+│  │   → Variables CAPTURED (snapshot taken)             │    │
+│  │   → Variables become IMMUTABLE for this execution   │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Background Worker (Durable Function Execution)             │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ {key} → 'value'         ← Substitution works        │    │
+│  │ {url} → 'https://...'                               │    │
+│  │ {sys_instance_id} → 'a1b2c3d4'                      │    │
+│  │                                                     │    │
+│  │ df.setvar('x', 'y')     ← ERROR! Cannot modify      │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -932,6 +1076,16 @@ df.wait_for_schedule('*/5 * * * *')      -- every 5 min
 df.http('https://api.example.com', 'GET')                    -- simple GET
 df.http('https://api.example.com', 'POST', '{"key": "val"}') -- POST with body
 df.http(url, 'GET', NULL, '{"Auth": "Bearer x"}'::jsonb)     -- with headers
+
+-- Durable function variables (set BEFORE df.start)
+SELECT df.setvar('api_url', 'https://api.example.com');      -- set variable
+SELECT df.getvar('api_url');                                  -- get variable
+SELECT df.unsetvar('api_url');                                -- remove variable
+SELECT df.clearvars();                                        -- clear all
+
+-- Use variables in workflows: {varname}
+SELECT df.start(df.http('{api_url}/data', 'GET'));           -- variable substitution
+-- System vars: {sys_instance_id}, {sys_label}
 
 -- Visualize
 SELECT df.explain('instance_id');        -- live instance

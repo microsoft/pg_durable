@@ -295,6 +295,48 @@ END $$;
 DROP TABLE _test_http_delay;
 
 -- ============================================================================
+-- Test 8: HTTP with workflow variables
+-- ============================================================================
+
+SELECT df.clearvars();
+SELECT df.setvar('base_url', 'https://httpbingo.org');
+SELECT df.setvar('test_endpoint', '/get');
+
+CREATE TEMP TABLE _test_http_vars (instance_id TEXT);
+
+INSERT INTO _test_http_vars SELECT df.start(
+    df.http('{base_url}{test_endpoint}', 'GET') |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as success',
+    'test-http-vars'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_vars;
+    RAISE NOTICE 'Testing HTTP with vars: %', inst_id;
+    
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    
+    IF lower(status) != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP vars status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_vars';
+END $$;
+
+DROP TABLE _test_http_vars;
+SELECT df.clearvars();
+
+-- ============================================================================
 -- Summary
 -- ============================================================================
 

@@ -13,8 +13,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Column, Row};
 
 use crate::types::{
-    calculate_cron_wait, evaluate_condition, postgres_connection_string, substitute_variables,
-    FunctionGraph, FunctionInput, FunctionNode, DUROXIDE_SCHEMA,
+    calculate_cron_wait, evaluate_condition, postgres_connection_string, substitute_all,
+    substitute_all_raw, FunctionGraph, FunctionInput, FunctionNode, DUROXIDE_SCHEMA,
 };
 use duroxide_pg::PostgresProvider;
 
@@ -95,8 +95,19 @@ async fn run_duroxide_runtime_with_shutdown() {
         DUROXIDE_SCHEMA
     );
 
+    // Create connection pool with session variable marking workflow context
+    // This allows df.setvar() to detect when it's called from within a workflow
     let pg_pool = match PgPoolOptions::new()
         .max_connections(5)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                // Mark this connection as being used by the workflow runtime
+                sqlx::query("SET df.in_workflow = 'true'")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&pg_conn_str)
         .await
     {
@@ -410,28 +421,42 @@ async fn run_duroxide_runtime_with_shutdown() {
     // Register durable functions
     let functions = OrchestrationRegistry::builder()
         .register(
-            "ExecuteWorkflow",
+            "ExecuteFunctionGraph",
             |ctx: OrchestrationContext, input_json: String| async move {
-                let (instance_id, label) = if input_json.starts_with('{') {
-                    match serde_json::from_str::<FunctionInput>(&input_json) {
-                        Ok(input) => (input.instance_id, input.label),
-                        Err(_) => (input_json.clone(), None),
-                    }
+                // Parse input with vars
+                let input: FunctionInput = if input_json.starts_with('{') {
+                    serde_json::from_str(&input_json).unwrap_or(FunctionInput {
+                        instance_id: input_json.clone(),
+                        label: None,
+                        vars: std::collections::HashMap::new(),
+                    })
                 } else {
-                    (input_json.clone(), None)
+                    FunctionInput {
+                        instance_id: input_json.clone(),
+                        label: None,
+                        vars: std::collections::HashMap::new(),
+                    }
                 };
 
-                let label_info = label
+                let label_info = input
+                    .label
                     .as_ref()
                     .map(|l| format!(" ({})", l))
                     .unwrap_or_default();
                 ctx.trace_info(format!(
-                    "Starting ExecuteWorkflow for instance: {}{}",
-                    instance_id, label_info
+                    "Starting ExecuteFunctionGraph for instance: {}{}",
+                    input.instance_id, label_info
                 ));
 
+                if !input.vars.is_empty() {
+                    ctx.trace_info(format!(
+                        "Workflow vars: {:?}",
+                        input.vars.keys().collect::<Vec<_>>()
+                    ));
+                }
+
                 let graph_json = ctx
-                    .schedule_activity("LoadFunctionGraph", instance_id.clone())
+                    .schedule_activity("LoadFunctionGraph", input.instance_id.clone())
                     .into_activity()
                     .await?;
 
@@ -447,14 +472,26 @@ async fn run_duroxide_runtime_with_shutdown() {
                 let mut results: std::collections::HashMap<String, String> =
                     std::collections::HashMap::new();
 
-                let function_result =
-                    execute_function_node(&ctx, &graph, &graph.root_node_id, &mut results).await;
+                // Create execution context with vars
+                let exec_ctx = ExecutionContext {
+                    vars: input.vars.clone(),
+                    label: input.label.clone(),
+                };
+
+                let function_result = execute_function_node_with_vars(
+                    &ctx,
+                    &graph,
+                    &graph.root_node_id,
+                    &mut results,
+                    &exec_ctx,
+                )
+                .await;
 
                 match &function_result {
                     Ok(result) => {
                         ctx.trace_info(format!("Function completed with result: {}", result));
                         let status_input = serde_json::json!({
-                            "instance_id": instance_id,
+                            "instance_id": input.instance_id,
                             "status": "completed"
                         });
                         let _ = ctx
@@ -465,7 +502,7 @@ async fn run_duroxide_runtime_with_shutdown() {
                     Err(err) => {
                         ctx.trace_info(format!("Function failed with error: {}", err));
                         let status_input = serde_json::json!({
-                            "instance_id": instance_id,
+                            "instance_id": input.instance_id,
                             "status": "failed"
                         });
                         let _ = ctx
@@ -539,12 +576,34 @@ async fn run_duroxide_runtime_with_shutdown() {
 // Node Execution
 // ============================================================================
 
-/// Recursively execute function nodes
+/// Execution context containing vars and metadata
+#[derive(Clone)]
+struct ExecutionContext {
+    vars: std::collections::HashMap<String, String>,
+    label: Option<String>,
+}
+
+/// Recursively execute function nodes (legacy - without vars)
 async fn execute_function_node(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
     node_id: &str,
     results: &mut std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let exec_ctx = ExecutionContext {
+        vars: std::collections::HashMap::new(),
+        label: None,
+    };
+    execute_function_node_with_vars(ctx, graph, node_id, results, &exec_ctx).await
+}
+
+/// Recursively execute function nodes with vars support
+async fn execute_function_node_with_vars(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node_id: &str,
+    results: &mut std::collections::HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
 ) -> Result<String, String> {
     let node = graph
         .nodes
@@ -566,7 +625,8 @@ async fn execute_function_node(
         .into_activity()
         .await;
 
-    let execute_result = execute_node_inner(ctx, graph, node_id, node, results).await;
+    let execute_result =
+        execute_node_inner_with_vars(ctx, graph, node_id, node, results, exec_ctx).await;
 
     // Update node with final status and result
     match &execute_result {
@@ -598,13 +658,20 @@ async fn execute_function_node(
 }
 
 /// Inner function that actually executes the node logic
-async fn execute_node_inner(
+async fn execute_node_inner_with_vars(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
     node_id: &str,
     node: &FunctionNode,
     results: &mut std::collections::HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
 ) -> Result<String, String> {
+    // Build system vars
+    let sys_vars = crate::types::SystemVars {
+        instance_id: graph.instance_id.clone(),
+        label: exec_ctx.label.clone(),
+    };
+
     match node.node_type.to_lowercase().as_str() {
         "sql" => {
             let query = node
@@ -612,7 +679,7 @@ async fn execute_node_inner(
                 .as_ref()
                 .ok_or_else(|| format!("SQL node {} has no query", node_id))?;
 
-            let final_query = substitute_variables(query, results);
+            let final_query = substitute_all(query, results, &exec_ctx.vars, &sys_vars);
             ctx.trace_info(format!("Executing SQL: {}", final_query));
 
             let result = ctx
@@ -637,10 +704,14 @@ async fn execute_node_inner(
                 .as_ref()
                 .ok_or_else(|| format!("THEN node {} has no right_node", node_id))?;
 
-            let _left_result =
-                Box::pin(execute_function_node(ctx, graph, left_id, results)).await?;
-            let right_result =
-                Box::pin(execute_function_node(ctx, graph, right_id, results)).await?;
+            let _left_result = Box::pin(execute_function_node_with_vars(
+                ctx, graph, left_id, results, exec_ctx,
+            ))
+            .await?;
+            let right_result = Box::pin(execute_function_node_with_vars(
+                ctx, graph, right_id, results, exec_ctx,
+            ))
+            .await?;
 
             Ok(right_result)
         }
@@ -685,10 +756,21 @@ async fn execute_node_inner(
                 .ok_or_else(|| format!("LOOP node {} has no body", node_id))?;
 
             ctx.trace_info("Executing loop iteration");
-            let body_result = Box::pin(execute_function_node(ctx, graph, body_id, results)).await?;
+            let body_result = Box::pin(execute_function_node_with_vars(
+                ctx, graph, body_id, results, exec_ctx,
+            ))
+            .await?;
 
             ctx.trace_info("Continuing as new for next loop iteration");
-            ctx.continue_as_new(graph.instance_id.clone());
+            // Preserve vars in continue_as_new input
+            let new_input = FunctionInput {
+                instance_id: graph.instance_id.clone(),
+                label: exec_ctx.label.clone(),
+                vars: exec_ctx.vars.clone(),
+            };
+            ctx.continue_as_new(
+                serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()),
+            );
 
             Ok(body_result)
         }
@@ -714,11 +796,12 @@ async fn execute_node_inner(
                 .ok_or_else(|| format!("IF node {} has no else branch", node_id))?;
 
             ctx.trace_info("Evaluating IF condition");
-            let condition_result = Box::pin(execute_function_node(
+            let condition_result = Box::pin(execute_function_node_with_vars(
                 ctx,
                 graph,
                 condition_node_id,
                 results,
+                exec_ctx,
             ))
             .await?;
 
@@ -726,9 +809,15 @@ async fn execute_node_inner(
             ctx.trace_info(format!("Condition evaluated to: {}", is_true));
 
             if is_true {
-                Box::pin(execute_function_node(ctx, graph, then_id, results)).await
+                Box::pin(execute_function_node_with_vars(
+                    ctx, graph, then_id, results, exec_ctx,
+                ))
+                .await
             } else {
-                Box::pin(execute_function_node(ctx, graph, else_id, results)).await
+                Box::pin(execute_function_node_with_vars(
+                    ctx, graph, else_id, results, exec_ctx,
+                ))
+                .await
             }
         }
         "join" => {
@@ -898,16 +987,33 @@ async fn execute_node_inner(
             let mut config: serde_json::Value = serde_json::from_str(config_str)
                 .map_err(|e| format!("Invalid HTTP config: {}", e))?;
 
-            // Substitute variables in body if present
+            // Substitute variables in body if present (supports {var}, {sys_*}, $name)
+            // Use raw substitution since body is already inside JSON, not SQL
             if let Some(body) = config.get("body").and_then(|b| b.as_str()) {
-                let substituted_body = substitute_variables(body, results);
+                let substituted_body = substitute_all_raw(body, results, &exec_ctx.vars, &sys_vars);
                 config["body"] = serde_json::Value::String(substituted_body);
             }
 
             // Substitute variables in URL if present (for dynamic endpoints)
+            // Use raw substitution since URLs shouldn't have SQL quotes
             if let Some(url) = config.get("url").and_then(|u| u.as_str()) {
-                let substituted_url = substitute_variables(url, results);
+                let substituted_url = substitute_all_raw(url, results, &exec_ctx.vars, &sys_vars);
                 config["url"] = serde_json::Value::String(substituted_url);
+            }
+
+            // Substitute variables in headers if present
+            // Use raw substitution since headers shouldn't have SQL quotes
+            if let Some(headers) = config.get("headers").and_then(|h| h.as_object()) {
+                let mut new_headers = serde_json::Map::new();
+                for (key, value) in headers {
+                    if let Some(v) = value.as_str() {
+                        let substituted = substitute_all_raw(v, results, &exec_ctx.vars, &sys_vars);
+                        new_headers.insert(key.clone(), serde_json::Value::String(substituted));
+                    } else {
+                        new_headers.insert(key.clone(), value.clone());
+                    }
+                }
+                config["headers"] = serde_json::Value::Object(new_headers);
             }
 
             let final_config = config.to_string();

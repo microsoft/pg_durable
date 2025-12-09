@@ -72,6 +72,12 @@ CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);
 
 -- Index for finding nodes by instance
 CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
+
+-- Table to store workflow variables (captured at df.start())
+CREATE TABLE IF NOT EXISTS df.vars (
+    name TEXT PRIMARY KEY,
+    value TEXT
+);
 "#,
     name = "create_tables",
     requires = [df]
@@ -459,8 +465,7 @@ mod tests {
         assert_eq!(fut.node_type, "HTTP");
 
         // Parse config to verify body is stored
-        let config: serde_json::Value =
-            serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
         assert_eq!(config["method"], "POST");
         assert_eq!(config["body"], r#"{"key": "value"}"#);
     }
@@ -481,8 +486,7 @@ mod tests {
         let fut = Durofut::from_json(&json);
 
         // Parse config to verify headers are stored
-        let config: serde_json::Value =
-            serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
         assert_eq!(config["headers"]["Authorization"], "Bearer token123");
         assert_eq!(config["timeout_seconds"], 60);
     }
@@ -509,11 +513,9 @@ mod tests {
 
     #[pg_test]
     fn test_http_via_sql() {
-        let result = Spi::get_one::<String>(
-            "SELECT df.http('https://example.com', 'GET')",
-        )
-        .unwrap()
-        .unwrap();
+        let result = Spi::get_one::<String>("SELECT df.http('https://example.com', 'GET')")
+            .unwrap()
+            .unwrap();
         let fut = Durofut::from_json(&result);
         assert_eq!(fut.node_type, "HTTP");
     }
@@ -625,6 +627,99 @@ mod tests {
         assert!(!conn_info.is_empty());
         assert!(conn_info.contains("duroxide")); // Should contain schema name
     }
+
+    // ========================================================================
+    // Unit Tests - Workflow Variables
+    // ========================================================================
+
+    #[pg_test]
+    fn test_setvar_returns_ok() {
+        let result = crate::dsl::setvar("test_var", "test_value");
+        assert_eq!(result, "OK");
+    }
+
+    #[pg_test]
+    fn test_getvar_returns_value() {
+        crate::dsl::setvar("my_var", "hello");
+        let value = crate::dsl::getvar("my_var");
+        assert_eq!(value, Some("hello".to_string()));
+    }
+
+    #[pg_test]
+    fn test_getvar_returns_none_for_missing() {
+        let value = crate::dsl::getvar("nonexistent_var_xyz");
+        assert_eq!(value, None);
+    }
+
+    #[pg_test]
+    fn test_unsetvar_removes_var() {
+        crate::dsl::setvar("to_remove", "value");
+        assert!(crate::dsl::getvar("to_remove").is_some());
+        crate::dsl::unsetvar("to_remove");
+        assert!(crate::dsl::getvar("to_remove").is_none());
+    }
+
+    #[pg_test]
+    fn test_clearvars_removes_all() {
+        crate::dsl::setvar("var1", "a");
+        crate::dsl::setvar("var2", "b");
+        crate::dsl::clearvars();
+        assert!(crate::dsl::getvar("var1").is_none());
+        assert!(crate::dsl::getvar("var2").is_none());
+    }
+
+    #[pg_test]
+    fn test_setvar_via_sql() {
+        let result = Spi::get_one::<String>("SELECT df.setvar('sql_var', 'sql_value')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, "OK");
+
+        let value = Spi::get_one::<String>("SELECT df.getvar('sql_var')").unwrap();
+        assert_eq!(value, Some("sql_value".to_string()));
+    }
+
+    #[pg_test]
+    fn test_setvar_overwrites() {
+        crate::dsl::setvar("overwrite_var", "first");
+        crate::dsl::setvar("overwrite_var", "second");
+        let value = crate::dsl::getvar("overwrite_var");
+        assert_eq!(value, Some("second".to_string()));
+    }
+
+    #[pg_test]
+    fn test_vars_with_special_chars() {
+        crate::dsl::setvar("special_var", "it's a \"test\"");
+        let value = crate::dsl::getvar("special_var");
+        assert_eq!(value, Some("it's a \"test\"".to_string()));
+    }
+
+    #[pg_test]
+    fn test_setvar_works_in_user_session() {
+        // In a normal user session, df.in_workflow is not set
+        // so setvar should work
+        let result = crate::dsl::setvar("user_session_var", "works");
+        assert_eq!(result, "OK");
+
+        // Verify the value was set
+        let value = crate::dsl::getvar("user_session_var");
+        assert_eq!(value, Some("works".to_string()));
+    }
+
+    #[pg_test]
+    fn test_setvar_after_start_works() {
+        // df.start() should not affect subsequent setvar calls
+        let fut = crate::dsl::sql("SELECT 1");
+        let _ = crate::dsl::start(&fut, None);
+
+        // setvar should work fine after start returns
+        let result = crate::dsl::setvar("after_start_var", "works");
+        assert_eq!(result, "OK");
+    }
+
+    // Note: Testing that setvar fails in workflow context requires E2E test
+    // because it depends on the background worker setting df.in_workflow='true'
+    // on its connections. See tests/e2e/sql/20_vars.sql for E2E coverage.
 
     // ========================================================================
     // Unit Tests - Explain Functionality
