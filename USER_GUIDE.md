@@ -135,6 +135,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 |----------|-------------|---------|
 | `df.sleep(seconds)` | Pause for N seconds | `df.sleep(60)` |
 | `df.wait_for_schedule(cron)` | Wait until cron matches | `df.wait_for_schedule('0 * * * *')` |
+| `df.http(url, method, body, headers, timeout)` | Make HTTP request | `df.http('https://api.example.com', 'POST', '{"key": "value"}')` |
 | `df.join(a, b)` | Execute in parallel, wait for all | `df.join('SELECT 1', 'SELECT 2')` |
 | `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
 | `df.race(a, b)` | Execute in parallel, first wins | `df.race(fast_query, slow_query)` |
@@ -336,6 +337,223 @@ SELECT df.start(
     'process-next-task'
 );
 ```
+
+---
+
+## HTTP Requests
+
+Use `df.http()` to make HTTP requests to external APIs, webhooks, or services. HTTP requests are executed as durable activities - they survive crashes and can be retried.
+
+### df.http() Function
+
+```sql
+df.http(
+    url TEXT,                     -- Required: endpoint URL
+    method TEXT DEFAULT 'POST',   -- GET, POST, PUT, DELETE, PATCH
+    body TEXT DEFAULT NULL,       -- Request body (JSON)
+    headers JSONB DEFAULT '{}',   -- Custom headers
+    timeout_seconds INT DEFAULT 30
+) RETURNS TEXT                    -- JSON response object
+```
+
+### Response Format
+
+HTTP calls return a JSON object with full response details:
+
+```json
+{
+  "status": 200,
+  "body": "{\"result\": \"success\"}",
+  "headers": {"content-type": "application/json"},
+  "ok": true,
+  "duration_ms": 245
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `status` | HTTP status code (200, 404, 500, etc.) |
+| `body` | Response body as string |
+| `headers` | Response headers object |
+| `ok` | `true` for 2xx status codes |
+| `duration_ms` | Request duration in milliseconds |
+
+### Error Handling
+
+- **2xx responses**: Success - `ok` is `true`
+- **4xx responses**: Returned to user (not a failure) - handle in workflow
+- **5xx responses**: Activity fails and may be retried
+- **Timeouts/Network errors**: Activity fails and may be retried
+
+### HTTP Examples
+
+#### 1. Simple GET Request
+
+```sql
+SELECT df.start(
+    df.http('https://api.example.com/users/123', 'GET') |=> 'user'
+    ~> 'INSERT INTO users_cache (data) VALUES (($user::jsonb->>''body'')::jsonb)',
+    'fetch-user'
+);
+```
+
+#### 2. POST with JSON Body
+
+```sql
+SELECT df.start(
+    df.http(
+        'https://api.example.com/orders',
+        'POST',
+        '{"product_id": 42, "quantity": 2}'
+    ) |=> 'response'
+    ~> df.if(
+        'SELECT ($response::jsonb->>''ok'')::boolean',
+        'INSERT INTO playground.logs (msg) VALUES (''Order created'')',
+        'INSERT INTO playground.logs (msg, level) VALUES (''Order failed'', ''error'')'
+    ),
+    'create-order'
+);
+```
+
+#### 3. HTTP with Custom Headers
+
+```sql
+SELECT df.start(
+    df.http(
+        'https://api.example.com/secure/data',
+        'GET',
+        NULL,
+        '{"Authorization": "Bearer token123", "X-Custom-Header": "value"}'::jsonb
+    ) |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''body'')::jsonb',
+    'authenticated-request'
+);
+```
+
+#### 4. Parallel API Calls
+
+```sql
+SELECT df.start(
+    df.join(
+        df.http('https://api.example.com/users', 'GET'),
+        df.http('https://api.example.com/products', 'GET')
+    ) |=> 'results'
+    ~> 'INSERT INTO playground.logs (msg) VALUES (''Fetched users and products'')',
+    'parallel-fetch'
+);
+```
+
+#### 5. HTTP with Variable Substitution
+
+```sql
+SELECT df.start(
+    'SELECT id, email FROM playground.users WHERE id = 1' |=> 'user'
+    ~> df.http(
+        'https://api.example.com/notifications',
+        'POST',
+        '{"user_id": "$user.id", "message": "Welcome!"}'
+    ) |=> 'notification'
+    ~> 'UPDATE playground.users SET notified = true WHERE id = ($user::jsonb->>''id'')::int',
+    'send-notification'
+);
+```
+
+#### 6. Handle 4xx Errors in Workflow
+
+```sql
+SELECT df.start(
+    df.http('https://api.example.com/users/999', 'GET') |=> 'response'
+    ~> df.if(
+        'SELECT ($response::jsonb->>''status'')::int = 404',
+        'INSERT INTO playground.logs (msg) VALUES (''User not found - creating new'')'
+            ~> df.http('https://api.example.com/users', 'POST', '{"name": "New User"}'),
+        'SELECT ($response::jsonb->>''body'')::jsonb'
+    ),
+    'fetch-or-create-user'
+);
+```
+
+#### 7. Webhook Integration
+
+```sql
+SELECT df.start(
+    'SELECT order_id, status, total FROM playground.orders WHERE id = 1' |=> 'order'
+    ~> df.http(
+        'https://partner.example.com/webhook/order-update',
+        'POST',
+        '{"order_id": "$order.order_id", "status": "$order.status", "total": "$order.total"}',
+        '{"X-Webhook-Secret": "shared-secret-123"}'::jsonb
+    ) |=> 'webhook_response'
+    ~> 'INSERT INTO playground.logs (msg) VALUES (''Webhook sent: '' || ($webhook_response::jsonb->>''status''))',
+    'send-order-webhook'
+);
+```
+
+#### 8. Scheduled API Polling
+
+```sql
+SELECT df.start(
+    @> (
+        df.wait_for_schedule('*/5 * * * *')  -- Every 5 minutes
+        ~> df.http('https://api.example.com/status', 'GET') |=> 'status'
+        ~> df.if(
+            'SELECT ($status::jsonb->''body''::jsonb->>''healthy'')::boolean = false',
+            'INSERT INTO playground.logs (msg, level) VALUES (''Service unhealthy!'', ''error'')',
+            'SELECT ''healthy'''
+        )
+    ),
+    'api-health-monitor'
+);
+```
+
+#### 9. Real-World Example: Fetch GitHub Pull Requests
+
+This example fetches the latest pull requests from a GitHub repository and stores them in a table.
+
+```sql
+-- Create table to store PR data
+CREATE TABLE IF NOT EXISTS github_prs (
+    id SERIAL PRIMARY KEY,
+    pr_number INT,
+    title TEXT,
+    state TEXT,
+    author TEXT,
+    created_at TIMESTAMPTZ,
+    url TEXT,
+    fetched_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Fetch PRs from GitHub API and store them
+SELECT df.start(
+    (df.http(
+        'https://api.github.com/repos/affandar/duroxide/pulls?state=all&per_page=10',
+        'GET',
+        NULL,
+        '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable"}'::jsonb
+    ) |=> 'response')
+    ~> 'INSERT INTO github_prs (pr_number, title, state, author, created_at, url)
+        SELECT 
+            (pr->>''number'')::int,
+            pr->>''title'',
+            pr->>''state'',
+            pr->''user''->>''login'',
+            (pr->>''created_at'')::timestamptz,
+            pr->>''html_url''
+        FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS pr
+        ON CONFLICT DO NOTHING
+        RETURNING *',
+    'fetch-github-prs'
+);
+
+-- Check the results
+SELECT * FROM github_prs ORDER BY created_at DESC;
+```
+
+This demonstrates:
+- Calling a real REST API (GitHub)
+- Setting required headers (User-Agent, Accept)
+- Parsing JSON array response
+- Inserting multiple rows from API response
 
 ---
 
@@ -709,6 +927,11 @@ SELECT df.start(df.loop(body ~> df.sleep(60)));   -- function
 -- Timers
 df.sleep(60)                             -- 60 seconds
 df.wait_for_schedule('*/5 * * * *')      -- every 5 min
+
+-- HTTP requests
+df.http('https://api.example.com', 'GET')                    -- simple GET
+df.http('https://api.example.com', 'POST', '{"key": "val"}') -- POST with body
+df.http(url, 'GET', NULL, '{"Auth": "Bearer x"}'::jsonb)     -- with headers
 
 -- Visualize
 SELECT df.explain('instance_id');        -- live instance

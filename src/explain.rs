@@ -355,6 +355,7 @@ fn build_tree_recursive(
                     && seq_node.node_type != "SQL"
                     && seq_node.node_type != "SLEEP"
                     && seq_node.node_type != "WAIT_SCHEDULE"
+                    && seq_node.node_type != "HTTP"
                 {
                     let child_prefix = format!("{}    ", prefix);
                     render_children(seq_node, nodes, &child_prefix, output, show_status);
@@ -543,6 +544,26 @@ fn format_node_display(node: &ExplainNode) -> String {
         "WAIT_SCHEDULE" => {
             let cron = node.query.as_deref().unwrap_or("?");
             format!("WAIT '{}'", cron)
+        }
+        "HTTP" => {
+            // Parse config to get method and URL
+            let (method, url) = node
+                .query
+                .as_ref()
+                .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
+                .map(|cfg| {
+                    let method = cfg["method"].as_str().unwrap_or("POST");
+                    let url = cfg["url"].as_str().unwrap_or("?");
+                    // Truncate long URLs
+                    let display_url = if url.len() > 40 {
+                        format!("{}...", &url[..37])
+                    } else {
+                        url.to_string()
+                    };
+                    (method.to_string(), display_url)
+                })
+                .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+            format!("HTTP {} {}{}", method, url, name_suffix)
         }
         "LOOP" => format!("LOOP{}", name_suffix),
         "IF" => format!("IF{}", name_suffix),

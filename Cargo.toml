@@ -41,6 +41,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json"] }
 cron = "0.13"
 chrono = "0.4"
 
+# For HTTP requests (df.http)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 

@@ -74,8 +74,9 @@ pub fn then_fn(a: &str, b: &str) -> String {
 /// Names a result for later reference.
 /// The SQL operator |=> is syntactic sugar for this function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
+/// Note: Parameter order matches the |=> operator: fut |=> name -> df.as(fut, name)
 #[pg_extern(name = "as", schema = "df")]
-pub fn as_named(name: &str, fut: &str) -> String {
+pub fn as_named(fut: &str, name: &str) -> String {
     let mut durofut = Durofut::ensure(fut);
     durofut.result_name = Some(name.to_string());
 
@@ -225,6 +226,59 @@ pub fn race(a: &str, b: &str) -> String {
         left_node: Some(a_fut.node_id),
         right_node: Some(b_fut.node_id),
         query: None,
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates an HTTP request node.
+/// Makes an HTTP request to the specified URL and returns the response.
+///
+/// # Arguments
+/// * `url` - The URL to request
+/// * `method` - HTTP method (GET, POST, PUT, DELETE, PATCH). Default: POST
+/// * `body` - Request body (typically JSON). Supports $variable substitution
+/// * `headers` - JSONB object of headers. Example: '{"Authorization": "Bearer token"}'
+/// * `timeout_seconds` - Request timeout in seconds. Default: 30
+///
+/// # Returns
+/// JSON object with: status, body, headers, ok (boolean), duration_ms
+#[pg_extern(schema = "df")]
+pub fn http(
+    url: &str,
+    method: default!(&str, "'POST'"),
+    body: default!(Option<&str>, "NULL"),
+    headers: default!(Option<pgrx::JsonB>, "NULL"),
+    timeout_seconds: default!(i32, "30"),
+) -> String {
+    // Validate method
+    let method_upper = method.to_uppercase();
+    if !["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&method_upper.as_str()) {
+        pgrx::error!(
+            "Invalid HTTP method: {}. Must be GET, POST, PUT, DELETE, or PATCH",
+            method
+        );
+    }
+
+    if timeout_seconds <= 0 {
+        pgrx::error!("Timeout must be positive");
+    }
+
+    let config = serde_json::json!({
+        "url": url,
+        "method": method_upper,
+        "body": body,
+        "headers": headers.as_ref().map(|h| &h.0),
+        "timeout_seconds": timeout_seconds
+    });
+
+    let durofut = Durofut {
+        node_id: short_id(),
+        node_type: "HTTP".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(config.to_string()),
         result_name: None,
     };
     durofut.insert_node();

@@ -17,7 +17,7 @@ INSERT INTO _test_state SELECT df.start(
 -- Variant B: Using df.as() function
 INSERT INTO _test_state SELECT df.start(
     df.seq(
-        df.as('y', 'SELECT 200 as num'),
+        df.as('SELECT 200 as num', 'y'),
         'INSERT INTO test_vars_log (val, variant) VALUES ($y::text, ''fn'')'
     ),
     'test-variables-fn'

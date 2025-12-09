@@ -1,5 +1,6 @@
 # TODO 
 
+- fault injection using mocks for all node types
 - support for signals
 - reformat e2e tests to pull up the actual durable functions at the top, well delimited and separated from all the helpers
 - add architecutre and detailed design docs

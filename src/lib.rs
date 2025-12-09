@@ -92,7 +92,7 @@ CREATE OPERATOR ~> (
 
 -- Operator |=> for naming: fut |=> 'name' means "name this result as $name"
 CREATE OR REPLACE FUNCTION df.as_op(fut text, name text) RETURNS text AS $$
-    SELECT df.as(name, fut);
+    SELECT df.as(fut, name);
 $$ LANGUAGE SQL IMMUTABLE;
 
 CREATE OPERATOR |=> (
@@ -386,7 +386,7 @@ mod tests {
     #[pg_test]
     fn test_as_named_sets_result_name() {
         let sql_json = crate::dsl::sql("SELECT 1");
-        let named_json = crate::dsl::as_named("my_result", &sql_json);
+        let named_json = crate::dsl::as_named(&sql_json, "my_result");
         let named_fut = Durofut::from_json(&named_json);
         assert_eq!(named_fut.result_name, Some("my_result".to_string()));
     }
@@ -432,6 +432,121 @@ mod tests {
         let json = crate::dsl::join(&a, &b);
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "JOIN");
+    }
+
+    // ========================================================================
+    // Unit Tests - HTTP Node Creation
+    // ========================================================================
+
+    #[pg_test]
+    fn test_http_creates_valid_node() {
+        let json = crate::dsl::http("https://example.com/api", "GET", None, None, 30);
+        let fut = Durofut::from_json(&json);
+        assert_eq!(fut.node_type, "HTTP");
+        assert!(!fut.node_id.is_empty());
+    }
+
+    #[pg_test]
+    fn test_http_post_with_body() {
+        let json = crate::dsl::http(
+            "https://api.example.com/data",
+            "POST",
+            Some(r#"{"key": "value"}"#),
+            None,
+            30,
+        );
+        let fut = Durofut::from_json(&json);
+        assert_eq!(fut.node_type, "HTTP");
+
+        // Parse config to verify body is stored
+        let config: serde_json::Value =
+            serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["method"], "POST");
+        assert_eq!(config["body"], r#"{"key": "value"}"#);
+    }
+
+    #[pg_test]
+    fn test_http_with_headers() {
+        let headers = pgrx::JsonB(serde_json::json!({
+            "Authorization": "Bearer token123",
+            "Content-Type": "application/json"
+        }));
+        let json = crate::dsl::http(
+            "https://api.example.com/secure",
+            "POST",
+            Some(r#"{"data": "test"}"#),
+            Some(headers),
+            60,
+        );
+        let fut = Durofut::from_json(&json);
+
+        // Parse config to verify headers are stored
+        let config: serde_json::Value =
+            serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["headers"]["Authorization"], "Bearer token123");
+        assert_eq!(config["timeout_seconds"], 60);
+    }
+
+    #[pg_test]
+    fn test_http_config_parsing() {
+        use crate::types::HttpConfig;
+
+        let json = crate::dsl::http(
+            "https://httpbin.org/post",
+            "POST",
+            Some(r#"{"test": true}"#),
+            None,
+            45,
+        );
+        let fut = Durofut::from_json(&json);
+        let config: HttpConfig = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+
+        assert_eq!(config.url, "https://httpbin.org/post");
+        assert_eq!(config.method, "POST");
+        assert_eq!(config.body, Some(r#"{"test": true}"#.to_string()));
+        assert_eq!(config.timeout_seconds, 45);
+    }
+
+    #[pg_test]
+    fn test_http_via_sql() {
+        let result = Spi::get_one::<String>(
+            "SELECT df.http('https://example.com', 'GET')",
+        )
+        .unwrap()
+        .unwrap();
+        let fut = Durofut::from_json(&result);
+        assert_eq!(fut.node_type, "HTTP");
+    }
+
+    #[pg_test]
+    fn test_http_in_sequence() {
+        let http_node = crate::dsl::http("https://api.example.com/data", "GET", None, None, 30);
+        let sql_node = crate::dsl::sql("SELECT 1");
+        let seq = crate::dsl::then_fn(&http_node, &sql_node);
+        let fut = Durofut::from_json(&seq);
+        assert_eq!(fut.node_type, "THEN");
+        assert!(fut.left_node.is_some());
+        assert!(fut.right_node.is_some());
+    }
+
+    #[pg_test]
+    fn test_http_with_name() {
+        let http_node = crate::dsl::http("https://api.example.com", "GET", None, None, 30);
+        let named = crate::dsl::as_named(&http_node, "api_response");
+        let fut = Durofut::from_json(&named);
+        assert_eq!(fut.result_name, Some("api_response".to_string()));
+    }
+
+    #[pg_test]
+    fn test_http_methods() {
+        // Test all supported methods
+        for method in &["GET", "POST", "PUT", "DELETE", "PATCH"] {
+            let json = crate::dsl::http("https://example.com", method, None, None, 30);
+            let fut = Durofut::from_json(&json);
+            let config: serde_json::Value =
+                serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+            assert_eq!(config["method"], *method);
+        }
     }
 
     // ========================================================================
@@ -657,7 +772,7 @@ mod tests {
     #[pg_test]
     fn test_autowrap_as_named_plain_sql() {
         // Plain SQL with naming
-        let result = crate::dsl::as_named("my_result", "SELECT 42 as answer");
+        let result = crate::dsl::as_named("SELECT 42 as answer", "my_result");
         let fut = Durofut::from_json(&result);
         assert_eq!(fut.node_type, "SQL");
         assert_eq!(fut.result_name, Some("my_result".to_string()));
@@ -840,7 +955,7 @@ mod tests {
 
         // Create durable function: get value, use it in next query
         let get_val = crate::dsl::sql("SELECT source_id FROM test_e2e_vars LIMIT 1");
-        let named = crate::dsl::as_named("src", &get_val);
+        let named = crate::dsl::as_named(&get_val, "src");
         let use_val = crate::dsl::sql(
             "INSERT INTO test_e2e_vars (copied_id) VALUES ($src) RETURNING copied_id",
         );

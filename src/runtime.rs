@@ -272,11 +272,19 @@ async fn run_duroxide_runtime_with_shutdown() {
                 let result = input.get("result").and_then(|r| r.as_str());
 
                 let update_query = if let Some(res) = result {
-                    // Escape single quotes in result for SQL
-                    let escaped_result = res.replace('\'', "''");
+                    // The result column is JSONB, so we need valid JSON.
+                    // If the result is already valid JSON, use it directly.
+                    // If not (e.g., error strings), wrap it as a JSON string.
+                    let json_result = if serde_json::from_str::<serde_json::Value>(res).is_ok() {
+                        res.to_string()
+                    } else {
+                        // Wrap as JSON string - serde_json::to_string handles escaping
+                        serde_json::to_string(res).unwrap_or_else(|_| "null".to_string())
+                    };
+                    // Use dollar-quoting to avoid SQL escaping issues with JSON
                     format!(
-                        "UPDATE df.nodes SET status = '{}', result = '{}', updated_at = now() WHERE id = '{}'",
-                        status, escaped_result, node_id
+                        "UPDATE df.nodes SET status = '{}', result = $json${}$json$::jsonb, updated_at = now() WHERE id = '{}'",
+                        status, json_result, node_id
                     )
                 } else {
                     format!(
@@ -293,6 +301,108 @@ async fn run_duroxide_runtime_with_shutdown() {
                         Err(err_msg)
                     }
                 }
+            }
+        })
+        .register("ExecuteHTTP", move |ctx: ActivityContext, config_json: String| {
+            use crate::types::HttpConfig;
+
+            async move {
+                let config: HttpConfig = serde_json::from_str(&config_json)
+                    .map_err(|e| format!("Invalid HTTP config: {}", e))?;
+
+                let start = std::time::Instant::now();
+                ctx.trace_info(format!("HTTP {} {}", config.method, config.url));
+
+                // Build client with timeout
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(config.timeout_seconds))
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+                // Build request based on method
+                let mut request = match config.method.as_str() {
+                    "GET" => client.get(&config.url),
+                    "POST" => client.post(&config.url),
+                    "PUT" => client.put(&config.url),
+                    "DELETE" => client.delete(&config.url),
+                    "PATCH" => client.patch(&config.url),
+                    _ => return Err(format!("Unsupported HTTP method: {}", config.method)),
+                };
+
+                // Add headers
+                if let Some(headers) = &config.headers {
+                    if let Some(obj) = headers.as_object() {
+                        for (key, value) in obj {
+                            if let Some(v) = value.as_str() {
+                                request = request.header(key, v);
+                            }
+                        }
+                    }
+                }
+
+                // Add body (for POST/PUT/PATCH)
+                if let Some(body) = &config.body {
+                    request = request.body(body.clone());
+                }
+
+                // Execute request
+                let response = request.send().await.map_err(|e| {
+                    if e.is_timeout() {
+                        format!("HTTP timeout after {}s: {}", config.timeout_seconds, config.url)
+                    } else if e.is_connect() {
+                        format!("HTTP connection failed to {}: {}", config.url, e)
+                    } else {
+                        format!("HTTP request failed: {}", e)
+                    }
+                })?;
+
+                let status = response.status();
+                let status_code = status.as_u16();
+
+                // Collect response headers
+                let response_headers: serde_json::Map<String, serde_json::Value> = response
+                    .headers()
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        v.to_str()
+                            .ok()
+                            .map(|s| (k.to_string(), serde_json::Value::String(s.to_string())))
+                    })
+                    .collect();
+
+                let response_body = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+                let duration_ms = start.elapsed().as_millis() as u64;
+                let is_ok = status.is_success();
+
+                // Build response object
+                let result = serde_json::json!({
+                    "status": status_code,
+                    "body": response_body,
+                    "headers": response_headers,
+                    "ok": is_ok,
+                    "duration_ms": duration_ms
+                });
+
+                ctx.trace_info(format!(
+                    "HTTP {} completed: status={}, ok={}, duration={}ms",
+                    config.method, status_code, is_ok, duration_ms
+                ));
+
+                // Fail on 5xx server errors (transient, should retry)
+                if status.is_server_error() {
+                    return Err(format!(
+                        "HTTP {} {} returned {}: {}",
+                        config.method, config.url, status_code, response_body
+                    ));
+                }
+
+                // Return response for all other cases (including 4xx)
+                // 4xx are client errors - user should handle in workflow logic
+                Ok(result.to_string())
             }
         })
         .build();
@@ -704,7 +814,16 @@ async fn execute_node_inner(
                 "JOIN completed with {} results",
                 join_results.len()
             ));
-            Ok(serde_json::to_string(&join_results).unwrap_or_else(|_| "[]".to_string()))
+
+            let result = serde_json::to_string(&join_results).unwrap_or_else(|_| "[]".to_string());
+
+            // Store result if named
+            if let Some(name) = &node.result_name {
+                ctx.trace_info(format!("Storing JOIN result as ${}", name));
+                results.insert(name.clone(), result.clone());
+            }
+
+            Ok(result)
         }
         "race" => {
             let left_id = node
@@ -745,7 +864,7 @@ async fn execute_node_inner(
             // select2 returns (usize, DurableOutput) where usize is the winning branch index
             let (_winner_idx, output) = ctx.select2(left_fut, right_fut).await;
 
-            match output {
+            let result = match output {
                 duroxide::DurableOutput::SubOrchestration(Ok(r)) => {
                     ctx.trace_info("RACE completed - first result received");
                     Ok(r)
@@ -759,7 +878,55 @@ async fn execute_node_inner(
                 }
                 duroxide::DurableOutput::Activity(Err(e)) => Err(format!("RACE failed: {}", e)),
                 _ => Err("RACE returned unexpected type".to_string()),
+            }?;
+
+            // Store result if named
+            if let Some(name) = &node.result_name {
+                ctx.trace_info(format!("Storing RACE result as ${}", name));
+                results.insert(name.clone(), result.clone());
             }
+
+            Ok(result)
+        }
+        "http" => {
+            let config_str = node
+                .query
+                .as_ref()
+                .ok_or_else(|| format!("HTTP node {} has no config", node_id))?;
+
+            // Parse config to substitute variables in body and URL
+            let mut config: serde_json::Value = serde_json::from_str(config_str)
+                .map_err(|e| format!("Invalid HTTP config: {}", e))?;
+
+            // Substitute variables in body if present
+            if let Some(body) = config.get("body").and_then(|b| b.as_str()) {
+                let substituted_body = substitute_variables(body, results);
+                config["body"] = serde_json::Value::String(substituted_body);
+            }
+
+            // Substitute variables in URL if present (for dynamic endpoints)
+            if let Some(url) = config.get("url").and_then(|u| u.as_str()) {
+                let substituted_url = substitute_variables(url, results);
+                config["url"] = serde_json::Value::String(substituted_url);
+            }
+
+            let final_config = config.to_string();
+            let url = config["url"].as_str().unwrap_or("?");
+            let method = config["method"].as_str().unwrap_or("POST");
+            ctx.trace_info(format!("Executing HTTP {} {}", method, url));
+
+            let result = ctx
+                .schedule_activity("ExecuteHTTP", final_config)
+                .into_activity()
+                .await?;
+
+            // Store result if named
+            if let Some(name) = &node.result_name {
+                ctx.trace_info(format!("Storing HTTP result as ${}", name));
+                results.insert(name.clone(), result.clone());
+            }
+
+            Ok(result)
         }
         other => Err(format!("Unknown node type: {}", other)),
     }

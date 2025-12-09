@@ -121,6 +121,7 @@ pub fn substitute_variables(
         let pattern = format!("${}", name);
         if result.contains(&pattern) {
             let replacement = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+                // Check if this is a SQL result format with rows
                 if let Some(rows) = json.get("rows").and_then(|r| r.as_array()) {
                     if let Some(first_row) = rows.first() {
                         if let Some(obj) = first_row.as_object() {
@@ -141,7 +142,10 @@ pub fn substitute_variables(
                         value.clone()
                     }
                 } else {
-                    value.clone()
+                    // This is a JSON object/array (like HTTP response) - quote it for SQL
+                    // so it can be cast to jsonb: '{"key": "value"}'::jsonb
+                    let escaped = value.replace('\'', "''");
+                    format!("'{}'", escaped)
                 }
             } else {
                 value.clone()
@@ -182,6 +186,23 @@ pub struct FunctionInput {
     pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// Configuration for HTTP requests
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    pub url: String,
+    pub method: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub headers: Option<serde_json::Value>,
+    #[serde(default = "default_http_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_http_timeout() -> u64 {
+    30
 }
 
 // ============================================================================
