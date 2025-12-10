@@ -182,17 +182,41 @@ async fn run_duroxide_runtime_with_shutdown() {
             async move {
                 ctx.trace_info(format!("Loading function graph for instance: {}", instance_id));
 
+                // Retry logic: wait for instance data to appear (handles race between
+                // df.start() and worker picking up before user transaction commits)
+                const MAX_WAIT_SECS: u64 = 5;
+                const POLL_INTERVAL_MS: u64 = 100;
+                
                 let instance_query = format!(
                     "SELECT root_node FROM df.instances WHERE id = '{}'",
                     instance_id
                 );
 
-                let root_node_id: String = match sqlx::query_scalar(&instance_query)
-                    .fetch_one(pool.as_ref())
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => return Err(format!("Failed to load instance: {}", e)),
+                let start_time = std::time::Instant::now();
+                let root_node_id: String = loop {
+                    match sqlx::query_scalar(&instance_query)
+                        .fetch_one(pool.as_ref())
+                        .await
+                    {
+                        Ok(id) => break id,
+                        Err(e) => {
+                            let elapsed = start_time.elapsed();
+                            if elapsed.as_secs() >= MAX_WAIT_SECS {
+                                return Err(format!(
+                                    "Instance {} not found after {}s (transaction may have been rolled back): {}",
+                                    instance_id, MAX_WAIT_SECS, e
+                                ));
+                            }
+                            // Log first retry and then every second
+                            if elapsed.as_millis() < POLL_INTERVAL_MS as u128 * 2 {
+                                ctx.trace_info(format!(
+                                    "Instance {} not yet visible, waiting for transaction commit...",
+                                    instance_id
+                                ));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+                        }
+                    }
                 };
 
                 let nodes_query = format!(
@@ -1049,8 +1073,133 @@ async fn execute_node_inner_with_vars(
 
             Ok(result)
         }
+        "signal" => {
+            let config_str = node
+                .query
+                .as_ref()
+                .ok_or_else(|| format!("SIGNAL node {} has no config", node_id))?;
+
+            let config: serde_json::Value = serde_json::from_str(config_str)
+                .map_err(|e| format!("Invalid SIGNAL config: {}", e))?;
+
+            let signal_name = config["signal_name"]
+                .as_str()
+                .ok_or("Missing signal_name in SIGNAL config")?;
+            let timeout_seconds = config["timeout_seconds"].as_i64();
+
+            ctx.trace_info(format!(
+                "Waiting for signal: {}{}",
+                signal_name,
+                timeout_seconds
+                    .map(|t| format!(" (timeout: {}s)", t))
+                    .unwrap_or_default()
+            ));
+
+            let result = if let Some(timeout_secs) = timeout_seconds {
+                // Race between signal and timeout using select2
+                let signal_fut = ctx.schedule_wait(signal_name);
+                let timeout_fut =
+                    ctx.schedule_timer(std::time::Duration::from_secs(timeout_secs as u64));
+
+                let (winner_index, output) = ctx.select2(signal_fut, timeout_fut).await;
+
+                if winner_index == 0 {
+                    // Signal received - extract data from DurableOutput::External
+                    let data_str = match output {
+                        duroxide::DurableOutput::External(s) => s,
+                        _ => String::new(),
+                    };
+                    let data: serde_json::Value =
+                        serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+                    serde_json::json!({
+                        "signal_name": signal_name,
+                        "timed_out": false,
+                        "data": data
+                    })
+                } else {
+                    // Timeout
+                    serde_json::json!({
+                        "signal_name": signal_name,
+                        "timed_out": true,
+                        "data": null
+                    })
+                }
+            } else {
+                // Wait forever - into_event() awaits and returns String directly
+                let data_str = ctx.schedule_wait(signal_name).into_event().await;
+                let data: serde_json::Value =
+                    serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "signal_name": signal_name,
+                    "timed_out": false,
+                    "data": data
+                })
+            };
+
+            let result_str = result.to_string();
+
+            // Store result if named
+            if let Some(name) = &node.result_name {
+                ctx.trace_info(format!("Storing signal result as ${}", name));
+                results.insert(name.clone(), result_str.clone());
+            }
+
+            Ok(result_str)
+        }
         other => Err(format!("Unknown node type: {}", other)),
     }
+}
+
+// ============================================================================
+// Cached Client Infrastructure
+// ============================================================================
+
+use std::sync::OnceLock;
+use tokio::runtime::Runtime;
+
+/// Cached tokio runtime for client operations.
+/// Created lazily on first use and reused for all subsequent calls.
+static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+/// Cached Duroxide client with connection pool.
+/// Created lazily on first use and reused for all subsequent calls.
+static DUROXIDE_CLIENT: OnceLock<Client> = OnceLock::new();
+
+/// Get or create the cached tokio runtime.
+fn get_client_runtime() -> &'static Runtime {
+    CLIENT_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime")
+    })
+}
+
+/// Get or create the cached Duroxide client.
+/// This caches the connection pool for efficient reuse.
+fn get_duroxide_client() -> Result<&'static Client, String> {
+    // If already initialized, return it
+    if let Some(client) = DUROXIDE_CLIENT.get() {
+        return Ok(client);
+    }
+
+    // Need to initialize - use the runtime to create the store
+    let rt = get_client_runtime();
+    let pg_conn_str = postgres_connection_string();
+
+    rt.block_on(async {
+        let store = Arc::new(
+            PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
+                .await
+                .map_err(|e| format!("Failed to connect to duroxide store: {}", e))?,
+        );
+
+        // Try to set it; if another thread beat us, that's fine
+        let _ = DUROXIDE_CLIENT.set(Client::new(store));
+        DUROXIDE_CLIENT
+            .get()
+            .ok_or_else(|| "Failed to initialize client".to_string())
+    })
 }
 
 // ============================================================================
@@ -1063,53 +1212,49 @@ pub fn start_durable_function(
     instance_id: &str,
     input: &str,
 ) -> Result<(), String> {
-    let pg_conn_str = postgres_connection_string();
-    log!("pg_durable: start_durable_function - connecting to PostgreSQL");
+    log!("pg_durable: start_durable_function for instance {}", instance_id);
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+    let rt = get_client_runtime();
+    let client = get_duroxide_client()?;
 
     rt.block_on(async {
-        let store = Arc::new(
-            PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
-                .await
-                .map_err(|e| format!("Failed to connect to duroxide store: {}", e))?,
-        );
-
-        let client = Client::new(store);
         client
             .start_orchestration(instance_id, function_name, input)
             .await
             .map_err(|e| format!("Failed to start durable function: {:?}", e))?;
-
         Ok(())
     })
 }
 
 /// Cancel a durable function.
 pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), String> {
-    let pg_conn_str = postgres_connection_string();
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+    let rt = get_client_runtime();
+    let client = get_duroxide_client()?;
 
     rt.block_on(async {
-        let store = Arc::new(
-            PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
-                .await
-                .map_err(|e| format!("Failed to connect to duroxide store: {}", e))?,
-        );
-
-        let client = Client::new(store);
         client
             .cancel_instance(instance_id, reason)
             .await
             .map_err(|e| format!("Failed to cancel durable function: {:?}", e))?;
+        Ok(())
+    })
+}
 
+/// Raise an external event (signal) to a running orchestration.
+/// Called from df.signal() SQL function in user's session.
+pub fn raise_external_event(
+    instance_id: &str,
+    event_name: &str,
+    data: &str,
+) -> Result<(), String> {
+    let rt = get_client_runtime();
+    let client = get_duroxide_client()?;
+
+    rt.block_on(async {
+        client
+            .raise_event(instance_id, event_name, data)
+            .await
+            .map_err(|e| format!("Failed to raise event: {:?}", e))?;
         Ok(())
     })
 }

@@ -1,8 +1,8 @@
 # TODO 
 
 - fault injection using mocks for all node types
-- support for signals
 - reformat e2e tests to pull up the actual durable functions at the top, well delimited and separated from all the helpers
+- GC/maintenance: prune old completed/failed orchestration history from duroxide.* tables; detect stuck df.instances rows that never started
 - add architecutre and detailed design docs
 - figure out process to build/release the extension for linux, windows and macos, with instructions for installation
 - figure out process for releasing prepackaged docker containers
@@ -26,3 +26,6 @@
 - Enble E2E tests
 - join needs to just ctx.join2()
 - Unit + functional + integration tests
+- support for signals (df.wait_for_signal, df.signal)
+- LoadFunctionGraph retry logic for transaction safety
+- Cached Duroxide client per backend process

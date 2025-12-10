@@ -365,6 +365,88 @@ pub fn http(
 }
 
 // ============================================================================
+// Signals
+// ============================================================================
+
+/// Wait for an external signal to be sent to this durable function instance.
+///
+/// Signals allow external code to send events to running durable functions, enabling:
+/// - Human-in-the-loop approval workflows
+/// - Webhook callbacks from external systems
+/// - Event-driven coordination between processes
+///
+/// # Arguments
+/// * `name` - Name of the signal to wait for
+/// * `timeout_seconds` - Optional timeout in seconds (NULL = wait forever)
+///
+/// # Returns
+/// JSON object with: signal_name, timed_out (boolean), data (the signal payload)
+#[pg_extern(schema = "df")]
+pub fn wait_for_signal(name: &str, timeout_seconds: default!(Option<i32>, "NULL")) -> String {
+    if name.is_empty() {
+        pgrx::error!("Signal name cannot be empty");
+    }
+
+    if let Some(timeout) = timeout_seconds {
+        if timeout <= 0 {
+            pgrx::error!("Timeout must be positive");
+        }
+    }
+
+    let config = serde_json::json!({
+        "signal_name": name,
+        "timeout_seconds": timeout_seconds
+    });
+
+    let durofut = Durofut {
+        node_id: short_id(),
+        node_type: "SIGNAL".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(config.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Send a signal to a running durable function instance.
+///
+/// # Arguments
+/// * `instance_id` - The durable function instance ID to signal
+/// * `signal_name` - Name of the signal (must match what the instance is waiting for)
+/// * `signal_data` - JSON payload to send with the signal (defaults to '{}')
+///
+/// # Returns
+/// 'OK' on success, raises error on failure
+#[pg_extern(schema = "df")]
+pub fn signal(
+    instance_id: &str,
+    signal_name: &str,
+    signal_data: default!(&str, "'{}'"),
+) -> String {
+    use crate::runtime::raise_external_event;
+
+    if instance_id.is_empty() {
+        pgrx::error!("Instance ID cannot be empty");
+    }
+
+    if signal_name.is_empty() {
+        pgrx::error!("Signal name cannot be empty");
+    }
+
+    // Validate signal_data is valid JSON
+    if serde_json::from_str::<serde_json::Value>(signal_data).is_err() {
+        pgrx::error!("Signal data must be valid JSON");
+    }
+
+    match raise_external_event(instance_id, signal_name, signal_data) {
+        Ok(_) => "OK".to_string(),
+        Err(e) => pgrx::error!("Failed to send signal: {}", e),
+    }
+}
+
+// ============================================================================
 // Orchestration Control Functions
 // ============================================================================
 

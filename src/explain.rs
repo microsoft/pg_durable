@@ -565,6 +565,23 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
             format!("HTTP {} {}{}", method, url, name_suffix)
         }
+        "SIGNAL" => {
+            // Parse config to get signal name and timeout
+            let (signal_name, timeout) = node
+                .query
+                .as_ref()
+                .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
+                .map(|cfg| {
+                    let name = cfg["signal_name"].as_str().unwrap_or("?");
+                    let timeout = cfg["timeout_seconds"].as_i64();
+                    (name.to_string(), timeout)
+                })
+                .unwrap_or_else(|| ("?".to_string(), None));
+            let timeout_str = timeout
+                .map(|t| format!(" ({}s)", t))
+                .unwrap_or_default();
+            format!("SIGNAL '{}'{}{}", signal_name, timeout_str, name_suffix)
+        }
         "LOOP" => format!("LOOP{}", name_suffix),
         "IF" => format!("IF{}", name_suffix),
         "JOIN" => {

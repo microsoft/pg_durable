@@ -552,6 +552,76 @@ mod tests {
     }
 
     // ========================================================================
+    // Unit Tests - Signals
+    // ========================================================================
+
+    #[pg_test]
+    fn test_wait_for_signal_creates_valid_node() {
+        let json = crate::dsl::wait_for_signal("approval", None);
+        let fut = Durofut::from_json(&json);
+        assert_eq!(fut.node_type, "SIGNAL");
+        assert!(!fut.node_id.is_empty());
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["signal_name"], "approval");
+        assert!(config["timeout_seconds"].is_null());
+    }
+
+    #[pg_test]
+    fn test_wait_for_signal_with_timeout() {
+        let json = crate::dsl::wait_for_signal("approval", Some(3600));
+        let fut = Durofut::from_json(&json);
+        assert_eq!(fut.node_type, "SIGNAL");
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["signal_name"], "approval");
+        assert_eq!(config["timeout_seconds"], 3600);
+    }
+
+    #[pg_test]
+    fn test_wait_for_signal_via_sql() {
+        let result = Spi::get_one::<String>("SELECT df.wait_for_signal('test_signal')")
+            .unwrap()
+            .unwrap();
+        let fut = Durofut::from_json(&result);
+        assert_eq!(fut.node_type, "SIGNAL");
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["signal_name"], "test_signal");
+    }
+
+    #[pg_test]
+    fn test_wait_for_signal_with_timeout_via_sql() {
+        let result = Spi::get_one::<String>("SELECT df.wait_for_signal('test_signal', 60)")
+            .unwrap()
+            .unwrap();
+        let fut = Durofut::from_json(&result);
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["signal_name"], "test_signal");
+        assert_eq!(config["timeout_seconds"], 60);
+    }
+
+    #[pg_test]
+    fn test_wait_for_signal_in_sequence() {
+        let sql_node = crate::dsl::sql("SELECT 1");
+        let signal_node = crate::dsl::wait_for_signal("go", None);
+        let seq = crate::dsl::then_fn(&sql_node, &signal_node);
+        let fut = Durofut::from_json(&seq);
+        assert_eq!(fut.node_type, "THEN");
+        assert!(fut.left_node.is_some());
+        assert!(fut.right_node.is_some());
+    }
+
+    #[pg_test]
+    fn test_wait_for_signal_with_name() {
+        let signal_node = crate::dsl::wait_for_signal("approval", None);
+        let named = crate::dsl::as_named(&signal_node, "sig");
+        let fut = Durofut::from_json(&named);
+        assert_eq!(fut.result_name, Some("sig".to_string()));
+    }
+
+    // ========================================================================
     // Unit Tests - Instance Management
     // ========================================================================
 

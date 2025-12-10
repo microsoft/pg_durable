@@ -16,10 +16,11 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 6. [HTTP Requests](#http-requests)
 7. [Durable Function Variables](#durable-function-variables)
 8. [Loops & Cron Jobs](#loops--cron-jobs)
-9. [Visualizing Functions](#visualizing-functions)
-10. [Monitoring](#monitoring)
-11. [Quick Reference Card](#quick-reference-card)
-12. [Appendix: Test Data Setup](#appendix-test-data-setup)
+9. [Signals](#signals)
+10. [Visualizing Functions](#visualizing-functions)
+11. [Monitoring](#monitoring)
+12. [Quick Reference Card](#quick-reference-card)
+13. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -47,6 +48,7 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 | **Timers & Delays** | Sleep with `df.sleep()` |
 | **Cron Scheduling** | Schedule with `df.wait_for_schedule()` |
 | **Eternal Loops** | Create forever-running jobs with `@>` operator or `df.loop()` |
+| **Signals** | Wait for external events with `df.wait_for_signal()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
 | **Labels** | Tag functions with friendly names |
 | **Visualization** | Preview function structure with `df.explain()` |
@@ -153,6 +155,9 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
 | `df.unsetvar(name)` | Remove durable function variable | `df.unsetvar('api_url')` |
 | `df.clearvars()` | Clear all durable function variables | `df.clearvars()` |
+| `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
+| `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
+| `df.signal(id, name, data)` | Send signal to instance | `df.signal('a1b2', 'go', '{}')` |
 
 ### Operators
 
@@ -788,6 +793,122 @@ SELECT df.cancel('found_id', 'Stopping cron job');
 
 ---
 
+## Signals
+
+Signals allow external code to send events to running durable functions. This enables:
+- **Human-in-the-loop workflows** - Wait for approval before proceeding
+- **Webhook callbacks** - Receive notifications from external systems
+- **Event-driven coordination** - Synchronize between processes
+
+### Waiting for a Signal
+
+Use `df.wait_for_signal()` to pause execution until a signal arrives:
+
+```sql
+-- Wait forever for a signal
+df.wait_for_signal('signal_name')
+
+-- Wait with timeout (seconds) - returns after timeout if no signal
+df.wait_for_signal('signal_name', 3600)  -- 1 hour timeout
+```
+
+### Sending a Signal
+
+Use `df.signal()` to send a signal to a running instance:
+
+```sql
+SELECT df.signal('instance_id', 'signal_name', '{"data": "value"}');
+```
+
+**Parameters:**
+- `instance_id` - The durable function instance ID (required)
+- `signal_name` - Name of the signal (must match what the instance is waiting for)
+- `signal_data` - JSON payload (optional, defaults to `'{}'`)
+
+### Signal Result Format
+
+When a signal is received (or times out), the result is a JSON object:
+
+```json
+{
+  "signal_name": "approval",
+  "timed_out": false,
+  "data": {"approved": true, "approver": "jane@acme.com"}
+}
+```
+
+If the signal times out:
+```json
+{
+  "signal_name": "approval",
+  "timed_out": true,
+  "data": null
+}
+```
+
+### Example: Order Approval Workflow
+
+```sql
+SELECT df.start(
+    'SELECT order_id, total FROM orders WHERE id = 1' |=> 'order'
+    ~> df.wait_for_signal('approval', 86400) |=> 'sig'  -- 24h timeout
+    ~> df.if(
+        'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean 
+            AND ($sig::jsonb->''data''->>''approved'')::boolean',
+        'UPDATE orders SET status = ''approved'' WHERE id = $order_id',
+        'UPDATE orders SET status = ''rejected'' WHERE id = $order_id'
+    ),
+    'order-approval'
+);
+
+-- Later, approve the order (using the instance ID returned by df.start)
+SELECT df.signal('a1b2c3d4', 'approval', '{"approved": true, "approver": "jane@acme.com"}');
+```
+
+### Example: Multi-Party Approval
+
+Wait for multiple approvals using `df.join()`:
+
+```sql
+SELECT df.start(
+    'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
+    ~> df.join(
+        df.wait_for_signal('legal_approval'),
+        df.wait_for_signal('tech_approval'),
+        df.wait_for_signal('mgmt_approval')
+    ) |=> 'approvals'
+    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc_id',
+    'multi-approval'
+);
+
+-- Each approver sends their signal independently
+SELECT df.signal('abc123', 'legal_approval', '{"approved": true}');
+SELECT df.signal('abc123', 'tech_approval', '{"approved": true}');
+SELECT df.signal('abc123', 'mgmt_approval', '{"approved": true}');
+```
+
+### Example: Webhook Callback Pattern
+
+Start a job and wait for external callback:
+
+```sql
+SELECT df.start(
+    df.http('{job_api}/start', 'POST', '{"type": "render"}') |=> 'job'
+    ~> df.wait_for_signal('job_complete', 3600) |=> 'result'
+    ~> df.if(
+        'SELECT NOT ($result::jsonb->>''timed_out'')::boolean',
+        'INSERT INTO completed_jobs VALUES ($job, $result)',
+        'INSERT INTO failed_jobs VALUES ($job, ''timeout'')'
+    ),
+    'webhook-job'
+);
+
+-- External system calls back via df.signal when job completes
+-- (e.g., via a webhook endpoint that calls df.signal)
+```
+
+---
+
 ## Visualizing Functions
 
 ### df.explain()
@@ -1081,6 +1202,11 @@ SELECT df.clearvars();                                        -- clear all
 -- Use variables in workflows: {varname}
 SELECT df.start(df.http('{api_url}/data', 'GET'));           -- variable substitution
 -- System vars: {sys_instance_id}, {sys_label}
+
+-- Signals (wait for external events)
+df.wait_for_signal('approval')                    -- wait forever
+df.wait_for_signal('approval', 3600)              -- wait with 1h timeout
+SELECT df.signal('inst_id', 'approval', '{}');    -- send signal
 
 -- Visualize
 SELECT df.explain('instance_id');        -- live instance
