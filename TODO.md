@@ -2,7 +2,6 @@
 
 - Compensation/Saga: `<->` operator and `df.with_undo()` for saga-style rollback (see docs/spec-compensation.md)
 - think of error handling, retries and compensating transactions
-- write down grammar rules and examples
 - samples for pg_fdw
 - retries on all df.* object update operations
 - figure out the right way and level to do logging in pg extensions
@@ -35,3 +34,4 @@
 - support for signals (df.wait_for_signal, df.signal)
 - LoadFunctionGraph retry logic for transaction safety
 - Cached Duroxide client per backend process
+- Grammar rules and examples (docs/grammar.md)
