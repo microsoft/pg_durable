@@ -12,15 +12,16 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 2. [Getting Started](#getting-started)
 3. [Core Concepts](#core-concepts)
 4. [DSL Reference](#dsl-reference)
-5. [Function Examples](#function-examples)
-6. [HTTP Requests](#http-requests)
-7. [Durable Function Variables](#durable-function-variables)
-8. [Loops & Cron Jobs](#loops--cron-jobs)
-9. [Signals](#signals)
-10. [Visualizing Functions](#visualizing-functions)
-11. [Monitoring](#monitoring)
-12. [Quick Reference Card](#quick-reference-card)
-13. [Appendix: Test Data Setup](#appendix-test-data-setup)
+5. [Condition Evaluation](#condition-evaluation)
+6. [Function Examples](#function-examples)
+7. [HTTP Requests](#http-requests)
+8. [Durable Function Variables](#durable-function-variables)
+9. [Loops & Cron Jobs](#loops--cron-jobs)
+10. [Signals](#signals)
+11. [Visualizing Functions](#visualizing-functions)
+12. [Monitoring](#monitoring)
+13. [Quick Reference Card](#quick-reference-card)
+14. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -230,6 +231,111 @@ SELECT df.start(
 | `0 0 * * *` | Daily at midnight |
 | `0 9 * * 1-5` | Weekdays at 9am |
 | `0 0 1 * *` | First of each month |
+
+---
+
+## Condition Evaluation
+
+When using conditional operators (`?>`, `!>`), `df.if()`, or loop conditions (`df.loop(body, condition)`), pg_durable needs to interpret SQL results as boolean values. This section explains how arbitrary data types are evaluated for truthiness.
+
+### How SQL Results Are Evaluated
+
+When a condition SQL query executes, pg_durable:
+
+1. **Extracts the first column of the first row** from the result
+2. **Evaluates that value for truthiness** using the rules below
+
+```sql
+-- Example: condition evaluates the first column of first row
+SELECT df.start(
+    'SELECT count(*) > 10 FROM orders'   -- Returns: true or false
+        ?> 'SELECT ''high volume'''
+        !> 'SELECT ''low volume'''
+);
+```
+
+### Truthiness Rules by Type
+
+| Type | Truthy | Falsy |
+|------|--------|-------|
+| **Boolean** | `true`, `t` | `false`, `f` |
+| **Number** | Any non-zero value | `0`, `0.0` |
+| **String** | `'true'`, `'t'`, `'yes'`, `'1'`, any non-empty string | `'false'`, `'f'`, `'no'`, `'0'`, empty string `''` |
+| **Array/JSON Array** | Non-empty array `[1,2,3]` | Empty array `[]` |
+| **Object/JSON Object** | Non-empty object `{"a":1}` | Empty object `{}` |
+| **NULL** | — | Always falsy |
+
+### Examples
+
+```sql
+-- Boolean expressions (most common)
+'SELECT true'                              -- ✓ truthy
+'SELECT false'                             -- ✗ falsy
+'SELECT count(*) > 0 FROM users'           -- ✓ truthy if count > 0
+'SELECT EXISTS(SELECT 1 FROM orders)'      -- ✓ truthy if exists
+
+-- Numeric comparisons
+'SELECT 1'                                 -- ✓ truthy (non-zero)
+'SELECT 0'                                 -- ✗ falsy (zero)
+'SELECT count(*) FROM empty_table'         -- ✗ falsy (returns 0)
+
+-- String conditions
+'SELECT ''yes'''                           -- ✓ truthy
+'SELECT ''no'''                            -- ✗ falsy
+'SELECT status FROM orders WHERE id = 1'   -- ✓ truthy if non-empty string
+
+-- NULL handling
+'SELECT NULL'                              -- ✗ falsy
+'SELECT name FROM users WHERE id = 999'    -- ✗ falsy if no rows (NULL)
+```
+
+### Best Practices
+
+1. **Use explicit boolean expressions** for clarity:
+
+```sql
+-- Good: explicit boolean
+'SELECT count(*) > 0 FROM pending_tasks'
+
+-- Works but less clear: relies on numeric truthiness
+'SELECT count(*) FROM pending_tasks'
+```
+
+2. **Handle NULL explicitly** when querying data that might not exist:
+
+```sql
+-- Good: COALESCE ensures a boolean result
+'SELECT COALESCE(active, false) FROM users WHERE id = $user_id'
+
+-- Risky: NULL if user doesn't exist
+'SELECT active FROM users WHERE id = $user_id'
+```
+
+3. **Use EXISTS for existence checks**:
+
+```sql
+-- Good: EXISTS always returns true/false
+'SELECT EXISTS(SELECT 1 FROM orders WHERE status = ''pending'')'
+
+-- Works but returns count instead of boolean
+'SELECT count(*) > 0 FROM orders WHERE status = ''pending'''
+```
+
+### Loop Condition Example
+
+For `df.loop(body, condition)`, the condition is evaluated after each iteration:
+
+```sql
+-- Loop while there are pending items
+SELECT df.start(
+    df.loop(
+        'SELECT process_next_item()',
+        'SELECT count(*) > 0 FROM queue WHERE status = ''pending'''  -- condition
+    )
+);
+```
+
+The loop continues while the condition is truthy and exits when it becomes falsy.
 
 ---
 

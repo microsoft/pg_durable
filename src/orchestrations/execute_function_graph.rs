@@ -12,7 +12,7 @@ use duroxide::OrchestrationContext;
 
 use crate::activities;
 use crate::types::{
-    evaluate_condition, is_truthy, substitute_all, substitute_all_raw, FunctionGraph,
+    evaluate_condition, substitute_all, substitute_all_raw, FunctionGraph,
     FunctionInput, FunctionNode, SystemVars,
 };
 
@@ -427,10 +427,8 @@ async fn execute_loop_node(
                 ))
                 .await?;
 
-                // Parse condition result to check truthiness
-                let condition_value: serde_json::Value =
-                    serde_json::from_str(&condition_result).unwrap_or(serde_json::Value::Null);
-                let should_continue = is_truthy(&condition_value);
+                // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
+                let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
                 ctx.trace_info(format!(
                     "Loop condition evaluated to: {} (continue={})",
                     condition_result, should_continue
@@ -452,14 +450,14 @@ async fn execute_loop_node(
         vars: exec_ctx.vars.clone(),
     };
 
-    // duroxide 0.1.1: continue_as_new now returns an awaitable future
-    ctx.continue_as_new(
-        serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()),
-    )
-    .await
-    .map_err(|e| format!("continue_as_new failed: {:?}", e))?;
-
-    Ok(body_result)
+    // duroxide 0.1.1: continue_as_new returns an awaitable future - return it directly
+    return ctx
+        .continue_as_new(
+            serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()),
+        )
+        .await
+        .map(|_| body_result)
+        .map_err(|e| format!("continue_as_new failed: {:?}", e));
 }
 
 async fn execute_break_node(

@@ -99,6 +99,24 @@ stop_server() {
     fi
 }
 
+# Function to ensure shared_preload_libraries is configured
+ensure_config() {
+    if [ -d "$DATA_DIR" ]; then
+        # Check if shared_preload_libraries is correctly set
+        if ! grep -q "^shared_preload_libraries.*pg_durable" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+            echo "Configuring shared_preload_libraries..."
+            # Remove any existing shared_preload_libraries lines (commented or not)
+            sed -i.bak '/^#*shared_preload_libraries/d' "$DATA_DIR/postgresql.conf"
+            echo "shared_preload_libraries = 'pg_durable'" >> "$DATA_DIR/postgresql.conf"
+        fi
+        # Ensure port is set
+        if ! grep -q "^port = $PG_PORT" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+            sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
+            echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
+        fi
+    fi
+}
+
 # Function to start server
 start_server() {
     if ! "$PG_ISREADY" -h localhost -p $PG_PORT &>/dev/null; then
@@ -114,11 +132,10 @@ start_server() {
         if [ ! -d "$DATA_DIR" ]; then
             echo "Initializing database..."
             "$PGRX_BIN/initdb" -D "$DATA_DIR" --no-locale -E UTF8 >/dev/null 2>&1
-            
-            # Configure shared_preload_libraries
-            echo "shared_preload_libraries = 'pg_durable'" >> "$DATA_DIR/postgresql.conf"
-            echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
         fi
+        
+        # Ensure config is correct (works for both new and existing data dirs)
+        ensure_config
         
         # Install extension
         echo "Building and installing extension..."
@@ -132,7 +149,15 @@ start_server() {
         # Drop and recreate extension (picks up schema changes)
         "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; CREATE EXTENSION pg_durable;" >/dev/null 2>&1
     else
-        # Server already running, just reinstall extension
+        # Server already running - check if config needs update (requires restart)
+        if ! grep -q "^shared_preload_libraries.*pg_durable" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+            echo -e "${YELLOW}Restarting PostgreSQL to load pg_durable worker...${NC}"
+            stop_server
+            ensure_config
+            "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+            sleep 2
+        fi
+        # Reinstall extension
         cd "$PROJECT_DIR"
         cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
         "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; CREATE EXTENSION pg_durable;" >/dev/null 2>&1

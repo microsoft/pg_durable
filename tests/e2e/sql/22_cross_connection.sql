@@ -20,7 +20,8 @@ CREATE TABLE cross_conn_log (
 -- Connection string for dblink (same database, different connection)
 -- This simulates an external system or different user session
 -- Use host=localhost to force TCP connection instead of socket
-CREATE TEMP TABLE _dblink_conn AS SELECT 'host=localhost dbname=postgres port=28817' AS connstr;
+CREATE TEMP TABLE _dblink_conn AS 
+SELECT format('host=localhost dbname=postgres port=%s', current_setting('port')) AS connstr;
 
 -- ============================================================================
 -- Test 1: Signal from Different Connection
