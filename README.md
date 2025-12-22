@@ -28,7 +28,36 @@ SELECT durable.start(
 3. **Runtime executes durably** — each step is checkpointed, survives crashes via replay
 4. **Query progress** anytime from standard PostgreSQL tables
 
+## Prerequisites
+
+- PostgreSQL 17
+- Rust (nightly)
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+
+### GitHub Personal Access Token (Required)
+
+This project depends on a private repository (`Azure/duroxide-pg-opt`). You need a GitHub PAT with `repo` scope and SSO authorization for the Azure organization.
+
+1. **Create a PAT** at https://github.com/settings/tokens (Classic token with `repo` scope)
+2. **Authorize SSO** for the Azure organization on the token
+3. **Configure Cargo** to use git CLI for fetching:
+
+```bash
+# Add to ~/.cargo/config.toml
+[net]
+git-fetch-with-cli = true
+```
+
+4. **For Docker builds**, create a `.env` file in the project root:
+
+```bash
+# .env (gitignored)
+GITHUB_TOKEN=ghp_your_token_here
+```
+
 ## Installation
+
+### Local Development
 
 ```bash
 # Build and install the extension
@@ -36,6 +65,16 @@ cargo pgrx install --release
 
 # In PostgreSQL
 CREATE EXTENSION pg_durable;
+```
+
+### Docker
+
+```bash
+# Build and test (requires .env with GITHUB_TOKEN)
+./scripts/test-e2e-docker.sh --rebuild
+
+# Optional: Deploy to ACR (for custom PG17 image with pg_durable baked-in)
+./scripts/deploy-acr.sh
 ```
 
 ## Documentation

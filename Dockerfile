@@ -3,6 +3,9 @@
 # Using nightly because cargo-pgrx 0.16.1 requires edition2024
 FROM rustlang/rust:nightly-bookworm AS builder
 
+# GitHub token for private repos (passed as build arg, not persisted in image)
+ARG GITHUB_TOKEN
+
 # Install PostgreSQL 17 dev packages and build dependencies
 RUN apt-get update && apt-get install -y \
     curl \
@@ -41,6 +44,13 @@ COPY build.rs ./
 COPY src ./src
 COPY pg_durable.control ./
 COPY sql ./sql
+
+# Configure git to use token for private GitHub repos
+# Also configure Cargo to use git CLI for fetching (required for git config to take effect)
+RUN if [ -n "$GITHUB_TOKEN" ]; then \
+        git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"; \
+        mkdir -p /usr/local/cargo && printf '[net]\ngit-fetch-with-cli = true\n' >> /usr/local/cargo/config.toml; \
+    fi
 
 # Build the extension
 RUN cargo pgrx package --pg-config /usr/lib/postgresql/17/bin/pg_config
