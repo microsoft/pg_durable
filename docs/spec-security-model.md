@@ -15,6 +15,7 @@
 4. [Functional Requirements](#4-functional-requirements)
 5. [Securing df.sql()](#5-securing-dfsql)
 6. [Securing df.http()](#6-securing-dfhttp)
+    6.7 [Duroxide Background Worker Authentication/Authorization](#67-duroxide-background-worker-authenticationauthorization)
 7. [Data Isolation (RLS)](#7-data-isolation-rls)
 8. [Implementation Specification](#8-implementation-specification)
 9. [User Experience](#9-user-experience)
@@ -658,6 +659,29 @@ SELECT df.start(
 );
 -- ✗ ERROR: HTTP request blocked: resolves to internal IP
 ```
+
+### 6.7 Duroxide Background Worker Authentication/Authorization
+
+**Purpose**: Keep the background worker’s control-plane connections passwordless while constraining what the worker can do when it is *not* running `execute_sql` on behalf of a user.
+
+- **Auth (peer over Unix socket + pg_ident mapping)**: Use a Unix socket host and `peer` auth to map the OS user `postgres` → a low-privilege DB role (e.g., `duroxide_worker`). Example:
+    - `pg_hba.conf`: `local  postgres  duroxide_worker  peer  map=duroxide_map`
+    - `pg_ident.conf`: `duroxide_map  postgres  duroxide_worker`
+    - Connection string (sqlx/duroxide store): `postgresql://duroxide_worker@/postgres?host=/var/run/postgresql`
+    - Rationale: passwordless, auditable, and scoped to local socket; avoids `trust` on TCP.
+
+- **AuthZ (limit ambient role)**: Grant the worker role only what the control-plane needs:
+    - `GRANT USAGE ON SCHEMA df, duroxide TO duroxide_worker;`
+    - `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA df, duroxide TO duroxide_worker;`
+    - `REVOKE ALL ON SCHEMA public FROM duroxide_worker;` (and avoid grants in other schemas)
+    - Future tables: ensure default privileges in those schemas keep the role scoped to df.* and duroxide.
+
+- **Privilege boundary vs execute_sql**: The `execute_sql` activity uses SPI with `SetUserIdAndSecContext` to *impersonate the submitting user* for the SQL node. That path necessarily bypasses the worker’s ambient role restrictions. All other worker SQL (loading graphs, updating status) should execute as the low-privilege `duroxide_worker` role.
+
+- **Safety notes**:
+    - Must connect via a socket path (not `127.0.0.1`) for `peer` to apply.
+    - This model still assumes trusted extension code; the bgworker can impersonate users inside `execute_sql`, but only that activity should do so.
+    - If sockets/`peer` are unavailable (managed services), fall back to client cert or AAD/Managed Identity as a “passwordless” token, while keeping the DB role scoped to df.* + duroxide.
 
 ---
 
