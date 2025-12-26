@@ -85,6 +85,14 @@ The security guarantee is: **only superusers can install the extension**, theref
 
 ### 3.2 Threats and Mitigations
 
+#### T0: SECURITY DEFINER Invocation Captures Definer Privileges
+
+**Threat**: Calling `df.start()` inside a `SECURITY DEFINER` function captures the definer’s identity (because `GetUserId()`/`current_user` reflect the definer inside the function). Unprivileged callers could cause durable work to run with the definer’s privileges.
+
+**Mitigation (documentation-only)**: This is expected PostgreSQL behavior. The extension does **not** block this pattern. Operators must avoid invoking `df.start()` from `SECURITY DEFINER` unless they explicitly want definer-level execution. Document clearly and, if possible, emit audit logs when df is invoked from SECURITY DEFINER.
+
+**Residual Risk**: High if misused. Safe if used intentionally and documented.
+
 #### T1: Privilege Escalation via RESET ROLE
 
 **Threat**: User submits SQL containing `RESET ROLE` to escape back to worker's identity.
@@ -431,6 +439,7 @@ HTTP requests have no native PostgreSQL permission model. Security is enforced v
 2. **SSRF protection**: Block internal IPs at the code level
 3. **URL allowlist**: GUC-based configuration for allowed destinations
 4. **Rate limiting**: GUC-based per-user limits
+5. **Redirect handling**: Redirects are **disabled by default**; if explicitly enabled, each hop must re-validate host/IP/port against SSRF and allowlist rules
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -524,8 +533,18 @@ if is_blocked_ip(&ip) {
     return Err("SSRF: blocked IP address");
 }
 
-// 3. Connect to the resolved IP (not hostname)
+// 3. Disable redirects by default; if enabled, re-validate every hop
+let client = reqwest::Client::builder()
+    .redirect(reqwest::redirect::Policy::none())
+    .build()?;
+
+// 4. Connect to the resolved IP (not hostname)
 let response = client.get(&url).resolve(&url.host(), ip).send()?;
+
+// If redirects are explicitly enabled later, each redirect must:
+// - Resolve the new host, re-check blocklist/allowlist/IP
+// - Enforce the same port validation
+// - Reject if any hop violates the rules
 ```
 
 ### 6.5 Implementation
@@ -545,11 +564,10 @@ pub async fn execute(
     // before df.http() could be called in df.start()
     
     // 1. Parse and validate URL
-    let parsed_url = Url::parse(&url)
-       Implementation Note: reqwest MUST use rustls-tls to avoid OpenSSL conflicts with Postgres
+    // Implementation Note: reqwest MUST use rustls-tls to avoid OpenSSL conflicts with Postgres
     // Cargo.toml: reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-
-    //  .map_err(|e| format!("Invalid URL: {}", e))?;
+    let parsed_url = Url::parse(&url)
+        .map_err(|e| format!("Invalid URL: {}", e))?;
     
     // 2. SSRF Protection - resolve DNS and check IP
     let ip = resolve_dns(parsed_url.host_str().unwrap_or(""))?;
@@ -569,14 +587,20 @@ pub async fn execute(
         ));
     }
     
-    // 4. Rate limiting
+    // 4. Redirect policy: disabled by default; if ever enabled, every hop must re-check SSRF + allowlist + port
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    
+    // 5. Rate limiting
     check_rate_limit(&security_ctx.user_name).await?;
     
-    // 5. Execute request with timeout
+    // 6. Execute request with timeout
     let timeout = get_guc_int("df.http_timeout_seconds", 30);
-    let response = execute_http_request(method, parsed_url, ip, headers, body, timeout).await?;
+    let response = execute_http_request(method, parsed_url, ip, headers, body, timeout, client).await?;
     
-    // 6. Log for audit
+    // 7. Log for audit
     log_http_request(&security_ctx, &url, &method, response.status());
     
     Ok(response.to_json())
@@ -664,6 +688,12 @@ CREATE POLICY nodes_user_isolation ON df.nodes
             SELECT id FROM df.instances 
             WHERE submitted_by = current_user::regrole
         )
+    )
+    WITH CHECK (
+        instance_id IN (
+            SELECT id FROM df.instances 
+            WHERE submitted_by = current_user::regrole
+        )
     );
 
 -- duroxide role bypasses RLS (needs to see all instances to execute them)
@@ -744,15 +774,25 @@ CREATE POLICY vars_owner_isolation ON df.vars
 ```sql
 CREATE TABLE IF NOT EXISTS df.secrets (
     name  TEXT PRIMARY KEY,
-    EQUIRED permissions:
+    value TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by REGROLE NOT NULL DEFAULT current_user::regrole
+);
 
+-- Permissions
+REVOKE ALL ON TABLE df.secrets FROM PUBLIC;
+-- Only the worker and admins can read to perform substitution
+GRANT SELECT ON TABLE df.secrets TO duroxide;
+-- Secret mutators are admin-only
+REVOKE EXECUTE ON FUNCTION df.setsecret(name text, value text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.unsetsecret(name text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.clearsecrets() FROM PUBLIC;
+```
 
--- Recommended permissions (conceptual):
--- REVOKE ALL ON TABLE df.secrets FROM PUBLIC;
--- GRANT SELECT ON TABLE df.secrets TO duroxide;   -- if worker reads secrets via SQL
--- (or keep table unreadable and resolve secrets through SECURITY DEFINER helpers restricted to worker)
-```
-```
+Additional requirements:
+- Secrets must never be returned in results, status, or logs (only secret *names* may be logged for audit).
+- If secrets are stored in plaintext, storage must be restricted to trusted roles as above; encrypt-at-rest may be added later but is not assumed by this spec.
+- Secret substitution occurs inside the worker; users cannot `SELECT` `df.secrets`.
 
 ### 8.2 Function Permissions (Extension Installation)
 
@@ -821,6 +861,7 @@ GucRegistry::define_int_guc(
 
 use pgrx::prelude::*;
 use pgrx::pg_sys;
+use pgrx::{IntoDatum, PgBuiltInOids};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -834,6 +875,7 @@ pub struct SecurityContext {
 impl SecurityContext {
     /// Capture the current session's security context
     /// Called at df.start() time in the user's backend process
+    /// Note: Inside SECURITY DEFINER, this captures the definer's identity (expected PostgreSQL behavior).
     pub fn capture() -> Self {
         // Get user OID directly from PostgreSQL (unforgeable)
         let user_oid = unsafe { pg_sys::GetUserId() };
@@ -904,10 +946,12 @@ fn execute_sql_with_security_context(
     // Execute SQL via SPI - runs with user's privileges
     // MUST run in a subtransaction to catch errors without aborting the worker
     Spi::connect(|mut client| {
-        // Set search_path to match user's session
-        let set_path = format!("SET LOCAL search_path = {}", security_ctx.search_path);
-        client.update(&set_path, None, None)
-            .map_err(|e| format!("Failed to set search_path: {}", e))?;
+        // Set search_path to match user's session safely (no string interpolation)
+        client.update(
+            "SELECT set_config('search_path', $1, true)",
+            None,
+            Some(vec![(PgBuiltInOids::TEXTOID.oid(), security_ctx.search_path.into_datum())])
+        ).map_err(|e| format!("Failed to set search_path: {}", e))?;
 
         // Execute user's query
         // Note: In real implementation, wrap this in a subtransaction (SAVEPOINT)
