@@ -23,6 +23,17 @@
 
 ---
 
+## Implementation Evaluation (repository state)
+
+The current repository does **not yet implement** the security guarantees described in this draft specification. Key gaps observed in code as of this change:
+
+- **No per-user execution context**: SQL is executed through a shared sqlx pool from the background worker (`src/activities/execute_sql.rs`), and `df.start()` does not capture or store the submitting user; the schema lacks `submitted_by`/security context columns (see `df.instances`/`df.nodes` creation in `src/lib.rs`).
+- **No RLS or ownership tracking**: Tables are created without row-level security or owner columns, and functions such as `df.setvar/getvar` operate on a single global `df.vars` table (`src/dsl.rs`), so variables are shared across users.
+- **HTTP hardening absent**: The HTTP activity (`src/activities/execute_http.rs`) performs direct requests without SSRF blocks, host allowlists, or GUC controls, and function-level permissions are not revoked by default.
+- **Secrets and GUCs not present**: There is no `df.secrets` table or secret APIs, and the GUC definitions referenced in this spec are not declared in the codebase.
+
+Treat this document as aspirational; aligning the implementation will require adding the above controls.
+
 ## 1. Executive Summary
 
 pg_durable executes user-submitted SQL durably via a background worker. This creates a security challenge: SQL submitted by User A should execute with User A's privileges, not with elevated background worker privileges.
