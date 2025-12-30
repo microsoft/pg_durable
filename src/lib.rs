@@ -251,7 +251,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("Failed to create runtime: {}", e))?;
+            .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
         // Try to initialize the store (creates schema if it doesn't exist)
         rt.block_on(async {
@@ -260,7 +260,7 @@ mod tests {
 
             loop {
                 match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
-                    Ok(_) => return Ok(format!("{} (schema: {})", pg_conn_str, DUROXIDE_SCHEMA)),
+                    Ok(_) => return Ok(format!("{pg_conn_str} (schema: {DUROXIDE_SCHEMA})")),
                     Err(e) => {
                         if start.elapsed() > timeout {
                             return Err(format!(
@@ -293,35 +293,33 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("Failed to create runtime: {}", e))?;
+            .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
         rt.block_on(async {
             let store = Arc::new(
                 PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
                     .await
-                    .map_err(|e| format!("Failed to connect to store: {}", e))?,
+                    .map_err(|e| format!("Failed to connect to store: {e}"))?,
             );
             let client = Client::new(store);
 
             loop {
-                match client.get_instance_info(instance_id).await {
-                    Ok(info) => {
-                        match info.status.as_str() {
-                            "Completed" | "ContinuedAsNew" => {
-                                return Ok(info.output.unwrap_or_default());
-                            }
-                            "Failed" | "Canceled" => {
-                                return Err(format!(
-                                    "{}: {}",
-                                    info.status,
-                                    info.output.unwrap_or_default()
-                                ));
-                            }
-                            _ => {} // Still running
+                if let Ok(info) = client.get_instance_info(instance_id).await {
+                    match info.status.as_str() {
+                        "Completed" | "ContinuedAsNew" => {
+                            return Ok(info.output.unwrap_or_default());
                         }
+                        "Failed" | "Canceled" => {
+                            return Err(format!(
+                                "{}: {}",
+                                info.status,
+                                info.output.unwrap_or_default()
+                            ));
+                        }
+                        _ => {} // Still running
                     }
-                    Err(_) => {} // Instance not found yet
                 }
+                // Instance not found yet - continue polling
 
                 if start.elapsed() > timeout {
                     // Get final status for better error message
@@ -331,8 +329,7 @@ mod tests {
                         .map(|i| i.status)
                         .unwrap_or_else(|_| "unknown".to_string());
                     return Err(format!(
-                        "Timeout after {}s, status: {}",
-                        timeout_secs, final_status
+                        "Timeout after {timeout_secs}s, status: {final_status}"
                     ));
                 }
 
@@ -682,8 +679,7 @@ mod tests {
         let fut = crate::dsl::sql("SELECT 42");
         let instance_id = crate::dsl::start(&fut, Some("test-instance-row"));
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT COUNT(*) FROM df.instances WHERE id = '{}'",
-            instance_id
+            "SELECT COUNT(*) FROM df.instances WHERE id = '{instance_id}'"
         ))
         .unwrap()
         .unwrap();
@@ -843,8 +839,7 @@ mod tests {
         // Should contain SQL node info, not an error
         assert!(
             result.contains("SQL") || result.contains("SELECT"),
-            "Expected SQL visualization, got: {}",
-            result
+            "Expected SQL visualization, got: {result}"
         );
     }
 
@@ -852,8 +847,8 @@ mod tests {
     fn test_explain_expression_simple_sql() {
         // Dry-run explain of a simple SQL
         let result = crate::explain::explain("df.sql('SELECT 42')");
-        assert!(result.contains("SQL"), "Expected SQL in output: {}", result);
-        assert!(result.contains("42"), "Expected query content: {}", result);
+        assert!(result.contains("SQL"), "Expected SQL in output: {result}");
+        assert!(result.contains("42"), "Expected query content: {result}");
     }
 
     #[pg_test]
@@ -863,28 +858,26 @@ mod tests {
         // Should show sequence with arrows
         assert!(
             result.contains("SELECT 1"),
-            "Expected first query: {}",
-            result
+            "Expected first query: {result}"
         );
         assert!(
             result.contains("SELECT 2"),
-            "Expected second query: {}",
-            result
+            "Expected second query: {result}"
         );
     }
 
     #[pg_test]
     fn test_explain_expression_sleep() {
         let result = crate::explain::explain("df.sleep(60)");
-        assert!(result.contains("SLEEP"), "Expected SLEEP node: {}", result);
-        assert!(result.contains("60"), "Expected duration: {}", result);
+        assert!(result.contains("SLEEP"), "Expected SLEEP node: {result}");
+        assert!(result.contains("60"), "Expected duration: {result}");
     }
 
     #[pg_test]
     fn test_explain_expression_loop() {
         let result = crate::explain::explain("df.loop(df.sql('SELECT 1'))");
-        assert!(result.contains("LOOP"), "Expected LOOP: {}", result);
-        assert!(result.contains("body"), "Expected body section: {}", result);
+        assert!(result.contains("LOOP"), "Expected LOOP: {result}");
+        assert!(result.contains("body"), "Expected body section: {result}");
     }
 
     #[pg_test]
@@ -892,16 +885,16 @@ mod tests {
         let result = crate::explain::explain(
             "df.if(df.sql('SELECT true'), df.sql('SELECT yes'), df.sql('SELECT no'))",
         );
-        assert!(result.contains("IF"), "Expected IF: {}", result);
-        assert!(result.contains("then"), "Expected then branch: {}", result);
-        assert!(result.contains("else"), "Expected else branch: {}", result);
+        assert!(result.contains("IF"), "Expected IF: {result}");
+        assert!(result.contains("then"), "Expected then branch: {result}");
+        assert!(result.contains("else"), "Expected else branch: {result}");
     }
 
     #[pg_test]
     fn test_explain_expression_join() {
         let result = crate::explain::explain("df.join(df.sql('SELECT 1'), df.sql('SELECT 2'))");
-        assert!(result.contains("JOIN"), "Expected JOIN: {}", result);
-        assert!(result.contains("branch"), "Expected branches: {}", result);
+        assert!(result.contains("JOIN"), "Expected JOIN: {result}");
+        assert!(result.contains("branch"), "Expected branches: {result}");
     }
 
     #[pg_test]
@@ -932,8 +925,7 @@ mod tests {
         let result = crate::explain::explain("deadbeef");
         assert!(
             result.contains("not found"),
-            "Expected 'not found' error: {}",
-            result
+            "Expected 'not found' error: {result}"
         );
     }
 
@@ -943,8 +935,8 @@ mod tests {
         let result = crate::explain::explain(
             "df.loop(df.if(df.sql('SELECT true'), df.sql('SELECT yes'), df.sql('SELECT no')))",
         );
-        assert!(result.contains("LOOP"), "Expected LOOP: {}", result);
-        assert!(result.contains("IF"), "Expected IF: {}", result);
+        assert!(result.contains("LOOP"), "Expected LOOP: {result}");
+        assert!(result.contains("IF"), "Expected IF: {result}");
     }
 
     // ========================================================================
@@ -1012,8 +1004,7 @@ mod tests {
 
         // Verify instance was created
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT COUNT(*) FROM df.instances WHERE id = '{}'",
-            instance_id
+            "SELECT COUNT(*) FROM df.instances WHERE id = '{instance_id}'"
         ))
         .unwrap()
         .unwrap();
@@ -1091,14 +1082,13 @@ mod tests {
 
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify result contains the inserted row
         let output = result.unwrap();
         assert!(
             output.contains("row_count"),
-            "Expected row_count in output: {}",
-            output
+            "Expected row_count in output: {output}"
         );
 
         // Verify data in table
@@ -1127,7 +1117,7 @@ mod tests {
 
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify both rows exist in order
         let steps: Vec<i32> = Spi::connect(|client| {
@@ -1143,7 +1133,7 @@ mod tests {
             steps
         });
 
-        assert_eq!(steps, vec![1, 2], "Expected steps [1, 2], got {:?}", steps);
+        assert_eq!(steps, vec![1, 2], "Expected steps [1, 2], got {steps:?}");
     }
 
     #[pg_test]
@@ -1167,18 +1157,13 @@ mod tests {
 
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify the value was copied
         let copied =
             Spi::get_one::<i32>("SELECT copied_id FROM test_e2e_vars WHERE copied_id IS NOT NULL")
                 .unwrap();
-        assert_eq!(
-            copied,
-            Some(42),
-            "Expected copied_id = 42, got {:?}",
-            copied
-        );
+        assert_eq!(copied, Some(42), "Expected copied_id = 42, got {copied:?}");
     }
 
     // ========================================================================
@@ -1199,7 +1184,7 @@ mod tests {
 
         // Wait for completion (with extra time for sleep)
         let result = wait_for_completion(&instance_id, 15);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         let elapsed = start_time.elapsed();
         assert!(
@@ -1220,14 +1205,10 @@ mod tests {
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-true"));
 
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
-        assert!(
-            output.contains("yes"),
-            "Expected 'yes' in output: {}",
-            output
-        );
+        assert!(output.contains("yes"), "Expected 'yes' in output: {output}");
     }
 
     #[pg_test]
@@ -1241,10 +1222,10 @@ mod tests {
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-false"));
 
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
-        assert!(output.contains("no"), "Expected 'no' in output: {}", output);
+        assert!(output.contains("no"), "Expected 'no' in output: {output}");
     }
 
     #[pg_test]
@@ -1259,13 +1240,12 @@ mod tests {
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-zero"));
 
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
         assert!(
             output.contains("falsy"),
-            "Expected 'falsy' for 0 condition: {}",
-            output
+            "Expected 'falsy' for 0 condition: {output}"
         );
     }
 
@@ -1287,7 +1267,7 @@ mod tests {
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join"));
 
         let result = wait_for_completion(&instance_id, 15);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify both branches executed
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM test_e2e_join")
@@ -1317,12 +1297,12 @@ mod tests {
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join3"));
 
         let result = wait_for_completion(&instance_id, 15);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Result should be an array of 3 results
         let output = result.unwrap();
         // The output is a JSON array of the branch results
-        assert!(output.starts_with('['), "Expected array result: {}", output);
+        assert!(output.starts_with('['), "Expected array result: {output}");
     }
 
     #[pg_test]
@@ -1343,8 +1323,7 @@ mod tests {
         let cancel_result = crate::dsl::cancel(&instance_id, "test cancellation");
         assert!(
             cancel_result.contains("cancelled") || cancel_result.contains("cancel"),
-            "Expected cancellation confirmation: {}",
-            cancel_result
+            "Expected cancellation confirmation: {cancel_result}"
         );
 
         // Verify it's cancelled
@@ -1353,8 +1332,7 @@ mod tests {
         assert!(
             final_status == Some("Canceled".to_string())
                 || final_status == Some("Failed".to_string()),
-            "Expected Canceled status, got {:?}",
-            final_status
+            "Expected Canceled status, got {final_status:?}"
         );
     }
 
@@ -1379,7 +1357,7 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM df.list_instances()")
             .unwrap()
             .unwrap_or(0);
-        assert!(count >= 2, "Expected at least 2 instances, got {}", count);
+        assert!(count >= 2, "Expected at least 2 instances, got {count}");
     }
 
     #[pg_test]
@@ -1400,8 +1378,7 @@ mod tests {
 
         // Query instance_info
         let orch_name = Spi::get_one::<String>(&format!(
-            "SELECT function_name FROM df.instance_info('{}')",
-            instance_id
+            "SELECT function_name FROM df.instance_info('{instance_id}')"
         ));
 
         assert!(orch_name.is_ok(), "instance_info should be callable");
@@ -1423,16 +1400,14 @@ mod tests {
 
         // Query instance_nodes - should have 3 nodes (2 SQL + 1 THEN)
         let node_count = Spi::get_one::<i64>(&format!(
-            "SELECT COUNT(DISTINCT node_id) FROM df.instance_nodes('{}')",
-            instance_id
+            "SELECT COUNT(DISTINCT node_id) FROM df.instance_nodes('{instance_id}')"
         ))
         .unwrap()
         .unwrap_or(0);
 
         assert!(
             node_count >= 3,
-            "Expected at least 3 nodes, got {}",
-            node_count
+            "Expected at least 3 nodes, got {node_count}"
         );
     }
 
@@ -1450,8 +1425,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.contains("Failed") || err.contains("does not exist"),
-            "Expected error about non-existent table: {}",
-            err
+            "Expected error about non-existent table: {err}"
         );
     }
 
@@ -1462,20 +1436,18 @@ mod tests {
         let instance_id = crate::dsl::start(&sql, Some("test-status-sync"));
 
         let result = wait_for_completion(&instance_id, 10);
-        assert!(result.is_ok(), "Function failed: {:?}", result);
+        assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Check PostgreSQL table status
         let pg_status = Spi::get_one::<String>(&format!(
-            "SELECT status FROM df.instances WHERE id = '{}'",
-            instance_id
+            "SELECT status FROM df.instances WHERE id = '{instance_id}'"
         ))
         .unwrap();
 
         assert_eq!(
             pg_status,
             Some("completed".to_string()),
-            "Expected 'completed' in PostgreSQL table, got {:?}",
-            pg_status
+            "Expected 'completed' in PostgreSQL table, got {pg_status:?}"
         );
     }
 }

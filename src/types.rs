@@ -46,7 +46,7 @@ pub fn postgres_connection_string() -> String {
         .or_else(|_| std::env::var("PGDATABASE"))
         .unwrap_or_else(|_| "postgres".to_string());
 
-    format!("postgres://{}@{}:{}/{}", user, host, port, database)
+    format!("postgres://{user}@{host}:{port}/{database}")
 }
 
 /// Schema name for Duroxide internal tables
@@ -54,10 +54,10 @@ pub const DUROXIDE_SCHEMA: &str = "duroxide";
 
 /// Calculate the duration until the next cron schedule match
 pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
-    let cron_with_seconds = format!("0 {}", cron_expr);
+    let cron_with_seconds = format!("0 {cron_expr}");
 
     let schedule = CronSchedule::from_str(&cron_with_seconds)
-        .map_err(|e| format!("Invalid cron expression '{}': {}", cron_expr, e))?;
+        .map_err(|e| format!("Invalid cron expression '{cron_expr}': {e}"))?;
 
     let now: DateTime<Utc> = Utc::now();
 
@@ -139,7 +139,7 @@ pub fn substitute_all_with_options(
 
     // 2. Substitute user vars: {name} (inserted as-is, no quoting)
     for (name, value) in vars {
-        let pattern = format!("{{{}}}", name);
+        let pattern = format!("{{{name}}}");
         if result.contains(&pattern) {
             result = result.replace(&pattern, value);
         }
@@ -147,7 +147,7 @@ pub fn substitute_all_with_options(
 
     // 3. Substitute results: $name
     for (name, value) in results {
-        let pattern = format!("${}", name);
+        let pattern = format!("${name}");
         if result.contains(&pattern) {
             let replacement = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
                 // Check if this is a SQL result format with rows
@@ -159,7 +159,7 @@ pub fn substitute_all_with_options(
                                     serde_json::Value::String(s) => {
                                         if quote_results_for_sql {
                                             let escaped = s.replace('\'', "''");
-                                            format!("'{}'", escaped)
+                                            format!("'{escaped}'")
                                         } else {
                                             s.clone()
                                         }
@@ -181,7 +181,7 @@ pub fn substitute_all_with_options(
                     // This is a JSON object/array (like HTTP response) - quote it for SQL
                     // so it can be cast to jsonb: '{"key": "value"}'::jsonb
                     let escaped = value.replace('\'', "''");
-                    format!("'{}'", escaped)
+                    format!("'{escaped}'")
                 } else {
                     // Raw mode - no quoting for non-SQL contexts
                     value.clone()
@@ -347,7 +347,7 @@ impl Durofut {
             .query
             .as_ref()
             .map(|q| q.replace('\'', "''"))
-            .map(|q| format!("'{}'", q))
+            .map(|q| format!("'{q}'"))
             .unwrap_or_else(|| "NULL".to_string());
 
         let result_name_escaped = self
@@ -359,13 +359,13 @@ impl Durofut {
         let left_node = self
             .left_node
             .as_ref()
-            .map(|id| format!("'{}'", id))
+            .map(|id| format!("'{id}'"))
             .unwrap_or_else(|| "NULL".to_string());
 
         let right_node = self
             .right_node
             .as_ref()
-            .map(|id| format!("'{}'", id))
+            .map(|id| format!("'{id}'"))
             .unwrap_or_else(|| "NULL".to_string());
 
         // Check if we're in explain mode - use temp table if so

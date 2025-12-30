@@ -14,7 +14,7 @@ pub async fn execute(
     input_json: String,
 ) -> Result<String, String> {
     let input: serde_json::Value = serde_json::from_str(&input_json)
-        .map_err(|e| format!("Failed to parse node status input: {}", e))?;
+        .map_err(|e| format!("Failed to parse node status input: {e}"))?;
 
     let node_id = input["node_id"].as_str().ok_or("Missing node_id")?;
     let status = input["status"].as_str().ok_or("Missing status")?;
@@ -32,20 +32,18 @@ pub async fn execute(
         };
         // Use dollar-quoting to avoid SQL escaping issues with JSON
         format!(
-            "UPDATE df.nodes SET status = '{}', result = $json${}$json$::jsonb, updated_at = now() WHERE id = '{}'",
-            status, json_result, node_id
+            "UPDATE df.nodes SET status = '{status}', result = $json${json_result}$json$::jsonb, updated_at = now() WHERE id = '{node_id}'"
         )
     } else {
         format!(
-            "UPDATE df.nodes SET status = '{}', updated_at = now() WHERE id = '{}'",
-            status, node_id
+            "UPDATE df.nodes SET status = '{status}', updated_at = now() WHERE id = '{node_id}'"
         )
     };
 
     match sqlx::query(&update_query).execute(pool.as_ref()).await {
         Ok(_) => Ok("Node status updated".to_string()),
         Err(e) => {
-            let err_msg = format!("Failed to update node status: {}", e);
+            let err_msg = format!("Failed to update node status: {e}");
             ctx.trace_info(&err_msg);
             Err(err_msg)
         }

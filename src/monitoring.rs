@@ -1,5 +1,7 @@
 //! Monitoring functions for pg_durable - using Duroxide Client Management API
 
+#![allow(clippy::type_complexity)] // Required for pgrx TableIterator return types
+
 use duroxide::Client;
 use pgrx::prelude::*;
 use std::sync::Arc;
@@ -308,8 +310,7 @@ pub fn instance_nodes(
     )> = Spi::connect(|client| {
         let sql = format!(
             r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, updated_at
-                   FROM df.nodes WHERE instance_id = '{}'"#,
-            instance_id
+                   FROM df.nodes WHERE instance_id = '{instance_id}'"#
         );
         let mut nodes = Vec::new();
         if let Ok(table) = client.select(&sql, None, &[]) {

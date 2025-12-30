@@ -67,7 +67,7 @@ fn explain_instance(instance_id: &str) -> String {
 
     let (root_id, label, pg_status) = match instance_info {
         Some(info) => info,
-        None => return format!("Instance '{}' not found", instance_id),
+        None => return format!("Instance '{instance_id}' not found"),
     };
 
     // Get status and output from Duroxide
@@ -77,7 +77,7 @@ fn explain_instance(instance_id: &str) -> String {
     let nodes = load_nodes_from_table("df.nodes", Some(instance_id));
 
     if nodes.is_empty() {
-        return format!("No nodes found for instance '{}'", instance_id);
+        return format!("No nodes found for instance '{instance_id}'");
     }
 
     // Build header
@@ -85,9 +85,9 @@ fn explain_instance(instance_id: &str) -> String {
 
     // Instance ID and label
     if let Some(lbl) = label {
-        result.push_str(&format!("Instance: {} ({})\n", instance_id, lbl));
+        result.push_str(&format!("Instance: {instance_id} ({lbl})\n"));
     } else {
-        result.push_str(&format!("Instance: {}\n", instance_id));
+        result.push_str(&format!("Instance: {instance_id}\n"));
     }
 
     // Status with icon
@@ -102,7 +102,7 @@ fn explain_instance(instance_id: &str) -> String {
         "running" => "⏳",
         _ => "○",
     };
-    result.push_str(&format!("Status:   {} {}\n", status_icon, status));
+    result.push_str(&format!("Status:   {status_icon} {status}\n"));
 
     // Output (truncated if too long)
     if let Some(out) = output {
@@ -111,7 +111,7 @@ fn explain_instance(instance_id: &str) -> String {
         } else {
             out
         };
-        result.push_str(&format!("Output:   {}\n", truncated));
+        result.push_str(&format!("Output:   {truncated}\n"));
     }
 
     result.push('\n');
@@ -174,7 +174,7 @@ fn explain_expression(expr: &str) -> String {
             updated_at TIMESTAMPTZ DEFAULT now()
         )"#,
     ) {
-        return format!("Failed to create temp table: {:?}", e);
+        return format!("Failed to create temp table: {e:?}");
     }
 
     // Clear any previous dry-run nodes
@@ -184,7 +184,7 @@ fn explain_expression(expr: &str) -> String {
     let _ = Spi::run("SET LOCAL df._explain_mode = 'true'");
 
     // 3. Execute the expression to populate temp table
-    let durofut_json: Result<Option<String>, _> = Spi::get_one(&format!("SELECT {}", expr));
+    let durofut_json: Result<Option<String>, _> = Spi::get_one(&format!("SELECT {expr}"));
 
     // 4. Reset explain mode
     let _ = Spi::run("RESET df._explain_mode");
@@ -192,13 +192,13 @@ fn explain_expression(expr: &str) -> String {
     let root_json = match durofut_json {
         Ok(Some(json)) => json,
         Ok(None) => return "Expression returned NULL".to_string(),
-        Err(e) => return format!("Failed to evaluate expression: {:?}", e),
+        Err(e) => return format!("Failed to evaluate expression: {e:?}"),
     };
 
     // Parse the root node ID from the Durofut JSON
     let root_id = match serde_json::from_str::<serde_json::Value>(&root_json) {
         Ok(v) => v["node_id"].as_str().unwrap_or("").to_string(),
-        Err(e) => return format!("Failed to parse result: {:?}", e),
+        Err(e) => return format!("Failed to parse result: {e:?}"),
     };
 
     if root_id.is_empty() {
@@ -228,8 +228,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
         )
     } else {
         format!(
-            "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {}",
-            table
+            "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {table}"
         )
     };
 
@@ -274,7 +273,7 @@ fn build_tree_visualization(
 
     lines
         .iter()
-        .map(|line| format!("{:width$}", line, width = padded_width))
+        .map(|line| format!("{line:padded_width$}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -346,8 +345,7 @@ fn build_tree_recursive(
 
                 let seq_display = format_node_display(seq_node);
                 output.push_str(&format!(
-                    "{}{}{}{}\n",
-                    prefix, seq_connector, seq_display, seq_status
+                    "{prefix}{seq_connector}{seq_display}{seq_status}\n"
                 ));
 
                 // If this node has children (not THEN), recurse
@@ -357,7 +355,7 @@ fn build_tree_recursive(
                     && seq_node.node_type != "WAIT_SCHEDULE"
                     && seq_node.node_type != "HTTP"
                 {
-                    let child_prefix = format!("{}    ", prefix);
+                    let child_prefix = format!("{prefix}    ");
                     render_children(seq_node, nodes, &child_prefix, output, show_status);
                 }
             }
@@ -365,17 +363,16 @@ fn build_tree_recursive(
     } else {
         // Regular node - output it
         output.push_str(&format!(
-            "{}{}{}{}\n",
-            prefix, connector, node_display, status_marker
+            "{prefix}{connector}{node_display}{status_marker}\n"
         ));
 
         // Recurse into children
         let child_prefix = if prefix.is_empty() {
             "    ".to_string()
         } else if is_last {
-            format!("{}    ", prefix)
+            format!("{prefix}    ")
         } else {
-            format!("{}│   ", prefix)
+            format!("{prefix}│   ")
         };
 
         render_children(node, nodes, &child_prefix, output, show_status);
@@ -429,11 +426,11 @@ fn render_children(
                 .and_then(|v| v["condition_node"].as_str().map(|s| s.to_string()));
 
             if let Some(ref body_id) = node.left_node {
-                output.push_str(&format!("{}↻ body:\n", prefix));
+                output.push_str(&format!("{prefix}↻ body:\n"));
                 build_tree_recursive(
                     body_id,
                     nodes,
-                    &format!("{}  ", prefix),
+                    &format!("{prefix}  "),
                     true,
                     output,
                     show_status,
@@ -441,11 +438,11 @@ fn render_children(
             }
 
             if let Some(ref cond_id) = condition_id {
-                output.push_str(&format!("{}? while:\n", prefix));
+                output.push_str(&format!("{prefix}? while:\n"));
                 build_tree_recursive(
                     cond_id,
                     nodes,
-                    &format!("{}  ", prefix),
+                    &format!("{prefix}  "),
                     true,
                     output,
                     show_status,
@@ -464,11 +461,11 @@ fn render_children(
                 .and_then(|v| v["condition_node"].as_str().map(|s| s.to_string()));
 
             if let Some(ref cond_id) = condition_id {
-                output.push_str(&format!("{}? condition:\n", prefix));
+                output.push_str(&format!("{prefix}? condition:\n"));
                 build_tree_recursive(
                     cond_id,
                     nodes,
-                    &format!("{}  ", prefix),
+                    &format!("{prefix}  "),
                     true,
                     output,
                     show_status,
@@ -476,11 +473,11 @@ fn render_children(
             }
 
             if let Some(ref then_id) = node.left_node {
-                output.push_str(&format!("{}✓ then:\n", prefix));
+                output.push_str(&format!("{prefix}✓ then:\n"));
                 build_tree_recursive(
                     then_id,
                     nodes,
-                    &format!("{}  ", prefix),
+                    &format!("{prefix}  "),
                     true,
                     output,
                     show_status,
@@ -488,11 +485,11 @@ fn render_children(
             }
 
             if let Some(ref else_id) = node.right_node {
-                output.push_str(&format!("{}✗ else:\n", prefix));
+                output.push_str(&format!("{prefix}✗ else:\n"));
                 build_tree_recursive(
                     else_id,
                     nodes,
-                    &format!("{}  ", prefix),
+                    &format!("{prefix}  "),
                     true,
                     output,
                     show_status,
@@ -528,7 +525,7 @@ fn render_children(
                 build_tree_recursive(
                     branch_id,
                     nodes,
-                    &format!("{}  ", prefix),
+                    &format!("{prefix}  "),
                     is_last_branch,
                     output,
                     show_status,
@@ -546,7 +543,7 @@ fn format_node_display(node: &ExplainNode) -> String {
     let name_suffix = node
         .result_name
         .as_ref()
-        .map(|n| format!(" |=> '{}'", n))
+        .map(|n| format!(" |=> '{n}'"))
         .unwrap_or_default();
 
     match node.node_type.as_str() {
@@ -557,11 +554,11 @@ fn format_node_display(node: &ExplainNode) -> String {
             } else {
                 query.to_string()
             };
-            format!("SQL: {}{}", truncated, name_suffix)
+            format!("SQL: {truncated}{name_suffix}")
         }
         "SLEEP" => {
             let seconds = node.query.as_deref().unwrap_or("?");
-            format!("SLEEP {}s{}", seconds, name_suffix)
+            format!("SLEEP {seconds}s{name_suffix}")
         }
         "WAIT_SCHEDULE" => {
             // Parse config to get cron expression and wait seconds
@@ -575,7 +572,7 @@ fn format_node_display(node: &ExplainNode) -> String {
                     (c, s)
                 })
                 .unwrap_or_else(|| ("?".to_string(), 0));
-            format!("WAIT '{}' ({}s){}", cron, secs, name_suffix)
+            format!("WAIT '{cron}' ({secs}s){name_suffix}")
         }
         "HTTP" => {
             // Parse config to get method and URL
@@ -595,7 +592,7 @@ fn format_node_display(node: &ExplainNode) -> String {
                     (method.to_string(), display_url)
                 })
                 .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
-            format!("HTTP {} {}{}", method, url, name_suffix)
+            format!("HTTP {method} {url}{name_suffix}")
         }
         "SIGNAL" => {
             // Parse config to get signal name and timeout
@@ -609,8 +606,8 @@ fn format_node_display(node: &ExplainNode) -> String {
                     (name.to_string(), timeout)
                 })
                 .unwrap_or_else(|| ("?".to_string(), None));
-            let timeout_str = timeout.map(|t| format!(" ({}s)", t)).unwrap_or_default();
-            format!("SIGNAL '{}'{}{}", signal_name, timeout_str, name_suffix)
+            let timeout_str = timeout.map(|t| format!(" ({t}s)")).unwrap_or_default();
+            format!("SIGNAL '{signal_name}'{timeout_str}{name_suffix}")
         }
         "LOOP" => {
             // Check if it has a while condition
@@ -621,9 +618,9 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .map(|cfg| cfg["condition_node"].is_string())
                 .unwrap_or(false);
             if has_condition {
-                format!("LOOP (while){}", name_suffix)
+                format!("LOOP (while){name_suffix}")
             } else {
-                format!("LOOP (infinite){}", name_suffix)
+                format!("LOOP (infinite){name_suffix}")
             }
         }
         "BREAK" => {
@@ -635,11 +632,11 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .and_then(|cfg| cfg["break_value"].as_str().map(|s| s.to_string()));
             match value {
                 Some(v) if v.len() > 20 => format!("BREAK '{}...'{}", &v[..17], name_suffix),
-                Some(v) => format!("BREAK '{}'{}", v, name_suffix),
-                None => format!("BREAK{}", name_suffix),
+                Some(v) => format!("BREAK '{v}'{name_suffix}"),
+                None => format!("BREAK{name_suffix}"),
             }
         }
-        "IF" => format!("IF{}", name_suffix),
+        "IF" => format!("IF{name_suffix}"),
         "JOIN" => {
             // Count branches
             let mut count = 0;
@@ -656,7 +653,7 @@ fn format_node_display(node: &ExplainNode) -> String {
                     }
                 }
             }
-            format!("JOIN ({}){}", count, name_suffix)
+            format!("JOIN ({count}){name_suffix}")
         }
         "THEN" => "SEQUENCE".to_string(), // Should rarely be seen due to flattening
         _ => node.node_type.clone(),

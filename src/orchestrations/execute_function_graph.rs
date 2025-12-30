@@ -32,12 +32,12 @@ struct ExecutionContext {
 /// Execute a complete function graph
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
     let input: FunctionInput = serde_json::from_str(&input_json)
-        .map_err(|e| format!("Invalid orchestration input: {}", e))?;
+        .map_err(|e| format!("Invalid orchestration input: {e}"))?;
 
     let label_info = input
         .label
         .as_ref()
-        .map(|l| format!(" ({})", l))
+        .map(|l| format!(" ({l})"))
         .unwrap_or_default();
     ctx.trace_info(format!(
         "Starting ExecuteFunctionGraph for instance: {}{}",
@@ -48,7 +48,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         // Sort keys for deterministic logging
         let mut keys: Vec<_> = input.vars.keys().collect();
         keys.sort();
-        ctx.trace_info(format!("Workflow vars: {:?}", keys));
+        ctx.trace_info(format!("Workflow vars: {keys:?}"));
     }
 
     let graph_json = ctx
@@ -60,7 +60,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         .await?;
 
     let graph: FunctionGraph = serde_json::from_str(&graph_json)
-        .map_err(|e| format!("Failed to parse function graph: {}", e))?;
+        .map_err(|e| format!("Failed to parse function graph: {e}"))?;
 
     ctx.trace_info(format!(
         "Executing function with {} nodes, root: {}",
@@ -82,7 +82,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
 
     match &function_result {
         Ok(result) => {
-            ctx.trace_info(format!("Function completed with result: {}", result));
+            ctx.trace_info(format!("Function completed with result: {result}"));
             let status_input = serde_json::json!({
                 "instance_id": input.instance_id,
                 "status": "completed"
@@ -96,7 +96,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
                 .await;
         }
         Err(err) => {
-            ctx.trace_info(format!("Function failed with error: {}", err));
+            ctx.trace_info(format!("Function failed with error: {err}"));
             let status_input = serde_json::json!({
                 "instance_id": input.instance_id,
                 "status": "failed"
@@ -120,7 +120,7 @@ pub async fn execute_subtree(
     input_json: String,
 ) -> Result<String, String> {
     let input: serde_json::Value = serde_json::from_str(&input_json)
-        .map_err(|e| format!("Failed to parse ExecuteSubtree input: {}", e))?;
+        .map_err(|e| format!("Failed to parse ExecuteSubtree input: {e}"))?;
 
     let graph_json = input["graph"]
         .as_str()
@@ -133,11 +133,11 @@ pub async fn execute_subtree(
         .ok_or("Missing results in ExecuteSubtree input")?;
 
     let graph: FunctionGraph = serde_json::from_str(graph_json)
-        .map_err(|e| format!("Failed to parse graph in ExecuteSubtree: {}", e))?;
+        .map_err(|e| format!("Failed to parse graph in ExecuteSubtree: {e}"))?;
     let mut results: HashMap<String, String> = serde_json::from_str(results_json)
-        .map_err(|e| format!("Failed to parse results in ExecuteSubtree: {}", e))?;
+        .map_err(|e| format!("Failed to parse results in ExecuteSubtree: {e}"))?;
 
-    ctx.trace_info(format!("ExecuteSubtree: executing node {}", node_id));
+    ctx.trace_info(format!("ExecuteSubtree: executing node {node_id}"));
 
     // Use empty execution context for subtrees (vars not passed to subtrees currently)
     let exec_ctx = ExecutionContext {
@@ -148,7 +148,7 @@ pub async fn execute_subtree(
     let result =
         execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await?;
 
-    ctx.trace_info(format!("ExecuteSubtree: node {} completed", node_id));
+    ctx.trace_info(format!("ExecuteSubtree: node {node_id} completed"));
     Ok(result)
 }
 
@@ -163,7 +163,7 @@ async fn execute_function_node_with_vars(
     let node = graph
         .nodes
         .get(node_id)
-        .ok_or_else(|| format!("Node not found: {}", node_id))?;
+        .ok_or_else(|| format!("Node not found: {node_id}"))?;
 
     ctx.trace_info(format!(
         "Executing node {} (type: {})",
@@ -247,7 +247,7 @@ async fn execute_node_inner(
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
-        other => Err(format!("Unknown node type: {}", other)),
+        other => Err(format!("Unknown node type: {other}")),
     }
 }
 
@@ -266,10 +266,10 @@ async fn execute_sql_node(
     let query = node
         .query
         .as_ref()
-        .ok_or_else(|| format!("SQL node {} has no query", node_id))?;
+        .ok_or_else(|| format!("SQL node {node_id} has no query"))?;
 
     let final_query = substitute_all(query, results, &exec_ctx.vars, sys_vars);
-    ctx.trace_info(format!("Executing SQL: {}", final_query));
+    ctx.trace_info(format!("Executing SQL: {final_query}"));
 
     let result = ctx
         .schedule_activity(activities::execute_sql::NAME, final_query)
@@ -277,7 +277,7 @@ async fn execute_sql_node(
         .await?;
 
     if let Some(name) = &node.result_name {
-        ctx.trace_info(format!("Storing result as ${}", name));
+        ctx.trace_info(format!("Storing result as ${name}"));
         results.insert(name.clone(), result.clone());
     }
 
@@ -295,11 +295,11 @@ async fn execute_then_node(
     let left_id = node
         .left_node
         .as_ref()
-        .ok_or_else(|| format!("THEN node {} has no left_node", node_id))?;
+        .ok_or_else(|| format!("THEN node {node_id} has no left_node"))?;
     let right_id = node
         .right_node
         .as_ref()
-        .ok_or_else(|| format!("THEN node {} has no right_node", node_id))?;
+        .ok_or_else(|| format!("THEN node {node_id} has no right_node"))?;
 
     let left_result = Box::pin(execute_function_node_with_vars(
         ctx, graph, left_id, results, exec_ctx,
@@ -327,18 +327,18 @@ async fn execute_sleep_node(
     let seconds_str = node
         .query
         .as_ref()
-        .ok_or_else(|| format!("SLEEP node {} has no duration", node_id))?;
+        .ok_or_else(|| format!("SLEEP node {node_id} has no duration"))?;
 
     let seconds: u64 = seconds_str
         .parse()
-        .map_err(|_| format!("Invalid sleep duration: {}", seconds_str))?;
+        .map_err(|_| format!("Invalid sleep duration: {seconds_str}"))?;
 
-    ctx.trace_info(format!("Sleeping for {} seconds", seconds));
+    ctx.trace_info(format!("Sleeping for {seconds} seconds"));
     ctx.schedule_timer(Duration::from_secs(seconds))
         .into_timer()
         .await;
 
-    Ok(format!(r#"{{"slept": true, "seconds": {}}}"#, seconds))
+    Ok(format!(r#"{{"slept": true, "seconds": {seconds}}}"#))
 }
 
 async fn execute_wait_schedule_node(
@@ -349,11 +349,11 @@ async fn execute_wait_schedule_node(
     let config_str = node
         .query
         .as_ref()
-        .ok_or_else(|| format!("WAIT_SCHEDULE node {} has no config", node_id))?;
+        .ok_or_else(|| format!("WAIT_SCHEDULE node {node_id} has no config"))?;
 
     // Parse pre-computed config from DSL time
     let config: serde_json::Value = serde_json::from_str(config_str)
-        .map_err(|e| format!("Invalid WAIT_SCHEDULE config: {}", e))?;
+        .map_err(|e| format!("Invalid WAIT_SCHEDULE config: {e}"))?;
 
     let wait_seconds = config["wait_seconds"]
         .as_u64()
@@ -362,8 +362,7 @@ async fn execute_wait_schedule_node(
     let cron_expr = config["cron_expr"].as_str().unwrap_or("?");
 
     ctx.trace_info(format!(
-        "Waiting {} seconds until schedule: {}",
-        wait_seconds, cron_expr
+        "Waiting {wait_seconds} seconds until schedule: {cron_expr}"
     ));
     ctx.schedule_timer(Duration::from_secs(wait_seconds))
         .into_timer()
@@ -406,7 +405,7 @@ async fn execute_loop_node(
     let body_id = node
         .left_node
         .as_ref()
-        .ok_or_else(|| format!("LOOP node {} has no body", node_id))?;
+        .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
 
     ctx.trace_info("Executing loop iteration");
     let body_result = Box::pin(execute_function_node_with_vars(
@@ -418,8 +417,7 @@ async fn execute_loop_node(
     if is_break_signal(&body_result) {
         let break_value = extract_break_value(&body_result);
         ctx.trace_info(format!(
-            "Loop terminated by break with value: {}",
-            break_value
+            "Loop terminated by break with value: {break_value}"
         ));
         return Ok(break_value);
     }
@@ -441,8 +439,7 @@ async fn execute_loop_node(
                 // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
                 let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
                 ctx.trace_info(format!(
-                    "Loop condition evaluated to: {} (continue={})",
-                    condition_result, should_continue
+                    "Loop condition evaluated to: {condition_result} (continue={should_continue})"
                 ));
 
                 if !should_continue {
@@ -466,7 +463,7 @@ async fn execute_loop_node(
         .continue_as_new(serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()))
         .await
         .map(|_| body_result)
-        .map_err(|e| format!("continue_as_new failed: {:?}", e));
+        .map_err(|e| format!("continue_as_new failed: {e:?}"));
 }
 
 async fn execute_break_node(
@@ -488,8 +485,7 @@ async fn execute_break_node(
         });
 
     ctx.trace_info(format!(
-        "BREAK node {} executed with value: {:?}",
-        node_id, break_value
+        "BREAK node {node_id} executed with value: {break_value:?}"
     ));
 
     // Return a special break signal that the loop will detect
@@ -512,9 +508,9 @@ async fn execute_if_node(
     let config_str = node
         .query
         .as_ref()
-        .ok_or_else(|| format!("IF node {} has no config", node_id))?;
+        .ok_or_else(|| format!("IF node {node_id} has no config"))?;
     let config: serde_json::Value =
-        serde_json::from_str(config_str).map_err(|e| format!("Invalid IF config: {}", e))?;
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid IF config: {e}"))?;
 
     let condition_node_id = config["condition_node"]
         .as_str()
@@ -523,11 +519,11 @@ async fn execute_if_node(
     let then_id = node
         .left_node
         .as_ref()
-        .ok_or_else(|| format!("IF node {} has no then branch", node_id))?;
+        .ok_or_else(|| format!("IF node {node_id} has no then branch"))?;
     let else_id = node
         .right_node
         .as_ref()
-        .ok_or_else(|| format!("IF node {} has no else branch", node_id))?;
+        .ok_or_else(|| format!("IF node {node_id} has no else branch"))?;
 
     ctx.trace_info("Evaluating IF condition");
     let condition_result = Box::pin(execute_function_node_with_vars(
@@ -540,7 +536,7 @@ async fn execute_if_node(
     .await?;
 
     let is_true = evaluate_condition(&condition_result)?;
-    ctx.trace_info(format!("Condition evaluated to: {}", is_true));
+    ctx.trace_info(format!("Condition evaluated to: {is_true}"));
 
     if is_true {
         Box::pin(execute_function_node_with_vars(
@@ -565,18 +561,18 @@ async fn execute_join_node(
     let left_id = node
         .left_node
         .as_ref()
-        .ok_or_else(|| format!("JOIN node {} has no left branch", node_id))?;
+        .ok_or_else(|| format!("JOIN node {node_id} has no left branch"))?;
     let right_id = node
         .right_node
         .as_ref()
-        .ok_or_else(|| format!("JOIN node {} has no right branch", node_id))?;
+        .ok_or_else(|| format!("JOIN node {node_id} has no right branch"))?;
 
     ctx.trace_info("Executing JOIN branches in parallel");
 
     let graph_json =
-        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {}", e))?;
-    let results_json = serde_json::to_string(&results)
-        .map_err(|e| format!("Failed to serialize results: {}", e))?;
+        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
+    let results_json =
+        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
 
     let left_input = serde_json::json!({
         "graph": graph_json,
@@ -649,7 +645,7 @@ async fn execute_join_node(
 
     // Store result if named
     if let Some(name) = &node.result_name {
-        ctx.trace_info(format!("Storing JOIN result as ${}", name));
+        ctx.trace_info(format!("Storing JOIN result as ${name}"));
         results.insert(name.clone(), result.clone());
     }
 
@@ -666,18 +662,18 @@ async fn execute_race_node(
     let left_id = node
         .left_node
         .as_ref()
-        .ok_or_else(|| format!("RACE node {} has no left branch", node_id))?;
+        .ok_or_else(|| format!("RACE node {node_id} has no left branch"))?;
     let right_id = node
         .right_node
         .as_ref()
-        .ok_or_else(|| format!("RACE node {} has no right branch", node_id))?;
+        .ok_or_else(|| format!("RACE node {node_id} has no right branch"))?;
 
     ctx.trace_info("Executing RACE branches in parallel (first wins)");
 
     let graph_json =
-        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {}", e))?;
-    let results_json = serde_json::to_string(&results)
-        .map_err(|e| format!("Failed to serialize results: {}", e))?;
+        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
+    let results_json =
+        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
 
     let left_input = serde_json::json!({
         "graph": graph_json,
@@ -705,18 +701,18 @@ async fn execute_race_node(
             ctx.trace_info("RACE completed - first result received");
             Ok(r)
         }
-        duroxide::DurableOutput::SubOrchestration(Err(e)) => Err(format!("RACE failed: {}", e)),
+        duroxide::DurableOutput::SubOrchestration(Err(e)) => Err(format!("RACE failed: {e}")),
         duroxide::DurableOutput::Activity(Ok(r)) => {
             ctx.trace_info("RACE completed - first result received");
             Ok(r)
         }
-        duroxide::DurableOutput::Activity(Err(e)) => Err(format!("RACE failed: {}", e)),
+        duroxide::DurableOutput::Activity(Err(e)) => Err(format!("RACE failed: {e}")),
         _ => Err("RACE returned unexpected type".to_string()),
     }?;
 
     // Store result if named
     if let Some(name) = &node.result_name {
-        ctx.trace_info(format!("Storing RACE result as ${}", name));
+        ctx.trace_info(format!("Storing RACE result as ${name}"));
         results.insert(name.clone(), result.clone());
     }
 
@@ -734,11 +730,11 @@ async fn execute_http_node(
     let config_str = node
         .query
         .as_ref()
-        .ok_or_else(|| format!("HTTP node {} has no config", node_id))?;
+        .ok_or_else(|| format!("HTTP node {node_id} has no config"))?;
 
     // Parse config to substitute variables in body and URL
     let mut config: serde_json::Value =
-        serde_json::from_str(config_str).map_err(|e| format!("Invalid HTTP config: {}", e))?;
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid HTTP config: {e}"))?;
 
     // Substitute variables in body if present
     if let Some(body) = config.get("body").and_then(|b| b.as_str()) {
@@ -774,7 +770,7 @@ async fn execute_http_node(
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");
     let method = config["method"].as_str().unwrap_or("POST");
-    ctx.trace_info(format!("Executing HTTP {} {}", method, url));
+    ctx.trace_info(format!("Executing HTTP {method} {url}"));
 
     let result = ctx
         .schedule_activity(activities::execute_http::NAME, final_config)
@@ -783,7 +779,7 @@ async fn execute_http_node(
 
     // Store result if named
     if let Some(name) = &node.result_name {
-        ctx.trace_info(format!("Storing HTTP result as ${}", name));
+        ctx.trace_info(format!("Storing HTTP result as ${name}"));
         results.insert(name.clone(), result.clone());
     }
 
@@ -799,10 +795,10 @@ async fn execute_signal_node(
     let config_str = node
         .query
         .as_ref()
-        .ok_or_else(|| format!("SIGNAL node {} has no config", node_id))?;
+        .ok_or_else(|| format!("SIGNAL node {node_id} has no config"))?;
 
     let config: serde_json::Value =
-        serde_json::from_str(config_str).map_err(|e| format!("Invalid SIGNAL config: {}", e))?;
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid SIGNAL config: {e}"))?;
 
     let signal_name = config["signal_name"]
         .as_str()
@@ -813,7 +809,7 @@ async fn execute_signal_node(
         "Waiting for signal: {}{}",
         signal_name,
         timeout_seconds
-            .map(|t| format!(" (timeout: {}s)", t))
+            .map(|t| format!(" (timeout: {t}s)"))
             .unwrap_or_default()
     ));
 
@@ -861,7 +857,7 @@ async fn execute_signal_node(
 
     // Store result if named
     if let Some(name) = &node.result_name {
-        ctx.trace_info(format!("Storing signal result as ${}", name));
+        ctx.trace_info(format!("Storing signal result as ${name}"));
         results.insert(name.clone(), result_str.clone());
     }
 

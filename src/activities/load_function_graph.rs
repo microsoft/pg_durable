@@ -23,14 +23,10 @@ pub async fn execute(
     instance_id: String,
 ) -> Result<String, String> {
     ctx.trace_info(format!(
-        "Loading function graph for instance: {}",
-        instance_id
+        "Loading function graph for instance: {instance_id}"
     ));
 
-    let instance_query = format!(
-        "SELECT root_node FROM df.instances WHERE id = '{}'",
-        instance_id
-    );
+    let instance_query = format!("SELECT root_node FROM df.instances WHERE id = '{instance_id}'");
 
     // Retry loop: wait for instance data to appear
     let start_time = std::time::Instant::now();
@@ -44,15 +40,13 @@ pub async fn execute(
                 let elapsed = start_time.elapsed();
                 if elapsed.as_secs() >= MAX_WAIT_SECS {
                     return Err(format!(
-                        "Instance {} not found after {}s (transaction may have been rolled back): {}",
-                        instance_id, MAX_WAIT_SECS, e
+                        "Instance {instance_id} not found after {MAX_WAIT_SECS}s (transaction may have been rolled back): {e}"
                     ));
                 }
                 // Log first retry and then every second
                 if elapsed.as_millis() < POLL_INTERVAL_MS as u128 * 2 {
                     ctx.trace_info(format!(
-                        "Instance {} not yet visible, waiting for transaction commit...",
-                        instance_id
+                        "Instance {instance_id} not yet visible, waiting for transaction commit..."
                     ));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
@@ -63,13 +57,12 @@ pub async fn execute(
     let nodes_query = format!(
         r#"SELECT id, node_type, query, result_name,
            left_node, right_node
-        FROM df.nodes WHERE instance_id = '{}'"#,
-        instance_id
+        FROM df.nodes WHERE instance_id = '{instance_id}'"#
     );
 
     let rows = match sqlx::query(&nodes_query).fetch_all(pool.as_ref()).await {
         Ok(rows) => rows,
-        Err(e) => return Err(format!("Failed to load function nodes: {}", e)),
+        Err(e) => return Err(format!("Failed to load function nodes: {e}")),
     };
 
     let mut nodes = std::collections::BTreeMap::new();
@@ -97,5 +90,5 @@ pub async fn execute(
         graph.nodes.len()
     ));
 
-    serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {}", e))
+    serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))
 }

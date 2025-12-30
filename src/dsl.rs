@@ -193,7 +193,7 @@ pub fn sleep(seconds: i64) -> String {
 /// to ensure deterministic replay in the orchestration.
 #[pg_extern(schema = "df")]
 pub fn wait_for_schedule(cron_expr: &str) -> String {
-    let cron_with_seconds = format!("0 {}", cron_expr);
+    let cron_with_seconds = format!("0 {cron_expr}");
     let schedule = match CronSchedule::from_str(&cron_with_seconds) {
         Ok(s) => s,
         Err(e) => pgrx::error!("Invalid cron expression '{}': {}", cron_expr, e),
@@ -553,30 +553,25 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         }
         visited.insert(node_id.to_string());
 
-        let update_sql = format!(
-            "UPDATE df.nodes SET instance_id = '{}' WHERE id = '{}'",
-            instance_id, node_id
-        );
+        let update_sql =
+            format!("UPDATE df.nodes SET instance_id = '{instance_id}' WHERE id = '{node_id}'");
         let _ = Spi::run(&update_sql);
 
         // Get child node IDs
         let left: Option<String> = Spi::get_one(&format!(
-            "SELECT left_node FROM df.nodes WHERE id = '{}'",
-            node_id
+            "SELECT left_node FROM df.nodes WHERE id = '{node_id}'"
         ))
         .ok()
         .flatten();
 
         let right: Option<String> = Spi::get_one(&format!(
-            "SELECT right_node FROM df.nodes WHERE id = '{}'",
-            node_id
+            "SELECT right_node FROM df.nodes WHERE id = '{node_id}'"
         ))
         .ok()
         .flatten();
 
         let config: Option<String> = Spi::get_one(&format!(
-            "SELECT query FROM df.nodes WHERE id = '{}'",
-            node_id
+            "SELECT query FROM df.nodes WHERE id = '{node_id}'"
         ))
         .ok()
         .flatten();
@@ -649,25 +644,21 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
     use crate::client::cancel_durable_function;
 
     if let Err(e) = cancel_durable_function(instance_id, reason) {
-        return format!("Failed to cancel: {}", e);
+        return format!("Failed to cancel: {e}");
     }
 
     let update_sql = format!(
-        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = '{}'",
-        instance_id
+        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = '{instance_id}'"
     );
     let _ = Spi::run(&update_sql);
 
-    format!("Instance {} cancelled: {}", instance_id, reason)
+    format!("Instance {instance_id} cancelled: {reason}")
 }
 
 /// Gets the status of a durable function instance.
 #[pg_extern(schema = "df")]
 pub fn status(instance_id: &str) -> Option<String> {
-    let sql = format!(
-        "SELECT status FROM df.instances WHERE id = '{}'",
-        instance_id
-    );
+    let sql = format!("SELECT status FROM df.instances WHERE id = '{instance_id}'");
     Spi::get_one::<String>(&sql).ok().flatten()
 }
 
@@ -675,7 +666,7 @@ pub fn status(instance_id: &str) -> Option<String> {
 #[pg_extern(schema = "df")]
 pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
     if let Some(id) = instance_id {
-        format!("Triggered run for instance: {}", id)
+        format!("Triggered run for instance: {id}")
     } else {
         "Triggered run for all pending instances".to_string()
     }
@@ -686,9 +677,8 @@ pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
 pub fn result(instance_id: &str) -> Option<String> {
     let sql = format!(
         r#"SELECT result::text FROM df.nodes 
-           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{}')
-           AND status = 'completed'"#,
-        instance_id
+           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{instance_id}')
+           AND status = 'completed'"#
     );
     Spi::get_one::<String>(&sql).ok().flatten()
 }

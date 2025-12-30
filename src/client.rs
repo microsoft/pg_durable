@@ -41,7 +41,7 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
         let store = Arc::new(
             PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
                 .await
-                .map_err(|e| format!("Failed to connect to duroxide store: {}", e))?,
+                .map_err(|e| format!("Failed to connect to duroxide store: {e}"))?,
         );
 
         let _ = DUROXIDE_CLIENT.set(Client::new(store));
@@ -69,7 +69,7 @@ pub fn start_durable_function(
         client
             .start_orchestration(instance_id, function_name, input)
             .await
-            .map_err(|e| format!("Failed to start durable function: {:?}", e))?;
+            .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
         Ok(())
     })
 }
@@ -83,7 +83,7 @@ pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), St
         client
             .cancel_instance(instance_id, reason)
             .await
-            .map_err(|e| format!("Failed to cancel durable function: {:?}", e))?;
+            .map_err(|e| format!("Failed to cancel durable function: {e:?}"))?;
         Ok(())
     })
 }
@@ -97,7 +97,7 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
         client
             .raise_event(instance_id, event_name, data)
             .await
-            .map_err(|e| format!("Failed to raise event: {:?}", e))?;
+            .map_err(|e| format!("Failed to raise event: {e:?}"))?;
         Ok(())
     })
 }

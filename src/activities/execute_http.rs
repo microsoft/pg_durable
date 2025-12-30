@@ -11,7 +11,7 @@ pub const NAME: &str = "pg_durable::activity::execute-http";
 /// Execute an HTTP request and return the response as JSON
 pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String, String> {
     let config: HttpConfig =
-        serde_json::from_str(&config_json).map_err(|e| format!("Invalid HTTP config: {}", e))?;
+        serde_json::from_str(&config_json).map_err(|e| format!("Invalid HTTP config: {e}"))?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!("HTTP {} {}", config.method, config.url));
@@ -20,7 +20,7 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout_seconds))
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
     // Build request based on method
     let mut request = match config.method.as_str() {
@@ -91,7 +91,7 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
     let response_body = response
         .text()
         .await
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_ok = status.is_success();

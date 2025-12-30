@@ -13,7 +13,7 @@ pub async fn execute(
     pool: Arc<PgPool>,
     query: String,
 ) -> Result<String, String> {
-    ctx.trace_info(format!("Executing SQL: {}", query));
+    ctx.trace_info(format!("Executing SQL: {query}"));
 
     match sqlx::query(&query).fetch_all(pool.as_ref()).await {
         Ok(rows) => {
@@ -52,7 +52,7 @@ pub async fn execute(
             Ok(result.to_string())
         }
         Err(e) => {
-            let err_msg = format!("SQL execution failed: {}", e);
+            let err_msg = format!("SQL execution failed: {e}");
             ctx.trace_info(&err_msg);
             Err(err_msg)
         }
