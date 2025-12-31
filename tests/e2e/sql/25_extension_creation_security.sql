@@ -53,21 +53,29 @@ CREATE SCHEMA IF NOT EXISTS df;
 
 -- Attempt to create extension with pre-existing df schema (should fail)
 DO $$
+DECLARE
+    extension_created BOOLEAN := FALSE;
 BEGIN
     -- This should fail because the schema already exists
-    CREATE EXTENSION pg_durable;
-    RAISE EXCEPTION 'SECURITY FAILURE: Extension created successfully even with pre-existing df schema!';
-EXCEPTION
-    WHEN duplicate_schema THEN
-        RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema';
-    WHEN OTHERS THEN
-        -- The extension might also fail with other errors related to schema conflicts
-        IF SQLERRM ILIKE '%schema%' OR SQLERRM ILIKE '%already exists%' THEN
-            RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema (%)' , SQLERRM;
-        ELSE
-            -- Log the error for debugging but don't fail - some PG versions might handle this differently
-            RAISE NOTICE 'TEST 2 WARNING: Unexpected error (might still be secure): %', SQLERRM;
-        END IF;
+    BEGIN
+        CREATE EXTENSION pg_durable;
+        extension_created := TRUE;
+    EXCEPTION
+        WHEN duplicate_schema THEN
+            RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema';
+        WHEN OTHERS THEN
+            -- The extension might also fail with other errors related to schema conflicts
+            IF SQLERRM ILIKE '%schema%' OR SQLERRM ILIKE '%already exists%' OR SQLERRM ILIKE '%df%' THEN
+                RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema (%)' , SQLERRM;
+            ELSE
+                RAISE EXCEPTION 'TEST 2 FAILED: Unexpected error during extension creation: %', SQLERRM;
+            END IF;
+    END;
+    
+    -- If we get here and extension was created, that's a security failure
+    IF extension_created THEN
+        RAISE EXCEPTION 'SECURITY FAILURE: Extension created successfully even with pre-existing df schema!';
+    END IF;
 END $$;
 
 -- Clean up the pre-created schema
