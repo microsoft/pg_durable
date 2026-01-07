@@ -2,7 +2,7 @@
 
 **Purpose:** Track duroxide-pg-opt issues/limitations that require workarounds in pg_durable.
 
-**Last Updated:** 2024-12-22
+**Last Updated:** 2026-01-06
 
 **GitHub Query:** [All pg_durable issues in duroxide-pg-opt](https://github.com/Azure/duroxide-pg-opt/issues?q=is%3Aissue+label%3Apg_durable)
 
@@ -34,67 +34,31 @@
 
 ## Active Blockers
 
-### 1. Schema Versioning for duroxide-pg Provider
-
-| Field | Value |
-|-------|-------|
-| **Issue** | [Azure/duroxide-pg-opt#6](https://github.com/Azure/duroxide-pg-opt/issues/6) |
-| **Also filed** | [affandar/duroxide-pg#1](https://github.com/affandar/duroxide-pg/issues/1) (FYI only) |
-| **Status** | 🔴 Open |
-| **Fixed In** | TBD |
-| **Workaround Location** | `scripts/test-e2e-local.sh` |
-
-**Problem:**
-When upgrading `duroxide` or `duroxide-pg-opt` versions, the PostgreSQL schema in the `duroxide` schema may change (new columns, changed function signatures, etc.). This causes runtime errors:
-- `function duroxide.XXX does not exist` (function signature changed)
-- `column index out of bounds` (table columns changed)
-- `cached plan must not change result type` (prepared statement cache invalidated)
-
-There is no built-in way to detect schema version mismatches or handle migrations.
-
-**Current Workaround:**
-- Test scripts drop the entire `duroxide` schema before restart
-- Requires full PostgreSQL restart to clear sqlx's prepared statement cache
-- For production: manual `DROP SCHEMA duroxide CASCADE` + restart
-
-**Desired Solution:**
-1. Store schema version in `duroxide.metadata` table
-2. On provider startup, check if schema version matches library version
-3. Options:
-   - Auto-migrate (for compatible changes)
-   - Fail fast with clear error message (for breaking changes)
-   - Provide migration scripts between versions
-
-**When Fixed - Cleanup Steps:**
-1. Update duroxide/duroxide-pg-opt dependency in `Cargo.toml`
-2. Remove manual schema drop logic from test scripts
-3. Implement proper upgrade documentation
-4. Update this document
-
-**Files to Update:**
-- [ ] `scripts/test-e2e-local.sh` (remove `DROP SCHEMA duroxide CASCADE`)
-- [ ] Documentation (add upgrade guide)
+_No active blockers at this time._
 
 ---
 
 ## Resolved Blockers
 
-_None yet. Move items here when fixed._
-
-<!--
-Template for resolved blocker:
-
-### [RESOLVED] Issue Title
+### [RESOLVED] Schema Versioning for duroxide-pg Provider
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [GitHub #XX](https://github.com/anthropics/duroxide/issues/XX) |
+| **Issue** | [Azure/duroxide-pg-opt#6](https://github.com/Azure/duroxide-pg-opt/issues/6) |
+| **Also filed** | [affandar/duroxide-pg#1](https://github.com/affandar/duroxide-pg/issues/1) (FYI only) |
 | **Status** | ✅ Resolved |
-| **Fixed In** | v0.1.X |
-| **Cleanup PR** | [#YY](link) |
+| **Fixed In** | duroxide-pg-opt v0.1.9 (requires duroxide 0.1.11) |
 
-**Resolution Date:** YYYY-MM-DD
--->
+**Resolution Date:** 2026-01-06
+
+**Problem (was):**
+When upgrading `duroxide` or `duroxide-pg-opt` versions, the PostgreSQL schema in the `duroxide` schema may change (new columns, changed function signatures, etc.). This caused runtime errors:
+- `function duroxide.XXX does not exist` (function signature changed)
+- `column index out of bounds` (table columns changed)
+- `cached plan must not change result type` (prepared statement cache invalidated)
+
+**Resolution:**
+The duroxide-pg-opt v0.1.9 release includes ProviderAdmin lifecycle management which handles schema versioning. No workarounds were needed in pg_durable codebase at the time of the fix.
 
 ---
 
@@ -118,4 +82,5 @@ When updating the duroxide dependency, run through this checklist:
 
 | pg_durable | duroxide | duroxide-pg-opt | Notes |
 |------------|----------|-----------------|-------|
-| 0.1.0 | 0.1.6 | 0.1.6 | Current |
+| 0.1.1 | 0.1.11 | 0.1.9 | Current - schema versioning fix |
+| 0.1.0 | 0.1.6 | 0.1.6 | Legacy |
