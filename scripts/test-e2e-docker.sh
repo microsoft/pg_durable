@@ -191,19 +191,19 @@ for run in $(seq 1 $REPEAT_COUNT); do
         if [ $exit_code -eq 0 ]; then
             if echo "$output" | grep -q "TEST PASSED"; then
                 echo -e "${GREEN}PASS${NC}"
-                ((PASSED++))
+                PASSED=$((PASSED + 1))
             elif echo "$output" | grep -q "TEST FAILED"; then
                 echo -e "${RED}FAIL${NC}"
                 echo "$output" | grep -E "(NOTICE|ERROR|TEST FAILED)" | tail -15
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
             else
                 echo -e "${GREEN}PASS${NC}"
-                ((PASSED++))
+                PASSED=$((PASSED + 1))
             fi
         else
             echo -e "${RED}FAIL${NC}"
             echo "$output" | grep -E "(NOTICE|ERROR)" | tail -15
-            ((FAILED++))
+            FAILED=$((FAILED + 1))
         fi
     done
     
