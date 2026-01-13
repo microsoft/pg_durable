@@ -123,20 +123,22 @@ fn execute_sql_with_security_context(
         for row in result {
             let mut row_obj = serde_json::Map::new();
             
-            for (idx, col) in row.columns().enumerate() {
-                let col_name = col.name();
-                let col_idx = (idx + 1) as usize;
+            // Iterate over columns (pgrx columns are 1-indexed)
+            for ordinal in 1..=row.columns().len() {
+                let col_name = row.columns().get(ordinal - 1)
+                    .map(|c| c.name())
+                    .unwrap_or("unknown");
                 
                 // Try to extract value as different types
-                if let Ok(Some(val)) = row.get::<String>(col_idx) {
+                if let Ok(Some(val)) = row.get::<String>(ordinal) {
                     row_obj.insert(col_name.to_string(), serde_json::Value::String(val));
-                } else if let Ok(Some(val)) = row.get::<i64>(col_idx) {
+                } else if let Ok(Some(val)) = row.get::<i64>(ordinal) {
                     row_obj.insert(col_name.to_string(), serde_json::Value::Number(val.into()));
-                } else if let Ok(Some(val)) = row.get::<i32>(col_idx) {
+                } else if let Ok(Some(val)) = row.get::<i32>(ordinal) {
                     row_obj.insert(col_name.to_string(), serde_json::Value::Number(val.into()));
-                } else if let Ok(Some(val)) = row.get::<bool>(col_idx) {
+                } else if let Ok(Some(val)) = row.get::<bool>(ordinal) {
                     row_obj.insert(col_name.to_string(), serde_json::Value::Bool(val));
-                } else if let Ok(Some(val)) = row.get::<f64>(col_idx) {
+                } else if let Ok(Some(val)) = row.get::<f64>(ordinal) {
                     if let Some(n) = serde_json::Number::from_f64(val) {
                         row_obj.insert(col_name.to_string(), serde_json::Value::Number(n));
                     }
