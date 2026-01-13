@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS df.instances (
     label TEXT,
     root_node VARCHAR(8) NOT NULL,
     status TEXT DEFAULT 'pending',
+    submitted_by OID NOT NULL DEFAULT current_user::regrole::oid,
+    security_context JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
     completed_at TIMESTAMPTZ

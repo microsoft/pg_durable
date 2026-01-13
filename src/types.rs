@@ -9,6 +9,55 @@ use std::time::Duration;
 use uuid::Uuid;
 
 // ============================================================================
+// Security Context
+// ============================================================================
+
+/// Security context captured at df.start() time for privilege isolation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityContext {
+    pub user_oid: u32,
+    pub user_name: String,
+    pub search_path: String,
+    pub is_superuser: bool,
+}
+
+impl SecurityContext {
+    /// Capture the current session's security context
+    /// Called at df.start() time in the user's backend process
+    pub fn capture() -> Result<Self, String> {
+        // Get user OID directly from PostgreSQL (unforgeable)
+        let user_oid = unsafe { pg_sys::GetUserId() };
+        
+        let user_name = Spi::get_one::<String>("SELECT current_user")
+            .map_err(|e| format!("Failed to get current_user: {:?}", e))?
+            .ok_or("current_user is NULL")?;
+        
+        let search_path = Spi::get_one::<String>("SELECT current_setting('search_path')")
+            .map_err(|e| format!("Failed to get search_path: {:?}", e))?
+            .ok_or("search_path is NULL")?;
+        
+        let is_superuser = unsafe { pg_sys::superuser() };
+        
+        Ok(SecurityContext {
+            user_oid,
+            user_name,
+            search_path,
+            is_superuser,
+        })
+    }
+    
+    /// Serialize to JSON for storage
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| format!("Failed to serialize SecurityContext: {}", e))
+    }
+    
+    /// Deserialize from JSON
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|e| format!("Failed to deserialize SecurityContext: {}", e))
+    }
+}
+
+// ============================================================================
 // Configuration Functions
 // ============================================================================
 

@@ -10,15 +10,13 @@ use crate::orchestrations;
 
 /// Create the activity registry with all registered activities
 pub fn create_activity_registry(pool: Arc<PgPool>) -> ActivityRegistry {
-    let sql_pool = pool.clone();
     let graph_pool = pool.clone();
     let status_pool = pool.clone();
     let node_status_pool = pool.clone();
 
     ActivityRegistry::builder()
-        .register(activities::execute_sql::NAME, move |ctx: ActivityContext, query: String| {
-            let pool = sql_pool.clone();
-            async move { activities::execute_sql::execute(ctx, pool, query).await }
+        .register(activities::execute_sql::NAME, |ctx: ActivityContext, input_json: String| {
+            async move { activities::execute_sql::execute(ctx, input_json).await }
         })
         .register(activities::load_function_graph::NAME, move |ctx: ActivityContext, instance_id: String| {
             let pool = graph_pool.clone();

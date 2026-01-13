@@ -524,18 +524,33 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 /// Variables from df.vars are captured and passed to the orchestration.
 #[pg_extern(schema = "df")]
 pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
+    use crate::types::SecurityContext;
+    
     let durofut = Durofut::ensure(fut);
     let instance_id = short_id();
+
+    // Capture security context for privilege isolation
+    let sec_ctx = match SecurityContext::capture() {
+        Ok(ctx) => ctx,
+        Err(e) => pgrx::error!("Failed to capture security context: {}", e),
+    };
+    
+    let sec_ctx_json = match sec_ctx.to_json() {
+        Ok(json) => json.replace('\'', "''"),
+        Err(e) => pgrx::error!("Failed to serialize security context: {}", e),
+    };
 
     let label_sql = label
         .map(|l| format!("'{}'", l.replace('\'', "''")))
         .unwrap_or_else(|| "NULL".to_string());
 
     let create_instance_sql = format!(
-        "INSERT INTO df.instances (id, label, root_node, status) VALUES ('{}', {}, '{}', 'pending')",
+        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, security_context) VALUES ('{}', {}, '{}', 'pending', {}, '{}'::jsonb)",
         instance_id,
         label_sql,
-        durofut.node_id
+        durofut.node_id,
+        sec_ctx.user_oid,
+        sec_ctx_json
     );
 
     if let Err(e) = Spi::run(&create_instance_sql) {

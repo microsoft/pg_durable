@@ -51,6 +51,10 @@ fn is_shutdown_requested() -> bool {
 pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
+    // Connect worker to SPI for executing user SQL with security context
+    // This is the "Execution Plane" connection used by execute_sql activity
+    BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
+
     // Initialize tracing before duroxide runtime to capture all logs including startup
     init_tracing();
 

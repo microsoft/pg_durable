@@ -271,8 +271,14 @@ async fn execute_sql_node(
     let final_query = substitute_all(query, results, &exec_ctx.vars, sys_vars);
     ctx.trace_info(format!("Executing SQL: {final_query}"));
 
+    // Pass both instance_id and query to execute_sql activity
+    let input = serde_json::json!({
+        "instance_id": sys_vars.instance_id,
+        "query": final_query
+    });
+
     let result = ctx
-        .schedule_activity(activities::execute_sql::NAME, final_query)
+        .schedule_activity(activities::execute_sql::NAME, input.to_string())
         .into_activity()
         .await?;
 
