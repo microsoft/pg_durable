@@ -84,6 +84,15 @@ CREATE EXTENSION pg_durable;
 ./scripts/deploy-acr.sh
 ```
 
+## Continuous Integration
+
+All pull requests must pass the following checks before merging:
+
+1. **Format Check** — `cargo fmt --check`
+2. **Clippy & Tests** — `cargo clippy`, unit tests (`cargo pgrx test pg17`), and E2E tests
+
+The CI workflow is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml). It uses pgrx to download and manage PostgreSQL.
+
 ## Documentation
 
 - [User Guide](USER_GUIDE.md) — Complete usage guide with examples

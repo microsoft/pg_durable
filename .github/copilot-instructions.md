@@ -158,6 +158,15 @@ SELECT 'TEST PASSED' AS result;
 3. **DO NOT** use `--force` or skip hooks with `--no-verify`
 4. After merge, optionally deploy: `./scripts/deploy-acr.sh`
 
+### CI/CD Pipeline
+
+Pull requests automatically run the CI workflow (`.github/workflows/ci.yml`):
+
+1. **Format Check**: `cargo fmt --check`
+2. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
+
+All checks must pass before a PR can be merged. Configure branch protection rules in GitHub to enforce this.
+
 ### ⚠️ IMPORTANT: Git Operations
 
 **DO NOT** commit, merge, or push without asking the user first. Always present the proposed changes and get explicit approval before any git operations.
