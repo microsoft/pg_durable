@@ -31,7 +31,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # duroxide integration
 duroxide = "0.1.11"
-duroxide-pg-opt = { git = "ssh://git@github.com/Azure/duroxide-pg-opt.git", tag = "v0.1.9", package = "duroxide-pg-opt" }
+duroxide-pg-opt = { git = "https://github.com/Azure/duroxide-pg-opt.git", tag = "v0.1.9", package = "duroxide-pg-opt" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # For ExecuteSQL activity (connecting back to PostgreSQL)

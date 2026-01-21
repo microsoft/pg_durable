@@ -2,12 +2,12 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]  # PRs targeting main - runs on the PR's source branch
   push:
     branches: [main]  # Runs on main after merge
 
 env:
   CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
 jobs:
   format:
@@ -58,6 +58,10 @@ jobs:
 
       - name: Initialize pgrx
         run: cargo pgrx init --pg17 download
+
+      - name: Configure git credentials for private repos
+        run: |
+          git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Run clippy
         run: cargo clippy --features pg17 -- -D warnings
