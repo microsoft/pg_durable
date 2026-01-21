@@ -1,0 +1,7 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI enabled"
