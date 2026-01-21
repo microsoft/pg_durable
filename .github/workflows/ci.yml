@@ -65,7 +65,7 @@ jobs:
             ${{ runner.os }}-cargo-pgrx-
 
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version 0.16.1 --locked
+        run: cargo install cargo-pgrx --version 0.15.0 --locked
 
       - name: Initialize pgrx
         run: cargo pgrx init --pg17 download

@@ -32,7 +32,7 @@ SELECT durable.start(
 
 - PostgreSQL 17
 - Rust (nightly)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.15.0
 
 ### GitHub SSH Access (Required)
 

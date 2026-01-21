@@ -22,8 +22,8 @@ sudo apt-get install -y \
     libicu-dev
 
 # Install cargo-pgrx
-echo "Installing cargo-pgrx 0.16.1..."
-cargo install cargo-pgrx --version 0.16.1 --locked
+echo "Installing cargo-pgrx 0.15.0..."
+cargo install cargo-pgrx --version 0.15.0 --locked
 
 # Initialize pgrx with PostgreSQL 17 (pgrx will download and compile PG17)
 echo "Initializing pgrx with PostgreSQL 17..."

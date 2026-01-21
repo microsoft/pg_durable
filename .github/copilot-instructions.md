@@ -78,7 +78,7 @@ Tests in `tests/e2e/sql/` follow this pattern:
 
 ## Dependencies
 
-- **pgrx 0.16.1**: PostgreSQL extension framework (pinned version)
+- **pgrx 0.15.0**: PostgreSQL extension framework (pinned version)
 - **duroxide/duroxide-pg**: Durable execution runtime
 - **sqlx**: Async PostgreSQL from background worker
 - **tokio**: Async runtime for background worker

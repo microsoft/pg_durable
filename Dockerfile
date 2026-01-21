@@ -1,6 +1,5 @@
 # Multi-stage build for pg_durable extension
 # Stage 1: Build the extension
-# Using nightly because cargo-pgrx 0.16.1 requires edition2024
 FROM rustlang/rust:nightly-bookworm AS builder
 
 # GitHub token for private repos (passed as build arg, not persisted in image)
@@ -27,7 +26,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install cargo-pgrx
-RUN cargo install cargo-pgrx --version 0.16.1 --locked
+RUN cargo install cargo-pgrx --version 0.15.0 --locked
 
 # Initialize pgrx with PG17 (use system PostgreSQL)
 RUN cargo pgrx init --pg17 /usr/lib/postgresql/17/bin/pg_config
