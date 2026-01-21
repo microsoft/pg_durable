@@ -39,7 +39,18 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev clang pkg-config libssl-dev
+          sudo apt-get install -y \
+              pkg-config \
+              libssl-dev \
+              libclang-dev \
+              clang \
+              bison \
+              flex \
+              libreadline-dev \
+              zlib1g-dev \
+              libxml2-dev \
+              libxslt1-dev \
+              libicu-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
