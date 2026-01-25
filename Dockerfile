@@ -47,7 +47,7 @@ COPY sql ./sql
 # Configure git to use token for private GitHub repos
 # Also configure Cargo to use git CLI for fetching (required for git config to take effect)
 RUN if [ -n "$GITHUB_TOKEN" ]; then \
-        git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"; \
+        git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"; \
         mkdir -p /usr/local/cargo && printf '[net]\ngit-fetch-with-cli = true\n' >> /usr/local/cargo/config.toml; \
     fi
 
