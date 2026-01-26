@@ -16,12 +16,13 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 6. [Function Examples](#function-examples)
 7. [HTTP Requests](#http-requests)
 8. [Durable Function Variables](#durable-function-variables)
-9. [Loops & Cron Jobs](#loops--cron-jobs)
-10. [Signals](#signals)
-11. [Visualizing Functions](#visualizing-functions)
-12. [Monitoring](#monitoring)
-13. [Quick Reference Card](#quick-reference-card)
-14. [Appendix: Test Data Setup](#appendix-test-data-setup)
+9. [Function Templates](#function-templates)
+10. [Loops & Cron Jobs](#loops--cron-jobs)
+11. [Signals](#signals)
+12. [Visualizing Functions](#visualizing-functions)
+13. [Monitoring](#monitoring)
+14. [Quick Reference Card](#quick-reference-card)
+15. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -51,6 +52,7 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 | **Eternal Loops** | Create forever-running jobs with `@>` operator or `df.loop()` |
 | **Signals** | Wait for external events with `df.wait_for_signal()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
+| **Function Templates** | Create reusable, with variable placeholders workflow patterns |
 | **Labels** | Tag functions with friendly names |
 | **Visualization** | Preview function structure with `df.explain()` |
 | **Monitoring** | Query function status, history, and metrics |
@@ -150,7 +152,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with return value | `df.break('{"done": true}')` |
-| `df.start(func, label)` | Start function | `df.start('SELECT 1', 'job')` |
+| `df.start(func, label, local_vars)` | Start function with optional per-instance vars | `df.start('SELECT 1', 'job', jsonb_build_object('x', '1'))` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
@@ -808,6 +810,381 @@ SELECT df.start(
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Per-Instance Variables (Local Vars)
+
+While global variables (set with `df.setvar()`) are shared across your session, you can also pass **per-instance variables** directly to `df.start()` using the optional third parameter:
+
+```sql
+SELECT df.start(
+    workflow_dsl,
+    'label',
+    jsonb_build_object('var1', 'value1', 'var2', 'value2')  -- Local vars
+);
+```
+
+**Key Differences:**
+
+| Feature | Global Vars (`df.setvar`) | Local Vars (3rd parameter) |
+|---------|--------------------------|----------------------------|
+| **Scope** | Cross-session | Single instance only |
+| **When set** | Before `df.start()` | During `df.start()` call |
+| **Persistence** | Stored in `df.vars` table | Only in instance metadata |
+| **Precedence** | Lower (overridden by local) | Higher (overrides global) |
+
+#### Variable Precedence
+
+When both global and local variables exist with the same name, **local variables take precedence**:
+
+```sql
+-- Set global variable
+SELECT df.setvar('api_url', 'https://prod.example.com');
+
+-- Start with local variable that overrides global
+SELECT df.start(
+    df.http('{api_url}/users', 'GET'),
+    'fetch-users',
+    jsonb_build_object('api_url', 'https://dev.example.com')  -- Overrides global
+);
+-- This instance uses: https://dev.example.com/users
+```
+
+#### Example: Per-Instance Configuration
+
+Perfect for running the same workflow with different parameters:
+
+```sql
+-- Deploy to multiple environments
+SELECT df.start(
+    'INSERT INTO deployments (env, status) VALUES (''{env}'', ''deploying'')'
+    ~> df.http('{api_url}/deploy', 'POST', jsonb_build_object('version', '{version}')),
+    'deploy-dev',
+    jsonb_build_object('env', 'dev', 'api_url', 'https://dev.api.com', 'version', '1.0.0')
+);
+
+SELECT df.start(
+    'INSERT INTO deployments (env, status) VALUES (''{env}'', ''deploying'')'
+    ~> df.http('{api_url}/deploy', 'POST', jsonb_build_object('version', '{version}')),
+    'deploy-staging',
+    jsonb_build_object('env', 'staging', 'api_url', 'https://staging.api.com', 'version', '1.0.0')
+);
+```
+
+#### Example: Combining Global and Local Variables
+
+Use global variables for shared configuration and local variables for instance-specific values:
+
+```sql
+-- Set shared configuration
+SELECT df.setvar('api_key', 'secret123');
+SELECT df.setvar('timeout', '30');
+
+-- Each instance gets different user ID but same auth
+SELECT df.start(
+    df.http('https://api.example.com/users/{user_id}', 'GET', 
+            NULL, 
+            jsonb_build_object('Authorization', 'Bearer {api_key}', 'timeout', '{timeout}')),
+    'fetch-user-1',
+    jsonb_build_object('user_id', '101')  -- Instance-specific
+);
+
+SELECT df.start(
+    df.http('https://api.example.com/users/{user_id}', 'GET', 
+            NULL, 
+            jsonb_build_object('Authorization', 'Bearer {api_key}', 'timeout', '{timeout}')),
+    'fetch-user-2',
+    jsonb_build_object('user_id', '102')  -- Instance-specific
+);
+```
+
+---
+
+## Function Templates
+
+### Overview
+
+Function Templates enable you to create reusable, with variable placeholders workflow patterns. Define a template once with placeholders, then instantiate it multiple times with different variables.
+
+**Benefits:**
+- **DRY (Don't Repeat Yourself)**: Define complex workflows once, reuse many times
+- **Consistency**: Ensure all instances follow the same pattern
+- **Maintainability**: Update the template to change all future instances
+- **Safety**: Variable validation prevents SQL injection
+
+### Registering a Template
+
+Use `df.create_template()` to register a new template:
+
+```sql
+SELECT df.create_template(
+    'template_name',                   -- Unique template identifier
+    $$...DSL with {param1} {param2}...$$,  -- DSL with placeholders
+    'Optional description'             -- Template description (optional)
+);
+```
+
+**Example:** Template for parallel data counting
+
+```sql
+SELECT df.create_template(
+    'parallel_counts',
+    $$'SELECT COUNT(*) as user_count FROM {schema_name}.users'
+    & 'SELECT COUNT(*) as order_count FROM {schema_name}.orders'
+    ~> 'INSERT INTO {schema_name}.logs (msg) VALUES (''Counts complete'')'$$,
+    'Count users and orders in parallel for a given schema'
+);
+```
+
+**Notes:**
+- Template names must be unique among active templates
+- Variables are automatically extracted from `{placeholder}` syntax in the DSL
+- Placeholder format: alphanumeric groups separated by single underscore or period
+- DSL is stored as text and parsed at instantiation time
+- Use `{param_name}` syntax for placeholders
+- To update a template, use `df.update_template()` (see below)
+
+### Starting a Template Instance
+
+Use `df.start_template()` to instantiate and run a template:
+
+```sql
+SELECT df.start_template(
+    'template_name',
+    'optional-label',
+    jsonb_build_object('param1', 'value1', 'param2', 'value2')
+);
+-- Returns: instance_id
+```
+
+**Example:**
+
+```sql
+-- Start instance with specific schema
+SELECT df.start_template(
+    'parallel_counts',
+    'prod-counts',
+    jsonb_build_object('schema_name', 'production')
+);
+
+-- Start another instance with different schema
+SELECT df.start_template(
+    'parallel_counts',
+    'test-counts',
+    jsonb_build_object('schema_name', 'testing')
+);
+```
+
+**Variable Validation:**
+- All required variables must be provided
+- No extra variables allowed
+- Variable values are validated to prevent SQL injection
+- Safe patterns: identifiers (`schema_name`, `public.table`), numbers (`123`, `45.67`), quoted strings (`'value'`)
+- Dangerous patterns rejected: SQL comments (`--`, `/*`), semicolons, SQL keywords in unsafe contexts
+
+### Listing Templates
+
+View all registered templates:
+
+```sql
+-- List all templates
+SELECT * FROM df.list_templates();
+
+-- Filter by name pattern (SQL LIKE syntax)
+SELECT * FROM df.list_templates(name_filter := '%etl%');
+
+-- Filter by creator
+SELECT * FROM df.list_templates(created_by_filter := 'alice');
+```
+
+**Returns:**
+- `name`: Template name
+- `description`: Template description
+- `created_by`: User who created the template
+- `created_at`: When the template was created
+
+**Note:** `name_filter` uses SQL LIKE pattern matching with `%` wildcards for simple substring searches.
+
+### Viewing Template Details
+
+Get the full template definition:
+
+```sql
+SELECT df.get_template('template_name');
+```
+
+**Returns:** JSONB object with:
+- `name`: Template name
+- `dsl_template`: The DSL with placeholders
+- `created_at`: Creation timestamp
+- `created_by`: Creator username
+- `description`: Description (if provided)
+
+### Explaining Templates
+
+Preview the stored DSL for a template (placeholders remain for clarity):
+
+```sql
+SELECT df.explain_template('template_name');
+```
+
+`df.explain_template` shows the workflow structure without starting an instance or substituting variables.
+
+### Updating Templates
+
+Update an existing template with `df.update_template()`:
+
+```sql
+-- Update DSL (creates new version, marks old inactive)
+SELECT df.update_template(
+    'template_name',
+    dsl_template := $$...new DSL...$$
+);
+
+-- Update description only (in-place, no new version)
+SELECT df.update_template(
+    'template_name',
+    description := 'New description'
+);
+
+-- Update both (creates new version with new description)
+SELECT df.update_template(
+    'template_name',
+    dsl_template := $$...new DSL...$$,
+    description := 'Updated description'
+);
+```
+
+**Example:**
+
+```sql
+-- Add logging to existing template
+SELECT df.update_template(
+    'parallel_counts',
+    dsl_template := $$'SELECT COUNT(*) as user_count FROM {schema_name}.users'
+    & 'SELECT COUNT(*) as order_count FROM {schema_name}.orders'
+    ~> 'INSERT INTO {schema_name}.logs (msg, counts) VALUES (''Complete'', $1)'$$
+);
+```
+
+**Notes:**
+- When DSL changes: old version becomes inactive, new active version is created
+- When DSL changes without new description: old description is preserved
+- When only description changes: in-place update, no versioning
+- Template history is preserved for audit purposes
+- At least one variable (dsl_template or description) must be provided
+
+### Dropping Templates
+
+Remove a template from the registry:
+
+```sql
+SELECT df.drop_template('template_name');
+```
+
+**Important:**
+- Marks the template as inactive (soft delete)
+- Doesn't affect running or completed instances
+- Template row is preserved in database for historical/audit purposes
+- Instances maintain reference to template via `template_id` column
+- You can create a new template with the same name after dropping
+
+### Template Examples
+
+#### ETL Pipeline Template
+
+```sql
+-- Register ETL template
+SELECT df.create_template(
+    'etl_pipeline',
+    
+    $$'SELECT * FROM {source_table} LIMIT {batch_size}::int' |=> 'batch'
+    ~> 'INSERT INTO {target_table} SELECT * FROM ($batch) AS source'$$,
+    'Generic ETL pipeline with batching'
+);
+
+-- Use the template
+SELECT df.start_template(
+    'etl_pipeline',
+    'daily-orders-etl',
+    jsonb_build_object(
+        'source_table', 'raw.orders',
+        'target_table', 'clean.orders',
+        'batch_size', '1000'
+    )
+);
+```
+
+#### Health Check Template
+
+```sql
+-- Register health check template
+SELECT df.create_template(
+    'health_check',
+    
+    $$df.http('GET', '{service_url}', NULL, {timeout_seconds})
+    ?> 'INSERT INTO monitoring.health_log (service, status) VALUES (''{service_url}'', ''up'')'
+    !> 'INSERT INTO monitoring.health_log (service, status) VALUES (''{service_url}'', ''down'')'$$,
+    'HTTP health check with logging'
+);
+
+-- Run health checks for different services
+SELECT df.start_template(
+    'health_check',
+    'check-api',
+    jsonb_build_object('service_url', 'https://api.example.com/health', 'timeout_seconds', 10)
+);
+
+SELECT df.start_template(
+    'health_check', 
+    'check-web',
+    jsonb_build_object('service_url', 'https://www.example.com', 'timeout_seconds', 5)
+);
+```
+
+#### Data Validation Template
+
+```sql
+-- Register validation template
+SELECT df.create_template(
+    'validate_table',
+    
+    $$'SELECT COUNT(*) as row_count FROM {schema_name}.{table_name}' |=> 'count'
+    ~> df.if('($count)::int >= {min_rows}::int',
+        'INSERT INTO validation.results (table_name, status) VALUES (''{table_name}'', ''pass'')',
+        'INSERT INTO validation.results (table_name, status) VALUES (''{table_name}'', ''fail'')'
+    )$$,
+    'Validate table has minimum number of rows'
+);
+
+-- Validate multiple tables
+SELECT df.start_template(
+    'validate_table',
+    'validate-users',
+    jsonb_build_object('schema_name', 'public', 'table_name', 'users', 'min_rows', '100')
+);
+```
+
+### Template Audit Trail
+
+Every instance created from a template records the template ID for tracking:
+
+```sql
+-- Find all instances from a specific template
+SELECT i.id, i.label, i.status, i.created_at, t.name as template_name
+FROM df.instances i
+JOIN df.templates t ON i.template_id = t.id
+WHERE t.name = 'etl_pipeline';
+
+-- Template usage statistics
+SELECT 
+    t.name as template,
+    COUNT(*) as instance_count,
+    COUNT(*) FILTER (WHERE i.status = 'completed') as completed,
+    COUNT(*) FILTER (WHERE i.status = 'failed') as failed
+FROM df.instances i
+JOIN df.templates t ON i.template_id = t.id
+GROUP BY t.name;
+```
+
 ---
 
 ## Loops & Cron Jobs
@@ -965,7 +1342,7 @@ Use `df.signal()` to send a signal to a running instance:
 SELECT df.signal('instance_id', 'signal_name', '{"data": "value"}');
 ```
 
-**Parameters:**
+**Variables:**
 - `instance_id` - The durable function instance ID (required)
 - `signal_name` - Name of the signal (must match what the instance is waiting for)
 - `signal_data` - JSON payload (optional, defaults to `'{}'`)
@@ -1359,6 +1736,30 @@ SELECT df.start(df.http('{api_url}/data', 'GET'));           -- variable substit
 df.wait_for_signal('approval')                    -- wait forever
 df.wait_for_signal('approval', 3600)              -- wait with 1h timeout
 SELECT df.signal('inst_id', 'approval', '{}');    -- send signal
+
+-- Templates: reusable workflow patterns
+-- Register template
+SELECT df.create_template(
+    'template_name',
+    
+    $$'DSL with {param1} and {param2}'$$,
+    'Optional description'
+);
+-- Start from template
+SELECT df.start_template(
+    'template_name', 
+    'label',
+    jsonb_build_object('param1', 'value1', 'param2', 'value2')
+);
+-- List templates
+SELECT * FROM df.list_templates();
+SELECT * FROM df.list_templates(name_filter := '%etl%');
+-- Get template details
+SELECT df.get_template('template_name');
+-- Explain template with variables
+SELECT df.explain_template('template_name');
+-- Drop template
+SELECT df.drop_template('template_name');
 
 -- Visualize
 SELECT df.explain('instance_id');        -- live instance

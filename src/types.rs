@@ -262,8 +262,15 @@ pub struct FunctionInput {
     pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Merged variables (local overrides global) used for execution
     #[serde(default)]
     pub vars: std::collections::HashMap<String, String>,
+    /// Local variables provided at invocation (for audit trail)
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub local_vars: std::collections::HashMap<String, String>,
+    /// Global variables from df.vars at invocation time (for audit trail)
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub global_vars: std::collections::HashMap<String, String>,
 }
 
 /// Configuration for HTTP requests

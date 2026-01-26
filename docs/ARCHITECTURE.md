@@ -350,7 +350,7 @@ When `df.start()` is called, it recursively links all nodes to the instance:
 
 ```rust
 // src/dsl.rs - df.start()
-pub fn start(fut: &str, label: Option<&str>) -> String {
+pub fn start(fut: &str, label: Option<&str>, local_vars: Option<JsonB>) -> String {
     let durofut = Durofut::ensure(fut);
     let instance_id = short_id();
     
@@ -392,9 +392,24 @@ pub fn start(fut: &str, label: Option<&str>) -> String {
     link_nodes(&durofut.node_id, &instance_id, &mut HashSet::new());
     
     // Capture variables and enqueue to duroxide
-    let vars = capture_vars();  // SELECT * FROM df.vars
-    let input = FunctionInput { instance_id, label, vars };
-    
+    // Global vars come from df.vars; optional local_vars are supplied per-instance
+    let global_vars = capture_global_vars();          // SELECT name, value FROM df.vars
+    let local_vars = parse_local_vars(local_vars_jsonb); // From df.start(..., local_vars := ...)
+
+    // Merge variables: local overrides global on key conflicts
+    let mut vars = global_vars.clone();
+    for (k, v) in &local_vars {
+        vars.insert(k.clone(), v.clone());
+    }
+
+    let input = FunctionInput {
+        instance_id: instance_id.clone(),
+        label,
+        vars,
+        local_vars,
+        global_vars,
+    };
+
     start_durable_function(ORCHESTRATION_NAME, &instance_id, &input.to_json());
     
     instance_id  // Return to user immediately
@@ -403,23 +418,36 @@ pub fn start(fut: &str, label: Option<&str>) -> String {
 
 ### Variable Capture
 
-Variables set via `df.setvar()` are captured at `df.start()` time:
+Variables set via `df.setvar()` are captured at `df.start()` time and combined with optional per-instance `local_vars`:
 
 ```rust
-// Capture vars from df.vars table
-let vars: HashMap<String, String> = Spi::connect(|client| {
+// Capture global vars from df.vars table
+let global_vars: HashMap<String, String> = Spi::connect(|client| {
     let mut vars = HashMap::new();
-    for row in client.select("SELECT name, value FROM df.vars", None, &[]) {
-        vars.insert(row.get("name"), row.get("value"));
+    if let Ok(table) = client.select("SELECT name, value FROM df.vars", None, &[]) {
+        for row in table {
+            vars.insert(row.get("name"), row.get("value"));
+        }
     }
     vars
 });
+
+// Parse local vars from JSONB parameter if provided
+let local_vars: HashMap<String, String> = parse_local_vars(local_vars_jsonb);
+
+// Merge variables: start with global, override with local
+let mut vars = global_vars.clone();
+for (key, value) in &local_vars {
+    vars.insert(key.clone(), value.clone());
+}
 
 // Pass to orchestration
 let input = FunctionInput {
     instance_id: instance_id.clone(),
     label: label.map(|s| s.to_string()),
-    vars,  // Captured snapshot - immutable during execution
+    vars,        // merged view used for substitution
+    local_vars,  // per-instance overrides
+    global_vars, // original snapshot from df.vars
 };
 ```
 

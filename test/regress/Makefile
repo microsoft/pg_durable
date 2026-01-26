@@ -3,7 +3,7 @@ EXTENSION = pg_durable
 DATA = pg_durable--0.1.1.sql
 
 # Test files (in order)
-REGRESS = simple sequence variables parallel conditional
+REGRESS = simple sequence variables parallel conditional templates
 
 # PostgreSQL configuration
 PG_CONFIG ?= $(shell cargo pgrx info pg-config pg17)

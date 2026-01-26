@@ -3,6 +3,7 @@
 use chrono::Utc;
 use cron::Schedule as CronSchedule;
 use pgrx::prelude::*;
+use pgrx::JsonB;
 use std::str::FromStr;
 
 use crate::client::start_durable_function;
@@ -30,7 +31,7 @@ pub fn version() -> String {
     format!(
         "{} (built {})",
         env!("CARGO_PKG_VERSION"),
-        env!("BUILD_TIMESTAMP")
+        "dev" // env!("BUILD_TIMESTAMP")
     )
 }
 
@@ -521,9 +522,14 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 
 /// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
-/// Variables from df.vars are captured and passed to the orchestration.
+/// Variables from df.vars (global) are captured and merged with local_vars (if provided).
+/// Local variables take precedence over global variables.
 #[pg_extern(schema = "df")]
-pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
+pub fn start(
+    fut: &str,
+    label: default!(Option<&str>, "NULL"),
+    local_vars: default!(Option<JsonB>, "NULL"),
+) -> String {
     let durofut = Durofut::ensure(fut);
     let instance_id = short_id();
 
@@ -601,8 +607,8 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     let mut visited = std::collections::HashSet::new();
     link_nodes(&durofut.node_id, &instance_id, &mut visited);
 
-    // Capture vars from df.vars table
-    let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
+    // Capture global vars from df.vars table
+    let global_vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
         let mut vars = std::collections::HashMap::new();
         if let Ok(table) = client.select("SELECT name, value FROM df.vars", None, &[]) {
             for row in table {
@@ -616,11 +622,43 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         vars
     });
 
+    // Parse local vars from JSONB parameter if provided
+    let local_vars_map: std::collections::HashMap<String, String> =
+        if let Some(local_jsonb) = local_vars {
+            let params_json: serde_json::Value = serde_json::from_str(&local_jsonb.0.to_string())
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            let mut result = std::collections::HashMap::new();
+            if let Some(obj) = params_json.as_object() {
+                for (key, value) in obj {
+                    let value_str = match value {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Null => String::new(),
+                        _ => value.to_string(),
+                    };
+                    result.insert(key.clone(), value_str);
+                }
+            }
+            result
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    // Merge variables: start with global, override with local
+    let mut merged_vars = global_vars.clone();
+    for (key, value) in &local_vars_map {
+        merged_vars.insert(key.clone(), value.clone());
+    }
+
     // Start the orchestration via duroxide
     let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
-        vars,
+        vars: merged_vars,
+        local_vars: local_vars_map,
+        global_vars,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 

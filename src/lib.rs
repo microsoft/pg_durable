@@ -13,6 +13,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod orchestrations;
 pub mod registry;
+pub mod templates;
 pub mod types;
 pub mod worker;
 
@@ -68,7 +69,8 @@ CREATE TABLE IF NOT EXISTS df.instances (
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    template_id BIGINT
 );
 
 -- Index for finding pending instances
@@ -82,6 +84,45 @@ CREATE TABLE IF NOT EXISTS df.vars (
     name TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Table to store function templates
+CREATE TABLE IF NOT EXISTS df.templates (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    dsl_template TEXT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    created_by TEXT DEFAULT current_user,
+    description TEXT
+);
+
+-- Add foreign key constraint to instances.template_id
+ALTER TABLE df.instances 
+    ADD CONSTRAINT fk_instances_template 
+    FOREIGN KEY (template_id) REFERENCES df.templates(id);
+
+-- Partial unique index: only one active template per name
+CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_name_active_unique 
+    ON df.templates(name) WHERE active = true;
+
+-- Index for listing templates by user
+CREATE INDEX IF NOT EXISTS idx_templates_created_by 
+    ON df.templates(created_by);
+
+-- Index for finding instances by template_id
+CREATE INDEX IF NOT EXISTS idx_instances_template_id 
+    ON df.instances(template_id) 
+    WHERE template_id IS NOT NULL;
+
+-- Add comments
+COMMENT ON TABLE df.templates IS 
+    'Stores reusable workflow templates with variable placeholders';
+COMMENT ON COLUMN df.templates.name IS 
+    'Unique template identifier';
+COMMENT ON COLUMN df.templates.dsl_template IS 
+    'DSL expression with {variable} placeholders for substitution';
+COMMENT ON COLUMN df.instances.template_id IS 
+    'Foreign key to template used to create this instance (NULL for non-template instances)';
 "#,
     name = "create_tables",
     requires = [df]
@@ -222,6 +263,73 @@ CREATE OPERATOR @> (
         dsl::race,
         dsl::if_fn,
         dsl::loop_fn
+    ]
+);
+
+// ============================================================================
+// Template Management SQL Functions
+// ============================================================================
+
+extension_sql!(
+    r#"
+-- Get template definition as JSONB
+CREATE OR REPLACE FUNCTION df.get_template(template_name TEXT)
+RETURNS JSONB AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        'name', name,
+        'dsl_template', dsl_template,
+        'created_at', created_at,
+        'created_by', created_by,
+        'description', description
+    ) INTO result
+    FROM df.templates
+    WHERE name = template_name AND active = true;
+    
+    IF result IS NULL THEN
+        RAISE EXCEPTION 'Active template ''%'' not found', template_name;
+    END IF;
+    
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+-- List templates with optional filtering
+CREATE OR REPLACE FUNCTION df.list_templates(
+    name_filter TEXT DEFAULT NULL,
+    created_by_filter TEXT DEFAULT NULL
+)
+RETURNS TABLE(
+    name TEXT,
+    description TEXT,
+    created_by TEXT,
+    created_at TIMESTAMPTZ
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        t.name,
+        t.description,
+        t.created_by,
+        t.created_at
+    FROM df.templates t
+    WHERE 
+        (name_filter IS NULL OR t.name LIKE name_filter)
+        AND (created_by_filter IS NULL OR t.created_by = created_by_filter)
+        AND t.active = true
+    ORDER BY t.created_at DESC;
+END;
+$$ LANGUAGE plpgsql;
+"#,
+    name = "create_template_functions",
+    requires = [
+        templates::create_template,
+        templates::start_template,
+        templates::update_template,
+        templates::drop_template,
+        templates::explain_template
     ]
 );
 
@@ -662,7 +770,7 @@ mod tests {
     #[pg_test]
     fn test_start_returns_instance_id() {
         let fut = crate::dsl::sql("SELECT 1");
-        let instance_id = crate::dsl::start(&fut, None);
+        let instance_id = crate::dsl::start(&fut, None, None);
         assert_eq!(instance_id.len(), 8);
         assert!(instance_id.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -670,14 +778,14 @@ mod tests {
     #[pg_test]
     fn test_start_with_label() {
         let fut = crate::dsl::sql("SELECT 1");
-        let instance_id = crate::dsl::start(&fut, Some("my-test-function"));
+        let instance_id = crate::dsl::start(&fut, Some("my-test-function"), None);
         assert_eq!(instance_id.len(), 8);
     }
 
     #[pg_test]
     fn test_start_creates_instance_row() {
         let fut = crate::dsl::sql("SELECT 42");
-        let instance_id = crate::dsl::start(&fut, Some("test-instance-row"));
+        let instance_id = crate::dsl::start(&fut, Some("test-instance-row"), None);
         let count = Spi::get_one::<i64>(&format!(
             "SELECT COUNT(*) FROM df.instances WHERE id = '{instance_id}'"
         ))
@@ -689,7 +797,7 @@ mod tests {
     #[pg_test]
     fn test_status_returns_pending_for_new() {
         let fut = crate::dsl::sql("SELECT 1");
-        let instance_id = crate::dsl::start(&fut, None);
+        let instance_id = crate::dsl::start(&fut, None, None);
         let status = crate::dsl::status(&instance_id);
         assert_eq!(status, Some("pending".to_string()));
     }
@@ -719,8 +827,8 @@ mod tests {
     #[pg_test]
     fn test_multiple_starts_different_ids() {
         let fut = crate::dsl::sql("SELECT 1");
-        let id1 = crate::dsl::start(&fut, None);
-        let id2 = crate::dsl::start(&fut, None);
+        let id1 = crate::dsl::start(&fut, None, None);
+        let id2 = crate::dsl::start(&fut, None, None);
         assert_ne!(id1, id2);
     }
 
@@ -813,7 +921,7 @@ mod tests {
     fn test_setvar_after_start_works() {
         // df.start() should not affect subsequent setvar calls
         let fut = crate::dsl::sql("SELECT 1");
-        let _ = crate::dsl::start(&fut, None);
+        let _ = crate::dsl::start(&fut, None, None);
 
         // setvar should work fine after start returns
         let result = crate::dsl::setvar("after_start_var", "works");
@@ -832,7 +940,7 @@ mod tests {
     fn test_explain_detects_instance_id() {
         // Create an instance first
         let fut = crate::dsl::sql("SELECT 1");
-        let instance_id = crate::dsl::start(&fut, None);
+        let instance_id = crate::dsl::start(&fut, None, None);
 
         // Explain should recognize it as an instance ID
         let result = crate::explain::explain(&instance_id);
@@ -999,7 +1107,7 @@ mod tests {
     #[pg_test]
     fn test_autowrap_start_plain_sql() {
         // Start with plain SQL - simplest possible durable function
-        let instance_id = crate::dsl::start("SELECT 42", Some("autowrap-test"));
+        let instance_id = crate::dsl::start("SELECT 42", Some("autowrap-test"), None);
         assert_eq!(instance_id.len(), 8);
 
         // Verify instance was created
@@ -1078,7 +1186,7 @@ mod tests {
         // Start durable function
         let sql =
             crate::dsl::sql("INSERT INTO test_e2e_simple (val) VALUES ('hello') RETURNING id");
-        let instance_id = crate::dsl::start(&sql, Some("test-e2e-simple"));
+        let instance_id = crate::dsl::start(&sql, Some("test-e2e-simple"), None);
 
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
@@ -1113,7 +1221,7 @@ mod tests {
         let step2 = crate::dsl::sql("INSERT INTO test_e2e_seq (step) VALUES (2)");
         let seq = crate::dsl::then_fn(&step1, &step2);
 
-        let instance_id = crate::dsl::start(&seq, Some("test-e2e-seq"));
+        let instance_id = crate::dsl::start(&seq, Some("test-e2e-seq"), None);
 
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
@@ -1153,7 +1261,7 @@ mod tests {
         );
         let seq = crate::dsl::then_fn(&named, &use_val);
 
-        let instance_id = crate::dsl::start(&seq, Some("test-e2e-vars"));
+        let instance_id = crate::dsl::start(&seq, Some("test-e2e-vars"), None);
 
         // Wait for completion
         let result = wait_for_completion(&instance_id, 10);
@@ -1180,7 +1288,7 @@ mod tests {
         let sql_node = crate::dsl::sql("SELECT 'done'");
         let seq = crate::dsl::then_fn(&sleep_node, &sql_node);
 
-        let instance_id = crate::dsl::start(&seq, Some("test-e2e-sleep"));
+        let instance_id = crate::dsl::start(&seq, Some("test-e2e-sleep"), None);
 
         // Wait for completion (with extra time for sleep)
         let result = wait_for_completion(&instance_id, 15);
@@ -1202,7 +1310,7 @@ mod tests {
         let else_branch = crate::dsl::sql("SELECT 'no' as result");
         let if_node = crate::dsl::if_fn(&condition, &then_branch, &else_branch);
 
-        let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-true"));
+        let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-true"), None);
 
         let result = wait_for_completion(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
@@ -1219,7 +1327,7 @@ mod tests {
         let else_branch = crate::dsl::sql("SELECT 'no' as result");
         let if_node = crate::dsl::if_fn(&condition, &then_branch, &else_branch);
 
-        let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-false"));
+        let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-false"), None);
 
         let result = wait_for_completion(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
@@ -1237,7 +1345,7 @@ mod tests {
         let else_branch = crate::dsl::sql("SELECT 'falsy' as result");
         let if_node = crate::dsl::if_fn(&condition, &then_branch, &else_branch);
 
-        let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-zero"));
+        let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-zero"), None);
 
         let result = wait_for_completion(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
@@ -1264,7 +1372,7 @@ mod tests {
         let branch_b = crate::dsl::sql("INSERT INTO test_e2e_join (branch) VALUES ('B')");
         let join_node = crate::dsl::join(&branch_a, &branch_b);
 
-        let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join"));
+        let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join"), None);
 
         let result = wait_for_completion(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
@@ -1294,7 +1402,7 @@ mod tests {
         let c = crate::dsl::sql("SELECT 3 as val");
         let join_node = crate::dsl::join3(&a, &b, &c);
 
-        let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join3"));
+        let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join3"), None);
 
         let result = wait_for_completion(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
@@ -1310,7 +1418,7 @@ mod tests {
     fn test_e2e_cancel_running() {
         // Start a long-running sleep
         let sleep_node = crate::dsl::sleep(300); // 5 minutes
-        let instance_id = crate::dsl::start(&sleep_node, Some("test-e2e-cancel"));
+        let instance_id = crate::dsl::start(&sleep_node, Some("test-e2e-cancel"), None);
 
         // Give it a moment to start
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1346,8 +1454,8 @@ mod tests {
         // Start a few durable functions
         let sql1 = crate::dsl::sql("SELECT 1");
         let sql2 = crate::dsl::sql("SELECT 2");
-        let id1 = crate::dsl::start(&sql1, Some("test-list-1"));
-        let id2 = crate::dsl::start(&sql2, Some("test-list-2"));
+        let id1 = crate::dsl::start(&sql1, Some("test-list-1"), None);
+        let id2 = crate::dsl::start(&sql2, Some("test-list-2"), None);
 
         // Wait for both to complete
         let _ = wait_for_completion(&id1, 10);
@@ -1372,7 +1480,7 @@ mod tests {
     #[ignore = "pgrx doesn't support shared_preload_libraries"]
     fn test_e2e_instance_info() {
         let sql = crate::dsl::sql("SELECT 'info-test'");
-        let instance_id = crate::dsl::start(&sql, Some("test-info-label"));
+        let instance_id = crate::dsl::start(&sql, Some("test-info-label"), None);
 
         let _ = wait_for_completion(&instance_id, 10);
 
@@ -1394,7 +1502,7 @@ mod tests {
         let a = crate::dsl::sql("SELECT 1");
         let b = crate::dsl::sql("SELECT 2");
         let seq = crate::dsl::then_fn(&a, &b);
-        let instance_id = crate::dsl::start(&seq, None);
+        let instance_id = crate::dsl::start(&seq, None, None);
 
         let _ = wait_for_completion(&instance_id, 10);
 
@@ -1416,7 +1524,7 @@ mod tests {
     fn test_e2e_sql_error() {
         // Try to select from a non-existent table
         let sql = crate::dsl::sql("SELECT * FROM nonexistent_table_xyz_12345");
-        let instance_id = crate::dsl::start(&sql, Some("test-sql-error"));
+        let instance_id = crate::dsl::start(&sql, Some("test-sql-error"), None);
 
         let result = wait_for_completion(&instance_id, 10);
 
@@ -1433,7 +1541,7 @@ mod tests {
     #[ignore = "pgrx doesn't support shared_preload_libraries"]
     fn test_e2e_status_sync() {
         let sql = crate::dsl::sql("SELECT 'sync-test'");
-        let instance_id = crate::dsl::start(&sql, Some("test-status-sync"));
+        let instance_id = crate::dsl::start(&sql, Some("test-status-sync"), None);
 
         let result = wait_for_completion(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
