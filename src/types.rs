@@ -25,28 +25,77 @@ pub fn short_id() -> String {
         .collect()
 }
 
-/// PostgreSQL connection string for the background worker and Duroxide runtime
-pub fn postgres_connection_string() -> String {
-    let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("PGPORT").unwrap_or_else(|_| {
-        if let Ok(pgdata) = std::env::var("PGDATA") {
-            if pgdata.contains(".pgrx") {
-                "28817".to_string()
-            } else {
-                "5432".to_string()
+/// Get the configured socket directory (host) from GUC
+/// Returns empty string if not configured, allowing sqlx to use defaults
+pub fn get_host() -> String {
+    if let Some(host) = crate::HOST.get() {
+        if let Ok(dir_str) = host.to_str() {
+            if !dir_str.is_empty() {
+                pgrx::log!("pg_durable: host from GUC: {}", dir_str);
+                return dir_str.to_string();
             }
-        } else {
-            "28817".to_string()
         }
-    });
-    let user = std::env::var("PGUSER")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "postgres".to_string());
-    let database = std::env::var("POSTGRES_DB")
-        .or_else(|_| std::env::var("PGDATABASE"))
-        .unwrap_or_else(|_| "postgres".to_string());
+    }
 
-    format!("postgres://{user}@{host}:{port}/{database}")
+    pgrx::log!("pg_durable: host not configured, using empty string (sqlx defaults)");
+    String::new()
+}
+
+/// Get the configured database name from GUC
+pub fn get_database_name() -> String {
+    if let Some(db_name) = crate::DATABASE_NAME.get() {
+        if let Ok(name_str) = db_name.to_str() {
+            if !name_str.is_empty() {
+                pgrx::log!("pg_durable: database_name from GUC: {}", name_str);
+                return name_str.to_string();
+            }
+        }
+    }
+
+    pgrx::log!("pg_durable: database_name not configured, using default: postgres");
+    "postgres".to_string()
+}
+
+/// Get the PostgreSQL port from the PostPortNumber system GUC
+pub fn get_port() -> String {
+    let port = unsafe { pgrx::pg_sys::PostPortNumber };
+    pgrx::log!("pg_durable: port from PostPortNumber: {}", port);
+    port.to_string()
+}
+
+/// Build a PostgreSQL connection string using Unix domain sockets with peer authentication
+///
+/// Uses OS-level peer authentication (empty user field) and connects to the configured database.
+///
+/// # Returns
+/// Connection string in format: `postgresql:///?host={socket_dir}&port={port}&dbname={database}`
+///
+/// # Examples
+/// ```text
+/// postgresql:///?host=/home/vscode/.pgrx&port=28817&dbname=postgres
+/// postgresql:///?port=5432&dbname=mydb  (when host is empty, uses default socket dir)
+/// ```
+pub fn postgres_connection_string() -> String {
+    let host = get_host();
+    let port = get_port();
+    let database = get_database_name();
+
+    let mut conn_str = "postgresql:///?".to_string();
+
+    // Add socket directory if configured (otherwise sqlx will use defaults)
+    if !host.is_empty() {
+        conn_str.push_str(&format!("host={}&", host));
+    }
+
+    // Always add port (required for Unix socket file identification)
+    // Port identifies the specific socket file: .s.PGSQL.{port}
+    conn_str.push_str(&format!("port={}&", port));
+
+    conn_str.push_str(&format!("dbname={}", database));
+
+    pgrx::log!("pg_durable: connection string (peer auth): {}", conn_str);
+
+    conn_str
 }
 
 /// Schema name for Duroxide internal tables

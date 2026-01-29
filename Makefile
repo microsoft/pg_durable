@@ -22,9 +22,11 @@ test-e2e:
 	./scripts/test.sh --e2e
 
 # Run pg_regress tests (requires PostgreSQL running)
+# Respects PGHOST, PGPORT, PGUSER, PGDATABASE environment variables
 installcheck:
-	@echo "Running pg_regress tests (PostgreSQL must be running with PGDATABASE=contrib_regression)..."
-	@cd test/regress && make installcheck
+	@echo "Running pg_regress tests (using PGHOST=$${PGHOST:-localhost} PGPORT=$${PGPORT:-5432})..."
+	@echo "Is pg_durable.database_name configured to match the pg_regress database?"
+	@cd test/regress && $(MAKE) installcheck
 
 # Alias for installcheck
 check: installcheck

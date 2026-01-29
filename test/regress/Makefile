@@ -6,10 +6,27 @@ DATA = pg_durable--0.1.1.sql
 REGRESS = simple sequence variables parallel conditional
 
 # PostgreSQL configuration
-PG_CONFIG ?= $(shell cargo pgrx info pg-config pg17)
+# Check if PG_CONFIG is already set (e.g., from parent Makefile or environment)
+# If not, try to get it from pgrx (for development)
+ifndef PG_CONFIG
+  # Check if we have pg_config in PATH (standard install)
+  PG_CONFIG := $(shell which pg_config 2>/dev/null)
+  # If not found, try to get it from pgrx
+  ifeq ($(PG_CONFIG),)
+    PG_CONFIG := $(shell cargo pgrx info pg-config pg17 2>/dev/null)
+  endif
+endif
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
-# Connection parameters for pgrx-managed PostgreSQL
-REGRESS_OPTS = --host=localhost --port=28817 --load-extension=pg_durable
+# Extract PGPORT from pg_config if not already set in environment
+ifndef PGPORT
+  PGPORT := $(shell $(PG_CONFIG) --configure 2>/dev/null | grep -oE -- '--with-pgport=[0-9]+' | cut -d= -f2)
+  export PGPORT
+endif
+
+# Connection parameters - use environment variables (PGHOST, PGPORT, PGUSER, PGDATABASE)
+# Default to load-extension for pg_durable
+REGRESS_OPTS = --load-extension=pg_durable
 
 include $(PGXS)

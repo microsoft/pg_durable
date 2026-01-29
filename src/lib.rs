@@ -4,6 +4,7 @@
 //! using the Duroxide runtime for persistence.
 
 use pgrx::prelude::*;
+use std::ffi::CString;
 
 // Module declarations
 pub mod activities;
@@ -22,13 +23,80 @@ pub use types::Durofut;
 ::pgrx::pg_module_magic!(name, version);
 
 // ============================================================================
+// Configuration Parameters (GUCs)
+// ============================================================================
+
+/// Unix domain socket directory (host) for PostgreSQL connections
+/// None means use PostgreSQL's default Unix socket directory
+pub static HOST: pgrx::GucSetting<Option<CString>> = <pgrx::GucSetting<Option<CString>>>::new(None);
+
+/// Database name to which the background worker connects
+pub static DATABASE_NAME: pgrx::GucSetting<Option<CString>> =
+    <pgrx::GucSetting<Option<CString>>>::new(Some(c"postgres"));
+
+// ============================================================================
 // Background Worker Registration
 // ============================================================================
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
+    // Register configuration parameters
+    pgrx::GucRegistry::define_string_guc(
+        c"pg_durable.host",
+        c"Unix domain socket directory (host) for PostgreSQL connections",
+        c"Specify the directory containing PostgreSQL's Unix domain socket. Empty string uses PostgreSQL's default.",
+        &HOST,
+        pgrx::GucContext::Postmaster,
+        pgrx::GucFlags::default(),
+    );
+
+    pgrx::GucRegistry::define_string_guc(
+        c"pg_durable.database_name",
+        c"Database name to which the background worker connects",
+        c"The database where pg_durable metadata and duroxide runtime state are stored. Defaults to 'postgres'.",
+        &DATABASE_NAME,
+        pgrx::GucContext::Postmaster,
+        pgrx::GucFlags::default(),
+    );
+
     worker::register_background_worker();
 }
+
+// ============================================================================
+// Extension Initialization Functions
+// ============================================================================
+
+/// Validate that extension is created in the correct database
+#[pg_extern(sql = r#"
+DO $$
+DECLARE
+    current_db TEXT := current_database();
+    target_db TEXT;
+BEGIN
+    SELECT setting INTO target_db 
+    FROM pg_settings 
+    WHERE name = 'pg_durable.database_name';
+    
+    IF current_db != COALESCE(target_db, 'postgres') THEN
+        RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). Set pg_durable.database_name in postgresql.conf or create the extension in the correct database.', 
+            COALESCE(target_db, 'postgres'), current_db;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS(
+        SELECT 1 FROM pg_settings 
+        WHERE name = 'shared_preload_libraries' 
+          AND setting LIKE '%pg_durable%'
+    ) THEN
+        RAISE EXCEPTION 'pg_durable must be in shared_preload_libraries. Add "shared_preload_libraries = ''pg_durable''" to postgresql.conf and restart PostgreSQL.';
+    END IF;
+END $$;
+
+CREATE SCHEMA duroxide;
+"#)]
+fn __validate_extension_requirements() {}
 
 // ============================================================================
 // Schema Declaration
@@ -1461,6 +1529,9 @@ pub mod pg_test {
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries = 'pg_durable'"]
+        vec![
+            "shared_preload_libraries = 'pg_durable'",
+            "pg_durable.database_name = 'pgrx_tests'",
+        ]
     }
 }

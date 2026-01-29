@@ -1,9 +1,16 @@
 #!/bin/bash
 # pg-start.sh - Start local PostgreSQL with pg_durable extension
 #
-# Usage: ./scripts/pg-start.sh
+# Usage: ./scripts/pg-start.sh [database_name]
+#   database_name: Optional value for pg_durable.database_name GUC
 
 set -e
+
+# Parse optional database_name parameter
+DATABASE_GUC=""
+if [ -n "$1" ]; then
+    DATABASE_GUC="$1"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -27,6 +34,14 @@ if [ -f "$PG_CONF" ]; then
         echo -e "\033[0;33mConfiguring shared_preload_libraries...\033[0m"
         echo "shared_preload_libraries = 'pg_durable'" >> "$PG_CONF"
     fi
+    
+    # Configure pg_durable.database_name GUC if provided
+    if [ -n "$DATABASE_GUC" ]; then
+        # Remove any existing pg_durable.database_name setting
+        sed -i '/^pg_durable\.database_name/d' "$PG_CONF"
+        echo -e "\033[0;33mSetting pg_durable.database_name = '$DATABASE_GUC'...\033[0m"
+        echo "pg_durable.database_name = '$DATABASE_GUC'" >> "$PG_CONF"
+    fi
 fi
 
 echo -e "\033[0;33mStarting PostgreSQL...\033[0m"
@@ -46,6 +61,11 @@ done
 # Show version
 VERSION=$(~/.pgrx/17.7/pgrx-install/bin/psql -h localhost -p 28817 -d postgres -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n')
 echo -e "\033[0;32mPostgreSQL started with pg_durable $VERSION\033[0m"
+
+# Show configured GUC if set
+if [ -n "$DATABASE_GUC" ]; then
+    echo -e "\033[0;32mConfigured: pg_durable.database_name = '$DATABASE_GUC'\033[0m"
+fi
 
 echo ""
 echo -e "\033[0;36mConnect:\033[0m"

@@ -97,12 +97,9 @@ jobs:
       # TODO: Re-enable once pg_regress tests are stabilized
       # - name: Run pg_regress tests
       #   id: pg_regress
-      #   env:
-      #     PGDATABASE: contrib_regression
       #   run: |
-      #     ./scripts/pg-start.sh
-      #     cd test/regress
-      #     make installcheck
+      #     ./scripts/pg-start.sh contrib_regression
+      #     PG_CONFIG=$(cargo pgrx info pg-config pg17) make installcheck
 
       # - name: Upload pg_regress results on failure
       #   if: steps.pg_regress.outcome == 'failure'
@@ -117,3 +114,7 @@ jobs:
       # - name: Stop PostgreSQL after pg_regress
       #   if: steps.pg_regress.outcome != 'skipped'
       #   run: ./scripts/pg-stop.sh
+
+      # - name: Stop PostgreSQL after pg_regress
+      #   if: steps.pg_regress.outcome != 'skipped'
+      #   run: ./scripts/pg-reset.sh

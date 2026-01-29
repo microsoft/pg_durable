@@ -18,24 +18,23 @@ pg_durable has two test suites:
    cargo pgrx install --release --pg-config $(cargo pgrx info pg-config pg17)
    ```
 
-2. Start PostgreSQL with the test database environment variable:
+2. Start PostgreSQL with the test database:
    ```bash
-   export PGDATABASE=contrib_regression
-   ./scripts/pg-start.sh
+   ./scripts/pg-start.sh contrib_regression
    ```
 
-   **Important**: The `PGDATABASE` environment variable tells the background worker which database to connect to. pg_regress will create the `contrib_regression` database when tests run.
+   **Important**: This sets the `pg_durable.database_name` GUC to tell the background worker which database to connect to. pg_regress will create the `contrib_regression` database when tests run.
 
 ### Run all tests
 
+As a one-liner from the repository root:
 ```bash
-cd test/regress
-make installcheck
+PG_CONFIG=$(cargo pgrx info pg-config pg17) make installcheck
 ```
 
 ### How Background Worker Connection Works
 
-When PostgreSQL starts, the pg_durable background worker attempts to connect to the database specified by `PGDATABASE` (default: `postgres`). For pg_regress tests, this must be set to `contrib_regression`.
+When PostgreSQL starts, the pg_durable background worker attempts to connect to the database specified by the `pg_durable.database_name` GUC (default: `postgres`). For pg_regress tests, this must be set to `contrib_regression`.
 
 **Retry logic:** If the database doesn't exist yet (common during startup), the worker retries the connection every 5 seconds until:
 - The database is created by pg_regress, OR

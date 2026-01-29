@@ -126,6 +126,8 @@ ensure_config() {
             sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
             echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
         fi
+        # Remove pg_durable.database_name (use default behavior: current database)
+        sed -i.bak '/^#*pg_durable\.database_name/d' "$DATA_DIR/postgresql.conf"
     fi
 }
 
