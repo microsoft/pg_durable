@@ -209,11 +209,11 @@ start_server() {
     fi
     
     # If server is running, we need to:
-    # 1. Drop duroxide schema (to clear any stale schema from previous duroxide-pg-opt version)
+    # 1. Drop extension + duroxide schema (to clear any stale schema from previous duroxide-pg-opt version)
     # 2. Restart server (so background worker reconnects with fresh cached plans)
     if "$PG_ISREADY" -h localhost -p $PG_PORT -U postgres &>/dev/null; then
-        # Drop schemas before restart (background worker will recreate on reconnect)
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP SCHEMA IF EXISTS duroxide CASCADE; DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+        # Drop extension (CASCADE also drops the owned duroxide schema)
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
         echo -e "${YELLOW}Restarting PostgreSQL to reload extension...${NC}"
         stop_server
     fi
@@ -226,10 +226,13 @@ start_server() {
     if [ "$NO_PRELOAD" = true ]; then
         # Drop extension if it exists from a previous run (e.g., unit tests)
         # so the no-preload test can verify CREATE EXTENSION fails correctly
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" >/dev/null 2>&1
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
     else
-        # Create extension (duroxide schema will be created by background worker on first connect)
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null 2>&1
+        # Always drop and recreate extension to ensure PL/pgSQL functions from extension_sql!
+        # are up to date. Without this, a cached data directory (e.g. from CI) may have stale
+        # PL/pgSQL operator functions even though the Rust .so is updated by cargo pgrx install.
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
     fi
 }
 

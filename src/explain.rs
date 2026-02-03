@@ -156,39 +156,74 @@ fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
     })
 }
 
+/// Check if input looks like a plain SQL statement (as opposed to a DSL expression).
+/// Returns true for inputs starting with SQL keywords like SELECT, INSERT, etc.
+fn looks_like_plain_sql(input: &str) -> bool {
+    let upper = input.trim_start().to_uppercase();
+    let sql_keywords = [
+        "SELECT ",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "WITH ",
+        "CREATE ",
+        "ALTER ",
+        "DROP ",
+        "CALL ",
+        "DO ",
+        "TRUNCATE ",
+        "GRANT ",
+        "REVOKE ",
+        "EXPLAIN ",
+        "SELECT\n",
+        "INSERT\n",
+        "UPDATE\n",
+        "DELETE\n",
+        "WITH\n",
+    ];
+    sql_keywords.iter().any(|kw| upper.starts_with(kw))
+}
+
+/// Check if input looks like a DSL expression containing pg_durable operators or functions.
+/// DSL expressions contain operators like ~>, |=>, ?>, !>, @> or df.* function calls.
+fn looks_like_dsl_expression(input: &str) -> bool {
+    input.contains("~>")
+        || input.contains("|=>")
+        || input.contains("?>")
+        || input.contains("!>")
+        || input.contains("@>")
+        || input.contains("df.")
+}
+
 /// Explain a DSL expression without executing it
 fn explain_expression(expr: &str) -> String {
-    // 1. Create temp table for dry-run nodes
-    if let Err(e) = Spi::run(
-        r#"CREATE TEMP TABLE IF NOT EXISTS _durable_explain_nodes (
-            id VARCHAR(8) PRIMARY KEY,
-            instance_id VARCHAR(8),
-            node_type TEXT NOT NULL,
-            query TEXT,
-            result_name TEXT,
-            left_node VARCHAR(8),
-            right_node VARCHAR(8),
-            status TEXT DEFAULT 'pending',
-            result JSONB,
-            error TEXT,
-            created_at TIMESTAMPTZ DEFAULT now(),
-            updated_at TIMESTAMPTZ DEFAULT now()
-        )"#,
-    ) {
-        return format!("Failed to create temp table: {e:?}");
+    use crate::types::Durofut;
+
+    // First try to parse as Durofut JSON
+    if let Ok(root) = serde_json::from_str::<Durofut>(expr) {
+        // Build in-memory node map from nested structure with generated IDs
+        let mut nodes = HashMap::new();
+        let mut id_counter = 0;
+        let root_id = collect_nodes(&root, &mut nodes, &mut id_counter);
+        return build_tree_visualization(&root_id, &nodes, false);
     }
 
-    // Clear any previous dry-run nodes
-    let _ = Spi::run("TRUNCATE _durable_explain_nodes");
+    // If it looks like plain SQL (not a DSL expression), wrap it directly as a SQL node
+    // This prevents the "SELECT SELECT ..." problem when users pass plain SQL to explain
+    if looks_like_plain_sql(expr) && !looks_like_dsl_expression(expr) {
+        let sql_node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some(expr.to_string()),
+            ..Default::default()
+        };
+        let mut nodes = HashMap::new();
+        let mut id_counter = 0;
+        let root_id = collect_nodes(&sql_node, &mut nodes, &mut id_counter);
+        return build_tree_visualization(&root_id, &nodes, false);
+    }
 
-    // 2. Set explain mode flag
-    let _ = Spi::run("SET LOCAL df._explain_mode = 'true'");
-
-    // 3. Execute the expression to populate temp table
+    // DSL expression - evaluate it to build the graph
     let durofut_json: Result<Option<String>, _> = Spi::get_one(&format!("SELECT {expr}"));
-
-    // 4. Reset explain mode
-    let _ = Spi::run("RESET df._explain_mode");
 
     let root_json = match durofut_json {
         Ok(Some(json)) => json,
@@ -196,26 +231,67 @@ fn explain_expression(expr: &str) -> String {
         Err(e) => return format!("Failed to evaluate expression: {e:?}"),
     };
 
-    // Parse the root node ID from the Durofut JSON
-    let root_id = match serde_json::from_str::<serde_json::Value>(&root_json) {
-        Ok(v) => v["node_id"].as_str().unwrap_or("").to_string(),
-        Err(e) => return format!("Failed to parse result: {e:?}"),
+    // Parse the resulting JSON
+    let root = match serde_json::from_str::<Durofut>(&root_json) {
+        Ok(d) => d,
+        Err(e) => return format!("Failed to parse Durofut JSON: {e:?}"),
     };
 
-    if root_id.is_empty() {
-        return "Could not determine root node".to_string();
-    }
+    // Build in-memory node map from nested structure with generated IDs
+    let mut nodes = HashMap::new();
+    let mut id_counter = 0;
+    let root_id = collect_nodes(&root, &mut nodes, &mut id_counter);
 
-    // 5. Load nodes from temp table
-    let nodes = load_nodes_from_table("_durable_explain_nodes", None);
+    // Visualize (existing visualization code)
+    build_tree_visualization(&root_id, &nodes, false)
+}
 
-    // 6. Build visualization (without status markers for dry-run)
-    let result = build_tree_visualization(&root_id, &nodes, false);
+/// Collect all nodes from a nested Durofut structure into a flat HashMap
+/// Generates temporary IDs for visualization (e.g., "N1", "N2", ...)
+/// Returns the ID of the current node
+fn collect_nodes(
+    node: &crate::types::Durofut,
+    nodes: &mut HashMap<String, ExplainNode>,
+    id_counter: &mut i32,
+) -> String {
+    *id_counter += 1;
+    let node_id = format!("N{}", id_counter);
 
-    // 7. Cleanup temp table
-    let _ = Spi::run("DROP TABLE IF EXISTS _durable_explain_nodes");
+    // Recursively collect children first to get their IDs
+    let left_id = node
+        .left_node
+        .as_ref()
+        .map(|n| collect_nodes(n, nodes, id_counter));
+    let right_id = node
+        .right_node
+        .as_ref()
+        .map(|n| collect_nodes(n, nodes, id_counter));
 
-    result
+    // Process config JSON to collect embedded nodes and replace Durofuts with IDs
+    let updated_query =
+        match node.transform_config_children(|child| Ok(collect_nodes(child, nodes, id_counter))) {
+            Ok(q) => q,
+            Err(e) => {
+                // In explain context, report errors as part of the visualization rather than panicking
+                Some(format!("ERROR: {e}"))
+            }
+        };
+
+    nodes.insert(
+        node_id.clone(),
+        ExplainNode {
+            id: node_id.clone(),
+            node_type: node.node_type.clone(),
+            query: updated_query,
+            result_name: node.result_name.clone(),
+            left_node: left_id,
+            right_node: right_id,
+            status: None,
+            result: None,
+        },
+    );
+
+    node_id
 }
 
 /// Load nodes from a table into a HashMap

@@ -138,6 +138,19 @@ Functions are persisted to disk. If PostgreSQL crashes:
 - In-progress steps resume from the last checkpoint
 - Pending steps execute when the server restarts
 
+### Graph Construction
+
+DSL functions build graph structures **in memory** without touching the database. Only when you call `df.start()` are the nodes written to the database:
+
+```sql
+-- This creates a JSON string representing the graph.
+SELECT 'SELECT 1' ~> 'SELECT 2';
+-- Returns: {"node_type":"THEN","left_node":{"node_type":"SQL","query":"SELECT 1"},"right_node":{"node_type":"SQL","query":"SELECT 2"}}
+
+-- Only df.start() writes to the database
+SELECT df.start('SELECT 1' ~> 'SELECT 2');
+```
+
 ---
 
 ## DSL Reference
@@ -1097,7 +1110,7 @@ SQL |=> 'step1': SELECT 1                    ✓ Completed
 **2. Dry-Run Preview** - Pass a DSL expression to visualize without executing:
 
 ```sql
-SELECT df.explain($$
+SELECT df.explain(
     'SELECT 1' |=> 'a'
     ~> 'SELECT 2' |=> 'b'
     ~> df.if(
@@ -1105,7 +1118,7 @@ SELECT df.explain($$
         'SELECT ''yes''',
         'SELECT ''no'''
     )
-$$);
+);
 ```
 
 Output shows the graph structure:
@@ -1133,7 +1146,7 @@ SQL |=> 'a': SELECT 1
 **ETL Pipeline with Parallel Validation:**
 
 ```sql
-SELECT df.explain($$
+SELECT df.explain(
     'SELECT * FROM staging WHERE status = ''pending'' LIMIT 1' |=> 'record'
     ~> df.if(
         'SELECT $record IS NOT NULL',
@@ -1150,7 +1163,7 @@ SELECT df.explain($$
             ),
         'SELECT ''no pending records'''
     )
-$$);
+);
 ```
 
 Output:
@@ -1177,7 +1190,7 @@ SQL |=> 'record': SELECT * FROM staging WHERE status = 'pending' LIMIT 1
 **Cron Job with Cleanup Loop:**
 
 ```sql
-SELECT df.explain($$
+SELECT df.explain(
     df.loop(
         df.wait_for_schedule('0 * * * *')
         ~> 'DELETE FROM logs WHERE created_at < now() - interval ''7 days''' |=> 'deleted'
@@ -1187,7 +1200,7 @@ SELECT df.explain($$
             'SELECT ''nothing to clean'''
         )
     )
-$$);
+);
 ```
 
 Output:
@@ -1207,7 +1220,7 @@ LOOP
 
 ```sql
 -- Visualize the daily-order-archive function before starting it
-SELECT df.explain($$
+SELECT df.explain(
     df.loop(
         df.wait_for_schedule('0 0 * * *')
         ~> 'SELECT COUNT(*) as cnt FROM playground.orders 
@@ -1224,7 +1237,7 @@ SELECT df.explain($$
              VALUES (''No orders to archive'')'
         )
     )
-$$);
+);
 ```
 
 Output:
@@ -1655,7 +1668,7 @@ SELECT df.signal('inst_id', 'approval', '{}');    -- send signal
 
 -- Visualize
 SELECT df.explain('instance_id');        -- live instance
-SELECT df.explain($$ 'a' ~> 'b' $$);     -- dry-run preview
+SELECT df.explain('a' ~> 'b');           -- dry-run preview
 
 -- Monitor
 SELECT * FROM df.list_instances();

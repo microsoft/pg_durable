@@ -1,8 +1,9 @@
 //! Core types and configuration for pg_durable
 
+use pgrx::pg_extern;
+
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
-use pgrx::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::str::FromStr;
@@ -385,15 +386,31 @@ fn default_http_timeout() -> u64 {
 // Durofut Type - Represents a function node reference
 // ============================================================================
 
+/// Valid node types for Durofut nodes.
+pub const VALID_NODE_TYPES: &[&str] = &[
+    "SQL",
+    "THEN",
+    "IF",
+    "JOIN",
+    "LOOP",
+    "BREAK",
+    "RACE",
+    "SLEEP",
+    "WAIT_SCHEDULE",
+    "HTTP",
+    "SIGNAL",
+];
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Children are embedded as nested structures, not stored as ID references.
+/// Node IDs are generated during insertion into df.nodes, not during graph construction.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Durofut {
-    pub node_id: String,
     pub node_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub left_node: Option<String>,
+    pub left_node: Option<Box<Durofut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub right_node: Option<String>,
+    pub right_node: Option<Box<Durofut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -409,92 +426,211 @@ impl Durofut {
         serde_json::from_str(s).expect("failed to deserialize Durofut")
     }
 
-    /// Check if a string is a valid Durofut JSON
-    /// Returns true if it's valid JSON with a node_id field that looks like our format
+    /// Check if a string is a valid Durofut JSON with a recognized node_type
     pub fn is_durofut(s: &str) -> bool {
-        if let Ok(fut) = serde_json::from_str::<Durofut>(s) {
-            // Check if node_id is 8 hex characters (our format)
-            fut.node_id.len() == 8 && fut.node_id.chars().all(|c| c.is_ascii_hexdigit())
-        } else {
-            false
-        }
+        serde_json::from_str::<Durofut>(s)
+            .map(|d| VALID_NODE_TYPES.contains(&d.node_type.as_str()))
+            .unwrap_or(false)
     }
 
-    /// Ensure a string is a Durofut - if it's already one, parse it; if not, treat as SQL and create a node
+    /// Ensure a string is a Durofut - if it's already one, parse it; if not, treat as SQL and create a node.
+    /// Uses a single deserialization attempt to avoid redundant parsing.
     pub fn ensure(s: &str) -> Self {
-        if Self::is_durofut(s) {
-            Self::from_json(s)
-        } else {
-            // It's a plain SQL string - create a SQL node for it
-            let fut = Durofut {
-                node_id: short_id(),
+        match serde_json::from_str::<Durofut>(s) {
+            Ok(d) if VALID_NODE_TYPES.contains(&d.node_type.as_str()) => d,
+            _ => Durofut {
                 node_type: "SQL".to_string(),
-                left_node: None,
-                right_node: None,
                 query: Some(s.to_string()),
-                result_name: None,
-            };
-            fut.insert_node();
-            fut
+                ..Default::default()
+            },
         }
     }
 
-    /// Insert this node into the appropriate table (df.nodes or temp table in explain mode)
-    pub fn insert_node(&self) {
-        let query_escaped = self
-            .query
-            .as_ref()
-            .map(|q| q.replace('\'', "''"))
-            .map(|q| format!("'{q}'"))
-            .unwrap_or_else(|| "NULL".to_string());
+    /// Strict version of ensure - rejects JSON with unknown node_type instead of wrapping as SQL.
+    /// Used by df.start() and other entrypoints where invalid node types should be caught early.
+    pub fn ensure_strict(s: &str) -> Result<Self, String> {
+        match serde_json::from_str::<Durofut>(s) {
+            Ok(d) => {
+                if VALID_NODE_TYPES.contains(&d.node_type.as_str()) {
+                    Ok(d)
+                } else {
+                    Err(format!(
+                        "Unknown node_type '{}'. Valid types: {}",
+                        d.node_type,
+                        VALID_NODE_TYPES.join(", ")
+                    ))
+                }
+            }
+            Err(serde_err) => {
+                // Not valid Durofut JSON - try to parse as generic JSON to check for node_type
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
+                    if let Some(nt) = val.get("node_type").and_then(|v| v.as_str()) {
+                        if VALID_NODE_TYPES.contains(&nt) {
+                            // Valid node_type but malformed structure
+                            return Err(format!(
+                                "Malformed Durofut JSON with node_type '{}': {}",
+                                nt, serde_err
+                            ));
+                        }
+                        return Err(format!(
+                            "Unknown node_type '{}'. Valid types: {}",
+                            nt,
+                            VALID_NODE_TYPES.join(", ")
+                        ));
+                    }
+                }
+                // Not JSON at all or no node_type field - treat as SQL
+                Ok(Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some(s.to_string()),
+                    ..Default::default()
+                })
+            }
+        }
+    }
 
-        let result_name_escaped = self
-            .result_name
-            .as_ref()
-            .map(|n| format!("'{}'", n.replace('\'', "''")))
-            .unwrap_or_else(|| "NULL".to_string());
+    /// Validate a Durofut node and all its children have valid node_types.
+    /// Used during insertion in df.start() to catch invalid nested nodes.
+    pub fn validate_recursive(&self) -> Result<(), String> {
+        if !VALID_NODE_TYPES.contains(&self.node_type.as_str()) {
+            return Err(format!(
+                "Unknown node_type '{}'. Valid types: {}",
+                self.node_type,
+                VALID_NODE_TYPES.join(", ")
+            ));
+        }
+        if let Some(ref left) = self.left_node {
+            left.validate_recursive()?;
+        }
+        if let Some(ref right) = self.right_node {
+            right.validate_recursive()?;
+        }
+        // Validate config-embedded nodes (condition_node, extra_nodes)
+        self.for_each_config_child(|child| child.validate_recursive())?;
+        Ok(())
+    }
 
-        let left_node = self
-            .left_node
-            .as_ref()
-            .map(|id| format!("'{id}'"))
-            .unwrap_or_else(|| "NULL".to_string());
-
-        let right_node = self
-            .right_node
-            .as_ref()
-            .map(|id| format!("'{id}'"))
-            .unwrap_or_else(|| "NULL".to_string());
-
-        // Check if we're in explain mode - use temp table if so
-        let target_table = if is_explain_mode() {
-            "_durable_explain_nodes"
-        } else {
-            "df.nodes"
+    /// Extract config-embedded Durofut children from the `query` JSON field and apply
+    /// a callback to each. This is the single source of truth for walking `condition_node`
+    /// (in IF/LOOP nodes) and `extra_nodes` (in JOIN nodes).
+    ///
+    /// The callback receives each embedded child and returns `Result<(), String>`.
+    /// Parsing failures are always treated as errors — a `condition_node` or `extra_nodes`
+    /// entry that cannot be deserialized as a valid Durofut is rejected.
+    pub fn for_each_config_child<F>(&self, mut f: F) -> Result<(), String>
+    where
+        F: FnMut(&Durofut) -> Result<(), String>,
+    {
+        let query_str = match self.query.as_ref() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let config = match serde_json::from_str::<serde_json::Value>(query_str) {
+            Ok(c) => c,
+            Err(_) => return Ok(()), // not JSON config, nothing to walk
         };
 
-        let sql = format!(
-            r#"INSERT INTO {} (id, node_type, query, result_name, left_node, right_node)
-               VALUES ('{}', '{}', {}, {}, {}, {})"#,
-            target_table,
-            self.node_id,
-            self.node_type,
-            query_escaped,
-            result_name_escaped,
-            left_node,
-            right_node
-        );
+        // IF/LOOP nodes: condition_node
+        if self.node_type == "IF" || self.node_type == "LOOP" {
+            if let Some(cond) = config.get("condition_node") {
+                let cond_node = serde_json::from_value::<Durofut>(cond.clone()).map_err(|e| {
+                    format!(
+                        "condition_node in {} must be a valid Durofut object, got {}: {}",
+                        self.node_type,
+                        summarize_json_type(cond),
+                        e
+                    )
+                })?;
+                f(&cond_node)?;
+            }
+        }
 
-        Spi::run(&sql).expect("failed to insert node");
+        // JOIN nodes: extra_nodes array
+        if self.node_type == "JOIN" {
+            if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
+                for (i, extra) in extras.iter().enumerate() {
+                    let extra_node =
+                        serde_json::from_value::<Durofut>(extra.clone()).map_err(|e| {
+                            format!(
+                                "extra_nodes[{}] in {} must be a valid Durofut object: {}",
+                                i, self.node_type, e
+                            )
+                        })?;
+                    f(&extra_node)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Transform config-embedded Durofut children into string IDs via a callback,
+    /// returning the updated query JSON string. Used by `insert_nodes` and `collect_nodes`
+    /// to replace nested Durofut objects with generated node IDs.
+    ///
+    /// The callback receives each embedded child and returns the generated ID string.
+    /// Parsing failures are always treated as errors.
+    pub fn transform_config_children<F>(&self, mut f: F) -> Result<Option<String>, String>
+    where
+        F: FnMut(&Durofut) -> Result<String, String>,
+    {
+        let query_str = match self.query.as_ref() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let mut config = match serde_json::from_str::<serde_json::Value>(query_str) {
+            Ok(c) => c,
+            Err(_) => return Ok(Some(query_str.clone())), // not JSON, pass through as-is
+        };
+
+        // IF/LOOP nodes: condition_node
+        if self.node_type == "IF" || self.node_type == "LOOP" {
+            if let Some(cond) = config.get("condition_node") {
+                let cond_node = serde_json::from_value::<Durofut>(cond.clone()).map_err(|e| {
+                    format!(
+                        "condition_node in {} must be a valid Durofut object, got {}: {}",
+                        self.node_type,
+                        summarize_json_type(cond),
+                        e
+                    )
+                })?;
+                let cond_id = f(&cond_node)?;
+                config["condition_node"] = serde_json::json!(cond_id);
+            }
+        }
+
+        // JOIN nodes: extra_nodes array
+        if self.node_type == "JOIN" {
+            if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
+                let mut extra_ids: Vec<String> = Vec::new();
+                for (i, extra) in extras.iter().enumerate() {
+                    let extra_node =
+                        serde_json::from_value::<Durofut>(extra.clone()).map_err(|e| {
+                            format!(
+                                "extra_nodes[{}] in {} must be a valid Durofut object: {}",
+                                i, self.node_type, e
+                            )
+                        })?;
+                    extra_ids.push(f(&extra_node)?);
+                }
+                if !extra_ids.is_empty() {
+                    config["extra_nodes"] = serde_json::json!(extra_ids);
+                }
+            }
+        }
+
+        Ok(Some(serde_json::to_string(&config).unwrap()))
     }
 }
 
-/// Check if we're in explain mode (for dry-run graph visualization)
-pub fn is_explain_mode() -> bool {
-    Spi::get_one::<bool>(
-        "SELECT COALESCE(current_setting('df._explain_mode', true), 'false') = 'true'",
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(false)
+/// Helper to describe a JSON value type for error messages
+fn summarize_json_type(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }

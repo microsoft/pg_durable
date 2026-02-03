@@ -296,14 +296,30 @@ END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
 -- Helper to ensure a value is a durofut (returns JSON string)
+-- Rejects JSON with unknown node_type values.
+-- NOTE: The valid node type list here must be kept in sync with
+-- VALID_NODE_TYPES in src/types.rs (the Rust constant is the canonical source).
 CREATE OR REPLACE FUNCTION df.ensure_durofut(val text) RETURNS text AS $$
+DECLARE
+    node_type_val text;
 BEGIN
     -- Try to parse as JSON to check if it's already a durofut
     BEGIN
-        IF (val::jsonb)->>'node_id' IS NOT NULL THEN
+        node_type_val := (val::jsonb)->>'node_type';
+        IF node_type_val IS NOT NULL THEN
+            -- Has a node_type - validate it
+            IF node_type_val NOT IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL') THEN
+                RAISE EXCEPTION 'Unknown node_type ''%''. Valid types: SQL, THEN, IF, JOIN, LOOP, BREAK, RACE, SLEEP, WAIT_SCHEDULE, HTTP, SIGNAL', node_type_val;
+            END IF;
             RETURN val;
         END IF;
-    EXCEPTION WHEN OTHERS THEN
+    EXCEPTION WHEN invalid_text_representation THEN
+        -- Not valid JSON, treat as SQL
+        NULL;
+    WHEN raise_exception THEN
+        -- Re-raise our validation error
+        RAISE;
+    WHEN OTHERS THEN
         -- Not valid JSON, treat as SQL
         NULL;
     END;
@@ -500,7 +516,7 @@ mod tests {
         let json = crate::dsl::sql("SELECT 1");
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "SQL");
-        assert!(!fut.node_id.is_empty());
+        assert!(fut.query.is_some());
     }
 
     #[pg_test]
@@ -531,6 +547,28 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_sleep_node_is_recognized_as_durofut() {
+        // This test verifies that SLEEP nodes created by df.sleep() can be
+        // properly recognized and deserialized by Durofut::ensure()
+        let sleep_json = crate::dsl::sleep(1);
+
+        // Test that is_durofut recognizes it
+        assert!(
+            Durofut::is_durofut(&sleep_json),
+            "Durofut::is_durofut should recognize SLEEP node JSON: {}",
+            sleep_json
+        );
+
+        // Test that ensure doesn't wrap it in SQL
+        let ensured = Durofut::ensure(&sleep_json);
+        assert_eq!(
+            ensured.node_type, "SLEEP",
+            "Durofut::ensure should preserve SLEEP, not wrap as SQL"
+        );
+        assert_eq!(ensured.query, Some("1".to_string()));
+    }
+
+    #[pg_test]
     fn test_wait_for_schedule_valid_cron() {
         let json = crate::dsl::wait_for_schedule("*/5 * * * *");
         let fut = Durofut::from_json(&json);
@@ -554,9 +592,22 @@ mod tests {
         let json = crate::dsl::loop_fn(&body, Some(&condition));
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "LOOP");
-        assert!(fut.left_node.is_some()); // body
-        assert!(fut.right_node.is_some()); // condition
-        assert!(fut.query.is_some()); // has config with condition_node
+        assert!(fut.left_node.is_some(), "body should be set"); // body
+        assert!(
+            fut.right_node.is_none(),
+            "right_node should be None for LOOP"
+        ); // condition in config now
+        assert!(
+            fut.query.is_some(),
+            "should have config with condition_node"
+        ); // has config with condition_node
+
+        // Verify condition is embedded in config
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert!(
+            config.get("condition_node").is_some(),
+            "config should have condition_node"
+        );
     }
 
     #[pg_test]
@@ -590,6 +641,83 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_if_condition_embedded_in_config() {
+        // Verify that if_fn embeds condition as a nested Durofut in the config JSON,
+        // not as a string ID reference.
+        let condition = crate::dsl::sql("SELECT count(*) > 0 FROM tasks");
+        let then_branch = crate::dsl::sql("SELECT 'yes'");
+        let else_branch = crate::dsl::sql("SELECT 'no'");
+        let json = crate::dsl::if_fn(&condition, &then_branch, &else_branch);
+        let fut = Durofut::from_json(&json);
+
+        assert_eq!(fut.node_type, "IF");
+        assert!(fut.left_node.is_some(), "then branch should be left_node");
+        assert!(fut.right_node.is_some(), "else branch should be right_node");
+
+        // Parse the config to verify condition_node structure
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        let cond_node = config
+            .get("condition_node")
+            .expect("config should have condition_node");
+
+        // condition_node must be a nested Durofut object, not a string ID
+        assert!(
+            cond_node.is_object(),
+            "condition_node should be an object, not a string"
+        );
+        assert_eq!(cond_node["node_type"], "SQL");
+        assert_eq!(cond_node["query"], "SELECT count(*) > 0 FROM tasks");
+
+        // Verify it round-trips through validation
+        assert!(
+            fut.validate_recursive().is_ok(),
+            "IF with embedded condition should pass validation"
+        );
+    }
+
+    #[pg_test]
+    fn test_join3_extra_nodes_embedded_in_config() {
+        // Verify that join3 embeds the third branch as a nested Durofut in extra_nodes,
+        // not as a string ID reference.
+        let a = crate::dsl::sql("SELECT 1");
+        let b = crate::dsl::sql("SELECT 2");
+        let c = crate::dsl::sql("SELECT 3");
+        let json = crate::dsl::join3(&a, &b, &c);
+        let fut = Durofut::from_json(&json);
+
+        assert_eq!(fut.node_type, "JOIN");
+        assert!(fut.left_node.is_some(), "first branch should be left_node");
+        assert!(
+            fut.right_node.is_some(),
+            "second branch should be right_node"
+        );
+
+        // Parse the config to verify extra_nodes structure
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        let extras = config
+            .get("extra_nodes")
+            .and_then(|e| e.as_array())
+            .expect("config should have extra_nodes array");
+
+        assert_eq!(extras.len(), 1, "join3 should have exactly 1 extra node");
+
+        // extra_nodes[0] must be a nested Durofut object, not a string ID
+        let extra = &extras[0];
+        assert!(
+            extra.is_object(),
+            "extra_nodes entry should be an object, not a string"
+        );
+        assert_eq!(extra["node_type"], "SQL");
+        assert_eq!(extra["query"], "SELECT 3");
+
+        // Verify it round-trips through validation
+        assert!(
+            fut.validate_recursive().is_ok(),
+            "JOIN3 with embedded extra_nodes should pass validation"
+        );
+    }
+
+    #[pg_test]
     fn test_join_creates_join_node() {
         let a = crate::dsl::sql("SELECT 1");
         let b = crate::dsl::sql("SELECT 2");
@@ -607,7 +735,7 @@ mod tests {
         let json = crate::dsl::http("https://example.com/api", "GET", None, None, 30);
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "HTTP");
-        assert!(!fut.node_id.is_empty());
+        assert!(fut.query.is_some());
     }
 
     #[pg_test]
@@ -718,7 +846,7 @@ mod tests {
         let json = crate::dsl::wait_for_signal("approval", None);
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "SIGNAL");
-        assert!(!fut.node_id.is_empty());
+        assert!(fut.query.is_some());
 
         let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
         assert_eq!(config["signal_name"], "approval");
@@ -842,10 +970,12 @@ mod tests {
 
     #[pg_test]
     fn test_multiple_starts_different_ids() {
+        // The same graph JSON can be reused with df.start() multiple times,
+        // each producing a distinct instance with its own node IDs.
         let fut = crate::dsl::sql("SELECT 1");
         let id1 = crate::dsl::start(&fut, None);
         let id2 = crate::dsl::start(&fut, None);
-        assert_ne!(id1, id2);
+        assert_ne!(id1, id2, "Each start should create a new instance");
     }
 
     #[pg_test]
@@ -1572,6 +1702,213 @@ mod tests {
             pg_status,
             Some("completed".to_string()),
             "Expected 'completed' in PostgreSQL table, got {pg_status:?}"
+        );
+    }
+
+    // ========================================================================
+    // Negative-path tests: validation, malformed config, ensure_strict
+    // ========================================================================
+
+    #[pg_test]
+    fn test_validate_rejects_malformed_condition_node_object() {
+        // A condition_node that is a JSON object but not a valid Durofut
+        // should be rejected by validate_recursive
+        let durofut = Durofut {
+            node_type: "IF".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 'then'".to_string()),
+                ..Default::default()
+            })),
+            right_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 'else'".to_string()),
+                ..Default::default()
+            })),
+            query: Some(r#"{"condition_node": {"foo": "bar"}}"#.to_string()),
+            ..Default::default()
+        };
+        let result = durofut.validate_recursive();
+        assert!(
+            result.is_err(),
+            "Should reject malformed condition_node object"
+        );
+        assert!(
+            result.unwrap_err().contains("condition_node"),
+            "Error should mention condition_node"
+        );
+    }
+
+    #[pg_test]
+    fn test_validate_rejects_condition_node_number() {
+        // condition_node as a number should be rejected
+        let durofut = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            query: Some(r#"{"condition_node": 42}"#.to_string()),
+            ..Default::default()
+        };
+        let result = durofut.validate_recursive();
+        assert!(result.is_err(), "Should reject numeric condition_node");
+    }
+
+    #[pg_test]
+    fn test_validate_rejects_condition_node_string_id() {
+        // condition_node as a string ID (old format) should be rejected
+        let durofut = Durofut {
+            node_type: "IF".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 'then'".to_string()),
+                ..Default::default()
+            })),
+            right_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 'else'".to_string()),
+                ..Default::default()
+            })),
+            query: Some(r#"{"condition_node": "a1b2c3d4"}"#.to_string()),
+            ..Default::default()
+        };
+        let result = durofut.validate_recursive();
+        assert!(result.is_err(), "Should reject string ID condition_node");
+    }
+
+    #[pg_test]
+    fn test_validate_rejects_deeply_nested_invalid_node_type() {
+        // Valid outer graph but a deeply nested node has an invalid type
+        let inner_bad = Durofut {
+            node_type: "BOGUS".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+        let middle = Durofut {
+            node_type: "THEN".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            right_node: Some(Box::new(inner_bad)),
+            ..Default::default()
+        };
+        let root = Durofut {
+            node_type: "THEN".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 0".to_string()),
+                ..Default::default()
+            })),
+            right_node: Some(Box::new(middle)),
+            ..Default::default()
+        };
+        let result = root.validate_recursive();
+        assert!(
+            result.is_err(),
+            "Should catch invalid node_type deep in the tree"
+        );
+        assert!(
+            result.unwrap_err().contains("BOGUS"),
+            "Error should mention the invalid type"
+        );
+    }
+
+    #[pg_test]
+    fn test_validate_rejects_malformed_extra_nodes() {
+        // An extra_nodes entry that is not a valid Durofut
+        let durofut = Durofut {
+            node_type: "JOIN".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            right_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 2".to_string()),
+                ..Default::default()
+            })),
+            query: Some(r#"{"extra_nodes": [{"not": "a durofut"}]}"#.to_string()),
+            ..Default::default()
+        };
+        let result = durofut.validate_recursive();
+        assert!(result.is_err(), "Should reject malformed extra_nodes entry");
+        assert!(
+            result.unwrap_err().contains("extra_nodes[0]"),
+            "Error should identify the index"
+        );
+    }
+
+    #[pg_test]
+    fn test_ensure_strict_malformed_structure_valid_type() {
+        // JSON with valid node_type but invalid structure (left_node as string)
+        let input = r#"{"node_type": "THEN", "left_node": "not-an-object"}"#;
+        let result = Durofut::ensure_strict(input);
+        assert!(result.is_err(), "Should reject malformed Durofut structure");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Malformed"),
+            "Error should say 'Malformed', got: {err}"
+        );
+        assert!(
+            !err.contains("Unknown node_type"),
+            "Error should NOT say 'Unknown node_type' for valid type, got: {err}"
+        );
+    }
+
+    #[pg_test]
+    fn test_ensure_strict_unknown_node_type() {
+        // JSON with truly unknown node_type
+        let input = r#"{"node_type": "BOGUS"}"#;
+        let result = Durofut::ensure_strict(input);
+        assert!(result.is_err(), "Should reject unknown node_type");
+        assert!(
+            result.unwrap_err().contains("Unknown node_type"),
+            "Error should say 'Unknown node_type'"
+        );
+    }
+
+    #[pg_test]
+    fn test_ensure_strict_plain_sql() {
+        // Non-JSON string should be treated as SQL
+        let result = Durofut::ensure_strict("SELECT 1");
+        assert!(result.is_ok());
+        let d = result.unwrap();
+        assert_eq!(d.node_type, "SQL");
+        assert_eq!(d.query, Some("SELECT 1".to_string()));
+    }
+
+    #[pg_test]
+    fn test_validate_accepts_valid_condition_node() {
+        // A properly formed IF node with embedded Durofut condition should pass
+        let condition = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT true".to_string()),
+            ..Default::default()
+        };
+        let config = serde_json::json!({ "condition_node": condition });
+        let durofut = Durofut {
+            node_type: "IF".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 'then'".to_string()),
+                ..Default::default()
+            })),
+            right_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 'else'".to_string()),
+                ..Default::default()
+            })),
+            query: Some(config.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            durofut.validate_recursive().is_ok(),
+            "Valid IF graph should pass validation"
         );
     }
 }

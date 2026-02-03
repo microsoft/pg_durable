@@ -186,42 +186,47 @@ pub extern "C-unwind" fn _PG_init() {
 
 #### Durofut (Durable Future Reference)
 
-A `Durofut` represents a node in the function graph. It's serialized as JSON and passed between DSL functions.
+A `Durofut` represents an abstract function graph, sub-graph or leaf node. It's serialized as JSON and passed between DSL functions.
 
 ```rust
 // src/types.rs
 pub struct Durofut {
-    pub node_id: String,           // 8-char hex ID (e.g., "a1b2c3d4")
-    pub node_type: String,         // SQL, THEN, IF, JOIN, LOOP, etc.
-    pub left_node: Option<String>, // Left child node ID
-    pub right_node: Option<String>,// Right child node ID  
-    pub query: Option<String>,     // SQL query or config JSON
-    pub result_name: Option<String>, // Named result (from |=> operator)
+    pub node_type: String,                  // SQL, THEN, IF, JOIN, LOOP, etc.
+    pub left_node: Option<Box<Durofut>>,    // Embedded left child
+    pub right_node: Option<Box<Durofut>>,   // Embedded right child
+    pub query: Option<String>,              // SQL query or config JSON
+    pub result_name: Option<String>,        // Named result (from |=> operator)
 }
 ```
 
 When serialized to JSON:
 ```json
 {
-  "node_id": "a1b2c3d4",
-  "node_type": "SQL",
-  "query": "SELECT 1"
+  "node_type": "THEN",
+  "left_node": {
+    "node_type": "SQL",
+    "query": "SELECT 1"
+  },
+  "right_node": {
+    "node_type": "SQL",
+    "query": "SELECT 2"
+  }
 }
 ```
 
 #### FunctionNode (Database Representation)
 
-Nodes are persisted in `df.nodes`:
+`df.start(<function>)` adds a new row to `df.instances`, then iterates the nodes in the function graph bottom up, persisting each one to the `df.nodes` table along with the instance ID, a new ID for the node, and the IDs of its child nodes, if any.
 
 ```sql
 CREATE TABLE df.nodes (
     id VARCHAR(8) PRIMARY KEY,
-    instance_id VARCHAR(8),      -- Set by df.start() during linking
+    instance_id VARCHAR(8),      -- Set by df.start()
     node_type TEXT NOT NULL,     -- SQL, THEN, IF, JOIN, LOOP, etc.
     query TEXT,                  -- SQL query or config JSON
     result_name TEXT,            -- Named result for $variable substitution
-    left_node VARCHAR(8),        -- Left child
-    right_node VARCHAR(8),       -- Right child
+    left_node VARCHAR(8),        -- Left child ID
+    right_node VARCHAR(8),       -- Right child ID
     status TEXT DEFAULT 'pending',
     result JSONB,
     created_at TIMESTAMPTZ DEFAULT now()
@@ -230,7 +235,7 @@ CREATE TABLE df.nodes (
 
 ### DSL Functions
 
-Each DSL function (`df.sql`, `df.sleep`, `df.join`, etc.) creates a node and returns its JSON representation.
+Each DSL function (`df.sql`, `df.sleep`, `df.join`, etc.) creates a Durofut and returns its JSON representation. All graph construction is stateless.
 
 #### Example: `df.sql()`
 
@@ -238,16 +243,12 @@ Each DSL function (`df.sql`, `df.sleep`, `df.join`, etc.) creates a node and ret
 // src/dsl.rs
 #[pg_extern(schema = "df")]
 pub fn sql(query: &str) -> String {
-    let durofut = Durofut {
-        node_id: short_id(),              // Generate 8-char hex ID
+    Durofut {
         node_type: "SQL".to_string(),
-        left_node: None,
-        right_node: None,
-        query: Some(query.to_string()),   // Store the SQL query
-        result_name: None,
-    };
-    durofut.insert_node();                // INSERT INTO df.nodes
-    durofut.to_json()                     // Return JSON for chaining
+        query: Some(query.to_string()),
+        ..Default::default()
+    }
+    .to_json()
 }
 ```
 
@@ -259,16 +260,13 @@ pub fn then_fn(a: &str, b: &str) -> String {
     let a_fut = Durofut::ensure(a);       // Auto-wrap plain SQL if needed
     let b_fut = Durofut::ensure(b);
     
-    let durofut = Durofut {
-        node_id: short_id(),
+    Durofut {
         node_type: "THEN".to_string(),
-        left_node: Some(a_fut.node_id),   // First step
-        right_node: Some(b_fut.node_id),  // Second step
-        query: None,
-        result_name: None,
-    };
-    durofut.insert_node();
-    durofut.to_json()
+        left_node: Some(Box::new(a_fut)),  // Embed first step
+        right_node: Some(Box::new(b_fut)), // Embed second step
+        ..Default::default()
+    }
+    .to_json()
 }
 ```
 
@@ -283,25 +281,20 @@ impl Durofut {
         if Self::is_durofut(s) {
             Self::from_json(s)           // Already a Durofut
         } else {
-            // Plain SQL string - create a SQL node
-            let fut = Durofut {
-                node_id: short_id(),
+            // Plain SQL string
+            Durofut {
                 node_type: "SQL".to_string(),
                 query: Some(s.to_string()),
                 ..Default::default()
-            };
-            fut.insert_node();
-            fut
+            }
         }
     }
     
     pub fn is_durofut(s: &str) -> bool {
-        // Check if valid JSON with 8-char hex node_id
-        if let Ok(fut) = serde_json::from_str::<Durofut>(s) {
-            fut.node_id.len() == 8 && fut.node_id.chars().all(|c| c.is_ascii_hexdigit())
-        } else {
-            false
-        }
+        // Check if valid JSON with a recognized node_type
+        serde_json::from_str::<Durofut>(s)
+            .map(|d| VALID_NODE_TYPES.contains(&d.node_type.as_str()))
+            .unwrap_or(false)
     }
 }
 ```
@@ -344,9 +337,9 @@ CREATE OPERATOR !> (FUNCTION = df.if_else_op, ...);
 CREATE OPERATOR @> (FUNCTION = df.loop_prefix_op, RIGHTARG = text);
 ```
 
-### Node Linking
+### Node Insertion
 
-When `df.start()` is called, it recursively links all nodes to the instance:
+When `df.start()` is called, it recursively inserts all nodes from the nested graph into the database:
 
 ```rust
 // src/dsl.rs - df.start()
@@ -354,42 +347,71 @@ pub fn start(fut: &str, label: Option<&str>) -> String {
     let durofut = Durofut::ensure(fut);
     let instance_id = short_id();
     
-    // Create instance record
-    Spi::run(&format!(
-        "INSERT INTO df.instances (id, label, root_node, status) 
-         VALUES ('{}', {}, '{}', 'pending')",
-        instance_id, label_sql, durofut.node_id
-    ));
-    
-    // Recursively link all nodes in the graph
-    fn link_nodes(node_id: &str, instance_id: &str, visited: &mut HashSet<String>) {
-        if visited.contains(node_id) { return; }
-        visited.insert(node_id.to_string());
+    // Recursively insert all nodes from the nested graph
+    // Note: No HashSet needed - nested graphs are trees, not DAGs
+    fn insert_nodes(node: &Durofut, instance_id: &str) -> String {
+        let node_id = short_id();  // Generate ID at insertion time
         
-        // Set instance_id on this node
-        Spi::run(&format!(
-            "UPDATE df.nodes SET instance_id = '{}' WHERE id = '{}'",
-            instance_id, node_id
-        ));
+        // Recursively insert children FIRST to get their IDs
+        let left_id = node.left_node.as_ref().map(|n| insert_nodes(n, instance_id));
+        let right_id = node.right_node.as_ref().map(|n| insert_nodes(n, instance_id));
         
-        // Get child nodes and recurse
-        let left = get_left_node(node_id);
-        let right = get_right_node(node_id);
-        let config = get_config(node_id);
-        
-        if let Some(l) = left { link_nodes(&l, instance_id, visited); }
-        if let Some(r) = right { link_nodes(&r, instance_id, visited); }
-        
-        // Handle extra nodes in config (e.g., condition_node, extra_nodes)
-        if let Some(cfg) = config {
-            if let Some(cond_id) = cfg["condition_node"].as_str() {
-                link_nodes(cond_id, instance_id, visited);
+        // Process config JSON to replace embedded Durofuts with IDs
+        // (for IF condition_node, LOOP condition_node, JOIN3 extra_nodes)
+        let query_escaped = if let Some(ref query_str) = node.query {
+            if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(query_str) {
+                // For IF/LOOP nodes: replace condition_node Durofut with ID
+                if node.node_type == "IF" || node.node_type == "LOOP" {
+                    if let Some(cond_json) = config.get("condition_node") {
+                        if let Ok(cond_node) = serde_json::from_value::<Durofut>(cond_json.clone()) {
+                            let cond_id = insert_nodes(&cond_node, instance_id);
+                            config["condition_node"] = serde_json::json!(cond_id);
+                        }
+                    }
+                }
+                // For JOIN3 nodes: replace extra_nodes Durofuts with IDs
+                if node.node_type == "JOIN" {
+                    if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
+                        let extra_ids: Vec<String> = extras.iter()
+                            .filter_map(|e| serde_json::from_value::<Durofut>(e.clone()).ok())
+                            .map(|n| insert_nodes(&n, instance_id))
+                            .collect();
+                        if !extra_ids.is_empty() {
+                            config["extra_nodes"] = serde_json::json!(extra_ids);
+                        }
+                    }
+                }
+                format!("'{}'", serde_json::to_string(&config).unwrap().replace('\'', "''"))
+            } else {
+                format!("'{}'", query_str.replace('\'', "''"))
             }
-            // ... handle extra_nodes for join3, etc.
-        }
+        } else {
+            "NULL".to_string()
+        };
+
+        // Insert this node with all fields
+        Spi::run(&format!(
+            "INSERT INTO df.nodes
+             (id, instance_id, node_type, query, result_name, left_node, right_node)
+             VALUES ('{}', '{}', '{}', {}, {}, {}, {})",
+            node_id, instance_id, node.node_type,
+            query_escaped,
+            escape_option(&node.result_name),
+            escape_option(&left_id),
+            escape_option(&right_id)
+        ));
+
+        node_id  // Return the generated ID
     }
     
-    link_nodes(&durofut.node_id, &instance_id, &mut HashSet::new());
+    let root_node_id = insert_nodes(&durofut, &instance_id);
+
+    // Create instance record with the root node ID
+    Spi::run(&format!(
+        "INSERT INTO df.instances (id, label, root_node, status)
+         VALUES ('{}', {}, '{}', 'pending')",
+        instance_id, label_sql, root_node_id
+    ));
     
     // Capture variables and enqueue to duroxide
     let vars = capture_vars();  // SELECT * FROM df.vars
