@@ -241,6 +241,7 @@ async fn execute_node_inner(
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
+        "call" => execute_call_node(ctx, graph, node, node_id, results, exec_ctx).await,
         other => Err(format!("Unknown node type: {other}")),
     }
 }
@@ -841,4 +842,61 @@ async fn execute_signal_node(
     }
 
     Ok(result_str)
+}
+
+async fn execute_call_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<String, String> {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("CALL node {node_id} has no config"))?;
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid CALL config: {e}"))?;
+
+    let graph_node_id = config["graph_node"]
+        .as_str()
+        .ok_or("Missing graph_node in CALL config")?;
+    let input = config["input"]
+        .as_str()
+        .unwrap_or("{}");
+
+    ctx.trace_info(format!(
+        "Calling sub-orchestration with graph node: {graph_node_id}"
+    ));
+
+    // Prepare the sub-orchestration input
+    // We need to serialize the child graph and execute it as a subtree
+    let graph_json =
+        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
+    let results_json =
+        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+
+    let subtree_input = serde_json::json!({
+        "graph": graph_json,
+        "node_id": graph_node_id,
+        "results": results_json
+    })
+    .to_string();
+
+    // Schedule the sub-orchestration
+    let result = ctx
+        .schedule_sub_orchestration(SUBTREE_NAME, subtree_input)
+        .await?;
+
+    ctx.trace_info(format!("Sub-orchestration completed with result: {result}"));
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing CALL result as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
 }

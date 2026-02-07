@@ -483,6 +483,52 @@ pub fn wait_for_signal(name: &str, timeout_seconds: default!(Option<i32>, "NULL"
     durofut.to_json()
 }
 
+/// Calls a sub-orchestration (child durable function).
+///
+/// This allows composition of durable functions by invoking one function from within another.
+/// The parent waits for the child to complete and receives its result.
+///
+/// # Arguments
+/// * `graph` - The child function graph to execute (Durofut or plain SQL)
+/// * `input` - Optional JSON input to pass to the child function (defaults to '{}')
+///
+/// # Returns
+/// A Durofut representing the sub-orchestration call node
+///
+/// # Examples
+/// ```sql
+/// -- Call a reusable workflow
+/// SELECT df.call('SELECT process_order($order_id)')
+///
+/// -- Call with input
+/// SELECT df.call('SELECT validate_data()', '{"user_id": 123}')
+/// ```
+#[pg_extern(schema = "df")]
+pub fn call(graph: &str, input: default!(&str, "'{}'")) -> String {
+    // Validate input is valid JSON
+    if serde_json::from_str::<serde_json::Value>(input).is_err() {
+        pgrx::error!("Input must be valid JSON");
+    }
+
+    let graph_fut = Durofut::ensure(graph);
+
+    let config = serde_json::json!({
+        "graph_node": graph_fut.node_id,
+        "input": input
+    });
+
+    let durofut = Durofut {
+        node_id: short_id(),
+        node_type: "CALL".to_string(),
+        left_node: Some(graph_fut.node_id),
+        right_node: None,
+        query: Some(config.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
 /// Send a signal to a running durable function instance.
 ///
 /// # Arguments

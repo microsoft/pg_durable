@@ -17,11 +17,12 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 7. [HTTP Requests](#http-requests)
 8. [Durable Function Variables](#durable-function-variables)
 9. [Loops & Cron Jobs](#loops--cron-jobs)
-10. [Signals](#signals)
-11. [Visualizing Functions](#visualizing-functions)
-12. [Monitoring](#monitoring)
-13. [Quick Reference Card](#quick-reference-card)
-14. [Appendix: Test Data Setup](#appendix-test-data-setup)
+10. [Sub-Orchestrations](#sub-orchestrations)
+11. [Signals](#signals)
+12. [Visualizing Functions](#visualizing-functions)
+13. [Monitoring](#monitoring)
+14. [Quick Reference Card](#quick-reference-card)
+15. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -49,6 +50,7 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 | **Timers & Delays** | Sleep with `df.sleep()` |
 | **Cron Scheduling** | Schedule with `df.wait_for_schedule()` |
 | **Eternal Loops** | Create forever-running jobs with `@>` operator or `df.loop()` |
+| **Sub-Orchestrations** | Compose workflows with `df.call()` |
 | **Signals** | Wait for external events with `df.wait_for_signal()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
 | **Labels** | Tag functions with friendly names |
@@ -938,6 +940,86 @@ SELECT df.cancel('found_id', 'Stopping cron job');
 
 ---
 
+## Sub-Orchestrations
+
+Sub-orchestrations (also called child orchestrations) allow you to compose durable functions by calling one workflow from within another. The parent waits for the child to complete and receives its result.
+
+### Basic Sub-Orchestration Call
+
+Use `df.call()` to invoke a sub-orchestration:
+
+```sql
+-- Define a reusable workflow as a simple SQL expression
+SELECT df.start(
+    df.seq(
+        'INSERT INTO audit_log (event) VALUES (''parent_start'')',
+        df.seq(
+            df.call('INSERT INTO audit_log (event) VALUES (''child_work'')'),
+            'INSERT INTO audit_log (event) VALUES (''parent_end'')'
+        )
+    ),
+    'parent-workflow'
+);
+```
+
+### Passing Data to Sub-Orchestrations
+
+You can pass JSON input to sub-orchestrations:
+
+```sql
+-- Call with input parameters
+SELECT df.call(
+    'SELECT process_order($order_id)',
+    '{"order_id": 123}'
+)
+```
+
+### Capturing Sub-Orchestration Results
+
+Use `|=>` to capture and reuse results from sub-orchestrations:
+
+```sql
+-- Capture child result and use it in parent
+SELECT df.start(
+    df.call('SELECT get_user_data($user_id)') |=> 'user_data' ~>
+    df.sql('SELECT log_user($$user_data)')
+);
+```
+
+### Use Cases
+
+- **Modularity**: Break complex workflows into reusable components
+- **Composition**: Build sophisticated workflows from simple building blocks
+- **Maintainability**: Update sub-workflows without changing parent workflows
+- **Parallel Execution**: Use `df.join()` or `&` with multiple `df.call()` for fan-out patterns
+
+### Example: Order Processing with Sub-Orchestrations
+
+```sql
+-- Reusable validation workflow
+-- Can be called from multiple parent workflows
+-- (In a real system, you might store these as named functions - coming soon!)
+
+SELECT df.start(
+    df.seq(
+        -- Validate order
+        df.call('SELECT validate_order($order_id)') |=> 'validation',
+        df.seq(
+            -- Process payment in parallel with inventory check
+            df.join(
+                df.call('SELECT charge_payment($order_id)'),
+                df.call('SELECT reserve_inventory($order_id)')
+            ) |=> 'processing',
+            -- Send confirmation
+            df.call('SELECT send_confirmation($order_id)')
+        )
+    ),
+    'order-workflow'
+);
+```
+
+---
+
 ## Signals
 
 Signals allow external code to send events to running durable functions. This enables:
@@ -1335,6 +1417,10 @@ SELECT df.start(df.loop(body, 'SELECT count(*) > 0 FROM queue'));
 -- Break out of loop
 df.break()                               -- exit loop
 df.break('{"done": true}')               -- exit with return value
+
+-- Call sub-orchestration
+df.call('SELECT child_workflow()')                    -- basic call
+df.call('SELECT child_workflow()', '{"param": 123}')  -- with input
 
 -- Timers
 df.sleep(60)                             -- 60 seconds

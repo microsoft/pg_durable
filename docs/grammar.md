@@ -289,6 +289,7 @@ This applies to all operator positions and function arguments.
 | `WAIT_SCHEDULE` | `df.wait_for_schedule()` | Wait for cron match |
 | `SIGNAL` | `df.wait_for_signal()` | Wait for external event |
 | `HTTP` | `df.http()` | Make HTTP request |
+| `CALL` | `df.call()` | Invoke sub-orchestration |
 
 ## Future: Compensation (Proposed)
 
