@@ -242,6 +242,8 @@ async fn execute_node_inner(
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
         "call" => execute_call_node(ctx, graph, node, node_id, results, exec_ctx).await,
+        "when_all" => execute_when_all_node(ctx, graph, node, node_id, results).await,
+        "when_any" => execute_when_any_node(ctx, graph, node, node_id, results).await,
         other => Err(format!("Unknown node type: {other}")),
     }
 }
@@ -905,6 +907,173 @@ async fn execute_call_node(
     // Store result if named
     if let Some(name) = &node.result_name {
         ctx.trace_info(format!("Storing CALL result as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
+}
+
+async fn execute_when_all_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+) -> Result<String, String> {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("WHEN_ALL node {node_id} has no config"))?;
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid WHEN_ALL config: {e}"))?;
+
+    let node_ids = config["node_ids"]
+        .as_array()
+        .ok_or("Missing node_ids in WHEN_ALL config")?;
+    
+    let concurrency_limit = config["concurrency_limit"].as_i64();
+
+    ctx.trace_info(format!(
+        "Executing WHEN_ALL with {} branches{}",
+        node_ids.len(),
+        concurrency_limit.map(|l| format!(" (concurrency limit: {})", l)).unwrap_or_default()
+    ));
+
+    let graph_json =
+        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
+    let results_json =
+        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+
+    // Build list of sub-orchestration inputs
+    let mut branch_inputs = Vec::new();
+    for node_id_val in node_ids {
+        if let Some(branch_node_id) = node_id_val.as_str() {
+            let branch_input = serde_json::json!({
+                "graph": graph_json,
+                "node_id": branch_node_id,
+                "results": results_json
+            })
+            .to_string();
+            branch_inputs.push(branch_input);
+        }
+    }
+
+    // For now, we'll execute all in parallel (concurrency_limit support could be added later with batching)
+    // Schedule sub-orchestrations and collect DurableFutures
+    let mut durable_futures = Vec::new();
+    for input in branch_inputs {
+        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, input);
+        durable_futures.push(fut);
+    }
+
+    // Use ctx.join() - Duroxide's proper join method for parallel execution
+    let results_vec = ctx.join(durable_futures).await;
+
+    // Process results
+    let mut join_results = Vec::new();
+    for (i, result) in results_vec.into_iter().enumerate() {
+        match result {
+            Ok(r) => join_results.push(r),
+            Err(e) => {
+                return Err(format!("WHEN_ALL branch {} failed: {}", i + 1, e));
+            }
+        }
+    }
+
+    ctx.trace_info(format!(
+        "WHEN_ALL completed with {} results",
+        join_results.len()
+    ));
+
+    let result = serde_json::to_string(&join_results).unwrap_or_else(|_| "[]".to_string());
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing WHEN_ALL result as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
+}
+
+async fn execute_when_any_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+) -> Result<String, String> {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("WHEN_ANY node {node_id} has no config"))?;
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid WHEN_ANY config: {e}"))?;
+
+    let node_ids = config["node_ids"]
+        .as_array()
+        .ok_or("Missing node_ids in WHEN_ANY config")?;
+
+    if node_ids.len() < 2 {
+        return Err("WHEN_ANY requires at least 2 branches".to_string());
+    }
+
+    ctx.trace_info(format!(
+        "Executing WHEN_ANY with {} branches (first wins)",
+        node_ids.len()
+    ));
+
+    let graph_json =
+        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
+    let results_json =
+        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+
+    // For now, we only support exactly 2 branches using select2
+    // TODO: For more than 2, we'd need to use a different strategy or loop with select2
+    if node_ids.len() != 2 {
+        return Err("WHEN_ANY currently only supports exactly 2 branches (use df.race() for 2 branches)".to_string());
+    }
+
+    let node_id_1 = node_ids[0].as_str().ok_or("Invalid node_id in WHEN_ANY")?;
+    let node_id_2 = node_ids[1].as_str().ok_or("Invalid node_id in WHEN_ANY")?;
+
+    let input_1 = serde_json::json!({
+        "graph": graph_json,
+        "node_id": node_id_1,
+        "results": results_json
+    })
+    .to_string();
+
+    let input_2 = serde_json::json!({
+        "graph": graph_json,
+        "node_id": node_id_2,
+        "results": results_json
+    })
+    .to_string();
+
+    // Schedule sub-orchestrations
+    let fut_1 = ctx.schedule_sub_orchestration(SUBTREE_NAME, input_1);
+    let fut_2 = ctx.schedule_sub_orchestration(SUBTREE_NAME, input_2);
+
+    // Use ctx.select2() - first to complete wins
+    let result = match ctx.select2(fut_1, fut_2).await {
+        duroxide::Either2::First(Ok(r)) => {
+            ctx.trace_info("WHEN_ANY completed - branch 1 won");
+            Ok(r)
+        }
+        duroxide::Either2::First(Err(e)) => Err(format!("WHEN_ANY branch 1 failed: {e}")),
+        duroxide::Either2::Second(Ok(r)) => {
+            ctx.trace_info("WHEN_ANY completed - branch 2 won");
+            Ok(r)
+        }
+        duroxide::Either2::Second(Err(e)) => Err(format!("WHEN_ANY branch 2 failed: {e}")),
+    }?;
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing WHEN_ANY result as ${name}"));
         results.insert(name.clone(), result.clone());
     }
 

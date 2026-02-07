@@ -1067,6 +1067,57 @@ SELECT df.start(
 );
 ```
 
+### Fan-Out/Fan-In Patterns
+
+For dynamic parallel execution with variable numbers of sub-orchestrations, use `df.when_all()` and `df.when_any()`:
+
+**`df.when_all(workflows_array, concurrency_limit)`** - Execute all branches in parallel and wait for all to complete:
+
+```sql
+-- Process multiple items in parallel
+SELECT df.start(
+    df.when_all('[
+        "SELECT process_order(1)",
+        "SELECT process_order(2)",
+        "SELECT process_order(3)",
+        "SELECT process_order(4)"
+    ]') |=> 'results' ~>
+    'SELECT log_completion($$results)'
+);
+
+-- With concurrency limit (max 2 at a time)
+SELECT df.when_all('[...]', 2)
+
+-- Call multiple named functions in parallel
+SELECT df.when_all('["validate_order", "check_inventory", "verify_payment"]')
+```
+
+**`df.when_any(workflows_array)`** - Race between branches, return first to complete:
+
+```sql
+-- Try multiple data sources, use fastest
+SELECT df.start(
+    df.when_any('[
+        "SELECT fetch_from_cache()",
+        "SELECT fetch_from_db()",
+        "SELECT fetch_from_api()"
+    ]') |=> 'data' ~>
+    'SELECT process_data($$data)'
+);
+
+-- Timeout pattern
+SELECT df.when_any('[
+    "SELECT long_running_query()",
+    "SELECT df.sleep(30)"
+]')
+```
+
+**Key Differences:**
+- `df.join()` / `&` operator: Fixed 2-3 branches at compile time
+- `df.when_all()`: Dynamic array of branches, unlimited count
+- `df.race()` / `|` operator: Fixed 2 branches  
+- `df.when_any()`: Dynamic array (currently limited to 2, same as race)
+
 ---
 
 ## Signals
@@ -1476,6 +1527,11 @@ df.call('my_named_function')                          -- named function
 SELECT df.define('func_name', 'SELECT workflow()', 'Description');
 SELECT df.undefine('func_name');
 SELECT * FROM unnest(df.list_functions());
+
+-- Fan-out/fan-in (dynamic parallel execution)
+df.when_all('["task1", "task2", "task3"]')           -- wait for all
+df.when_all('[...]', 2)                              -- with concurrency limit
+df.when_any('["source1", "source2"]')                -- first wins
 
 -- Timers
 df.sleep(60)                             -- 60 seconds

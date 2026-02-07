@@ -365,6 +365,144 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
     durofut.to_json()
 }
 
+/// Creates a parallel join node that waits for all branches to complete (fan-out/fan-in).
+///
+/// This is similar to df.join() but accepts a JSON array of workflows, allowing dynamic
+/// parallel execution. All branches must complete successfully.
+///
+/// # Arguments
+/// * `workflows` - JSON array of workflow graphs (inline or named functions)
+/// * `concurrency_limit` - Optional max number of concurrent executions (NULL = unlimited)
+///
+/// # Returns
+/// JSON array of results from all branches
+///
+/// # Examples
+/// ```sql
+/// -- Execute multiple workflows in parallel
+/// SELECT df.when_all('[
+///     "SELECT process_item(1)",
+///     "SELECT process_item(2)",
+///     "SELECT process_item(3)"
+/// ]')
+///
+/// -- Call multiple named functions in parallel
+/// SELECT df.when_all('["validate_order", "check_inventory", "verify_payment"]')
+///
+/// -- Limit concurrency to 2 at a time
+/// SELECT df.when_all('["job1", "job2", "job3", "job4"]', 2)
+/// ```
+#[pg_extern(schema = "df")]
+pub fn when_all(workflows: &str, concurrency_limit: default!(Option<i32>, "NULL")) -> String {
+    // Parse the workflows array
+    let workflows_array: Vec<String> = match serde_json::from_str(workflows) {
+        Ok(arr) => arr,
+        Err(e) => pgrx::error!("workflows must be a JSON array: {}", e),
+    };
+
+    if workflows_array.is_empty() {
+        pgrx::error!("workflows array cannot be empty");
+    }
+
+    if let Some(limit) = concurrency_limit {
+        if limit <= 0 {
+            pgrx::error!("concurrency_limit must be positive");
+        }
+    }
+
+    // Convert each workflow to a node
+    let mut node_ids = Vec::new();
+    for workflow in workflows_array {
+        let fut = Durofut::ensure(&workflow);
+        node_ids.push(fut.node_id);
+    }
+
+    // Store all node IDs in the config
+    let config = serde_json::json!({
+        "node_ids": node_ids,
+        "concurrency_limit": concurrency_limit,
+        "mode": "when_all"
+    });
+
+    let durofut = Durofut {
+        node_id: short_id(),
+        node_type: "WHEN_ALL".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(config.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
+/// Creates a parallel race node that returns when the first branch completes (fan-out/first-wins).
+///
+/// This is similar to df.race() but accepts a JSON array of workflows, allowing dynamic
+/// parallel execution. Returns as soon as the first branch completes.
+///
+/// # Arguments
+/// * `workflows` - JSON array of workflow graphs (inline or named functions)
+///
+/// # Returns
+/// Result from the first completed branch
+///
+/// # Examples
+/// ```sql
+/// -- Race between multiple data sources
+/// SELECT df.when_any('[
+///     "SELECT fetch_from_cache()",
+///     "SELECT fetch_from_db()",
+///     "SELECT fetch_from_api()"
+/// ]')
+///
+/// -- Timeout pattern - race against a delay
+/// SELECT df.when_any('[
+///     "SELECT long_running_query()",
+///     "SELECT pg_sleep(30)"
+/// ]')
+/// ```
+#[pg_extern(schema = "df")]
+pub fn when_any(workflows: &str) -> String {
+    // Parse the workflows array
+    let workflows_array: Vec<String> = match serde_json::from_str(workflows) {
+        Ok(arr) => arr,
+        Err(e) => pgrx::error!("workflows must be a JSON array: {}", e),
+    };
+
+    if workflows_array.is_empty() {
+        pgrx::error!("workflows array cannot be empty");
+    }
+
+    if workflows_array.len() < 2 {
+        pgrx::error!("when_any requires at least 2 workflows");
+    }
+
+    // Convert each workflow to a node
+    let mut node_ids = Vec::new();
+    for workflow in workflows_array {
+        let fut = Durofut::ensure(&workflow);
+        node_ids.push(fut.node_id);
+    }
+
+    // Store all node IDs in the config
+    let config = serde_json::json!({
+        "node_ids": node_ids,
+        "mode": "when_any"
+    });
+
+    let durofut = Durofut {
+        node_id: short_id(),
+        node_type: "WHEN_ANY".to_string(),
+        left_node: None,
+        right_node: None,
+        query: Some(config.to_string()),
+        result_name: None,
+    };
+    durofut.insert_node();
+    durofut.to_json()
+}
+
 /// Creates a race node - runs branches in parallel, first to complete wins.
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(schema = "df")]

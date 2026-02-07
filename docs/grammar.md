@@ -290,6 +290,8 @@ This applies to all operator positions and function arguments.
 | `SIGNAL` | `df.wait_for_signal()` | Wait for external event |
 | `HTTP` | `df.http()` | Make HTTP request |
 | `CALL` | `df.call()` | Invoke sub-orchestration |
+| `WHEN_ALL` | `df.when_all()` | Fan-out/fan-in: wait for all branches |
+| `WHEN_ANY` | `df.when_any()` | Fan-out/first: first branch wins |
 
 ## Future: Compensation (Proposed)
 
