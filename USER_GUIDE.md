@@ -962,6 +962,38 @@ SELECT df.start(
 );
 ```
 
+### Named Sub-Functions
+
+For better reusability, define named workflow templates using `df.define()`:
+
+```sql
+-- Define a reusable validation workflow
+SELECT df.define(
+    'validate_order',
+    'SELECT check_inventory($order_id) ~> SELECT check_payment($order_id)',
+    'Validates order inventory and payment status'
+);
+
+-- Call it by name from any workflow
+SELECT df.start(
+    'SELECT get_order(123)' |=> 'order' ~>
+    df.call('validate_order') |=> 'validation' ~>
+    'SELECT process_if_valid($validation)'
+);
+
+-- List all defined functions
+SELECT * FROM unnest(df.list_functions());
+
+-- Remove a function definition
+SELECT df.undefine('validate_order');
+```
+
+**Named Function Management:**
+- `df.define(name, graph, description)` - Define a reusable workflow template
+- `df.call(name)` - Call a named function by name
+- `df.list_functions()` - Returns array of all defined function names
+- `df.undefine(name)` - Remove a function definition
+
 ### Passing Data to Sub-Orchestrations
 
 You can pass JSON input to sub-orchestrations:
@@ -969,8 +1001,8 @@ You can pass JSON input to sub-orchestrations:
 ```sql
 -- Call with input parameters
 SELECT df.call(
-    'SELECT process_order($order_id)',
-    '{"order_id": 123}'
+    'process_order',
+    '{"order_id": 123, "priority": "high"}'
 )
 ```
 
@@ -981,7 +1013,7 @@ Use `|=>` to capture and reuse results from sub-orchestrations:
 ```sql
 -- Capture child result and use it in parent
 SELECT df.start(
-    df.call('SELECT get_user_data($user_id)') |=> 'user_data' ~>
+    df.call('get_user_data') |=> 'user_data' ~>
     df.sql('SELECT log_user($$user_data)')
 );
 ```
@@ -992,26 +1024,43 @@ SELECT df.start(
 - **Composition**: Build sophisticated workflows from simple building blocks
 - **Maintainability**: Update sub-workflows without changing parent workflows
 - **Parallel Execution**: Use `df.join()` or `&` with multiple `df.call()` for fan-out patterns
+- **Library Building**: Create a library of common workflow patterns
 
-### Example: Order Processing with Sub-Orchestrations
+### Example: Order Processing with Named Sub-Functions
 
 ```sql
--- Reusable validation workflow
--- Can be called from multiple parent workflows
--- (In a real system, you might store these as named functions - coming soon!)
+-- Define reusable components
+SELECT df.define(
+    'validate_order',
+    'SELECT validate_order_data($order_id)',
+    'Validates order data'
+);
 
+SELECT df.define(
+    'process_payment',
+    'SELECT charge_card($order_id) ~> SELECT update_payment_status($order_id)',
+    'Charges payment and updates status'
+);
+
+SELECT df.define(
+    'reserve_inventory',
+    'SELECT reserve_items($order_id) ~> SELECT update_inventory($order_id)',
+    'Reserves inventory items'
+);
+
+-- Compose them into a complete workflow
 SELECT df.start(
     df.seq(
-        -- Validate order
-        df.call('SELECT validate_order($order_id)') |=> 'validation',
+        -- Validate first
+        df.call('validate_order') |=> 'validation',
         df.seq(
-            -- Process payment in parallel with inventory check
+            -- Process payment and inventory in parallel
             df.join(
-                df.call('SELECT charge_payment($order_id)'),
-                df.call('SELECT reserve_inventory($order_id)')
+                df.call('process_payment'),
+                df.call('reserve_inventory')
             ) |=> 'processing',
             -- Send confirmation
-            df.call('SELECT send_confirmation($order_id)')
+            'SELECT send_confirmation($order_id)'
         )
     ),
     'order-workflow'
@@ -1419,8 +1468,14 @@ df.break()                               -- exit loop
 df.break('{"done": true}')               -- exit with return value
 
 -- Call sub-orchestration
-df.call('SELECT child_workflow()')                    -- basic call
+df.call('SELECT child_workflow()')                    -- inline call
 df.call('SELECT child_workflow()', '{"param": 123}')  -- with input
+df.call('my_named_function')                          -- named function
+
+-- Define and manage named functions
+SELECT df.define('func_name', 'SELECT workflow()', 'Description');
+SELECT df.undefine('func_name');
+SELECT * FROM unnest(df.list_functions());
 
 -- Timers
 df.sleep(60)                             -- 60 seconds

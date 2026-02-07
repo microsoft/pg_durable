@@ -866,10 +866,20 @@ async fn execute_call_node(
     let input = config["input"]
         .as_str()
         .unwrap_or("{}");
+    let is_named = config["is_named"].as_bool().unwrap_or(false);
+    let function_name = config["function_name"].as_str();
 
-    ctx.trace_info(format!(
-        "Calling sub-orchestration with graph node: {graph_node_id}"
-    ));
+    if is_named {
+        ctx.trace_info(format!(
+            "Calling named sub-orchestration: {} (node: {})",
+            function_name.unwrap_or("unknown"),
+            graph_node_id
+        ));
+    } else {
+        ctx.trace_info(format!(
+            "Calling inline sub-orchestration with graph node: {graph_node_id}"
+        ));
+    }
 
     // Prepare the sub-orchestration input
     // We need to serialize the child graph and execute it as a subtree

@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS df.vars (
     name TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Table to store named function definitions (reusable sub-workflows)
+CREATE TABLE IF NOT EXISTS df.function_definitions (
+    name TEXT PRIMARY KEY,
+    root_node VARCHAR(8) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Index for finding function definitions
+CREATE INDEX IF NOT EXISTS idx_function_definitions_name ON df.function_definitions(name);
 "#,
     name = "create_tables",
     requires = [df]

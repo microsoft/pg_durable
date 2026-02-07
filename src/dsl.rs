@@ -483,13 +483,126 @@ pub fn wait_for_signal(name: &str, timeout_seconds: default!(Option<i32>, "NULL"
     durofut.to_json()
 }
 
+/// Defines a named, reusable sub-function (workflow template).
+///
+/// Named functions can be invoked by name using df.call('function_name').
+/// This allows for modular, reusable workflow composition.
+///
+/// # Arguments
+/// * `name` - A unique name for this function definition
+/// * `graph` - The workflow graph to save (Durofut or plain SQL)
+/// * `description` - Optional description of what this function does
+///
+/// # Returns
+/// 'OK' on success, raises error if name already exists
+///
+/// # Examples
+/// ```sql
+/// -- Define a reusable order validation workflow
+/// SELECT df.define(
+///     'validate_order',
+///     'SELECT check_inventory() ~> SELECT check_payment()',
+///     'Validates order inventory and payment'
+/// );
+///
+/// -- Use it in workflows
+/// SELECT df.start(df.call('validate_order'));
+/// ```
+#[pg_extern(schema = "df")]
+pub fn define(name: &str, graph: &str, description: default!(Option<&str>, "NULL")) -> String {
+    if name.is_empty() {
+        pgrx::error!("Function name cannot be empty");
+    }
+
+    // Check if name already exists
+    let exists: Option<bool> = Spi::get_one(&format!(
+        "SELECT EXISTS(SELECT 1 FROM df.function_definitions WHERE name = '{}')",
+        name.replace('\'', "''")
+    ))
+    .ok()
+    .flatten();
+
+    if exists == Some(true) {
+        pgrx::error!("Function '{}' already exists. Use df.undefine() to remove it first.", name);
+    }
+
+    let graph_fut = Durofut::ensure(graph);
+
+    let desc_sql = description
+        .map(|d| format!("'{}'", d.replace('\'', "''")))
+        .unwrap_or_else(|| "NULL".to_string());
+
+    let insert_sql = format!(
+        "INSERT INTO df.function_definitions (name, root_node, description) VALUES ('{}', '{}', {})",
+        name.replace('\'', "''"),
+        graph_fut.node_id,
+        desc_sql
+    );
+
+    if let Err(e) = Spi::run(&insert_sql) {
+        pgrx::error!("Failed to define function: {:?}", e);
+    }
+
+    "OK".to_string()
+}
+
+/// Removes a named function definition.
+///
+/// # Arguments
+/// * `name` - The name of the function definition to remove
+///
+/// # Returns
+/// 'OK' on success, raises error if function doesn't exist
+#[pg_extern(schema = "df")]
+pub fn undefine(name: &str) -> String {
+    if name.is_empty() {
+        pgrx::error!("Function name cannot be empty");
+    }
+
+    let delete_sql = format!(
+        "DELETE FROM df.function_definitions WHERE name = '{}'",
+        name.replace('\'', "''")
+    );
+
+    if let Err(e) = Spi::run(&delete_sql) {
+        pgrx::error!("Failed to undefine function: {:?}", e);
+    }
+
+    "OK".to_string()
+}
+
+/// Lists all defined function names.
+///
+/// # Returns
+/// Array of function names
+#[pg_extern(schema = "df")]
+pub fn list_functions() -> Vec<String> {
+    let query = "SELECT name FROM df.function_definitions ORDER BY name";
+    
+    Spi::connect(|client| {
+        let mut names = Vec::new();
+        let tup_table = client.select(query, None, None)?;
+        
+        for row in tup_table {
+            if let Ok(Some(name)) = row.get::<String>(1) {
+                names.push(name);
+            }
+        }
+        
+        Ok(Some(names))
+    })
+    .unwrap_or_default()
+}
+
 /// Calls a sub-orchestration (child durable function).
 ///
 /// This allows composition of durable functions by invoking one function from within another.
 /// The parent waits for the child to complete and receives its result.
 ///
 /// # Arguments
-/// * `graph` - The child function graph to execute (Durofut or plain SQL)
+/// * `graph_or_name` - Either:
+///   - A named function (e.g., 'my_workflow') - will lookup in df.function_definitions
+///   - A function graph to execute (Durofut or plain SQL) - starts with '{' or 'SELECT'
 /// * `input` - Optional JSON input to pass to the child function (defaults to '{}')
 ///
 /// # Returns
@@ -497,30 +610,59 @@ pub fn wait_for_signal(name: &str, timeout_seconds: default!(Option<i32>, "NULL"
 ///
 /// # Examples
 /// ```sql
-/// -- Call a reusable workflow
+/// -- Call a named function
+/// SELECT df.call('validate_order')
+///
+/// -- Call an inline workflow
 /// SELECT df.call('SELECT process_order($order_id)')
 ///
 /// -- Call with input
-/// SELECT df.call('SELECT validate_data()', '{"user_id": 123}')
+/// SELECT df.call('validate_order', '{"order_id": 123}')
 /// ```
 #[pg_extern(schema = "df")]
-pub fn call(graph: &str, input: default!(&str, "'{}'")) -> String {
+pub fn call(graph_or_name: &str, input: default!(&str, "'{}'")) -> String {
     // Validate input is valid JSON
     if serde_json::from_str::<serde_json::Value>(input).is_err() {
         pgrx::error!("Input must be valid JSON");
     }
 
-    let graph_fut = Durofut::ensure(graph);
+    // Check if this is a named function reference or an inline graph
+    let is_named = !graph_or_name.trim().starts_with('{') 
+        && !graph_or_name.trim().to_uppercase().starts_with("SELECT")
+        && !graph_or_name.trim().to_uppercase().starts_with("INSERT")
+        && !graph_or_name.trim().to_uppercase().starts_with("UPDATE")
+        && !graph_or_name.trim().to_uppercase().starts_with("DELETE");
+
+    let (graph_node_id, is_named_ref) = if is_named {
+        // Look up the named function
+        let root_node: Option<String> = Spi::get_one(&format!(
+            "SELECT root_node FROM df.function_definitions WHERE name = '{}'",
+            graph_or_name.replace('\'', "''")
+        ))
+        .ok()
+        .flatten();
+
+        match root_node {
+            Some(node_id) => (node_id, true),
+            None => pgrx::error!("Named function '{}' not found. Use df.define() to create it.", graph_or_name),
+        }
+    } else {
+        // It's an inline graph
+        let graph_fut = Durofut::ensure(graph_or_name);
+        (graph_fut.node_id, false)
+    };
 
     let config = serde_json::json!({
-        "graph_node": graph_fut.node_id,
-        "input": input
+        "graph_node": graph_node_id,
+        "input": input,
+        "is_named": is_named_ref,
+        "function_name": if is_named_ref { Some(graph_or_name) } else { None }
     });
 
     let durofut = Durofut {
         node_id: short_id(),
         node_type: "CALL".to_string(),
-        left_node: Some(graph_fut.node_id),
+        left_node: Some(graph_node_id),
         right_node: None,
         query: Some(config.to_string()),
         result_name: None,
