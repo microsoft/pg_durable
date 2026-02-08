@@ -745,3 +745,241 @@ pub fn wait_for_completion(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+// ============================================================================
+// Sub-Orchestration Functions
+// ============================================================================
+
+/// Calls a sub-orchestration (child durable function) using a template.
+///
+/// This allows composition of durable functions by invoking one function from within another.
+/// The parent waits for the child to complete and receives its result.
+///
+/// # Arguments
+/// * `template_name_or_graph` - Either:
+///   - A template name (e.g., 'my_workflow') - will lookup in df.templates
+///   - A function graph to execute (Durofut or plain SQL) - starts with '{' or 'SELECT'
+/// * `input` - Optional JSON input to pass to the child function (defaults to '{}')
+///
+/// # Returns
+/// A Durofut representing the sub-orchestration call node
+///
+/// # Examples
+/// ```sql
+/// -- Call a named template
+/// SELECT df.call('validate_order')
+///
+/// -- Call with input
+/// SELECT df.call('validate_order', '{"order_id": 123}')
+///
+/// -- Call inline graph
+/// SELECT df.call('SELECT process_data()')
+/// ```
+#[pg_extern(schema = "df")]
+pub fn call(template_name_or_graph: &str, input: default!(&str, "'{}'")) -> String {
+    // Validate input is valid JSON
+    if serde_json::from_str::<serde_json::Value>(input).is_err() {
+        pgrx::error!("Input must be valid JSON");
+    }
+
+    // Check if this is a template name or an inline graph
+    let is_template_name = !template_name_or_graph.trim().starts_with('{') 
+        && !template_name_or_graph.trim().to_uppercase().starts_with("SELECT")
+        && !template_name_or_graph.trim().to_uppercase().starts_with("INSERT")
+        && !template_name_or_graph.trim().to_uppercase().starts_with("UPDATE")
+        && !template_name_or_graph.trim().to_uppercase().starts_with("DELETE");
+
+    let (graph_node_id, is_template_ref) = if is_template_name {
+        // Look up the template and evaluate its DSL to get the root node
+        let template_dsl: Option<String> = Spi::get_one(&format!(
+            "SELECT dsl_template FROM df.templates WHERE name = '{}' AND active = true",
+            template_name_or_graph.replace('\'', "''")
+        ))
+        .ok()
+        .flatten();
+
+        match template_dsl {
+            Some(dsl) => {
+                // Evaluate the DSL to get a Durofut
+                let durofut_json = match Spi::get_one::<String>(&format!("SELECT {}", dsl)) {
+                    Ok(Some(json)) => json,
+                    _ => {
+                        // If evaluation fails, assume it's plain SQL and call df.sql() on it
+                        match Spi::get_one::<String>(&format!(
+                            "SELECT df.sql('{}')",
+                            dsl.replace('\'', "''")
+                        )) {
+                            Ok(Some(json)) => json,
+                            _ => pgrx::error!("Failed to evaluate template '{}' as DSL", template_name_or_graph),
+                        }
+                    }
+                };
+                
+                let fut = Durofut::from_json(&durofut_json);
+                (fut.node_id, true)
+            }
+            None => pgrx::error!("Template '{}' not found. Use df.create_template() to create it.", template_name_or_graph),
+        }
+    } else {
+        // It's an inline graph
+        let graph_fut = Durofut::ensure(template_name_or_graph);
+        (graph_fut.node_id, false)
+    };
+
+    // Create a CALL node
+    let node_id = short_id();
+    let config = serde_json::json!({
+        "graph_node_id": graph_node_id,
+        "input": input,
+        "is_template_ref": is_template_ref,
+        "template_name": if is_template_ref { Some(template_name_or_graph) } else { None },
+    });
+
+    let insert_sql = format!(
+        "INSERT INTO df.nodes (id, node_type, query) VALUES ('{}', 'CALL', '{}')",
+        node_id,
+        config.to_string().replace('\'', "''")
+    );
+
+    if let Err(e) = Spi::run(&insert_sql) {
+        pgrx::error!("Failed to create CALL node: {:?}", e);
+    }
+
+    Durofut::new(node_id).to_json()
+}
+
+/// Executes multiple workflows in parallel and waits for all to complete (fan-out/fan-in).
+///
+/// # Arguments
+/// * `workflows` - JSON array of workflow DSL expressions or template names to execute
+/// * `concurrency_limit` - Optional maximum number of workflows to run concurrently
+///
+/// # Returns
+/// A Durofut representing the when_all node
+///
+/// # Examples
+/// ```sql
+/// -- Execute inline SQL in parallel
+/// SELECT df.when_all('[
+///     "SELECT process_item(1)",
+///     "SELECT process_item(2)",
+///     "SELECT process_item(3)"
+/// ]')
+///
+/// -- Call multiple templates in parallel
+/// SELECT df.when_all('["validate_order", "check_inventory", "verify_payment"]')
+///
+/// -- Limit concurrency to 2 at a time
+/// SELECT df.when_all('["job1", "job2", "job3", "job4"]', 2)
+/// ```
+#[pg_extern(schema = "df")]
+pub fn when_all(workflows: &str, concurrency_limit: default!(Option<i32>, "NULL")) -> String {
+    // Parse the workflows array
+    let workflows_array: Vec<String> = match serde_json::from_str(workflows) {
+        Ok(arr) => arr,
+        Err(e) => pgrx::error!("workflows must be a JSON array: {}", e),
+    };
+
+    if workflows_array.is_empty() {
+        pgrx::error!("workflows array cannot be empty");
+    }
+
+    if let Some(limit) = concurrency_limit {
+        if limit <= 0 {
+            pgrx::error!("concurrency_limit must be positive");
+        }
+    }
+
+    // Convert each workflow to a node
+    let mut node_ids = Vec::new();
+    for workflow in workflows_array {
+        let fut = Durofut::ensure(&workflow);
+        node_ids.push(fut.node_id);
+    }
+
+    // Store all node IDs in the config
+    let config = serde_json::json!({
+        "node_ids": node_ids,
+        "concurrency_limit": concurrency_limit,
+    });
+
+    // Create a WHEN_ALL node
+    let node_id = short_id();
+    let insert_sql = format!(
+        "INSERT INTO df.nodes (id, node_type, query) VALUES ('{}', 'WHEN_ALL', '{}')",
+        node_id,
+        config.to_string().replace('\'', "''")
+    );
+
+    if let Err(e) = Spi::run(&insert_sql) {
+        pgrx::error!("Failed to create WHEN_ALL node: {:?}", e);
+    }
+
+    Durofut::new(node_id).to_json()
+}
+
+/// Executes multiple workflows in parallel and returns when the first completes (race).
+///
+/// # Arguments
+/// * `workflows` - JSON array of workflow DSL expressions or template names to execute
+///
+/// # Returns
+/// A Durofut representing the when_any node
+///
+/// # Examples
+/// ```sql
+/// -- Race multiple data sources
+/// SELECT df.when_any('[
+///     "SELECT fetch_from_cache()",
+///     "SELECT fetch_from_db()",
+///     "SELECT fetch_from_api()"
+/// ]')
+///
+/// -- Timeout pattern - race against a delay
+/// SELECT df.when_any('[
+///     "SELECT long_running_query()",
+///     "SELECT pg_sleep(30)"
+/// ]')
+/// ```
+#[pg_extern(schema = "df")]
+pub fn when_any(workflows: &str) -> String {
+    // Parse the workflows array
+    let workflows_array: Vec<String> = match serde_json::from_str(workflows) {
+        Ok(arr) => arr,
+        Err(e) => pgrx::error!("workflows must be a JSON array: {}", e),
+    };
+
+    if workflows_array.is_empty() {
+        pgrx::error!("workflows array cannot be empty");
+    }
+
+    if workflows_array.len() < 2 {
+        pgrx::error!("when_any requires at least 2 workflows");
+    }
+
+    // Convert each workflow to a node
+    let mut node_ids = Vec::new();
+    for workflow in workflows_array {
+        let fut = Durofut::ensure(&workflow);
+        node_ids.push(fut.node_id);
+    }
+
+    // Store all node IDs in the config
+    let config = serde_json::json!({
+        "node_ids": node_ids,
+    });
+
+    // Create a WHEN_ANY node
+    let node_id = short_id();
+    let insert_sql = format!(
+        "INSERT INTO df.nodes (id, node_type, query) VALUES ('{}', 'WHEN_ANY', '{}')",
+        node_id,
+        config.to_string().replace('\'', "''")
+    );
+
+    if let Err(e) = Spi::run(&insert_sql) {
+        pgrx::error!("Failed to create WHEN_ANY node: {:?}", e);
+    }
+
+    Durofut::new(node_id).to_json()
+}

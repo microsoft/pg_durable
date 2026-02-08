@@ -241,6 +241,9 @@ async fn execute_node_inner(
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
+        "call" => execute_call_node(ctx, graph, node, node_id, results, exec_ctx).await,
+        "when_all" => execute_when_all_node(ctx, graph, node, node_id, results, exec_ctx).await,
+        "when_any" => execute_when_any_node(ctx, graph, node, node_id, results, exec_ctx).await,
         other => Err(format!("Unknown node type: {other}")),
     }
 }
@@ -841,4 +844,170 @@ async fn execute_signal_node(
     }
 
     Ok(result_str)
+}
+
+async fn execute_call_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<String, String> {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("CALL node {node_id} has no config"))?;
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid CALL config: {e}"))?;
+
+    let graph_node_id = config["graph_node_id"]
+        .as_str()
+        .ok_or("Missing graph_node_id in CALL config")?;
+    let input = config["input"]
+        .as_str()
+        .unwrap_or("{}");
+
+    ctx.trace_info(format!(
+        "Calling sub-orchestration with graph node {}",
+        graph_node_id
+    ));
+
+    // Serialize graph and execute subtree as a sub-orchestration
+    let subtree_input = serde_json::json!({
+        "graph": serde_json::to_string(graph).map_err(|e| format!("Failed to serialize graph: {e}"))?,
+        "node_id": graph_node_id,
+        "results": results,
+        "label": exec_ctx.label,
+        "vars": exec_ctx.vars,
+        "input": input,
+    });
+
+    let result = ctx
+        .schedule_sub_orchestration(SUBTREE_NAME, subtree_input.to_string())
+        .await?;
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing sub-orchestration result as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
+}
+
+async fn execute_when_all_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<String, String> {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("WHEN_ALL node {node_id} has no config"))?;
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid WHEN_ALL config: {e}"))?;
+
+    let node_ids: Vec<String> = config["node_ids"]
+        .as_array()
+        .ok_or("Missing node_ids in WHEN_ALL config")?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let concurrency_limit = config["concurrency_limit"].as_i64();
+
+    ctx.trace_info(format!(
+        "Executing WHEN_ALL with {} workflows{}",
+        node_ids.len(),
+        concurrency_limit
+            .map(|l| format!(" (concurrency limit: {l})"))
+            .unwrap_or_default()
+    ));
+
+    // Schedule all sub-orchestrations
+    let mut futures = Vec::new();
+    for (idx, child_node_id) in node_ids.iter().enumerate() {
+        let subtree_input = serde_json::json!({
+            "graph": serde_json::to_string(graph).map_err(|e| format!("Failed to serialize graph: {e}"))?,
+            "node_id": child_node_id,
+            "results": results,
+            "label": exec_ctx.label.as_ref().map(|l| format!("{l}/when_all[{idx}]")),
+            "vars": exec_ctx.vars,
+        });
+
+        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, subtree_input.to_string());
+        futures.push(fut);
+    }
+
+    // Wait for all to complete
+    let all_results = ctx.join(futures).await;
+
+    // Collect results into JSON array
+    let result = serde_json::json!(all_results).to_string();
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing WHEN_ALL results as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
+}
+
+async fn execute_when_any_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<String, String> {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("WHEN_ANY node {node_id} has no config"))?;
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_str).map_err(|e| format!("Invalid WHEN_ANY config: {e}"))?;
+
+    let node_ids: Vec<String> = config["node_ids"]
+        .as_array()
+        .ok_or("Missing node_ids in WHEN_ANY config")?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    ctx.trace_info(format!("Executing WHEN_ANY with {} workflows", node_ids.len()));
+
+    // Schedule all sub-orchestrations
+    let mut futures = Vec::new();
+    for (idx, child_node_id) in node_ids.iter().enumerate() {
+        let subtree_input = serde_json::json!({
+            "graph": serde_json::to_string(graph).map_err(|e| format!("Failed to serialize graph: {e}"))?,
+            "node_id": child_node_id,
+            "results": results,
+            "label": exec_ctx.label.as_ref().map(|l| format!("{l}/when_any[{idx}]")),
+            "vars": exec_ctx.vars,
+        });
+
+        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, subtree_input.to_string());
+        futures.push(fut);
+    }
+
+    // Race - return result from first to complete
+    let result = ctx.select_any(futures).await?;
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing WHEN_ANY result as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
 }

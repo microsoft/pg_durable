@@ -13,6 +13,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod orchestrations;
 pub mod registry;
+pub mod templates;
 pub mod types;
 pub mod worker;
 
@@ -68,7 +69,8 @@ CREATE TABLE IF NOT EXISTS df.instances (
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    template_id BIGINT
 );
 
 -- Index for finding pending instances
@@ -82,6 +84,45 @@ CREATE TABLE IF NOT EXISTS df.vars (
     name TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Table to store function templates
+CREATE TABLE IF NOT EXISTS df.templates (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    dsl_template TEXT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    created_by TEXT DEFAULT current_user,
+    description TEXT
+);
+
+-- Add foreign key constraint to instances.template_id
+ALTER TABLE df.instances 
+    ADD CONSTRAINT fk_instances_template 
+    FOREIGN KEY (template_id) REFERENCES df.templates(id);
+
+-- Partial unique index: only one active template per name
+CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_name_active_unique 
+    ON df.templates(name) WHERE active = true;
+
+-- Index for listing templates by user
+CREATE INDEX IF NOT EXISTS idx_templates_created_by 
+    ON df.templates(created_by);
+
+-- Index for finding instances by template_id
+CREATE INDEX IF NOT EXISTS idx_instances_template_id 
+    ON df.instances(template_id) 
+    WHERE template_id IS NOT NULL;
+
+-- Add comments
+COMMENT ON TABLE df.templates IS 
+    'Stores reusable workflow templates with variable placeholders';
+COMMENT ON COLUMN df.templates.name IS 
+    'Unique template identifier';
+COMMENT ON COLUMN df.templates.dsl_template IS 
+    'DSL expression with {variable} placeholders for substitution';
+COMMENT ON COLUMN df.instances.template_id IS 
+    'Foreign key to template used to create this instance (NULL for non-template instances)';
 "#,
     name = "create_tables",
     requires = [df]
