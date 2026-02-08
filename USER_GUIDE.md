@@ -18,10 +18,12 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 8. [Durable Function Variables](#durable-function-variables)
 9. [Loops & Cron Jobs](#loops--cron-jobs)
 10. [Signals](#signals)
-11. [Visualizing Functions](#visualizing-functions)
-12. [Monitoring](#monitoring)
-13. [Quick Reference Card](#quick-reference-card)
-14. [Appendix: Test Data Setup](#appendix-test-data-setup)
+11. [Function Templates](#function-templates)
+12. [Sub-Orchestration](#sub-orchestration)
+13. [Visualizing Functions](#visualizing-functions)
+14. [Monitoring](#monitoring)
+15. [Quick Reference Card](#quick-reference-card)
+16. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -1050,6 +1052,303 @@ SELECT df.start(
 
 -- External system calls back via df.signal when job completes
 -- (e.g., via a webhook endpoint that calls df.signal)
+```
+
+---
+
+## Function Templates
+
+Function templates allow you to create reusable workflow definitions that can be instantiated multiple times with different variables. This promotes code reuse and makes it easy to standardize common patterns.
+
+### Creating Templates
+
+Use `df.create_template()` to register a new template:
+
+```sql
+-- Simple template
+SELECT df.create_template(
+    'data_validation',
+    'SELECT validate_data() ~> SELECT log_validation()',
+    'Validates and logs data'
+);
+
+-- Template with variables (use {placeholder} syntax)
+SELECT df.create_template(
+    'process_user',
+    'SELECT process_user_data({user_id}) ~> SELECT send_notification({user_id})',
+    'Processes user data and sends notification'
+);
+```
+
+**Parameters:**
+- `name` - Unique template identifier
+- `dsl_template` - DSL expression (can include `{variable}` placeholders)
+- `description` - Optional description
+
+### Starting Templates
+
+Use `df.start_template()` to instantiate and execute a template:
+
+```sql
+-- Start template without variables
+SELECT df.start_template('data_validation');
+
+-- Start with label
+SELECT df.start_template('data_validation', 'validation-run-1');
+
+-- Start with local variables (overrides global variables)
+SELECT df.start_template(
+    'process_user',
+    'user-123-process',
+    jsonb_build_object('user_id', '123')
+);
+```
+
+### Managing Templates
+
+```sql
+-- List all active templates
+SELECT df.list_templates();
+
+-- List templates by name pattern
+SELECT df.list_templates('process_%');
+
+-- Get template details
+SELECT df.get_template('data_validation');
+
+-- Update template description
+SELECT df.update_template('data_validation', NULL, 'New description');
+
+-- Update template DSL (creates new version)
+SELECT df.update_template(
+    'data_validation',
+    'SELECT validate_data() ~> SELECT log_validation() ~> SELECT archive()',
+    NULL
+);
+
+-- Drop (deactivate) template
+SELECT df.drop_template('data_validation');
+
+-- Preview template execution
+SELECT df.explain_template('data_validation');
+```
+
+### Template Variables
+
+Templates support variable substitution using `{variable_name}` placeholders. Variables can come from:
+- **Local variables** - Passed to `df.start_template()` as JSONB
+- **Global variables** - Stored in `df.vars` table
+
+Local variables override global variables.
+
+```sql
+-- Set global variables
+INSERT INTO df.vars (name, value) VALUES ('env', 'prod');
+
+-- Create template with variable
+SELECT df.create_template(
+    'deploy_check',
+    'SELECT check_environment({env})',
+    'Checks deployment environment'
+);
+
+-- Start with local override
+SELECT df.start_template(
+    'deploy_check',
+    NULL,
+    jsonb_build_object('env', 'staging')  -- Overrides global 'prod'
+);
+```
+
+### Template Example: ETL Pipeline
+
+```sql
+-- Create reusable ETL template
+SELECT df.create_template(
+    'etl_pipeline',
+    'SELECT extract_data({source}) |=> ''data'' 
+     ~> SELECT transform_data($data, {transform_rules})
+     ~> SELECT load_data({destination})',
+    'Generic ETL pipeline'
+);
+
+-- Instantiate for different sources
+SELECT df.start_template(
+    'etl_pipeline',
+    'etl-salesforce',
+    jsonb_build_object(
+        'source', 'salesforce',
+        'transform_rules', 'cleanup_names',
+        'destination', 'warehouse.sales'
+    )
+);
+
+SELECT df.start_template(
+    'etl_pipeline',
+    'etl-hubspot',
+    jsonb_build_object(
+        'source', 'hubspot',
+        'transform_rules', 'normalize_contacts',
+        'destination', 'warehouse.contacts'
+    )
+);
+```
+
+---
+
+## Sub-Orchestration
+
+Sub-orchestration allows you to compose complex workflows by calling one durable function from within another. This enables modular design and code reuse.
+
+### Calling Templates
+
+Use `df.call()` to invoke a template as a sub-orchestration:
+
+```sql
+-- Create reusable components as templates
+SELECT df.create_template(
+    'validate_order',
+    'SELECT check_inventory() & check_payment()',
+    'Validates order prerequisites'
+);
+
+SELECT df.create_template(
+    'process_payment',
+    'SELECT charge_card() ~> SELECT update_ledger()',
+    'Processes payment'
+);
+
+-- Compose them into a workflow
+SELECT df.start(
+    df.call('validate_order') ~> df.call('process_payment'),
+    'order-12345'
+);
+```
+
+### Calling Inline Graphs
+
+You can also call inline DSL expressions without creating templates:
+
+```sql
+SELECT df.start(
+    df.call('SELECT step1() ~> SELECT step2()') ~> SELECT step3(),
+    'workflow-1'
+);
+```
+
+### Parallel Execution: when_all
+
+`df.when_all()` executes multiple workflows in parallel and waits for all to complete:
+
+```sql
+-- Execute multiple templates in parallel
+SELECT df.start(
+    df.when_all('["validate_order", "check_fraud", "verify_customer"]'),
+    'parallel-checks'
+);
+
+-- Execute inline workflows in parallel
+SELECT df.start(
+    df.when_all('[
+        "SELECT process_item(1)",
+        "SELECT process_item(2)",
+        "SELECT process_item(3)"
+    ]'),
+    'parallel-processing'
+);
+
+-- Limit concurrency (run max 2 at a time)
+SELECT df.start(
+    df.when_all('["job1", "job2", "job3", "job4"]', 2),
+    'limited-parallel'
+);
+```
+
+**Parameters:**
+- `workflows` - JSON array of template names or DSL expressions
+- `concurrency_limit` - Optional max concurrent executions
+
+### Parallel Execution: when_any
+
+`df.when_any()` executes multiple workflows in parallel and returns when the first completes:
+
+```sql
+-- Race between different data sources
+SELECT df.start(
+    df.when_any('[
+        "SELECT fetch_from_cache()",
+        "SELECT fetch_from_db()",
+        "SELECT fetch_from_api()"
+    ]'),
+    'data-race'
+);
+
+-- Timeout pattern
+SELECT df.start(
+    df.when_any('[
+        "SELECT long_running_query()",
+        "SELECT pg_sleep(30)"
+    ]'),
+    'query-with-timeout'
+);
+```
+
+**Parameters:**
+- `workflows` - JSON array of template names or DSL expressions (minimum 2)
+
+### Sub-Orchestration Example: Order Processing
+
+```sql
+-- Create modular components
+SELECT df.create_template(
+    'validate_order',
+    'SELECT check_inventory({order_id}) & check_payment_method({order_id})',
+    'Order validation'
+);
+
+SELECT df.create_template(
+    'fulfill_order',
+    'SELECT reserve_items({order_id}) ~> SELECT prepare_shipment({order_id})',
+    'Order fulfillment'
+);
+
+SELECT df.create_template(
+    'notify_customer',
+    'SELECT send_email({order_id}) & send_sms({order_id})',
+    'Customer notification'
+);
+
+-- Compose into order workflow
+SELECT df.create_template(
+    'process_order',
+    'df.call(''validate_order'') ~> 
+     df.call(''fulfill_order'') ~> 
+     df.call(''notify_customer'')',
+    'Complete order processing pipeline'
+);
+
+-- Execute for specific order
+SELECT df.start_template(
+    'process_order',
+    'order-67890',
+    jsonb_build_object('order_id', '67890')
+);
+```
+
+### Fan-Out/Fan-In Pattern
+
+```sql
+-- Process multiple items in parallel, then aggregate
+SELECT df.create_template(
+    'batch_processor',
+    'df.when_all(''[
+        "SELECT process({item_1})",
+        "SELECT process({item_2})",
+        "SELECT process({item_3})"
+    ]'') |=> ''results'' ~> 
+    SELECT aggregate_results($results)',
+    'Parallel batch processing with aggregation'
+);
 ```
 
 ---
