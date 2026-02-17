@@ -81,7 +81,18 @@ jobs:
         run: cargo pgrx test pg17
 
       - name: Run E2E tests
+        id: e2e_tests
         run: ./scripts/test-e2e-local.sh
+
+      - name: Upload PostgreSQL logs on E2E failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgresql-logs
+          path: |
+            ~/.pgrx/17.log
+            ~/.pgrx/data-17/log/*.log
+          if-no-files-found: warn
 
       # TODO: Re-enable once pg_regress tests are stabilized
       # - name: Run pg_regress tests
