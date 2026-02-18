@@ -84,6 +84,44 @@ CREATE EXTENSION pg_durable;
 ./scripts/deploy-acr.sh
 ```
 
+## Telemetry (Optional)
+
+pg_durable includes optional telemetry support for monitoring extension health. Metrics are automatically published every 5 seconds by the background worker.
+
+### Default (Log-based)
+
+By default, metrics are logged to the PostgreSQL log:
+
+```bash
+cargo pgrx install --release --pg-config $(cargo pgrx info pg-config pg17)
+```
+
+### With StatsD
+
+To enable StatsD telemetry:
+
+```bash
+cargo pgrx install --release --features telemetry-statsd --pg-config $(cargo pgrx info pg-config pg17)
+```
+
+### With MDM/Geneva
+
+To enable Azure MDM (Geneva) telemetry:
+
+```bash
+cargo pgrx install --release --features telemetry-mdm --pg-config $(cargo pgrx info pg-config pg17)
+```
+
+### Multiple Backends
+
+You can enable multiple backends simultaneously:
+
+```bash
+cargo pgrx install --release --features telemetry-statsd,telemetry-mdm --pg-config $(cargo pgrx info pg-config pg17)
+```
+
+See [docs/telemetry.md](docs/telemetry.md) for complete documentation.
+
 ## Continuous Integration
 
 All pull requests must pass the following checks before merging:
