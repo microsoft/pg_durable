@@ -13,6 +13,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod orchestrations;
 pub mod registry;
+pub mod telemetry;
 pub mod types;
 pub mod worker;
 

@@ -23,6 +23,8 @@ pg17 = ["pgrx/pg17", "pgrx-tests/pg17" ]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18" ]
 unsafe = ["pgrx/unsafe-postgres"]
 pg_test = []
+telemetry-statsd = ["cadence"]
+telemetry-mdm = []
 
 [dependencies]
 pgrx = "=0.16.1"
@@ -47,6 +49,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # For duroxide tracing integration
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# For metrics/telemetry (optional, feature-gated)
+cadence = { version = "1.4", optional = true }
 
 [dev-dependencies]
 pgrx-tests = "=0.16.1"

@@ -169,6 +169,27 @@ async fn run_duroxide_runtime() {
 
     log!("pg_durable: duroxide runtime started, processing durable functions...");
 
+    // Create Duroxide client for metrics
+    let client = Arc::new(duroxide::Client::new(store.clone()));
+
+    // Initialize metric emitters
+    let emitters = crate::telemetry::create_emitters();
+
+    // Spawn metrics publishing task
+    let metrics_task = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            crate::telemetry::start_metrics_loop(
+                client,
+                emitters,
+                || {
+                    tokio::task::block_in_place(|| is_shutdown_requested())
+                },
+            )
+            .await;
+        })
+    };
+
     // Keep runtime alive until shutdown signal
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -184,6 +205,10 @@ async fn run_duroxide_runtime() {
     }
 
     log!("pg_durable: initiating duroxide runtime shutdown...");
+    
+    // Wait for metrics task to complete (it will exit on shutdown check)
+    let _ = tokio::time::timeout(Duration::from_secs(2), metrics_task).await;
+    
     duroxide_runtime.shutdown(Some(10_000)).await;
     log!("pg_durable: duroxide runtime shutdown complete");
 }
