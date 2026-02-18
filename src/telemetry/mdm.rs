@@ -52,7 +52,7 @@ impl MetricEmitter for MdmEmitter {
     fn emit_gauge(&self, name: &str, value: i64, dimensions: &HashMap<String, String>) {
         // Format: JSON key (Account/Namespace/Metric/Dims), value, type=gauge (|g)
         // MDM expects: {"Account":"...","Namespace":"...","Metric":"...","Dims":{"key":"value"}}:value|g
-        
+
         let metric_key = json!({
             "Account": self.account,
             "Namespace": self.namespace,

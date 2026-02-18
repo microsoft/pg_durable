@@ -30,10 +30,14 @@ impl StatsdEmitter {
         let sink = UdpMetricSink::from((host, port), socket)
             .map_err(|e| format!("Sink creation failed: {}", e))?;
 
-        let client =
-            StatsdClient::from_sink(prefix, sink);
+        let client = StatsdClient::from_sink(prefix, sink);
 
-        log!("pg_durable: StatsD emitter initialized at {}:{} with prefix '{}'", host, port, prefix);
+        log!(
+            "pg_durable: StatsD emitter initialized at {}:{} with prefix '{}'",
+            host,
+            port,
+            prefix
+        );
         Ok(StatsdEmitter { client })
     }
 }
@@ -43,7 +47,7 @@ impl MetricEmitter for StatsdEmitter {
         // Format: JSON key (Account/Namespace/Metric/Dims), value, type=gauge
         // Encode dimensions as part of the metric name for StatsD compatibility
         let mut metric_name = name.to_string();
-        
+
         // Add dimensions to metric name (StatsD/DogStatsD format with tags)
         if !dimensions.is_empty() {
             let tags: Vec<String> = dimensions
