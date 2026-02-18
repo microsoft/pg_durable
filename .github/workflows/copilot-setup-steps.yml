@@ -3,6 +3,8 @@ name: "Copilot Setup Steps"
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/copilot-setup-steps.yml
   pull_request:
@@ -25,6 +27,31 @@ jobs:
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies for pgrx
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              pkg-config \
+              libssl-dev \
+              libclang-dev \
+              clang \
+              bison \
+              flex \
+              libreadline-dev \
+              zlib1g-dev \
+              libxml2-dev \
+              libxslt1-dev \
+              libicu-dev
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version 0.16.1 --locked
+
+      - name: Initialize pgrx (PostgreSQL 17)
+        run: cargo pgrx init --pg17 download
+
+      - name: Verify pgrx installation
+        run: cargo pgrx --version
 
       # Strongly recommended for private git deps + auth in CI-like envs
       - name: Configure Cargo to use git CLI
