@@ -1,0 +1,49 @@
+name: "Copilot Setup Steps"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+    environment: copilot
+
+    # Least privilege; checkout needs contents:read.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Strongly recommended for private git deps + auth in CI-like envs
+      - name: Configure Cargo to use git CLI
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+      # Provide non-interactive auth for *all* https://github.com/* git fetches
+      # using an environment secret in the `copilot` environment.
+      - name: Configure git auth for private GitHub deps (PAT)
+        run: |
+          test -n "${{ secrets.DUROXIDE_PG_OPT_TOKEN }}"
+          git config --global --add url."https://x-access-token:${{ secrets.DUROXIDE_PG_OPT_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${{ secrets.DUROXIDE_PG_OPT_TOKEN }}@github.com/".insteadOf "https://api.github.com/"
+
+      # Warm the Cargo git/db caches so later `cargo update/test` is fast and reliable.
+      - name: Prefetch Rust dependencies (including private git deps)
+        run: |
+          cargo fetch
