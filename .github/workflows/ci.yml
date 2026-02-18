@@ -114,7 +114,3 @@ jobs:
       # - name: Stop PostgreSQL after pg_regress
       #   if: steps.pg_regress.outcome != 'skipped'
       #   run: ./scripts/pg-stop.sh
-
-      # - name: Stop PostgreSQL after pg_regress
-      #   if: steps.pg_regress.outcome != 'skipped'
-      #   run: ./scripts/pg-reset.sh
