@@ -175,17 +175,17 @@ async fn run_duroxide_runtime() {
     // Initialize metric emitters
     let emitters = crate::telemetry::create_emitters();
 
+    // Create a shutdown flag for metrics task
+    let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Spawn metrics publishing task
     let metrics_task = {
         let client = client.clone();
+        let shutdown_flag = shutdown_flag.clone();
         tokio::spawn(async move {
-            crate::telemetry::start_metrics_loop(
-                client,
-                emitters,
-                || {
-                    tokio::task::block_in_place(|| is_shutdown_requested())
-                },
-            )
+            crate::telemetry::start_metrics_loop(client, emitters, move || {
+                shutdown_flag.load(std::sync::atomic::Ordering::Relaxed)
+            })
             .await;
         })
     };
@@ -200,15 +200,16 @@ async fn run_duroxide_runtime() {
 
         if should_shutdown {
             log!("pg_durable: shutdown signal received, stopping duroxide runtime...");
+            shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             break;
         }
     }
 
     log!("pg_durable: initiating duroxide runtime shutdown...");
-    
+
     // Wait for metrics task to complete (it will exit on shutdown check)
     let _ = tokio::time::timeout(Duration::from_secs(2), metrics_task).await;
-    
+
     duroxide_runtime.shutdown(Some(10_000)).await;
     log!("pg_durable: duroxide runtime shutdown complete");
 }

@@ -15,6 +15,12 @@ impl NoopEmitter {
     }
 }
 
+impl Default for NoopEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricEmitter for NoopEmitter {
     fn emit_gauge(&self, name: &str, value: i64, dimensions: &HashMap<String, String>) {
         // Format dimensions as key=value pairs

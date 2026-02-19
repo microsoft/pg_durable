@@ -57,7 +57,10 @@ impl MetricEmitter for StatsdEmitter {
             metric_name = format!("{}.{}", metric_name, tags.join("."));
         }
 
-        if let Err(e) = self.client.gauge(&metric_name, value) {
+        // Convert i64 to u64 (metrics are always non-negative)
+        let gauge_value = value.max(0) as u64;
+
+        if let Err(e) = self.client.gauge(&metric_name, gauge_value) {
             log!("pg_durable: StatsD emit error for {}: {}", name, e);
         }
     }

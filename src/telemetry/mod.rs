@@ -31,10 +31,8 @@ use mdm::MdmEmitter;
 
 /// Initialize metric emitters based on enabled features
 pub fn create_emitters() -> Vec<Box<dyn MetricEmitter>> {
-    let mut emitters: Vec<Box<dyn MetricEmitter>> = Vec::new();
-
-    // Always include noop/log emitter (default)
-    emitters.push(Box::new(NoopEmitter::new()));
+    #[allow(unused_mut)]
+    let mut emitters: Vec<Box<dyn MetricEmitter>> = vec![Box::new(NoopEmitter::new())];
 
     // Add StatsD emitter if feature is enabled
     #[cfg(feature = "telemetry-statsd")]
@@ -87,9 +85,18 @@ pub async fn publish_metrics(client: &Client, emitters: &[Box<dyn MetricEmitter>
 
     // Emit each metric as a gauge
     let metric_values = [
-        ("pg_durable.instances.started", metrics.total_instances as i64),
-        ("pg_durable.instances.completed", metrics.completed_instances as i64),
-        ("pg_durable.instances.failed", metrics.failed_instances as i64),
+        (
+            "pg_durable.instances.started",
+            metrics.total_instances as i64,
+        ),
+        (
+            "pg_durable.instances.completed",
+            metrics.completed_instances as i64,
+        ),
+        (
+            "pg_durable.instances.failed",
+            metrics.failed_instances as i64,
+        ),
     ];
 
     for (name, value) in &metric_values {
@@ -111,6 +118,8 @@ pub async fn start_metrics_loop(
     log!("pg_durable: Starting metrics publishing loop (interval: 5 seconds)");
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+    // Skip the first immediate tick
+    interval.tick().await;
 
     loop {
         interval.tick().await;
