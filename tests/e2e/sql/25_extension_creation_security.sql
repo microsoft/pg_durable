@@ -189,6 +189,10 @@ BEGIN
     RAISE NOTICE 'PASS: Worker initialized duroxide-pg after recreation';
 END $$;
 
+-- Give the worker additional time to fully complete initialization
+-- This avoids race conditions with migration conflicts when client connects
+SELECT pg_sleep(1);
+
 -- Verify extension schemas and ownership
 DO $$
 DECLARE

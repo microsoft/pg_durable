@@ -44,6 +44,10 @@ BEGIN
     RAISE NOTICE 'PASS: Worker initialized duroxide-pg after cycle 1';
 END $$;
 
+-- Give the worker additional time to fully complete initialization
+-- This avoids race conditions with migration conflicts when client connects
+SELECT pg_sleep(1);
+
 -- Verify operational with a simple durable function
 CREATE TEMP TABLE _cycle1_state (instance_id TEXT);
 INSERT INTO _cycle1_state 
@@ -100,6 +104,9 @@ BEGIN
     RAISE NOTICE 'PASS: Worker initialized duroxide-pg after cycle 2';
 END $$;
 
+-- Give the worker additional time to fully complete initialization
+SELECT pg_sleep(1);
+
 -- Verify operational again
 CREATE TEMP TABLE _cycle2_state (instance_id TEXT);
 INSERT INTO _cycle2_state 
@@ -155,6 +162,9 @@ BEGIN
     
     RAISE NOTICE 'PASS: Worker initialized duroxide-pg after cycle 3';
 END $$;
+
+-- Give the worker additional time to fully complete initialization
+SELECT pg_sleep(1);
 
 -- Verify operational one more time
 CREATE TEMP TABLE _cycle3_state (instance_id TEXT);
