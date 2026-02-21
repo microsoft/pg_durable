@@ -9,6 +9,8 @@
 #   --verbose         Show all NOTICE messages and full error output
 #   -v                Same as --verbose
 #   --pg-version VER  PostgreSQL major version to use (default: 17)
+#   --no-preload      Start PostgreSQL WITHOUT shared_preload_libraries=pg_durable
+#                     (runs only 00_requires_shared_preload test)
 #
 # Examples:
 #   ./scripts/test-e2e-local.sh                         # Run all tests, stop server after
@@ -19,6 +21,7 @@
 #   ./scripts/test-e2e-local.sh --keep 04_parallel      # Run test, keep server
 #   ./scripts/test-e2e-local.sh -v 27_database_guc      # Run test with verbose output
 #   ./scripts/test-e2e-local.sh --pg-version 18         # Run all tests against PG18
+#   ./scripts/test-e2e-local.sh --no-preload            # Test shared_preload_libraries enforcement
 
 set -e
 
@@ -30,6 +33,7 @@ SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
+NO_PRELOAD=false
 TEST_FILTER=""
 REPEAT_COUNT=1
 PG_VERSION="17"
@@ -56,6 +60,10 @@ while [[ $# -gt 0 ]]; do
             fi
             PG_VERSION="$2"
             shift 2
+            ;;
+        --no-preload)
+            NO_PRELOAD=true
+            shift
             ;;
         *)
             if [ -z "$TEST_FILTER" ]; then
@@ -89,6 +97,9 @@ PG_CONFIG="$PGRX_BIN/pg_config"
 DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 
+# Test that requires --no-preload mode (no shared_preload_libraries)
+NO_PRELOAD_TEST="00_requires_shared_preload"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -110,6 +121,9 @@ if [ "$KEEP_RUNNING" = true ]; then
 fi
 if [ "$VERBOSE" = true ]; then
     echo -e "Mode: ${YELLOW}Verbose output (show NOTICE messages)${NC}"
+fi
+if [ "$NO_PRELOAD" = true ]; then
+    echo -e "Mode: ${YELLOW}No-preload (testing shared_preload_libraries enforcement)${NC}"
 fi
 echo "================================================"
 echo ""
@@ -140,6 +154,19 @@ ensure_config() {
     fi
 }
 
+# Function to configure PostgreSQL WITHOUT shared_preload_libraries (for --no-preload mode)
+ensure_config_no_preload() {
+    if [ -d "$DATA_DIR" ]; then
+        # Remove shared_preload_libraries so pg_durable is NOT preloaded
+        sed -i.bak '/^#*shared_preload_libraries/d' "$DATA_DIR/postgresql.conf"
+        # Ensure port is set
+        if ! grep -q "^port = $PG_PORT" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+            sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
+            echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
+        fi
+    fi
+}
+
 # Function to start server
 start_server() {
     # Clean start if requested
@@ -160,8 +187,12 @@ start_server() {
         "$PGRX_BIN/initdb" -D "$DATA_DIR" --no-locale -E UTF8 >/dev/null 2>&1
     fi
     
-    # Ensure config is correct
-    ensure_config
+    # Ensure config is correct (with or without preload)
+    if [ "$NO_PRELOAD" = true ]; then
+        ensure_config_no_preload
+    else
+        ensure_config
+    fi
     
     # If server is running, we need to:
     # 1. Drop duroxide schema (to clear any stale schema from previous duroxide-pg-opt version)
@@ -178,8 +209,14 @@ start_server() {
     "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
     sleep 2
     
-    # Create extension (duroxide schema will be created by background worker on first connect)
-    "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null 2>&1
+    if [ "$NO_PRELOAD" = true ]; then
+        # Drop extension if it exists from a previous run (e.g., unit tests)
+        # so the no-preload test can verify CREATE EXTENSION fails correctly
+        "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" >/dev/null 2>&1
+    else
+        # Create extension (duroxide schema will be created by background worker on first connect)
+        "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null 2>&1
+    fi
 }
 
 # Cleanup on exit (unless --keep)
@@ -199,10 +236,12 @@ trap cleanup EXIT
 # Start server
 start_server
 
-# Show version
-echo -n "pg_durable version: "
-"$PSQL" -h localhost -p $PG_PORT -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
-echo ""
+# Show version (only when extension is loaded)
+if [ "$NO_PRELOAD" = false ]; then
+    echo -n "pg_durable version: "
+    "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
+    echo ""
+fi
 echo ""
 
 # Run tests
@@ -222,6 +261,17 @@ for run in $(seq 1 $REPEAT_COUNT); do
         
         test_name=$(basename "$test_file" .sql)
         
+        # In --no-preload mode, only run the shared_preload_libraries enforcement test
+        if [ "$NO_PRELOAD" = true ] && [[ "$test_name" != *"$NO_PRELOAD_TEST"* ]]; then
+            continue
+        fi
+
+        # In normal mode, skip the shared_preload_libraries enforcement test
+        # (it requires a server without shared_preload_libraries=pg_durable)
+        if [ "$NO_PRELOAD" = false ] && [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]]; then
+            continue
+        fi
+
         # Apply filter
         if [ -n "$TEST_FILTER" ] && [[ ! "$test_name" == *"$TEST_FILTER"* ]]; then
             continue

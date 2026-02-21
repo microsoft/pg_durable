@@ -27,6 +27,11 @@ pub use types::Durofut;
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
+    if unsafe { !pgrx::pg_sys::process_shared_preload_libraries_in_progress } {
+        pgrx::error!(
+            "pg_durable must be loaded via shared_preload_libraries.\n\nHINT: Add 'pg_durable' to shared_preload_libraries in postgresql.conf and restart the server."
+        );
+    }
     worker::register_background_worker();
 }
 
