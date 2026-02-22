@@ -643,7 +643,7 @@ CREATE TABLE IF NOT EXISTS github_commits (
 );
 
 -- Configure the sync URL using durable function variable
-SELECT df.setvar('github_url', 'https://api.github.com/repos/affandar/duroxide/commits?per_page=5');
+SELECT df.setvar('github_url', 'https://api.github.com/repos/microsoft/duroxide/commits?per_page=5');
 
 -- Start scheduled commit sync (runs every 30 minutes)
 SELECT df.start(

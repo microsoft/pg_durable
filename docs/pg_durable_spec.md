@@ -47,7 +47,7 @@ SELECT durable.start(
 
 ### Built on duroxide
 
-The runtime is powered by [duroxide](https://github.com/affandar/duroxide), a durable task framework for Rust. Orchestrations are deterministic and survive crashes via replay:
+The runtime is powered by [duroxide](https://github.com/microsoft/duroxide), a durable task framework for Rust. Orchestrations are deterministic and survive crashes via replay:
 
 ```rust
 async fn order_workflow(ctx: OrchestrationContext, order_json: String) -> Result<String, String> {
@@ -83,7 +83,7 @@ async fn order_workflow(ctx: OrchestrationContext, order_json: String) -> Result
 }
 ```
 
-**Learn more:** [GitHub](https://github.com/affandar/duroxide) · [Docs](https://docs.rs/duroxide) · [Examples](https://github.com/affandar/duroxide/tree/main/examples)
+**Learn more:** [GitHub](https://github.com/microsoft/duroxide) · [Docs](https://docs.rs/duroxide) · [Examples](https://github.com/microsoft/duroxide/tree/main/examples)
 
 ---
 

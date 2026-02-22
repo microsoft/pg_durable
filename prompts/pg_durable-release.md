@@ -22,8 +22,8 @@ cargo search duroxide --limit 5
 
 **Check for new duroxide-pg-opt tag:**
 ```bash
-# List recent tags from the Azure/duroxide-pg-opt repo
-git ls-remote --tags ssh://git@github.com/Azure/duroxide-pg-opt.git | tail -10
+# List recent tags from the microsoft/duroxide-pg-opt repo
+git ls-remote --tags ssh://git@github.com/microsoft/duroxide-pg-opt.git | tail -10
 ```
 
 ### 1.2 Ask User About Updates
@@ -50,7 +50,7 @@ Update `Cargo.toml` dependencies:
 ```toml
 # Example update
 duroxide = "NEW_VERSION"
-duroxide-pg-opt = { git = "ssh://git@github.com/Azure/duroxide-pg-opt.git", tag = "NEW_TAG", package = "duroxide-pg-opt" }
+duroxide-pg-opt = { git = "ssh://git@github.com/microsoft/duroxide-pg-opt.git", tag = "NEW_TAG", package = "duroxide-pg-opt" }
 ```
 
 Then run:

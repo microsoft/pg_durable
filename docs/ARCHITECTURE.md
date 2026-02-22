@@ -429,7 +429,7 @@ let input = FunctionInput {
 
 ### Duroxide Integration
 
-pg_durable uses [duroxide](https://github.com/affandar/duroxide) for durable execution. Key concepts:
+pg_durable uses [duroxide](https://github.com/microsoft/duroxide) for durable execution. Key concepts:
 
 - **Orchestrations**: Deterministic functions that make scheduling decisions
 - **Activities**: Non-deterministic I/O operations (SQL queries, HTTP calls)

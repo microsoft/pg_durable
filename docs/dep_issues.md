@@ -4,7 +4,7 @@
 
 **Last Updated:** 2026-01-06
 
-**GitHub Query:** [All pg_durable issues in duroxide-pg-opt](https://github.com/Azure/duroxide-pg-opt/issues?q=is%3Aissue+label%3Apg_durable)
+**GitHub Query:** [All pg_durable issues in duroxide-pg-opt](https://github.com/microsoft/duroxide-pg-opt/issues?q=is%3Aissue+label%3Apg_durable)
 
 ---
 
@@ -12,12 +12,12 @@
 
 1. **Check duroxide-pg-opt releases:**
    ```bash
-   gh release list --repo Azure/duroxide-pg-opt --limit 10
+   gh release list --repo microsoft/duroxide-pg-opt --limit 10
    ```
 
 2. **Check specific issue status:**
    ```bash
-   gh issue view <ISSUE_NUMBER> --repo Azure/duroxide-pg-opt
+   gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide-pg-opt
    ```
 
 3. **Check current duroxide version in use:**
@@ -44,8 +44,8 @@ _No active blockers at this time._
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [Azure/duroxide-pg-opt#6](https://github.com/Azure/duroxide-pg-opt/issues/6) |
-| **Also filed** | [affandar/duroxide-pg#1](https://github.com/affandar/duroxide-pg/issues/1) (FYI only) |
+| **Issue** | [microsoft/duroxide-pg-opt#6](https://github.com/microsoft/duroxide-pg-opt/issues/6) |
+| **Also filed** | [microsoft/duroxide-pg#1](https://github.com/microsoft/duroxide-pg/issues/1) (FYI only) |
 | **Status** | ✅ Resolved |
 | **Fixed In** | duroxide-pg-opt v0.1.9 (requires duroxide 0.1.11) |
 

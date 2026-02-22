@@ -1,0 +1,4 @@
+# pg_regress output (generated on each run)
+results/
+regression.diffs
+regression.out

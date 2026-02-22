@@ -36,7 +36,7 @@ SELECT df.start(
 
 ### GitHub SSH Access (Required)
 
-This project depends on a private repository (`Azure/duroxide-pg-opt`) via SSH. You need SSH access to the Azure GitHub organization.
+This project depends on a private repository (`microsoft/duroxide-pg-opt`) via SSH. You need SSH access to the Azure GitHub organization.
 
 1. **Set up SSH key** with GitHub: https://docs.github.com/en/authentication/connecting-to-github-with-ssh
 2. **Authorize SSO** for the Azure organization on your SSH key
@@ -52,7 +52,7 @@ git-fetch-with-cli = true' >> ~/.cargo/config.toml
 4. **Verify SSH access**:
 
 ```bash
-git ls-remote ssh://git@github.com/Azure/duroxide-pg-opt.git
+git ls-remote ssh://git@github.com/microsoft/duroxide-pg-opt.git
 ```
 
 5. **For Docker builds**, create a `.env` file in the project root with a GitHub PAT:
