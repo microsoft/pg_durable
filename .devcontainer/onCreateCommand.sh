@@ -27,8 +27,8 @@ else
 fi
 
 # Install cargo-pgrx
-echo "Installing cargo-pgrx 0.15.0..."
-cargo install cargo-pgrx --version 0.15.0 --locked
+echo "Installing cargo-pgrx 0.16.1..."
+cargo install cargo-pgrx --version 0.16.1 --locked
 
 # Initialize pgrx with PostgreSQL 17 (pgrx will download and compile PG17)
 # This is the most time-consuming step (~5-8 minutes)

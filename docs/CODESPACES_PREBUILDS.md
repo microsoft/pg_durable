@@ -36,7 +36,7 @@ Codespaces has two distinct phases:
    - Duration: ~10 minutes (but only runs once per configuration change)
    - Installs:
      - System dependencies (libssl, clang, bison, etc.)
-     - cargo-pgrx 0.15.0
+     - cargo-pgrx 0.16.1
      - PostgreSQL 17 (downloaded and compiled via pgrx)
    - Result: Docker image with all dependencies baked in
 
@@ -97,7 +97,7 @@ When you need to update system dependencies or pgrx version:
 Example: Updating pgrx version
 ```bash
 # In .devcontainer/onCreateCommand.sh
-cargo install cargo-pgrx --version 0.16.0 --locked  # Updated from 0.15.0
+cargo install cargo-pgrx --version 0.16.1 --locked  # Updated from 0.15.0
 ```
 
 ## Troubleshooting
