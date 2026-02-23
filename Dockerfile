@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install cargo-pgrx
-RUN cargo install cargo-pgrx --version 0.15.0 --locked
+RUN cargo install cargo-pgrx --version 0.16.1 --locked
 
 # Initialize pgrx with PG17 (use system PostgreSQL)
 RUN cargo pgrx init --pg17 /usr/lib/postgresql/17/bin/pg_config
