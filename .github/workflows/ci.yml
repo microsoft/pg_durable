@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]  # Runs on main after merge
+  schedule:
+    - cron: '0 2 * * *'  # Nightly at 2 AM UTC
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,9 +27,19 @@ jobs:
         run: cargo fmt --all -- --check
 
   test:
-    name: Clippy & Tests
+    name: Clippy & Tests (PG${{ matrix.pg_version }})
     runs-on: ubuntu-latest
     needs: format
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+    # PG18 only runs on pushes to main and scheduled (nightly) runs, not on PRs
+    if: matrix.pg_version != '18' || github.event_name != 'pull_request'
+    # PG18 failures are non-blocking while compatibility is being established
+    continue-on-error: ${{ matrix.pg_version == '18' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,38 +72,38 @@ jobs:
             ~/.cargo/git
             ~/.pgrx
             target
-          key: ${{ runner.os }}-cargo-pgrx-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-pgrx-pg${{ matrix.pg_version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-pgrx-
+            ${{ runner.os }}-cargo-pgrx-pg${{ matrix.pg_version }}-
 
       - name: Install cargo-pgrx
         run: cargo install cargo-pgrx --version 0.16.1 --locked
 
       - name: Initialize pgrx
-        run: cargo pgrx init --pg17 download
+        run: cargo pgrx init --pg${{ matrix.pg_version }} download
 
       - name: Configure git credentials for private repos
         run: |
           git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Run clippy
-        run: cargo clippy --features pg17 -- -D warnings
+        run: cargo clippy --features pg${{ matrix.pg_version }} -- -D warnings
 
       - name: Run unit tests
-        run: cargo pgrx test pg17
+        run: cargo pgrx test pg${{ matrix.pg_version }}
 
       - name: Run E2E tests
         id: e2e_tests
-        run: ./scripts/test-e2e-local.sh
+        run: ./scripts/test-e2e-local.sh --pg-version ${{ matrix.pg_version }}
 
       - name: Upload PostgreSQL logs on E2E failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: postgresql-logs
+          name: postgresql-logs-pg${{ matrix.pg_version }}
           path: |
-            ~/.pgrx/17.log
-            ~/.pgrx/data-17/log/*.log
+            ~/.pgrx/${{ matrix.pg_version }}.log
+            ~/.pgrx/data-${{ matrix.pg_version }}/log/*.log
           if-no-files-found: warn
 
       # TODO: Re-enable once pg_regress tests are stabilized

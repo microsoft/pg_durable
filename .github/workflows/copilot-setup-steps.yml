@@ -47,8 +47,8 @@ jobs:
       - name: Install cargo-pgrx
         run: cargo install cargo-pgrx --version 0.16.1 --locked
 
-      - name: Initialize pgrx (PostgreSQL 17)
-        run: cargo pgrx init --pg17 download
+      - name: Initialize pgrx (PostgreSQL 17 and 18)
+        run: cargo pgrx init --pg17 download --pg18 download
 
       - name: Verify pgrx installation
         run: cargo pgrx --version

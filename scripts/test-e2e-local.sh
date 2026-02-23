@@ -4,19 +4,21 @@
 # Usage: ./scripts/test-e2e-local.sh [options] [test_filter] [repeat_count]
 #
 # Options:
-#   --keep       Leave PostgreSQL running after tests for investigation
-#   --clean      Start with fresh database (wipes all data)
-#   --verbose    Show all NOTICE messages and full error output
-#   -v           Same as --verbose
+#   --keep            Leave PostgreSQL running after tests for investigation
+#   --clean           Start with fresh database (wipes all data)
+#   --verbose         Show all NOTICE messages and full error output
+#   -v                Same as --verbose
+#   --pg-version VER  PostgreSQL major version to use (default: 17)
 #
 # Examples:
-#   ./scripts/test-e2e-local.sh                    # Run all tests, stop server after
-#   ./scripts/test-e2e-local.sh --keep             # Run all tests, keep server running
-#   ./scripts/test-e2e-local.sh --verbose          # Run all tests with NOTICE messages
-#   ./scripts/test-e2e-local.sh 04_parallel        # Run matching test
-#   ./scripts/test-e2e-local.sh 04_parallel 5      # Run 5 times
-#   ./scripts/test-e2e-local.sh --keep 04_parallel # Run test, keep server
-#   ./scripts/test-e2e-local.sh -v 27_database_guc # Run test with verbose output
+#   ./scripts/test-e2e-local.sh                         # Run all tests, stop server after
+#   ./scripts/test-e2e-local.sh --keep                  # Run all tests, keep server running
+#   ./scripts/test-e2e-local.sh --verbose               # Run all tests with NOTICE messages
+#   ./scripts/test-e2e-local.sh 04_parallel             # Run matching test
+#   ./scripts/test-e2e-local.sh 04_parallel 5           # Run 5 times
+#   ./scripts/test-e2e-local.sh --keep 04_parallel      # Run test, keep server
+#   ./scripts/test-e2e-local.sh -v 27_database_guc      # Run test with verbose output
+#   ./scripts/test-e2e-local.sh --pg-version 18         # Run all tests against PG18
 
 set -e
 
@@ -30,6 +32,7 @@ CLEAN_START=false
 VERBOSE=false
 TEST_FILTER=""
 REPEAT_COUNT=1
+PG_VERSION="17"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -46,6 +49,14 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --pg-version)
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --pg-version requires a numeric argument, got: $2"
+                exit 1
+            fi
+            PG_VERSION="$2"
+            shift 2
+            ;;
         *)
             if [ -z "$TEST_FILTER" ]; then
                 TEST_FILTER="$1"
@@ -59,8 +70,7 @@ done
 
 # pgrx settings
 PGRX_HOME="$HOME/.pgrx"
-PG_VERSION="17"
-PG_PORT="28817"
+PG_PORT="$((28800 + PG_VERSION))"
 PG_USER="$USER"
 PG_DB="postgres"
 
@@ -88,6 +98,7 @@ NC='\033[0m'
 
 echo "================================================"
 echo "pg_durable E2E Tests (Local)"
+echo -e "PostgreSQL: ${CYAN}PG${PG_VERSION}${NC} (port ${PG_PORT})"
 if [ -n "$TEST_FILTER" ]; then
     echo -e "Filter: ${CYAN}$TEST_FILTER${NC}"
 fi
