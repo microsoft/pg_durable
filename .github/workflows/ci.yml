@@ -26,20 +26,32 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  prepare:
+    name: Prepare Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      pg_versions: ${{ steps.set-matrix.outputs.pg_versions }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'pg_versions=[17]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'pg_versions=[17, 18]' >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Clippy & Tests (PG${{ matrix.pg_version }})
     runs-on: ubuntu-latest
-    needs: format
+    needs: [format, prepare]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [17, 18]
-    # PG18 only runs on pushes to main and scheduled (nightly) runs, not on PRs
-    if: matrix.pg_version != '18' || github.event_name != 'pull_request'
+        pg_version: ${{ fromJson(needs.prepare.outputs.pg_versions) }}
     # PG18 failures are non-blocking while compatibility is being established
-    continue-on-error: ${{ matrix.pg_version == '18' }}
+    continue-on-error: ${{ matrix.pg_version == 18 }}
     steps:
       - uses: actions/checkout@v4
 
