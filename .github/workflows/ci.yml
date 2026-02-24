@@ -2,10 +2,22 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]  # Runs on main after merge
   schedule:
     - cron: '0 2 * * *'  # Nightly at 2 AM UTC
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: 'PostgreSQL version(s) to test'
+        required: false
+        default: '17'
+        type: choice
+        options:
+          - '17'
+          - '18'
+          - '17, 18'
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,8 +46,14 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'pg_versions=[17]' >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'pg_versions=[${{ github.event.inputs.pg_version }}]' >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "${{ contains(github.event.pull_request.labels.*.name, 'test-pg18') }}" = "true" ]; then
+              echo 'pg_versions=[17, 18]' >> "$GITHUB_OUTPUT"
+            else
+              echo 'pg_versions=[17]' >> "$GITHUB_OUTPUT"
+            fi
           else
             echo 'pg_versions=[17, 18]' >> "$GITHUB_OUTPUT"
           fi
