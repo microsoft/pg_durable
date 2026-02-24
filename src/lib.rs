@@ -59,6 +59,8 @@ pub extern "C-unwind" fn _PG_init() {
         pgrx::GucFlags::default(),
     );
 
+    // Don't start the background worker during pgrx tests to avoid database locking issues
+    #[cfg(not(feature = "pg_test"))]
     worker::register_background_worker();
 }
 

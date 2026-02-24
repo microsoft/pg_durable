@@ -37,8 +37,8 @@ if [ -f "$PG_CONF" ]; then
     
     # Configure pg_durable.database_name GUC if provided
     if [ -n "$DATABASE_GUC" ]; then
-        # Remove any existing pg_durable.database_name setting
-        sed -i '/^pg_durable\.database_name/d' "$PG_CONF"
+        # Remove any existing pg_durable.database_name setting (portable sed -i usage)
+        sed -i.bak '/^pg_durable\.database_name/d' "$PG_CONF" && rm -f "$PG_CONF.bak"
         echo -e "\033[0;33mSetting pg_durable.database_name = '$DATABASE_GUC'...\033[0m"
         echo "pg_durable.database_name = '$DATABASE_GUC'" >> "$PG_CONF"
     fi
