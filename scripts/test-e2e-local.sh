@@ -291,16 +291,18 @@ for run in $(seq 1 $REPEAT_COUNT); do
         echo -n "  $test_name ... "
 
         # Tests run as the non-privileged E2E user unless they need superuser:
-        # 00_requires_shared_preload - attempts create extension
-        # 22 and 23 - use dblink passwordless connections
+        # 00_requires_shared_preload attempts create extension
+        # 22 and 23 use dblink passwordless connections
         # 25 tests extension creation security
         # 26 tests superuser scenarios
+        # 27 creates users and tests permissions
         PSQL_USER="$E2E_USER"
         if [[ "$test_name" == "00_requires_shared_preload" \
            || "$test_name" == "22_cross_connection" \
            || "$test_name" == "23_transactions" \
            || "$test_name" == "25_extension_creation_security" \
-           || "$test_name" == 26_superuser_* ]]; then
+           || "$test_name" == 26_superuser_* \
+           || "$test_name" == "27_user_isolation" ]]; then
             PSQL_USER="$PG_USER"
         fi
         

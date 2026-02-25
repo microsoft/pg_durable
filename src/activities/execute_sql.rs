@@ -1,21 +1,44 @@
 //! ExecuteSQL activity - runs SQL queries against PostgreSQL
+//!
+//! Connects as the submitting user's login_role and SET ROLE to submitted_by
+//! for proper privilege isolation.
 
 use duroxide::ActivityContext;
+use serde::{Deserialize, Serialize};
 use sqlx::{Column, PgPool, Row};
 use std::sync::Arc;
+
+use crate::types::connect_as_user;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-sql";
 
-/// Execute a SQL query and return results as JSON
+/// Input for the execute_sql activity
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExecuteSqlInput {
+    pub query: String,
+    pub submitted_by: String,
+    pub login_role: String,
+}
+
+/// Execute a SQL query as the submitting user and return results as JSON
 pub async fn execute(
     ctx: ActivityContext,
-    pool: Arc<PgPool>,
-    query: String,
+    _pool: Arc<PgPool>,
+    input_json: String,
 ) -> Result<String, String> {
-    ctx.trace_info(format!("Executing SQL: {query}"));
+    let input: ExecuteSqlInput =
+        serde_json::from_str(&input_json).map_err(|e| format!("Invalid execute_sql input: {e}"))?;
 
-    match sqlx::query(&query).fetch_all(pool.as_ref()).await {
+    ctx.trace_info(format!(
+        "Executing SQL as '{}' (connected as '{}'): {}",
+        input.submitted_by, input.login_role, input.query
+    ));
+
+    // Create a single connection as login_role, SET ROLE to submitted_by
+    let mut conn = connect_as_user(&input.login_role, &input.submitted_by).await?;
+
+    match sqlx::query(&input.query).fetch_all(&mut conn).await {
         Ok(rows) => {
             let mut result_rows: Vec<serde_json::Value> = Vec::new();
             for row in rows {
