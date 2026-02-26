@@ -233,6 +233,104 @@ END $$;
 DROP TABLE _test_state_5;
 
 -- ============================================================================
+-- Test 6: SECURITY DEFINER function - captures caller, not definer
+-- ============================================================================
+-- This verifies that GetOuterUserId() correctly identifies the caller's
+-- identity, not the function owner's identity, when df.start() is called
+-- inside a SECURITY DEFINER function.
+
+-- Create a superuser-only table (alice has no access)
+CREATE TABLE IF NOT EXISTS iso_superuser_secrets (id SERIAL PRIMARY KEY, value TEXT);
+INSERT INTO iso_superuser_secrets (value) VALUES ('classified') ON CONFLICT DO NOTHING;
+-- Do NOT grant alice any access to this table
+
+-- Create a SECURITY DEFINER wrapper function owned by superuser
+CREATE OR REPLACE FUNCTION iso_submit_as_definer(q TEXT) RETURNS TEXT
+LANGUAGE SQL SECURITY DEFINER
+AS $$
+    SELECT df.start(df.sql(q), 'secdef-test');
+$$;
+
+-- Grant alice permission to execute the wrapper
+GRANT EXECUTE ON FUNCTION iso_submit_as_definer TO iso_alice;
+
+-- Test 6a: Alice calls SECURITY DEFINER function to query her own table
+-- Expected: succeeds because the function runs as alice (caller), not superuser (definer)
+SET SESSION AUTHORIZATION iso_alice;
+CREATE TEMP TABLE _test_state_6a (instance_id TEXT);
+INSERT INTO _test_state_6a
+SELECT iso_submit_as_definer('SELECT value FROM iso_alice_data LIMIT 1');
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    final_status TEXT;
+    result TEXT;
+    inst_submitted TEXT;
+    inst_login TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state_6a;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+
+    IF final_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6a - SECURITY DEFINER caller access): expected completed, got %', final_status;
+    END IF;
+
+    SELECT r INTO result FROM df.result(inst_id) r;
+    IF result IS NULL OR result NOT LIKE '%alice secret%' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6a): expected alice secret, got %', result;
+    END IF;
+
+    -- Verify identity columns show alice (caller), not superuser (definer)
+    SELECT submitted_by::text, login_role::text INTO inst_submitted, inst_login
+      FROM df.instances WHERE id = inst_id;
+
+    IF inst_submitted != 'iso_alice' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6a): expected submitted_by=iso_alice (caller), got % (would be superuser if definer was captured)', inst_submitted;
+    END IF;
+    IF inst_login != 'iso_alice' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6a): expected login_role=iso_alice, got %', inst_login;
+    END IF;
+
+    RAISE NOTICE 'Test 6a PASSED: SECURITY DEFINER captures caller (alice), not definer (superuser)';
+END $$;
+
+DROP TABLE _test_state_6a;
+
+-- Test 6b: Alice calls SECURITY DEFINER function to query superuser table
+-- Expected: FAILS because the function runs as alice (caller), not superuser (definer)
+-- This proves GetOuterUserId() captured the caller's identity correctly
+SET SESSION AUTHORIZATION iso_alice;
+CREATE TEMP TABLE _test_state_6b (instance_id TEXT);
+INSERT INTO _test_state_6b
+SELECT iso_submit_as_definer('SELECT value FROM iso_superuser_secrets LIMIT 1');
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    final_status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state_6b;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+
+    IF final_status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6b - SECURITY DEFINER unauthorized): expected failed, got % (if completed, function incorrectly ran as definer instead of caller)', final_status;
+    END IF;
+
+    RAISE NOTICE 'Test 6b PASSED: SECURITY DEFINER function runs as caller, cannot access superuser table';
+END $$;
+
+DROP TABLE _test_state_6b;
+
+-- Cleanup Test 6 resources
+DROP FUNCTION IF EXISTS iso_submit_as_definer(TEXT);
+DROP TABLE IF EXISTS iso_superuser_secrets CASCADE;
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
 DROP TABLE IF EXISTS iso_alice_data CASCADE;
