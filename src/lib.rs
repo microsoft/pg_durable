@@ -61,9 +61,16 @@ CREATE TABLE IF NOT EXISTS df.nodes (
     status TEXT DEFAULT 'pending',
     result JSONB,
     error TEXT,
+    submitted_by REGROLE,
+    login_role   REGROLE,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+COMMENT ON COLUMN df.nodes.submitted_by IS
+    'Effective role (outer user) for privilege isolation. Set by df.start() when node is linked to an instance.';
+COMMENT ON COLUMN df.nodes.login_role IS
+    'Authenticated role (session user) for connection authentication. Set by df.start() when node is linked to an instance.';
 
 -- Table to store function instances
 CREATE TABLE IF NOT EXISTS df.instances (
@@ -71,10 +78,17 @@ CREATE TABLE IF NOT EXISTS df.instances (
     label TEXT,
     root_node VARCHAR(8) NOT NULL,
     status TEXT DEFAULT 'pending',
+    submitted_by REGROLE NOT NULL,
+    login_role   REGROLE NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
     completed_at TIMESTAMPTZ
 );
+
+COMMENT ON COLUMN df.instances.submitted_by IS
+    'Effective role (outer user) when df.start() was called - used for SET ROLE during execution';
+COMMENT ON COLUMN df.instances.login_role IS
+    'Authenticated role (session user) when df.start() was called - used for connection authentication';
 
 -- Index for finding pending instances
 CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);

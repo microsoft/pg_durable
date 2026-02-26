@@ -56,7 +56,9 @@ pub async fn execute(
 
     let nodes_query = format!(
         r#"SELECT id, node_type, query, result_name,
-           left_node, right_node
+           left_node, right_node,
+           submitted_by::text AS submitted_by,
+           login_role::text AS login_role
         FROM df.nodes WHERE instance_id = '{instance_id}'"#
     );
 
@@ -75,6 +77,8 @@ pub async fn execute(
             result_name: row.get("result_name"),
             left_node: row.get("left_node"),
             right_node: row.get("right_node"),
+            submitted_by: row.get::<String, _>("submitted_by"),
+            login_role: row.get::<String, _>("login_role"),
         };
         nodes.insert(id, node);
     }

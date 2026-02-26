@@ -16,9 +16,9 @@ pub fn create_activity_registry(pool: Arc<PgPool>) -> ActivityRegistry {
     let node_status_pool = pool.clone();
 
     ActivityRegistry::builder()
-        .register(activities::execute_sql::NAME, move |ctx: ActivityContext, query: String| {
+        .register(activities::execute_sql::NAME, move |ctx: ActivityContext, input_json: String| {
             let pool = sql_pool.clone();
-            async move { activities::execute_sql::execute(ctx, pool, query).await }
+            async move { activities::execute_sql::execute(ctx, pool, input_json).await }
         })
         .register(activities::load_function_graph::NAME, move |ctx: ActivityContext, instance_id: String| {
             let pool = graph_pool.clone();
