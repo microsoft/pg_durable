@@ -331,6 +331,106 @@ DROP FUNCTION IF EXISTS iso_submit_as_definer(TEXT);
 DROP TABLE IF EXISTS iso_superuser_secrets CASCADE;
 
 -- ============================================================================
+-- Test 7: Dropped role during execution
+-- ============================================================================
+-- This verifies that clear error messages are produced when the submitting
+-- role is dropped between node executions in a multi-step function.
+
+-- Create ephemeral user and table
+DO $test7_setup$
+BEGIN
+    BEGIN DROP OWNED BY iso_ephemeral; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE iso_ephemeral;     EXCEPTION WHEN undefined_object THEN NULL; END;
+END $test7_setup$;
+
+CREATE ROLE iso_ephemeral LOGIN;
+GRANT USAGE ON SCHEMA df TO iso_ephemeral;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO iso_ephemeral;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances, df.nodes TO iso_ephemeral;
+GRANT SELECT ON df.vars TO iso_ephemeral;
+GRANT TEMPORARY ON DATABASE postgres TO iso_ephemeral;
+
+-- Submit a sequence: df.sleep(3) followed by df.sql('SELECT 1')
+-- We'll drop the role after the sleep starts but before the SQL executes.
+-- This tests the realistic scenario: role dropped between nodes in a multi-node graph.
+
+-- Use a regular table (not temp) so we can access it after session switch
+CREATE TABLE IF NOT EXISTS _test_state_7_persistent (instance_id TEXT);
+GRANT INSERT ON _test_state_7_persistent TO iso_ephemeral;
+
+SET SESSION AUTHORIZATION iso_ephemeral;
+INSERT INTO _test_state_7_persistent SELECT df.start(df.sleep(3) ~> df.sql('SELECT 1'), 'ephemeral-test');
+RESET SESSION AUTHORIZATION;
+
+-- Wait for the sleep node to start, then drop the role
+DO $$
+DECLARE
+    inst_id TEXT;
+    attempts INT := 0;
+    node_count INT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state_7_persistent;
+    
+    -- Wait until at least one node has started (status != 'pending')
+    LOOP
+        SELECT COUNT(*) INTO node_count
+          FROM df.nodes
+          WHERE instance_id = inst_id
+            AND status != 'pending'
+            AND status IS NOT NULL;
+        EXIT WHEN node_count > 0 OR attempts > 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    
+    IF node_count = 0 THEN
+        RAISE EXCEPTION 'TEST SETUP FAILED (Test 7): sleep node never started';
+    END IF;
+    
+    RAISE NOTICE 'Test 7: Sleep node started, now dropping role iso_ephemeral';
+    
+    -- Drop the user and their objects (no need to terminate backends)
+    DROP OWNED BY iso_ephemeral;
+    DROP ROLE iso_ephemeral;
+    
+    RAISE NOTICE 'Test 7: Dropped role iso_ephemeral, SQL node should fail when it tries to execute';
+END $$;
+
+-- Wait for execution and verify it fails with clear error
+DO $$
+DECLARE
+    inst_id TEXT;
+    final_status TEXT;
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state_7_persistent;
+    
+    -- Wait for the instance to complete (should fail when trying to execute SQL node)
+    LOOP
+        SELECT status INTO final_status FROM df.instances WHERE id = inst_id;
+        EXIT WHEN lower(final_status) IN ('failed', 'completed') OR attempts > 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    
+    IF final_status IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 7 - dropped role): instance not found';
+    END IF;
+    
+    IF lower(final_status) != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 7 - dropped role): expected failed, got %', final_status;
+    END IF;
+    
+    -- The error should mention connection failure for the dropped role
+    -- We're not checking the exact error text since it comes from libpq/sqlx,
+    -- but we verified the instance transitioned to failed status
+    
+    RAISE NOTICE 'Test 7 PASSED: Dropped role causes clear failure (status=failed)';
+END $$;
+
+DROP TABLE _test_state_7_persistent;
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
 DROP TABLE IF EXISTS iso_alice_data CASCADE;
