@@ -102,6 +102,7 @@ SELECT sha, author, committed_at, LEFT(message, 50) AS message FROM github_commi
 
 -- Cleanup
 DROP TABLE _test_github;
+DROP TABLE github_commits;
 SELECT df.clearvars();
 
 SELECT 'TEST PASSED' AS result;

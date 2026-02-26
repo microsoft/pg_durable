@@ -82,6 +82,9 @@ PG_PORT="$((28800 + PG_VERSION))"
 PG_USER="$USER"
 PG_DB="postgres"
 
+# Default non-privileged role for E2E tests (created by 00_setup_playground.sql)
+E2E_USER="df_e2e_user"
+
 # Find pgrx binaries
 PGRX_BIN=$(ls -d $PGRX_HOME/$PG_VERSION.*/pgrx-install/bin 2>/dev/null | head -1)
 if [ -z "$PGRX_BIN" ]; then
@@ -236,13 +239,18 @@ trap cleanup EXIT
 # Start server
 start_server
 
-# Show version (only when extension is loaded)
+# Show version and run setup (only when extension is loaded, not in --no-preload mode)
 if [ "$NO_PRELOAD" = false ]; then
     echo -n "pg_durable version: "
     "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
     echo ""
+    echo ""
+
+    # Run shared E2E setup (outside the repeat loop since it only needs to run once)
+    "$PSQL" -h localhost -p $PG_PORT -U "$PG_USER" -d $PG_DB -v ON_ERROR_STOP=1 -f "$SQL_DIR/00_setup_playground.sql" >/dev/null
+else
+    echo ""
 fi
-echo ""
 
 # Run tests
 TOTAL_PASSED=0
@@ -266,10 +274,13 @@ for run in $(seq 1 $REPEAT_COUNT); do
             continue
         fi
 
-        # In normal mode, skip the shared_preload_libraries enforcement test
-        # (it requires a server without shared_preload_libraries=pg_durable)
-        if [ "$NO_PRELOAD" = false ] && [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]]; then
-            continue
+        # In normal mode, skip tests that have specific requirements:
+        # - shared_preload_libraries enforcement test (requires server without preload)
+        # - setup_playground (already run explicitly as shared setup)
+        if [ "$NO_PRELOAD" = false ]; then
+            if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]] || [[ "$test_name" == "00_setup_playground" ]]; then
+                continue
+            fi
         fi
 
         # Apply filter
@@ -278,11 +289,27 @@ for run in $(seq 1 $REPEAT_COUNT); do
         fi
         
         echo -n "  $test_name ... "
+
+        # Tests run as the non-privileged E2E user unless they need superuser:
+        # 00_requires_shared_preload attempts create extension
+        # 22 and 23 use dblink passwordless connections
+        # 25 tests extension creation security
+        # 26 tests superuser scenarios
+        # 27 creates users and tests permissions
+        PSQL_USER="$E2E_USER"
+        if [[ "$test_name" == "00_requires_shared_preload" \
+           || "$test_name" == "22_cross_connection" \
+           || "$test_name" == "23_transactions" \
+           || "$test_name" == "25_extension_creation_security" \
+           || "$test_name" == 26_superuser_* \
+           || "$test_name" == "27_user_isolation" ]]; then
+            PSQL_USER="$PG_USER"
+        fi
         
         # In verbose mode, show output as it happens
         if [ "$VERBOSE" = true ]; then
             echo ""  # Newline before verbose output
-            "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"
+            "$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"
             exit_code=$?
 
             if [ $exit_code -eq 0 ]; then
@@ -294,7 +321,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
             fi
         else
             # Non-verbose mode: capture output and show summary
-            output=$("$PSQL" -h localhost -p $PG_PORT -d $PG_DB -v ON_ERROR_STOP=1 -f "$test_file" 2>&1)
+            output=$("$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -f "$test_file" 2>&1)
             exit_code=$?
             
             if [ $exit_code -eq 0 ]; then

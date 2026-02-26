@@ -1,8 +1,43 @@
 -- Setup: Create playground schema and test data for scenario tests
 -- This file runs first (00_) to set up shared test infrastructure
 
+-- ---------------------------------------------------------------------------
+-- E2E test roles
+--
+-- We want the default E2E posture to be: run tests as a non-privileged role.
+-- This setup file is expected to run as a superuser (postgres in Docker,
+-- or the pgrx superuser in local runs) and will create/grant the test role.
+-- ---------------------------------------------------------------------------
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
+        CREATE ROLE df_e2e_user LOGIN;
+    END IF;
+END $$;
+
+-- Grant access to df API surface used by tests
+GRANT USAGE ON SCHEMA df TO df_e2e_user;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO df_e2e_user;
+
+-- Install extensions needed by tests (requires superuser)
+CREATE EXTENSION IF NOT EXISTS dblink;
+
+-- Current implementation details: df.start() links nodes/instances and reads vars
+-- via direct table access. Until table hardening lands, E2E needs DML on these.
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances TO df_e2e_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.nodes TO df_e2e_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO df_e2e_user;
+
+-- E2E tests create/drop temporary state tables in the public schema.
+-- PG15+ revokes CREATE on public from PUBLIC by default.
+GRANT USAGE, CREATE ON SCHEMA public TO df_e2e_user;
+
 -- Create playground schema
 CREATE SCHEMA IF NOT EXISTS playground;
+
+-- Ensure playground objects are owned by the non-privileged E2E role
+ALTER SCHEMA playground OWNER TO df_e2e_user;
 
 -- Users table
 CREATE TABLE IF NOT EXISTS playground.users (
@@ -13,6 +48,8 @@ CREATE TABLE IF NOT EXISTS playground.users (
     created_at TIMESTAMP DEFAULT now()
 );
 
+ALTER TABLE playground.users OWNER TO df_e2e_user;
+
 -- Orders table
 CREATE TABLE IF NOT EXISTS playground.orders (
     id SERIAL PRIMARY KEY,
@@ -22,6 +59,8 @@ CREATE TABLE IF NOT EXISTS playground.orders (
     created_at TIMESTAMP DEFAULT now(),
     processed_at TIMESTAMP
 );
+
+ALTER TABLE playground.orders OWNER TO df_e2e_user;
 
 -- Task queue for job processing examples
 CREATE TABLE IF NOT EXISTS playground.task_queue (
@@ -34,6 +73,8 @@ CREATE TABLE IF NOT EXISTS playground.task_queue (
     completed_at TIMESTAMP
 );
 
+ALTER TABLE playground.task_queue OWNER TO df_e2e_user;
+
 -- Logs table for function output
 CREATE TABLE IF NOT EXISTS playground.logs (
     id SERIAL PRIMARY KEY,
@@ -41,6 +82,8 @@ CREATE TABLE IF NOT EXISTS playground.logs (
     level VARCHAR(20) DEFAULT 'info',
     created_at TIMESTAMP DEFAULT now()
 );
+
+ALTER TABLE playground.logs OWNER TO df_e2e_user;
 
 -- Staging table for ETL examples
 CREATE TABLE IF NOT EXISTS playground.staging (
@@ -50,6 +93,8 @@ CREATE TABLE IF NOT EXISTS playground.staging (
     processed_at TIMESTAMP
 );
 
+ALTER TABLE playground.staging OWNER TO df_e2e_user;
+
 -- Target table for ETL examples
 CREATE TABLE IF NOT EXISTS playground.target (
     id SERIAL PRIMARY KEY,
@@ -58,6 +103,8 @@ CREATE TABLE IF NOT EXISTS playground.target (
     processed_at TIMESTAMP,
     loaded_at TIMESTAMP DEFAULT now()
 );
+
+ALTER TABLE playground.target OWNER TO df_e2e_user;
 
 -- Insert sample users
 INSERT INTO playground.users (name, email, active) VALUES

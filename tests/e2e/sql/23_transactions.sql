@@ -171,8 +171,6 @@ END $$;
 -- df.start() is called, and then the transaction is explicitly rolled back.
 -- ============================================================================
 
-CREATE EXTENSION IF NOT EXISTS dblink;
-
 DO $$
 DECLARE
     connstr TEXT := 'host=localhost dbname=postgres port=28817';

@@ -527,25 +527,36 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     let durofut = Durofut::ensure(fut);
     let instance_id = short_id();
 
+    // Capture user identity for privilege isolation
+    let session_user_oid = unsafe { pgrx::pg_sys::GetSessionUserId() };
+    let outer_user_oid = unsafe { pgrx::pg_sys::GetOuterUserId() };
+
     let label_sql = label
         .map(|l| format!("'{}'", l.replace('\'', "''")))
         .unwrap_or_else(|| "NULL".to_string());
 
+    let outer_oid_u32: u32 = outer_user_oid.into();
+    let session_oid_u32: u32 = session_user_oid.into();
+
     let create_instance_sql = format!(
-        "INSERT INTO df.instances (id, label, root_node, status) VALUES ('{}', {}, '{}', 'pending')",
+        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role) VALUES ('{}', {}, '{}', 'pending', {}::oid::regrole, {}::oid::regrole)",
         instance_id,
         label_sql,
-        durofut.node_id
+        durofut.node_id,
+        outer_oid_u32,
+        session_oid_u32
     );
 
     if let Err(e) = Spi::run(&create_instance_sql) {
         pgrx::error!("Failed to create instance: {:?}", e);
     }
 
-    // Link all nodes in the function graph to this instance
+    // Link all nodes in the function graph to this instance and set identity
     fn link_nodes(
         node_id: &str,
         instance_id: &str,
+        outer_user_oid: u32,
+        session_user_oid: u32,
         visited: &mut std::collections::HashSet<String>,
     ) {
         if visited.contains(node_id) {
@@ -553,8 +564,9 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         }
         visited.insert(node_id.to_string());
 
-        let update_sql =
-            format!("UPDATE df.nodes SET instance_id = '{instance_id}' WHERE id = '{node_id}'");
+        let update_sql = format!(
+            "UPDATE df.nodes SET instance_id = '{instance_id}', submitted_by = {outer_user_oid}::oid::regrole, login_role = {session_user_oid}::oid::regrole WHERE id = '{node_id}'"
+        );
         let _ = Spi::run(&update_sql);
 
         // Get child node IDs
@@ -577,20 +589,32 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         .flatten();
 
         if let Some(l) = left {
-            link_nodes(&l, instance_id, visited);
+            link_nodes(&l, instance_id, outer_user_oid, session_user_oid, visited);
         }
         if let Some(r) = right {
-            link_nodes(&r, instance_id, visited);
+            link_nodes(&r, instance_id, outer_user_oid, session_user_oid, visited);
         }
         if let Some(config_str) = config {
             if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&config_str) {
                 if let Some(cond_id) = cfg["condition_node"].as_str() {
-                    link_nodes(cond_id, instance_id, visited);
+                    link_nodes(
+                        cond_id,
+                        instance_id,
+                        outer_user_oid,
+                        session_user_oid,
+                        visited,
+                    );
                 }
                 if let Some(extras) = cfg["extra_nodes"].as_array() {
                     for extra in extras {
                         if let Some(extra_id) = extra.as_str() {
-                            link_nodes(extra_id, instance_id, visited);
+                            link_nodes(
+                                extra_id,
+                                instance_id,
+                                outer_user_oid,
+                                session_user_oid,
+                                visited,
+                            );
                         }
                     }
                 }
@@ -599,7 +623,13 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
     }
 
     let mut visited = std::collections::HashSet::new();
-    link_nodes(&durofut.node_id, &instance_id, &mut visited);
+    link_nodes(
+        &durofut.node_id,
+        &instance_id,
+        outer_oid_u32,
+        session_oid_u32,
+        &mut visited,
+    );
 
     // Capture vars from df.vars table
     let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
