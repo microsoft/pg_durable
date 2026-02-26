@@ -6,9 +6,6 @@
 -- Setup
 -- ============================================================================
 
--- Enable dblink for cross-connection calls
-CREATE EXTENSION IF NOT EXISTS dblink;
-
 DROP TABLE IF EXISTS cross_conn_log;
 CREATE TABLE cross_conn_log (
     id SERIAL PRIMARY KEY,
