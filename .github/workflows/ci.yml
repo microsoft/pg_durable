@@ -128,11 +128,11 @@ jobs:
 
       - name: Run E2E tests (shared_preload_libraries enforcement)
         id: e2e_no_preload
-        run: ./scripts/test-e2e-local.sh --no-preload
+        run: ./scripts/test-e2e-local.sh --clean --no-preload
 
       - name: Run E2E tests
         id: e2e_tests
-        run: ./scripts/test-e2e-local.sh --pg-version ${{ matrix.pg_version }}
+        run: ./scripts/test-e2e-local.sh --clean --pg-version ${{ matrix.pg_version }}
 
       - name: Upload PostgreSQL logs on E2E failure
         if: failure()

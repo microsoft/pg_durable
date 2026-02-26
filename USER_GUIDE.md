@@ -20,8 +20,9 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 10. [Signals](#signals)
 11. [Visualizing Functions](#visualizing-functions)
 12. [Monitoring](#monitoring)
-13. [Quick Reference Card](#quick-reference-card)
-14. [Appendix: Test Data Setup](#appendix-test-data-setup)
+13. [User Isolation & Privileges](#user-isolation--privileges)
+14. [Quick Reference Card](#quick-reference-card)
+15. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -1298,6 +1299,143 @@ SELECT df.status('a1b2c3d4');
 -- Result only
 SELECT df.result('a1b2c3d4');
 ```
+
+---
+
+## User Isolation & Privileges
+
+### How Privilege Isolation Works
+
+Durable functions **execute with the privileges of the user who submitted them**, not the background worker's privileges. This means:
+
+- ✅ Your SQL runs as **you**, with your permissions
+- ✅ You can only access tables and data **you** have access to
+- ✅ Non-superusers cannot escalate privileges through durable functions
+- ✅ Superusers' functions run with superuser privileges (expected behavior)
+
+**Example:**
+
+```sql
+-- Alice creates a table she owns
+CREATE USER alice;
+CREATE TABLE alice_data (secret TEXT);
+ALTER TABLE alice_data OWNER TO alice;
+
+-- Alice submits a durable function
+SET SESSION AUTHORIZATION alice;
+SELECT df.start('SELECT * FROM alice_data');
+-- ✅ This works - alice can access her own table
+
+SELECT df.start('SELECT * FROM bob_data');
+-- ❌ This fails - alice doesn't have permission
+```
+
+### How Identity Is Captured
+
+When you call `df.start()`, pg_durable captures two pieces of identity:
+
+1. **Login role** (`session_user`) - The user you authenticated as
+2. **Effective role** (`current_user`) - Your current effective privileges (after `SET ROLE`, if used)
+
+The background worker then:
+1. Connects to PostgreSQL as your **login role**
+2. Executes `SET ROLE` to your **effective role** 
+3. Runs your SQL with the correct privileges
+
+### Working with Group Roles
+
+You can use `SET ROLE` to switch to a group role before submitting a durable function:
+
+```sql
+-- Create a group role (no LOGIN)
+CREATE ROLE analysts NOLOGIN;
+GRANT analysts TO alice;
+
+CREATE TABLE analyst_reports (id INT, report TEXT);
+ALTER TABLE analyst_reports OWNER TO analysts;
+
+-- Alice switches to the analysts role
+SET SESSION AUTHORIZATION alice;
+SET ROLE analysts;
+
+-- Submit as the group role
+SELECT df.start('SELECT * FROM analyst_reports');
+-- ✅ Runs as 'analysts', alice's session user is used for authentication
+```
+
+### What Happens If a Role Is Dropped?
+
+If the user who submitted a function is dropped **before execution**:
+
+- The background worker will fail to connect
+- The instance transitions to `failed` status
+- You'll see a clear error message: `"Failed to connect as 'username'..."`
+
+**Important:** Don't drop roles that have running or pending durable functions.
+
+### Current Limitations
+
+#### Shared Variables
+
+The `df.vars` table is currently **shared across all users**:
+
+```sql
+-- User alice sets a variable
+SET SESSION AUTHORIZATION alice;
+SELECT df.setvar('api_key', 'alice-secret');
+
+-- User bob can read it! ⚠️
+SET SESSION AUTHORIZATION bob;
+SELECT df.getvar('api_key');  -- Returns 'alice-secret'
+```
+
+**Workaround:** Use namespaced variable names: `df.setvar('alice.api_key', ...)`
+
+**Future:** User-scoped variables with row-level security (RLS) are planned.
+
+#### HTTP Requests
+
+HTTP requests (`df.http()`) currently execute with the **background worker's privileges**, not the submitting user's privileges:
+
+- All users can make HTTP requests to the same endpoints
+- No user-specific URL allowlists or SSRF protection
+
+**Future:** Per-user HTTP isolation and URL allowlists are planned.
+
+#### Cross-Instance Visibility
+
+Any user with `SELECT` access to `df.instances` can see **all instances**, including:
+- Who submitted them (`submitted_by` column)
+- Their labels and status
+- When they were created
+
+**Future:** Row-level security (RLS) to restrict visibility to own instances is planned.
+
+### Security Best Practices
+
+1. **Grant minimal permissions** - Only grant `df` schema access to users who need it
+2. **Review df.vars usage** - Avoid storing secrets in shared variables
+3. **Use labels carefully** - Labels are visible to all users; avoid including sensitive info
+4. **Monitor instances** - Use `df.list_instances()` to see who's running what
+5. **Clean up** - Cancel or delete old instances to reduce cross-user visibility
+
+### Privilege Grants
+
+To allow a user to use pg_durable:
+
+```sql
+-- Minimum grants for basic usage
+GRANT USAGE ON SCHEMA df TO username;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO username;
+
+-- Current implementation requires table access
+-- (This will be tightened in future releases)
+GRANT SELECT, INSERT, UPDATE ON df.instances TO username;
+GRANT SELECT, INSERT, UPDATE ON df.nodes TO username;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO username;
+```
+
+**Note:** These grants will become more restrictive as the security model evolves.
 
 ---
 

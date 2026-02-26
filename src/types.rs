@@ -49,6 +49,84 @@ pub fn postgres_connection_string() -> String {
     format!("postgres://{user}@{host}:{port}/{database}")
 }
 
+/// Get the PostgreSQL host for connections
+pub fn get_host() -> String {
+    std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+/// Get the PostgreSQL port for connections
+pub fn get_port() -> u16 {
+    std::env::var("PGPORT")
+        .unwrap_or_else(|_| {
+            if let Ok(pgdata) = std::env::var("PGDATA") {
+                if pgdata.contains(".pgrx") {
+                    "28817".to_string()
+                } else {
+                    "5432".to_string()
+                }
+            } else {
+                "28817".to_string()
+            }
+        })
+        .parse::<u16>()
+        .unwrap_or(5432)
+}
+
+/// Get the PostgreSQL database name for connections
+pub fn get_database_name() -> String {
+    std::env::var("POSTGRES_DB")
+        .or_else(|_| std::env::var("PGDATABASE"))
+        .unwrap_or_else(|_| "postgres".to_string())
+}
+
+/// Create a single PostgreSQL connection authenticated as `login_role`,
+/// then SET ROLE to `effective_role`.
+pub async fn connect_as_user(
+    login_role: &str,
+    effective_role: &str,
+) -> Result<sqlx::postgres::PgConnection, String> {
+    use sqlx::postgres::PgConnectOptions;
+    use sqlx::Connection;
+
+    let mut options = PgConnectOptions::new()
+        .username(login_role)
+        .database(&get_database_name())
+        .port(get_port());
+
+    let host = get_host();
+    if !host.is_empty() {
+        options = options.host(&host);
+    }
+
+    let mut conn = sqlx::postgres::PgConnection::connect_with(&options)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to connect as '{}' (for effective role '{}'). Error: {}",
+                login_role, effective_role, e
+            )
+        })?;
+
+    // Switch to effective role if different from login role
+    if login_role != effective_role {
+        sqlx::query(&format!(
+            "SET ROLE \"{}\"",
+            effective_role.replace('"', "\"\"")
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| format!("SET ROLE {} failed: {}", effective_role, e))?;
+    }
+
+    // Prevent recursive df.start() calls
+    sqlx::query("SET df.in_workflow = 'true'")
+        .execute(&mut conn)
+        .await
+        .map_err(|e| format!("SET df.in_workflow failed: {}", e))?;
+
+    Ok(conn)
+}
+
 /// Schema name for Duroxide internal tables
 pub const DUROXIDE_SCHEMA: &str = "duroxide";
 
@@ -245,6 +323,10 @@ pub struct FunctionNode {
     pub result_name: Option<String>,
     pub left_node: Option<String>,
     pub right_node: Option<String>,
+    /// Effective role (outer user) for privilege isolation
+    pub submitted_by: String,
+    /// Authenticated role (session user) for connection authentication
+    pub login_role: String,
 }
 
 /// Represents the entire function graph for an instance

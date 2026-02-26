@@ -20,7 +20,7 @@ use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
 /// Must be called before Runtime::start_with_store() to capture all logs.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,duroxide::orchestration=info,duroxide::activity=info")
+        EnvFilter::new("warn,duroxide::orchestration=info,duroxide::activity=info,sqlx_postgres::options::pgpass=error")
     });
 
     let _ = tracing_subscriber::fmt()
