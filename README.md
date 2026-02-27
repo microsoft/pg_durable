@@ -119,6 +119,26 @@ Complex integration tests with Docker:
 
 See [tests/e2e/](tests/e2e/) for details.
 
+## Verifying Duroxide Migrations
+
+pg_durable includes checked-in copies of duroxide-pg-opt migration SQL files to ensure the extension owns the duroxide schema. To verify these copies match upstream:
+
+```bash
+# Clone duroxide-pg-opt at the repository root
+git clone --branch pinodeca/initialization \
+  https://github.com/microsoft/duroxide-pg-opt.git
+
+# Verify migrations match upstream
+./scripts/verify-duroxide-migrations.sh
+```
+
+**When to verify:**
+- After updating the `duroxide-pg-opt` dependency in Cargo.toml
+- When contributing changes to pg_durable
+- CI automatically verifies on every pull request
+
+**Note:** The verification script requires the `duroxide-pg-opt` repository to be cloned at the root of the pg_durable repository.
+
 ## Documentation
 
 - [User Guide](USER_GUIDE.md) — Complete usage guide with examples

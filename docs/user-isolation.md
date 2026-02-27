@@ -236,7 +236,7 @@ pub async fn connect_as_user(
 ) -> Result<PgConnection, String> {
     let mut options = PgConnectOptions::new()
         .username(login_role)
-        .database(&get_database_name())
+        .database(&target_database())
         .port(get_port().parse::<u16>().unwrap_or(5432));
 
     // Set socket directory if configured

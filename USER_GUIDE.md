@@ -21,8 +21,9 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 11. [Visualizing Functions](#visualizing-functions)
 12. [Monitoring](#monitoring)
 13. [User Isolation & Privileges](#user-isolation--privileges)
-14. [Quick Reference Card](#quick-reference-card)
-15. [Appendix: Test Data Setup](#appendix-test-data-setup)
+14. [Troubleshooting](#troubleshooting)
+15. [Quick Reference Card](#quick-reference-card)
+16. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -60,11 +61,26 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 
 ## Getting Started
 
+### Prerequisites
+
+pg_durable requires:
+1. **PostgreSQL configuration**: Add `pg_durable` to `shared_preload_libraries` in `postgresql.conf`
+2. **Server restart**: Required after modifying `shared_preload_libraries`
+3. **Extension creation**: Run `CREATE EXTENSION pg_durable` in your database
+
 ### Enable the Extension
 
 ```sql
 CREATE EXTENSION pg_durable;
 ```
+
+**What happens during `CREATE EXTENSION`:**
+- pg_durable creates its own tables in the `df` schema (for tracking function graphs)
+- It creates the `duroxide` schema and all required tables (for durable execution state)
+- The background worker (started by `shared_preload_libraries`) detects the extension and initializes the runtime
+- Within a few seconds, the system is ready to execute durable functions
+
+> ⚠️ **Important**: The background worker waits for `CREATE EXTENSION` to complete before starting. If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
 
 ### Your First Durable Function
 
@@ -1436,6 +1452,145 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO username;
 ```
 
 **Note:** These grants will become more restrictive as the security model evolves.
+## Troubleshooting
+
+### Extension Exists But Workflows Don't Start
+
+**Symptom**: You've run `CREATE EXTENSION pg_durable` but `df.start()` returns an instance ID that never completes.
+
+**Cause**: The background worker is not running, usually because `pg_durable` is not in `shared_preload_libraries`.
+
+**Solution**:
+1. Check if `pg_durable` is in `shared_preload_libraries`:
+   ```sql
+   SHOW shared_preload_libraries;
+   ```
+2. If missing, add to `postgresql.conf`:
+   ```ini
+   shared_preload_libraries = 'pg_durable'  # or 'pg_durable,other_ext'
+   ```
+3. Restart PostgreSQL (required for `shared_preload_libraries` changes)
+4. Verify the background worker started by checking PostgreSQL logs for:
+   ```
+   pg_durable: duroxide background worker starting...
+   pg_durable: extension detected, proceeding with initialization
+   pg_durable: duroxide runtime started
+   ```
+
+### "Failed to connect to duroxide store" Error
+
+**Symptom**: Calling `df.start()`, `df.status()`, or monitoring functions returns an error:
+```
+Failed to connect to duroxide store: ...
+```
+
+**Possible Causes**:
+
+1. **Extension not created**: Run `CREATE EXTENSION pg_durable`
+
+2. **Schema migration mismatch**: The `duroxide` schema exists but is at an incompatible version
+   - **Solution**: Drop and recreate the extension:
+     ```sql
+     DROP EXTENSION pg_durable CASCADE;
+     CREATE EXTENSION pg_durable;
+     ```
+   
+3. **Database connection issues**: PostgreSQL is not accepting connections
+   - Check PostgreSQL is running
+   - Verify connection string environment variables if customized
+
+### Background Worker Not Initializing
+
+**Symptom**: After `CREATE EXTENSION`, functions still don't execute, and logs show:
+```
+pg_durable: waiting for CREATE EXTENSION pg_durable...
+```
+
+**Cause**: The background worker is waiting for the extension to be created in the database it's connected to.
+
+**Solution**:
+1. Verify you're creating the extension in the correct database
+2. Check which database the background worker connects to:
+   - Defaults to the database specified by `PGDATABASE` environment variable or `postgres`
+   - The background worker only processes functions in **one** database
+3. If you need pg_durable in a different database:
+   - Create the extension in the database the background worker uses, OR
+   - Update environment variables and restart PostgreSQL
+
+### Extension Drop/Recreate Issues
+
+**Symptom**: After `DROP EXTENSION pg_durable CASCADE`, workflows still appear to be running or you see errors.
+
+**Explanation**: The background worker polls for extension existence every 5 seconds. After detecting a drop:
+- It shuts down the duroxide runtime (takes ~10 seconds)
+- Returns to waiting for extension creation
+- Any in-flight workflows are terminated
+
+**Solution**: Wait 15-20 seconds after `DROP EXTENSION` before recreating:
+```sql
+DROP EXTENSION pg_durable CASCADE;
+-- Wait ~20 seconds for background worker to fully shut down
+CREATE EXTENSION pg_durable;
+```
+
+### Functions Complete But Results Are Empty
+
+**Symptom**: `df.status()` shows `Completed` but `df.result()` returns empty or null.
+
+**Possible Causes**:
+
+1. **Query returns no rows**: The SQL query executed successfully but returned no data
+   ```sql
+   SELECT * FROM users WHERE id = 999999;  -- no such user
+   ```
+   
+2. **Variable not named**: Use `|=>` to capture results in named variables
+   ```sql
+   -- Bad: result not captured
+   SELECT df.start('SELECT id FROM users LIMIT 1');
+   
+   -- Good: result captured
+   SELECT df.start('SELECT id FROM users LIMIT 1' |=> 'user_id');
+   ```
+
+3. **ETL workflow that doesn't return data**: If the function performs INSERTs/UPDATEs, those succeed without returning data. Add a final query to return status:
+   ```sql
+   SELECT df.start(
+     'INSERT INTO logs (msg) VALUES (''done'')' ~>
+     'SELECT ''success'' as status'
+   );
+   ```
+
+### Slow Function Startup
+
+**Symptom**: There's a delay between `df.start()` returning and the function actually executing.
+
+**Explanation**: This is normal during:
+- **Initial extension creation**: Background worker needs 1-5 seconds to initialize
+- **After DROP/CREATE**: Background worker needs to reinitialize
+
+**Solution**: If delays persist beyond startup:
+1. Check PostgreSQL logs for errors
+2. Verify the background worker is running (see "Extension Exists But Workflows Don't Start")
+3. Check for resource contention (CPU, disk I/O, connection limits)
+
+### Check Background Worker Logs
+
+To debug background worker issues, check PostgreSQL logs:
+
+```bash
+# Find PostgreSQL log location
+psql -c "SHOW log_directory;"
+psql -c "SHOW log_filename;"
+
+# Example (adjust path for your installation)
+tail -f /var/log/postgresql/postgresql-17-main.log
+
+# Or for pgrx development:
+tail -f ~/.pgrx/17.log
+```
+
+Look for lines starting with `pg_durable:` for background worker activity.
 
 ---
 

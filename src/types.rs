@@ -72,8 +72,10 @@ pub fn get_port() -> u16 {
         .unwrap_or(5432)
 }
 
-/// Get the PostgreSQL database name for connections
-pub fn get_database_name() -> String {
+/// Get the target database name that the background worker will connect to
+/// This matches the logic in postgres_connection_string() for database selection
+#[pg_extern(immutable, parallel_safe, schema = "df")]
+pub fn target_database() -> String {
     std::env::var("POSTGRES_DB")
         .or_else(|_| std::env::var("PGDATABASE"))
         .unwrap_or_else(|_| "postgres".to_string())
@@ -90,7 +92,7 @@ pub async fn connect_as_user(
 
     let mut options = PgConnectOptions::new()
         .username(login_role)
-        .database(&get_database_name())
+        .database(&target_database())
         .port(get_port());
 
     let host = get_host();
@@ -129,6 +131,30 @@ pub async fn connect_as_user(
 
 /// Schema name for Duroxide internal tables
 pub const DUROXIDE_SCHEMA: &str = "duroxide";
+
+/// Create a `ProviderConfig` for backend (request/response) operations.
+///
+/// - `VerifyOnly`: never create schema/tables, reject unknown migrations
+/// - `long_poll` disabled: avoid a dedicated listener connection per backend session
+pub fn backend_provider_config() -> duroxide_pg_opt::ProviderConfig {
+    let mut config = duroxide_pg_opt::ProviderConfig::default();
+    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
+    config.migration_policy = duroxide_pg_opt::MigrationPolicy::VerifyOnly;
+    config.long_poll.enabled = false;
+    config
+}
+
+/// Create a `ProviderConfig` for the background worker runtime.
+///
+/// - `VerifyOnly`: never create schema/tables, reject unknown migrations
+/// - Long-polling intentionally left enabled (default) for the BGW runtime,
+///   unlike backend sessions where it's disabled to save resources.
+pub fn worker_provider_config() -> duroxide_pg_opt::ProviderConfig {
+    let mut config = duroxide_pg_opt::ProviderConfig::default();
+    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
+    config.migration_policy = duroxide_pg_opt::MigrationPolicy::VerifyOnly;
+    config
+}
 
 /// Calculate the duration until the next cron schedule match
 pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
