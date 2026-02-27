@@ -604,6 +604,7 @@ Test users need `GRANT` of `df` schema usage, execute on `df.start`/`df.sql`/`df
 
 ## Future Work
 
+- **Execution context capture (hybrid approach)**: Add a `execution_context JSONB` column to capture environment settings like `search_path`, `statement_timeout`, `work_mem`, etc. Identity fields (`login_role`, `submitted_by`) remain strongly-typed `REGROLE` columns because they're security-critical and benefit from type validation. Execution context is supplementary and may evolve, making JSONB more appropriate for flexibility.
 - **Connection reuse across nodes**: Cache connections keyed by `(instance_id, login_role, submitted_by)` and reuse across SQL nodes within the same instance execution. Close on instance completion.
 - **SPI-based execution**: Instead of opening a new connection, use `SetUserIdAndSecContext()` to switch the effective user within the background worker process. This would eliminate connection overhead entirely and remove the `pg_hba.conf` trust requirement.
 - **Row-level security**: Apply RLS to `df.instances` and `df.nodes` so users can only see their own submissions.
