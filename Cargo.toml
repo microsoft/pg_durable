@@ -32,7 +32,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # duroxide integration
 duroxide = "=0.1.20"
-duroxide-pg-opt = { git = "https://github.com/microsoft/duroxide-pg-opt.git", tag = "v0.1.18", package = "duroxide-pg-opt" }
+duroxide-pg-opt = { git = "https://github.com/microsoft/duroxide-pg-opt.git", branch = "pinodeca/migration-policy", package = "duroxide-pg-opt" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # For ExecuteSQL activity (connecting back to PostgreSQL)
@@ -59,5 +59,3 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-
-

@@ -296,13 +296,17 @@ for run in $(seq 1 $REPEAT_COUNT); do
         # 25 tests extension creation security
         # 26 tests superuser scenarios
         # 27 creates users and tests permissions
+        # 28 drops/creates the extension
+        # 29 uses dblink and creates pg_durable in a different database
         PSQL_USER="$E2E_USER"
         if [[ "$test_name" == "00_requires_shared_preload" \
            || "$test_name" == "22_cross_connection" \
            || "$test_name" == "23_transactions" \
            || "$test_name" == "25_extension_creation_security" \
            || "$test_name" == 26_superuser_* \
-           || "$test_name" == "27_user_isolation" ]]; then
+           || "$test_name" == "27_user_isolation" \
+           || "$test_name" == "28_bgw_lifecycle" \
+           || "$test_name" == "29_database_validation" ]]; then
             PSQL_USER="$PG_USER"
         fi
         
