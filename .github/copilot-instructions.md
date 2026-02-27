@@ -21,7 +21,9 @@ pg_durable is a **PostgreSQL extension** (pgrx/Rust) providing durable SQL funct
 | [src/activities/](src/activities/) | Duroxide activities (I/O happens here) |
 | [src/types.rs](src/types.rs) | Core types: `Durofut`, `FunctionGraph`, `FunctionNode` |
 | [tests/e2e/sql/](tests/e2e/sql/) | SQL-based E2E tests (numbered, run sequentially) |
-
+| [sql/duroxide_upstream/](sql/duroxide_upstream/) | Checked-in copies of duroxide-pg-opt migrations |
+| [scripts/gen-duroxide-install-sql.sh](scripts/gen-duroxide-install-sql.sh) | Generates combined install SQL from upstream copies |
+| [scripts/verify-duroxide-migrations.sh](scripts/verify-duroxide-migrations.sh) | Verifies upstream copies match duroxide-pg-opt |
 ## Development Commands
 
 ```bash
@@ -75,6 +77,51 @@ Tests in `tests/e2e/sql/` follow this pattern:
 **Adding a new activity:** Create file in `src/activities/`, add `pub const NAME`, register in [src/registry.rs](src/registry.rs)
 
 **Adding E2E test:** Create numbered SQL file in `tests/e2e/sql/`, follow existing pattern (see [02_sequence.sql](tests/e2e/sql/02_sequence.sql))
+
+## Duroxide Migration Sync Workflow
+
+pg_durable includes the duroxide-pg-opt schema DDL as extension SQL to ensure proper PostgreSQL ownership semantics. This requires maintaining checked-in copies of upstream migrations.
+
+### Migration Files
+
+- **Upstream source**: `duroxide-pg-opt/migrations/000*.sql` (from duroxide-pg-opt repository)
+- **Checked-in copies**: [sql/duroxide_upstream/](sql/duroxide_upstream/) (verbatim copies of upstream)
+- **Combined install SQL**: [sql/duroxide_install.sql](sql/duroxide_install.sql) (generated from copies)
+- **Extension integration**: [src/lib.rs](src/lib.rs) includes via `extension_sql_file!("../sql/duroxide_install.sql")`
+
+### Scripts
+
+**Generate combined install SQL:**
+```bash
+./scripts/gen-duroxide-install-sql.sh
+# Creates sql/duroxide_install.sql from sql/duroxide_upstream/*.sql
+```
+
+**Verify migrations match upstream:**
+```bash
+# Requires duroxide-pg-opt cloned at repository root
+git clone --branch pinodeca/initialization \
+  https://github.com/microsoft/duroxide-pg-opt.git
+./scripts/verify-duroxide-migrations.sh
+```
+
+### When to Update Migrations
+
+1. **Upgrading duroxide-pg-opt dependency**: When Cargo.toml points to a new version/tag/branch:
+   - Clone/pull the matching duroxide-pg-opt version
+   - Copy new/updated migration files from `duroxide-pg-opt/migrations/` to `sql/duroxide_upstream/`
+   - Run `./scripts/gen-duroxide-install-sql.sh` to regenerate install SQL
+   - Run `./scripts/verify-duroxide-migrations.sh` to confirm sync
+   - Commit both the upstream copies and generated install SQL
+
+2. **After cloning pg_durable**: CI automatically verifies migrations on every PR
+
+### Important Notes
+
+- ⚠️ **Never manually edit `sql/duroxide_install.sql`** - it's generated
+- ⚠️ **Keep `sql/duroxide_upstream/` in sync** with the duroxide-pg-opt version referenced in Cargo.toml
+- ✅ **CI enforces sync** - `.github/workflows/ci.yml` clones duroxide-pg-opt and runs verification
+- ✅ **Extension owns the schema** - duroxide schema/tables are created by `CREATE EXTENSION pg_durable`
 
 ## Dependencies
 
@@ -163,7 +210,8 @@ SELECT 'TEST PASSED' AS result;
 Pull requests automatically run the CI workflow (`.github/workflows/ci.yml`):
 
 1. **Format Check**: `cargo fmt --check`
-2. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
+2. **Migration Verification**: Clones duroxide-pg-opt and runs `./scripts/verify-duroxide-migrations.sh`
+3. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
 
 All checks must pass before a PR can be merged. Configure branch protection rules in GitHub to enforce this.
 

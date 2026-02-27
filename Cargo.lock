@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "duroxide-pg-opt"
 version = "0.1.18"
-source = "git+https://github.com/microsoft/duroxide-pg-opt.git?tag=v0.1.18#cae71b22aa328ef44cc7a6f45d80e479c3c0908e"
+source = "git+https://github.com/microsoft/duroxide-pg-opt.git?branch=pinodeca%2Finitialization#f386df4ed96d584d8471bc741049dc6ecb4f691a"
 dependencies = [
  "anyhow",
  "async-trait",

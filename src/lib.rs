@@ -93,6 +93,69 @@ CREATE TABLE IF NOT EXISTS df.vars (
 );
 
 // ============================================================================
+// Extension Validation (must run before duroxide schema creation)
+// ============================================================================
+
+// In production builds, validate that the extension is created in the database
+// the background worker will connect to.  In pgrx test builds the test database
+// name is chosen by pgrx and won't match the worker's target database, so we
+// skip the check (unit tests don't need the background worker).
+
+#[cfg(not(any(test, feature = "pg_test")))]
+extension_sql!(
+    r#"
+-- Validate that CREATE EXTENSION is run in the correct database
+-- The background worker connects to one specific database (determined by
+-- POSTGRES_DB or PGDATABASE environment variable). The extension must be
+-- created in that database for workflows to execute.
+DO $$
+DECLARE
+    current_db TEXT;
+    target_db TEXT;
+BEGIN
+    -- Get the current database
+    SELECT current_database() INTO current_db;
+    
+    -- Get the target database that the background worker will connect to
+    SELECT df.target_database() INTO target_db;
+    
+    IF current_db != target_db THEN
+        RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). The background worker only processes functions in the database specified by POSTGRES_DB or PGDATABASE environment variable (defaults to "postgres").', target_db, current_db
+            USING HINT = 'Connect to the correct database and run: CREATE EXTENSION pg_durable;';
+    END IF;
+END $$;
+"#,
+    name = "validate_database",
+    requires = [df, target_database]
+);
+
+#[cfg(any(test, feature = "pg_test"))]
+extension_sql!(
+    r#"
+-- Test build: skip database validation.
+-- pgrx creates a test database whose name differs from the background worker's
+-- target database.  The worker won't run in the test database; unit tests that
+-- exercise duroxide use direct tokio runtimes instead.
+DO $$
+BEGIN
+    RAISE NOTICE 'pg_durable: database validation skipped (test build)';
+END $$;
+"#,
+    name = "validate_database",
+    requires = [df]
+);
+
+// ============================================================================
+// Duroxide Schema (experimental hand-over)
+// ============================================================================
+
+extension_sql_file!(
+    "../sql/duroxide_install.sql",
+    name = "duroxide_migrations_install",
+    requires = ["validate_database"]
+);
+
+// ============================================================================
 // SQL Operators
 // ============================================================================
 
@@ -247,7 +310,7 @@ mod tests {
 
     /// Ensure the Duroxide store exists and is ready
     fn ensure_store_ready() -> Result<String, String> {
-        use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
         use duroxide_pg_opt::PostgresProvider;
         use std::time::{Duration, Instant};
 
@@ -263,8 +326,10 @@ mod tests {
             let start = Instant::now();
             let timeout = Duration::from_secs(10);
 
+            let config = backend_provider_config();
+
             loop {
-                match PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA)).await {
+                match PostgresProvider::new_with_config(&pg_conn_str, config.clone()).await {
                     Ok(_) => return Ok(format!("{pg_conn_str} (schema: {DUROXIDE_SCHEMA})")),
                     Err(e) => {
                         if start.elapsed() > timeout {
@@ -283,7 +348,7 @@ mod tests {
 
     /// Wait for a durable function to complete, polling Duroxide status
     fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
-        use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{backend_provider_config, postgres_connection_string};
         use duroxide::Client;
         use duroxide_pg_opt::PostgresProvider;
         use std::time::{Duration, Instant};
@@ -302,7 +367,7 @@ mod tests {
 
         rt.block_on(async {
             let store = Arc::new(
-                PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
+                PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
                     .await
                     .map_err(|e| format!("Failed to connect to store: {e}"))?,
             );
@@ -345,7 +410,7 @@ mod tests {
 
     /// Get the current status from Duroxide
     fn get_duroxide_status(instance_id: &str) -> Option<String> {
-        use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{backend_provider_config, postgres_connection_string};
         use duroxide::Client;
         use duroxide_pg_opt::PostgresProvider;
 
@@ -359,7 +424,7 @@ mod tests {
 
         rt.block_on(async {
             let store = Arc::new(
-                PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
+                PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
                     .await
                     .ok()?,
             );

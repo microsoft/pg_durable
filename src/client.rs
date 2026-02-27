@@ -10,7 +10,7 @@ use duroxide_pg_opt::PostgresProvider;
 use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+use crate::types::{backend_provider_config, postgres_connection_string};
 
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -39,7 +39,7 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
 
     rt.block_on(async {
         let store = Arc::new(
-            PostgresProvider::new_with_schema(&pg_conn_str, Some(DUROXIDE_SCHEMA))
+            PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
                 .await
                 .map_err(|e| format!("Failed to connect to duroxide store: {e}"))?,
         );
