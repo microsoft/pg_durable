@@ -113,7 +113,9 @@ We keep an audited, ordered copy of the upstream migration SQL inside this repo:
   - our copies match `duroxide-pg-opt/migrations/`
   - the generated combined install SQL matches what’s checked in
 
-Then we include `sql/duroxide_install.sql` as part of the extension install SQL via `extension_sql_file!`.
+The generated install SQL sets `search_path` to `duroxide` for the migration DDL, then resets it to `@extschema@` at the end so that subsequent extension SQL blocks (operators, etc.) resolve to the correct schema.
+
+We include `sql/duroxide_install.sql` as part of the extension install SQL via `extension_sql_file!`.
 
 #### Why we avoid “out-of-band” DDL
 
@@ -364,7 +366,7 @@ Because the Duroxide schema DDL runs inside `CREATE EXTENSION` as extension SQL,
 
 5. **Prerequisite validation tests (implemented)**
     - Test 00_requires_shared_preload.sql: Validates CREATE EXTENSION fails without shared_preload_libraries
-    - Test 27_database_validation.sql: Validates CREATE EXTENSION fails in wrong database, documents multi-database limitation
+    - Test 27_database_validation.sql: Validates CREATE EXTENSION succeeds in the correct database, and actually fails with the expected error message in a wrong database (tested via dblink into a throwaway database)
     - Tests ensure users get clear error messages during extension creation rather than discovering issues at runtime
 
 ## PostgreSQL Best Practices Alignment
