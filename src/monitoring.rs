@@ -1,13 +1,14 @@
-//! Monitoring functions for pg_durable - using Duroxide Client Management API
+//! Monitoring functions for pg_durable — SPI-based
+//!
+//! All monitoring queries run synchronously via SPI against the duroxide
+//! stored procedures and pg_durable's own tables. No async runtime, no TCP
+//! connections, no connection pools.
 
 #![allow(clippy::type_complexity)] // Required for pgrx TableIterator return types
 
-use duroxide::Client;
 use pgrx::prelude::*;
-use std::sync::Arc;
 
-use crate::types::{backend_provider_config, postgres_connection_string};
-use duroxide_pg_opt::PostgresProvider;
+use crate::types::DUROXIDE_SCHEMA;
 
 // ============================================================================
 // Monitoring Functions
@@ -29,66 +30,60 @@ pub fn list_instances(
         name!(output, Option<String>),
     ),
 > {
-    let pg_conn_str = postgres_connection_string();
+    let results = Spi::connect(|client| {
+        // 1. Get instance IDs from duroxide (filtered or all)
+        let list_sql = if let Some(status) = status_filter {
+            format!(
+                "SELECT instance_id FROM {DUROXIDE_SCHEMA}.list_instances_by_status('{}') LIMIT {}",
+                status.replace('\'', "''"),
+                limit_count
+            )
+        } else {
+            format!(
+                "SELECT instance_id FROM {DUROXIDE_SCHEMA}.list_instances() LIMIT {limit_count}"
+            )
+        };
 
-    // Fetch labels from PostgreSQL
-    let labels: std::collections::HashMap<String, Option<String>> = Spi::connect(|client| {
-        let mut map = std::collections::HashMap::new();
-        if let Ok(table) = client.select("SELECT id, label FROM df.instances", None, &[]) {
-            for row in table {
-                if let Ok(Some(id)) = row.get::<String>(1) {
-                    let label: Option<String> = row.get(2).ok().flatten();
-                    map.insert(id, label);
-                }
-            }
-        }
-        map
-    });
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
-    };
-
-    let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
-        {
-            Ok(s) => Arc::new(s),
+        let instance_ids: Vec<String> = match client.select(&list_sql, None, &[]) {
+            Ok(table) => table
+                .filter_map(|row| row.get::<String>(1).ok().flatten())
+                .collect(),
             Err(_) => return vec![],
         };
 
-        let client = Client::new(store);
-
-        let instance_ids = if let Some(status) = status_filter {
-            client
-                .list_instances_by_status(status)
-                .await
-                .unwrap_or_default()
-        } else {
-            client.list_all_instances().await.unwrap_or_default()
-        };
-
-        let limited: Vec<_> = instance_ids
-            .into_iter()
-            .take(limit_count as usize)
-            .collect();
-
+        // 2. For each instance, get info from duroxide + label from df.instances
         let mut rows = Vec::new();
-        for id in limited {
-            if let Ok(info) = client.get_instance_info(&id).await {
-                let label = labels.get(&info.instance_id).cloned().flatten();
-                rows.push((
-                    info.instance_id,
-                    label,
-                    info.orchestration_name,
-                    info.status,
-                    info.current_execution_id as i64,
-                    info.output,
-                ));
+        for id in instance_ids {
+            let info_sql = format!(
+                "SELECT instance_id, orchestration_name, status, current_execution_id, output \
+                 FROM {DUROXIDE_SCHEMA}.get_instance_info('{}')",
+                id.replace('\'', "''")
+            );
+            if let Ok(table) = client.select(&info_sql, None, &[]) {
+                for row in table {
+                    let inst_id: String = match row.get(1).ok().flatten() {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let function_name: String =
+                        row.get::<String>(2).ok().flatten().unwrap_or_default();
+                    let status: String = row.get::<String>(3).ok().flatten().unwrap_or_default();
+                    let exec_id: i64 = row.get::<i64>(4).ok().flatten().unwrap_or(0);
+                    let output: Option<String> = row.get(5).ok().flatten();
+
+                    // Get label from df.instances
+                    let label_sql = format!(
+                        "SELECT label FROM df.instances WHERE id = '{}'",
+                        inst_id.replace('\'', "''")
+                    );
+                    let label: Option<String> = client
+                        .select(&label_sql, None, &[])
+                        .ok()
+                        .and_then(|t| t.into_iter().next())
+                        .and_then(|r| r.get(1).ok().flatten());
+
+                    rows.push((inst_id, label, function_name, status, exec_id, output));
+                }
             }
         }
         rows
@@ -113,44 +108,55 @@ pub fn instance_info(
         name!(output, Option<String>),
     ),
 > {
-    let pg_conn_str = postgres_connection_string();
-    let instance_id_str = instance_id.to_string();
+    let safe_id = instance_id.replace('\'', "''");
 
-    let label: Option<String> = Spi::get_one(&format!(
-        "SELECT label FROM df.instances WHERE id = '{}'",
-        instance_id.replace('\'', "''")
-    ))
-    .ok()
-    .flatten();
+    let results = Spi::connect(|client| {
+        // Get label from df.instances
+        let label: Option<String> = client
+            .select(
+                &format!("SELECT label FROM df.instances WHERE id = '{safe_id}'"),
+                None,
+                &[],
+            )
+            .ok()
+            .and_then(|t| t.into_iter().next())
+            .and_then(|r| r.get(1).ok().flatten());
 
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
-    };
+        // Get instance info from duroxide stored procedure
+        let info_sql = format!(
+            "SELECT instance_id, orchestration_name, orchestration_version, \
+             current_execution_id, status, output \
+             FROM {DUROXIDE_SCHEMA}.get_instance_info('{safe_id}')"
+        );
 
-    let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
-        {
-            Ok(s) => Arc::new(s),
-            Err(_) => return vec![],
-        };
+        match client.select(&info_sql, None, &[]) {
+            Ok(table) => {
+                let mut rows = Vec::new();
+                for row in table {
+                    let inst_id: String = match row.get(1).ok().flatten() {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let function_name: String =
+                        row.get::<String>(2).ok().flatten().unwrap_or_default();
+                    let function_version: String =
+                        row.get::<String>(3).ok().flatten().unwrap_or_default();
+                    let exec_id: i64 = row.get::<i64>(4).ok().flatten().unwrap_or(0);
+                    let status: String = row.get::<String>(5).ok().flatten().unwrap_or_default();
+                    let output: Option<String> = row.get(6).ok().flatten();
 
-        let client = Client::new(store);
-
-        match client.get_instance_info(&instance_id_str).await {
-            Ok(info) => vec![(
-                info.instance_id,
-                label,
-                info.orchestration_name,
-                info.orchestration_version,
-                info.current_execution_id as i64,
-                info.status,
-                info.output,
-            )],
+                    rows.push((
+                        inst_id,
+                        label.clone(),
+                        function_name,
+                        function_version,
+                        exec_id,
+                        status,
+                        output,
+                    ));
+                }
+                rows
+            }
             Err(_) => vec![],
         }
     });
@@ -173,51 +179,41 @@ pub fn instance_executions(
         name!(output, Option<String>),
     ),
 > {
-    let pg_conn_str = postgres_connection_string();
-    let instance_id = instance_id.to_string();
+    let safe_id = instance_id.replace('\'', "''");
 
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
-    };
+    let results = Spi::connect(|client| {
+        // Get execution IDs (sorted descending, limited)
+        let list_sql = format!(
+            "SELECT execution_id FROM {DUROXIDE_SCHEMA}.list_executions('{safe_id}') \
+             ORDER BY execution_id DESC LIMIT {limit_count}"
+        );
 
-    let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
-        {
-            Ok(s) => Arc::new(s),
+        let exec_ids: Vec<i64> = match client.select(&list_sql, None, &[]) {
+            Ok(table) => table
+                .filter_map(|row| row.get::<i64>(1).ok().flatten())
+                .collect(),
             Err(_) => return vec![],
         };
-
-        let client = Client::new(store);
-
-        let execution_ids = match client.list_executions(&instance_id).await {
-            Ok(ids) => ids,
-            Err(_) => return vec![],
-        };
-
-        let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
-        sorted_ids.sort_by(|a, b| b.cmp(a));
-        let limited: Vec<_> = sorted_ids.into_iter().take(limit_count as usize).collect();
 
         let mut rows = Vec::new();
-        for exec_id in limited {
-            if let Ok(info) = client.get_execution_info(&instance_id, exec_id).await {
-                let duration_ms = info
-                    .completed_at
-                    .map(|end| end.saturating_sub(info.started_at))
-                    .unwrap_or(0);
+        for exec_id in exec_ids {
+            let info_sql = format!(
+                "SELECT execution_id, status, event_count, \
+                 EXTRACT(EPOCH FROM (completed_at - started_at))::BIGINT * 1000 AS duration_ms, \
+                 output \
+                 FROM {DUROXIDE_SCHEMA}.get_execution_info('{safe_id}', {exec_id})"
+            );
 
-                rows.push((
-                    info.execution_id as i64,
-                    info.status,
-                    info.event_count as i64,
-                    duration_ms as i64,
-                    info.output,
-                ));
+            if let Ok(table) = client.select(&info_sql, None, &[]) {
+                for row in table {
+                    let eid: i64 = row.get::<i64>(1).ok().flatten().unwrap_or(0);
+                    let status: String = row.get::<String>(2).ok().flatten().unwrap_or_default();
+                    let event_count: i64 = row.get::<i64>(3).ok().flatten().unwrap_or(0);
+                    let duration_ms: i64 = row.get::<i64>(4).ok().flatten().unwrap_or(0);
+                    let output: Option<String> = row.get(5).ok().flatten();
+
+                    rows.push((eid, status, event_count, duration_ms, output));
+                }
             }
         }
         rows
@@ -239,35 +235,35 @@ pub fn metrics() -> TableIterator<
         name!(total_events, i64),
     ),
 > {
-    let pg_conn_str = postgres_connection_string();
+    let results = Spi::connect(|client| {
+        let sql = format!(
+            "SELECT total_instances, running_instances, completed_instances, \
+             failed_instances, total_executions, total_events \
+             FROM {DUROXIDE_SCHEMA}.get_system_metrics()"
+        );
 
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
-    };
+        match client.select(&sql, None, &[]) {
+            Ok(table) => {
+                let mut rows = Vec::new();
+                for row in table {
+                    let total_instances: i64 = row.get::<i64>(1).ok().flatten().unwrap_or(0);
+                    let running: i64 = row.get::<i64>(2).ok().flatten().unwrap_or(0);
+                    let completed: i64 = row.get::<i64>(3).ok().flatten().unwrap_or(0);
+                    let failed: i64 = row.get::<i64>(4).ok().flatten().unwrap_or(0);
+                    let total_executions: i64 = row.get::<i64>(5).ok().flatten().unwrap_or(0);
+                    let total_events: i64 = row.get::<i64>(6).ok().flatten().unwrap_or(0);
 
-    let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
-        {
-            Ok(s) => Arc::new(s),
-            Err(_) => return vec![],
-        };
-
-        let client = Client::new(store);
-
-        match client.get_system_metrics().await {
-            Ok(m) => vec![(
-                m.total_instances as i64,
-                m.running_instances as i64,
-                m.completed_instances as i64,
-                m.failed_instances as i64,
-                m.total_executions as i64,
-                m.total_events as i64,
-            )],
+                    rows.push((
+                        total_instances,
+                        running,
+                        completed,
+                        failed,
+                        total_executions,
+                        total_events,
+                    ));
+                }
+                rows
+            }
             Err(_) => vec![],
         }
     });
@@ -297,116 +293,76 @@ pub fn instance_nodes(
 > {
     use pgrx::datum::TimestampWithTimeZone;
 
-    let instance_id = instance_id_param.to_string();
-    let pg_conn_str = postgres_connection_string();
+    let safe_id = instance_id_param.replace('\'', "''");
 
-    // Get node definitions from PostgreSQL (including status, result and updated_at)
-    let node_defs: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<TimestampWithTimeZone>,
-    )> = Spi::connect(|client| {
-        let sql = format!(
-            r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, updated_at
-                   FROM df.nodes WHERE instance_id = '{instance_id}'"#
+    let results = Spi::connect(|client| {
+        // Get node definitions from df.nodes (including status, result and updated_at)
+        let node_sql = format!(
+            r#"SELECT id, node_type, query, result_name, left_node, right_node,
+                      status, result::text, updated_at
+               FROM df.nodes WHERE instance_id = '{safe_id}'"#
         );
-        let mut nodes = Vec::new();
-        if let Ok(table) = client.select(&sql, None, &[]) {
-            for row in table {
-                if let Ok(Some(id)) = row.get::<String>(1) {
-                    let node_type: String = row.get(2).ok().flatten().unwrap_or_default();
-                    let query: Option<String> = row.get(3).ok().flatten();
-                    let result_name: Option<String> = row.get(4).ok().flatten();
-                    let left_node: Option<String> = row.get(5).ok().flatten();
-                    let right_node: Option<String> = row.get(6).ok().flatten();
-                    let node_status: Option<String> = row.get(7).ok().flatten();
-                    let node_result: Option<String> = row.get(8).ok().flatten();
-                    let updated_at: Option<TimestampWithTimeZone> = row.get(9).ok().flatten();
-                    nodes.push((
-                        id,
-                        node_type,
-                        query,
-                        result_name,
-                        left_node,
-                        right_node,
-                        node_status,
-                        node_result,
-                        updated_at,
-                    ));
+
+        let node_defs: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<TimestampWithTimeZone>,
+        )> = match client.select(&node_sql, None, &[]) {
+            Ok(table) => {
+                let mut nodes = Vec::new();
+                for row in table {
+                    if let Ok(Some(id)) = row.get::<String>(1) {
+                        let node_type: String = row.get(2).ok().flatten().unwrap_or_default();
+                        let query: Option<String> = row.get(3).ok().flatten();
+                        let result_name: Option<String> = row.get(4).ok().flatten();
+                        let left_node: Option<String> = row.get(5).ok().flatten();
+                        let right_node: Option<String> = row.get(6).ok().flatten();
+                        let node_status: Option<String> = row.get(7).ok().flatten();
+                        let node_result: Option<String> = row.get(8).ok().flatten();
+                        let updated_at: Option<TimestampWithTimeZone> = row.get(9).ok().flatten();
+                        nodes.push((
+                            id,
+                            node_type,
+                            query,
+                            result_name,
+                            left_node,
+                            right_node,
+                            node_status,
+                            node_result,
+                            updated_at,
+                        ));
+                    }
                 }
+                nodes
             }
-        }
-        nodes
-    });
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
-    };
-
-    let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
-        {
-            Ok(s) => Arc::new(s),
-            Err(_) => return vec![],
+            Err(_) => vec![],
         };
 
-        let client = Client::new(store);
+        // Get execution IDs from duroxide (sorted descending, limited)
+        let exec_sql = format!(
+            "SELECT execution_id FROM {DUROXIDE_SCHEMA}.list_executions('{safe_id}') \
+             ORDER BY execution_id DESC LIMIT {last_n_executions}"
+        );
 
-        let execution_ids = match client.list_executions(&instance_id).await {
-            Ok(ids) => ids,
-            Err(_) => return vec![],
-        };
-
-        let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
-        sorted_ids.sort_by(|a, b| b.cmp(a));
-        let limited: Vec<_> = sorted_ids
-            .into_iter()
-            .take(last_n_executions as usize)
-            .collect();
+        let exec_ids: Vec<i64> = client
+            .select(&exec_sql, None, &[])
+            .ok()
+            .map(|t| {
+                t.filter_map(|row| row.get::<i64>(1).ok().flatten())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut rows = Vec::new();
 
-        for exec_id in limited {
-            for (
-                node_id,
-                node_type,
-                query,
-                result_name,
-                left_node,
-                right_node,
-                node_status,
-                node_result,
-                updated_at,
-            ) in &node_defs
-            {
-                rows.push((
-                    exec_id as i64,
-                    node_id.clone(),
-                    node_type.clone(),
-                    query.clone(),
-                    result_name.clone(),
-                    left_node.clone(),
-                    right_node.clone(),
-                    node_status.clone(),
-                    node_result.clone(),
-                    *updated_at,
-                ));
-            }
-        }
-
-        // If no executions found, return static node definitions
-        if rows.is_empty() {
+        if exec_ids.is_empty() {
+            // No executions found — return static node definitions
             for (
                 node_id,
                 node_type,
@@ -431,6 +387,34 @@ pub fn instance_nodes(
                     node_result,
                     updated_at,
                 ));
+            }
+        } else {
+            for exec_id in exec_ids {
+                for (
+                    node_id,
+                    node_type,
+                    query,
+                    result_name,
+                    left_node,
+                    right_node,
+                    node_status,
+                    node_result,
+                    updated_at,
+                ) in &node_defs
+                {
+                    rows.push((
+                        exec_id,
+                        node_id.clone(),
+                        node_type.clone(),
+                        query.clone(),
+                        result_name.clone(),
+                        left_node.clone(),
+                        right_node.clone(),
+                        node_status.clone(),
+                        node_result.clone(),
+                        *updated_at,
+                    ));
+                }
             }
         }
 

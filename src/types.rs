@@ -44,12 +44,31 @@ pub fn short_id() -> String {
         .collect()
 }
 
-/// PostgreSQL connection string for the background worker and Duroxide runtime
+/// PostgreSQL connection string for the background worker and Duroxide runtime.
+///
+/// Prefers Unix domain sockets when PGHOST points to a socket directory or
+/// when a well-known socket directory exists — avoiding TCP overhead for the
+/// background worker running on the same host as PostgreSQL.
 pub fn postgres_connection_string() -> String {
     let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = unsafe { pgrx::pg_sys::PostPortNumber };
     let user = get_worker_role();
     let database = get_database();
+
+    // If PGHOST is a directory path, use Unix domain socket connection
+    if host.starts_with('/') {
+        return format!("postgres://{user}@/{database}?host={host}&port={port}");
+    }
+
+    // Auto-detect UDS when PGHOST is localhost/unset — check common socket dirs
+    if host == "127.0.0.1" || host == "localhost" {
+        for socket_dir in &["/var/run/postgresql", "/tmp"] {
+            let socket_file = format!("{socket_dir}/.s.PGSQL.{port}");
+            if std::path::Path::new(&socket_file).exists() {
+                return format!("postgres://{user}@/{database}?host={socket_dir}&port={port}");
+            }
+        }
+    }
 
     format!("postgres://{user}@{host}:{port}/{database}")
 }

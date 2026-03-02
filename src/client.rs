@@ -1,57 +1,44 @@
-//! Cached client infrastructure for user session calls
+//! Client operations for user session calls — SPI-based
 //!
-//! This module provides cached Tokio runtime and Duroxide client for efficient
-//! df.start(), df.signal(), and df.cancel() calls from user sessions.
+//! This module provides direct SPI-based calls for df.start(), df.signal(),
+//! and df.cancel(). Operations are executed synchronously within the current
+//! PostgreSQL backend process — no TCP connections, no async runtime, no
+//! connection pools.
+//!
+//! All operations enqueue WorkItems to the duroxide orchestrator queue via
+//! the `duroxide.enqueue_orchestrator_work()` stored procedure.
 
-use std::sync::{Arc, OnceLock};
-
-use duroxide::Client;
-use duroxide_pg_opt::PostgresProvider;
 use pgrx::prelude::*;
-use tokio::runtime::Runtime;
 
-use crate::types::{backend_provider_config, postgres_connection_string};
+use crate::types::DUROXIDE_SCHEMA;
 
-/// Cached tokio runtime for client operations.
-static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// Enqueue a WorkItem to the duroxide orchestrator queue via SPI.
+///
+/// This is the core primitive used by start/cancel/signal operations.
+/// It calls the `duroxide.enqueue_orchestrator_work()` stored procedure
+/// that was installed as part of `CREATE EXTENSION pg_durable`.
+fn enqueue_orchestrator_work(instance_id: &str, work_item_json: &str) -> Result<(), String> {
+    let safe_id = instance_id.replace('\'', "''");
+    let safe_json = work_item_json.replace('\'', "''");
 
-/// Cached Duroxide client with connection pool.
-static DUROXIDE_CLIENT: OnceLock<Client> = OnceLock::new();
+    let sql = format!(
+        "SELECT {DUROXIDE_SCHEMA}.enqueue_orchestrator_work(\
+         '{safe_id}', '{safe_json}', NOW(), \
+         (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT)"
+    );
 
-/// Get or create the cached tokio runtime.
-fn get_client_runtime() -> &'static Runtime {
-    CLIENT_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create tokio runtime")
+    Spi::connect(|client| {
+        client
+            .select(&sql, None, &[])
+            .map_err(|e| format!("Failed to enqueue work item: {e:?}"))?;
+        Ok(())
     })
 }
 
-/// Get or create the cached Duroxide client.
-fn get_duroxide_client() -> Result<&'static Client, String> {
-    if let Some(client) = DUROXIDE_CLIENT.get() {
-        return Ok(client);
-    }
-
-    let rt = get_client_runtime();
-    let pg_conn_str = postgres_connection_string();
-
-    rt.block_on(async {
-        let store = Arc::new(
-            PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-                .await
-                .map_err(|e| format!("Failed to connect to duroxide store: {e}"))?,
-        );
-
-        let _ = DUROXIDE_CLIENT.set(Client::new(store));
-        DUROXIDE_CLIENT
-            .get()
-            .ok_or_else(|| "Failed to initialize client".to_string())
-    })
-}
-
-/// Start a durable function via the shared PostgreSQL store.
+/// Start a durable function by enqueuing a StartOrchestration work item.
+///
+/// This directly inserts into the duroxide orchestrator queue via SPI,
+/// bypassing the need for any async runtime or TCP connection.
 pub fn start_durable_function(
     function_name: &str,
     instance_id: &str,
@@ -62,42 +49,47 @@ pub fn start_durable_function(
         instance_id
     );
 
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
+    // Build the WorkItem::StartOrchestration JSON (serde externally-tagged format)
+    let work_item = serde_json::json!({
+        "StartOrchestration": {
+            "instance": instance_id,
+            "orchestration": function_name,
+            "input": input,
+            "version": null,
+            "parent_instance": null,
+            "parent_id": null,
+            "execution_id": 1
+        }
+    });
 
-    rt.block_on(async {
-        client
-            .start_orchestration(instance_id, function_name, input)
-            .await
-            .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
-        Ok(())
-    })
+    enqueue_orchestrator_work(instance_id, &work_item.to_string())
 }
 
-/// Cancel a durable function.
+/// Cancel a durable function by enqueuing a CancelInstance work item.
 pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), String> {
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
+    let work_item = serde_json::json!({
+        "CancelInstance": {
+            "instance": instance_id,
+            "reason": reason
+        }
+    });
 
-    rt.block_on(async {
-        client
-            .cancel_instance(instance_id, reason)
-            .await
-            .map_err(|e| format!("Failed to cancel durable function: {e:?}"))?;
-        Ok(())
-    })
+    enqueue_orchestrator_work(instance_id, &work_item.to_string())
 }
 
 /// Raise an external event (signal) to a running orchestration.
-pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> Result<(), String> {
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
+pub fn raise_external_event(
+    instance_id: &str,
+    event_name: &str,
+    data: &str,
+) -> Result<(), String> {
+    let work_item = serde_json::json!({
+        "ExternalRaised": {
+            "instance": instance_id,
+            "name": event_name,
+            "data": data
+        }
+    });
 
-    rt.block_on(async {
-        client
-            .raise_event(instance_id, event_name, data)
-            .await
-            .map_err(|e| format!("Failed to raise event: {e:?}"))?;
-        Ok(())
-    })
+    enqueue_orchestrator_work(instance_id, &work_item.to_string())
 }
