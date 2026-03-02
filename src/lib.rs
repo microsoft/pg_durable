@@ -210,6 +210,102 @@ extension_sql_file!(
 );
 
 // ============================================================================
+// Permissions & Row-Level Security
+// ============================================================================
+
+extension_sql!(
+    r#"
+-- ============================================================================
+-- GRANTs: Allow non-superusers to call df functions via SPI
+-- ============================================================================
+
+-- df schema access
+GRANT USAGE ON SCHEMA df TO PUBLIC;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
+GRANT SELECT, INSERT, UPDATE ON df.instances TO PUBLIC;
+GRANT SELECT, INSERT, UPDATE ON df.nodes TO PUBLIC;
+GRANT SELECT, INSERT, DELETE ON df.vars TO PUBLIC;
+
+-- duroxide schema access (only functions/tables needed by user-facing SPI)
+GRANT USAGE ON SCHEMA duroxide TO PUBLIC;
+GRANT SELECT ON duroxide.instances TO PUBLIC;
+GRANT SELECT ON duroxide.executions TO PUBLIC;
+GRANT SELECT ON duroxide.history TO PUBLIC;
+GRANT INSERT ON duroxide.orchestrator_queue TO PUBLIC;
+GRANT USAGE ON SEQUENCE duroxide.orchestrator_queue_id_seq TO PUBLIC;
+
+-- Performance index for RLS ownership lookups
+CREATE INDEX IF NOT EXISTS idx_instances_submitted_by ON df.instances(submitted_by);
+
+-- ============================================================================
+-- Row-Level Security: users see only their own data
+-- ============================================================================
+-- Superusers (including the BGW worker role) bypass RLS by default.
+
+-- df.instances: users see/modify only instances they submitted
+ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY df_instances_select ON df.instances
+    FOR SELECT USING (submitted_by = current_user::regrole);
+
+CREATE POLICY df_instances_insert ON df.instances
+    FOR INSERT WITH CHECK (submitted_by = current_user::regrole);
+
+CREATE POLICY df_instances_update ON df.instances
+    FOR UPDATE USING (submitted_by = current_user::regrole);
+
+-- df.nodes: users see their own nodes + unlinked nodes (submitted_by IS NULL).
+-- Unlinked nodes are transient rows created by DSL operators before df.start()
+-- links them to an instance. A separate effort will eliminate unlinked nodes
+-- entirely by deferring INSERT to df.start() time.
+ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY df_nodes_select ON df.nodes
+    FOR SELECT USING (submitted_by IS NULL OR submitted_by = current_user::regrole);
+
+CREATE POLICY df_nodes_insert ON df.nodes
+    FOR INSERT WITH CHECK (TRUE);
+
+CREATE POLICY df_nodes_update ON df.nodes
+    FOR UPDATE USING (submitted_by IS NULL OR submitted_by = current_user::regrole);
+
+-- duroxide.instances: filtered to user's own instances via df.instances
+ALTER TABLE duroxide.instances ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY duroxide_instances_select ON duroxide.instances
+    FOR SELECT USING (instance_id IN (
+        SELECT id FROM df.instances WHERE submitted_by = current_user::regrole
+    ));
+
+-- duroxide.executions: filtered via df.instances ownership
+ALTER TABLE duroxide.executions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY duroxide_executions_select ON duroxide.executions
+    FOR SELECT USING (instance_id IN (
+        SELECT id FROM df.instances WHERE submitted_by = current_user::regrole
+    ));
+
+-- duroxide.history: filtered via df.instances ownership
+ALTER TABLE duroxide.history ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY duroxide_history_select ON duroxide.history
+    FOR SELECT USING (instance_id IN (
+        SELECT id FROM df.instances WHERE submitted_by = current_user::regrole
+    ));
+
+-- duroxide.orchestrator_queue: users can only enqueue for their own instances
+ALTER TABLE duroxide.orchestrator_queue ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY duroxide_orch_queue_insert ON duroxide.orchestrator_queue
+    FOR INSERT WITH CHECK (instance_id IN (
+        SELECT id FROM df.instances WHERE submitted_by = current_user::regrole
+    ));
+"#,
+    name = "permissions_and_rls",
+    requires = ["create_tables", "duroxide_migrations_install"]
+);
+
+// ============================================================================
 // SQL Operators
 // ============================================================================
 

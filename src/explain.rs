@@ -122,35 +122,25 @@ fn explain_instance(instance_id: &str) -> String {
     result
 }
 
-/// Get instance info from Duroxide store
+/// Get instance info from Duroxide store via SPI
 fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
-    use crate::types::{backend_provider_config, postgres_connection_string};
-    use duroxide::Client;
-    use duroxide_pg_opt::PostgresProvider;
-    use std::sync::Arc;
+    use crate::types::DUROXIDE_SCHEMA;
 
-    let pg_conn_str = postgres_connection_string();
+    let safe_id = instance_id.replace('\'', "''");
 
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return (String::new(), None),
-    };
+    Spi::connect(|client| {
+        let sql =
+            format!("SELECT status, output FROM {DUROXIDE_SCHEMA}.get_instance_info('{safe_id}')");
 
-    rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
-        {
-            Ok(s) => Arc::new(s),
-            Err(_) => return (String::new(), None),
-        };
-
-        let client = Client::new(store);
-
-        match client.get_instance_info(instance_id).await {
-            Ok(info) => (info.status, info.output),
+        match client.select(&sql, None, &[]) {
+            Ok(mut table) => {
+                if let Some(row) = table.next() {
+                    let status: String = row.get::<String>(1).ok().flatten().unwrap_or_default();
+                    let output: Option<String> = row.get(2).ok().flatten();
+                    return (status, output);
+                }
+                (String::new(), None)
+            }
             Err(_) => (String::new(), None),
         }
     })

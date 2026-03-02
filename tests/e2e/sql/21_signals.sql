@@ -159,15 +159,24 @@ INSERT INTO _test_signal_data SELECT df.start(
 
 SELECT pg_sleep(1);
 
+-- Send signal in its own transaction so the BGW can see it immediately.
+-- (SPI INSERT into orchestrator_queue is only visible to other sessions after commit.)
+DO $$
+DECLARE
+    inst_id TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_signal_data;
+    PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
+    RAISE NOTICE 'Sent signal with data to %', inst_id;
+END $$;
+
+-- Wait for completion in a separate transaction
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_data;
-    
-    -- Send signal with data
-    PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
     RAISE NOTICE 'Testing signal with data: %', inst_id;
 
     SELECT df.wait_for_completion(inst_id, 10) INTO status;
