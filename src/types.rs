@@ -63,29 +63,25 @@ pub const DUROXIDE_SCHEMA: &str = "duroxide";
 
 /// Create a `ProviderConfig` for backend (request/response) operations.
 ///
-/// - `VerifyOnly`: never create schema/tables
+/// - `VerifyOnly`: never create schema/tables, reject unknown migrations
 /// - `long_poll` disabled: avoid a dedicated listener connection per backend session
-/// - `reject_unknown_migrations`: fail if schema is ahead of code
 pub fn backend_provider_config() -> duroxide_pg_opt::ProviderConfig {
     let mut config = duroxide_pg_opt::ProviderConfig::default();
     config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
     config.migration_policy = duroxide_pg_opt::MigrationPolicy::VerifyOnly;
     config.long_poll.enabled = false;
-    config.reject_unknown_migrations = true;
     config
 }
 
 /// Create a `ProviderConfig` for the background worker runtime.
 ///
-/// - `VerifyOnly`: never create schema/tables
+/// - `VerifyOnly`: never create schema/tables, reject unknown migrations
 /// - Long-polling intentionally left enabled (default) for the BGW runtime,
 ///   unlike backend sessions where it's disabled to save resources.
-/// - `reject_unknown_migrations`: fail if schema is ahead of code
 pub fn worker_provider_config() -> duroxide_pg_opt::ProviderConfig {
     let mut config = duroxide_pg_opt::ProviderConfig::default();
     config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
     config.migration_policy = duroxide_pg_opt::MigrationPolicy::VerifyOnly;
-    config.reject_unknown_migrations = true;
     config
 }
 
