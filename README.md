@@ -99,14 +99,13 @@ pg_durable has two test suites:
 
 ### pg_regress Tests (Standard PostgreSQL Regression Tests)
 
-Fast, deterministic tests for core DSL functionality using PostgreSQL's standard testing framework:
+Fast, deterministic tests for core DSL functionality using PostgreSQL's standard testing framework.
+Test SQL lives in `sql/`, expected output in `expected/`, and PGXS is configured in the root `Makefile`.
 
 ```bash
-cd test/regress
-make installcheck
+make test-regress          # full reset + run
+make installcheck          # run only (PostgreSQL must already be running)
 ```
-
-See [test/regress/README.md](test/regress/README.md) for details.
 
 ### E2E Tests (Comprehensive Scenario Tests)
 

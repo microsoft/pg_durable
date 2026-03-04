@@ -7,7 +7,7 @@ This guide covers all testing scenarios for pg_durable.
 | What | Command |
 |------|---------|
 | Unit tests | `./scripts/test-unit.sh` |
-| pg_regress tests | `cd test/regress && make installcheck` |
+| pg_regress tests | `make test-regress` |
 | E2E tests (local) | `./scripts/test-e2e-local.sh` |
 | E2E tests (Docker) | `./scripts/test-e2e-docker.sh` |
 | Stop PostgreSQL | `./scripts/pg-stop.sh` |
@@ -56,11 +56,10 @@ Runs Rust unit tests using `cargo pgrx test`. These test individual functions in
 Standard PostgreSQL regression tests for core DSL functionality. These tests are fast, deterministic, and use PostgreSQL's industry-standard testing framework.
 
 ```bash
-# Prerequisites: Build and install the extension
-cargo pgrx install --release
+# Run all pg_regress tests (resets PostgreSQL, installs extension, runs tests)
+make test-regress
 
-# Run all pg_regress tests
-cd test/regress
+# Or if PostgreSQL is already running with PGDATABASE=contrib_regression:
 make installcheck
 
 # Run specific test
@@ -84,7 +83,7 @@ cat regression.diffs
 - Standard PostgreSQL testing approach
 - Familiar to PostgreSQL developers
 
-See [test/regress/README.md](../test/regress/README.md) for more details.
+Test SQL files are in `sql/`, expected output in `expected/`, and PGXS is configured in the root `Makefile`.
 
 ---
 

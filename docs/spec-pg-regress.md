@@ -50,7 +50,7 @@ This specification describes the addition of a **pg_regress-compatible test suit
 
 ### Dual Test Suite Approach
 
-**pg_regress suite** (`test/regress/`):
+**pg_regress suite** (`sql/`, `expected/`):
 - Simple, deterministic tests
 - Core DSL functionality
 - Fast feedback (no Docker)
@@ -70,22 +70,19 @@ This specification describes the addition of a **pg_regress-compatible test suit
 ### Directory Structure
 
 ```
-test/
-├── regress/
-│   ├── sql/              # Input test files
-│   │   ├── simple.sql
-│   │   ├── sequence.sql
-│   │   ├── parallel.sql
-│   │   ├── conditional.sql
-│   │   ├── variables.sql
-│   │   ├── loops.sql
-│   │   └── transactions.sql
-│   ├── expected/         # Expected output files (generated)
-│   │   ├── simple.out
-│   │   ├── sequence.out
-│   │   └── ...
-│   └── Makefile          # pg_regress configuration
-└── README.md             # Testing documentation
+sql/                  # pg_regress input test files
+├── 00_init.sql
+├── simple.sql
+├── sequence.sql
+├── parallel.sql
+├── conditional.sql
+└── variables.sql
+expected/             # Expected output files (generated)
+├── 00_init.out
+├── simple.out
+├── sequence.out
+└── ...
+Makefile              # PGXS configuration (at repo root)
 ```
 
 ### New Helper Function: df.wait_for_completion()
@@ -259,7 +256,7 @@ SELECT 'TEST PASSED' AS result;
 
 ### After (pg_regress format)
 
-**File:** `test/regress/sql/sequence.sql`
+**File:** `sql/sequence.sql`
 
 ```sql
 -- Test sequential execution using ~> operator and df.seq() function
@@ -297,7 +294,7 @@ SELECT step, variant FROM test_sequence_log ORDER BY id;
 DROP TABLE test_sequence_log;
 ```
 
-**File:** `test/regress/expected/sequence.out`
+**File:** `expected/sequence.out`
 
 ```
 DROP TABLE
@@ -345,11 +342,14 @@ fn wait_for_completion(
 
 ### Step 2: Create pg_regress Directory Structure
 
+Test files live at the repo root:
 ```bash
-mkdir -p test/regress/sql test/regress/expected
+mkdir -p sql expected
 ```
 
-### Step 3: Create test/regress/Makefile
+### Step 3: PGXS Configuration in Root Makefile
+
+The root `Makefile` includes PGXS at the bottom:
 
 ```makefile
 # pg_regress configuration for pg_durable
@@ -368,13 +368,13 @@ include $(PGXS)
 ### Step 4: Convert Phase 1 Tests
 
 1. Convert 5 core DSL tests to pg_regress format
-2. Run tests: `cd test/regress && make installcheck`
+2. Run tests: `make installcheck`
 3. Capture expected output
 4. Verify reproducibility
 
 ### Step 5: Update Documentation
 
-- Add `test/regress/README.md` explaining both test suites
+- Update `test/regress/README.md` noting files are at repo root
 - Update main `README.md` with pg_regress instructions
 - Update `docs/TESTING.md` with dual approach
 
@@ -384,8 +384,7 @@ Update `.github/workflows/ci.yml`:
 ```yaml
 - name: Run pg_regress tests
   run: |
-    cd test/regress
-    make installcheck
+    PG_CONFIG=$(cargo pgrx info pg-config pg17) make installcheck
 ```
 
 ## Success Criteria
