@@ -3,7 +3,16 @@
 //! This extension provides durable, fault-tolerant function execution within PostgreSQL
 //! using the Duroxide runtime for persistence.
 
+use pgrx::guc::*;
 use pgrx::prelude::*;
+use std::ffi::CString;
+
+// ============================================================================
+// GUC Definitions
+// ============================================================================
+
+pub static WORKER_ROLE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"azuresu"));
 
 // Module declarations
 pub mod activities;
@@ -32,6 +41,15 @@ pub extern "C-unwind" fn _PG_init() {
             "pg_durable must be loaded via shared_preload_libraries.\n\nHINT: Add 'pg_durable' to shared_preload_libraries in postgresql.conf and restart the server."
         );
     }
+    GucRegistry::define_string_guc(
+        c"pg_durable.worker_role",
+        c"PostgreSQL role used by the pg_durable background worker",
+        c"",
+        &WORKER_ROLE,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
     worker::register_background_worker();
 }
 
@@ -1554,6 +1572,9 @@ pub mod pg_test {
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries = 'pg_durable'"]
+        vec![
+            "shared_preload_libraries = 'pg_durable'",
+            "pg_durable.worker_role = 'postgres'",
+        ]
     }
 }

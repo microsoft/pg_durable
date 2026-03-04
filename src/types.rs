@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use pgrx::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::ffi::CString;
 use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
@@ -11,6 +12,15 @@ use uuid::Uuid;
 // ============================================================================
 // Configuration Functions
 // ============================================================================
+
+/// Get the worker role from the `pg_durable.worker_role` GUC.
+/// Falls back to `"azuresu"` if the GUC is not set.
+pub fn get_worker_role() -> String {
+    crate::WORKER_ROLE
+        .get()
+        .map(|cs: CString| cs.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "azuresu".to_string())
+}
 
 /// Generate a short 8-character instance ID from a UUID
 pub fn short_id() -> String {
@@ -29,9 +39,7 @@ pub fn short_id() -> String {
 pub fn postgres_connection_string() -> String {
     let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = unsafe { pgrx::pg_sys::PostPortNumber };
-    let user = std::env::var("PGUSER")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "postgres".to_string());
+    let user = get_worker_role();
     let database = std::env::var("POSTGRES_DB")
         .or_else(|_| std::env::var("PGDATABASE"))
         .unwrap_or_else(|_| "postgres".to_string());
