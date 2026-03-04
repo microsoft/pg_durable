@@ -98,23 +98,46 @@ jobs:
               libxslt1-dev \
               libicu-dev
 
-      - name: Cache cargo registry
+      - name: Cache cargo dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.pgrx
+            ~/.cargo/bin/cargo-pgrx
             target
-          key: ${{ runner.os }}-cargo-pgrx-pg${{ matrix.pg_version }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-pg${{ matrix.pg_version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-pgrx-pg${{ matrix.pg_version }}-
+            ${{ runner.os }}-cargo-pg${{ matrix.pg_version }}-
+
+      - name: Cache PostgreSQL build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx/config.toml
+            ~/.pgrx/${{ matrix.pg_version }}.*
+          key: ${{ runner.os }}-pgrx-pg${{ matrix.pg_version }}
+
+      # Always remove stale data directories to prevent flaky tests
+      # from leftover state. The data dir is cheap to recreate (~1s).
+      - name: Remove cached data directory
+        run: rm -rf "$HOME/.pgrx/data-${{ matrix.pg_version }}"
 
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version 0.16.1 --locked
+        run: |
+          if ! command -v cargo-pgrx &> /dev/null || ! cargo pgrx --version | grep -q "0.16.1"; then
+            cargo install cargo-pgrx --version 0.16.1 --locked
+          else
+            echo "cargo-pgrx 0.16.1 already installed, skipping"
+          fi
 
       - name: Initialize pgrx
-        run: cargo pgrx init --pg${{ matrix.pg_version }} download
+        run: |
+          if [ ! -d "$HOME/.pgrx/${{ matrix.pg_version }}."* ]; then
+            cargo pgrx init --pg${{ matrix.pg_version }} download
+          else
+            echo "PostgreSQL ${{ matrix.pg_version }} already initialized, skipping download"
+          fi
 
       - name: Configure git credentials for private repos
         run: |
