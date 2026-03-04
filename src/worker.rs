@@ -94,18 +94,26 @@ async fn run_duroxide_runtime() {
 
     // Single-connection pool reused for all extension-existence polling, avoiding
     // the overhead of opening/closing a TCP connection on every check.
-    let poll_pool = match sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&pg_conn_str)
-        .await
-    {
-        Ok(pool) => pool,
-        Err(e) => {
-            log!(
-                "pg_durable: failed to create polling pool (will retry via restart): {}",
-                e
-            );
+    // Retry in a loop so the worker survives the target database not yet existing
+    // (e.g. pg_regress creates `contrib_regression` after PostgreSQL starts).
+    let poll_pool = loop {
+        if is_shutdown_requested() {
+            log!("pg_durable: shutdown requested before poll pool created, exiting");
             return;
+        }
+        match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&pg_conn_str)
+            .await
+        {
+            Ok(pool) => break pool,
+            Err(e) => {
+                log!(
+                    "pg_durable: failed to create polling pool (will retry in 5s): {}",
+                    e
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
     };
 
