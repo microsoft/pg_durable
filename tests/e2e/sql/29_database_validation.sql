@@ -41,6 +41,9 @@ END $$;
 DROP EXTENSION IF EXISTS pg_durable CASCADE;
 CREATE EXTENSION pg_durable;
 
+-- Restore df_e2e_user grants lost when the extension was dropped
+SELECT public._e2e_grant_df_to_e2e_user();
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_durable') THEN

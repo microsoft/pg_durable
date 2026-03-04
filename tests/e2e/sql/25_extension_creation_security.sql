@@ -85,18 +85,7 @@ DROP SCHEMA IF EXISTS df CASCADE;
 CREATE EXTENSION pg_durable;
 
 -- Re-grant permissions that were lost when the extension was dropped.
--- These mirror the grants in 00_setup_playground.sql.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
-        EXECUTE 'GRANT USAGE ON SCHEMA df TO df_e2e_user';
-        EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO df_e2e_user';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances TO df_e2e_user';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON df.nodes TO df_e2e_user';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO df_e2e_user';
-        RAISE NOTICE 'Re-granted df_e2e_user permissions after extension recreate';
-    END IF;
-END $$;
+SELECT public._e2e_grant_df_to_e2e_user();
 
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
 --
