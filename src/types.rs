@@ -28,17 +28,7 @@ pub fn short_id() -> String {
 /// PostgreSQL connection string for the background worker and Duroxide runtime
 pub fn postgres_connection_string() -> String {
     let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("PGPORT").unwrap_or_else(|_| {
-        if let Ok(pgdata) = std::env::var("PGDATA") {
-            if pgdata.contains(".pgrx") {
-                "28817".to_string()
-            } else {
-                "5432".to_string()
-            }
-        } else {
-            "28817".to_string()
-        }
-    });
+    let port = unsafe { pgrx::pg_sys::PostPortNumber };
     let user = std::env::var("PGUSER")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "postgres".to_string());
@@ -56,20 +46,7 @@ pub fn get_host() -> String {
 
 /// Get the PostgreSQL port for connections
 pub fn get_port() -> u16 {
-    std::env::var("PGPORT")
-        .unwrap_or_else(|_| {
-            if let Ok(pgdata) = std::env::var("PGDATA") {
-                if pgdata.contains(".pgrx") {
-                    "28817".to_string()
-                } else {
-                    "5432".to_string()
-                }
-            } else {
-                "28817".to_string()
-            }
-        })
-        .parse::<u16>()
-        .unwrap_or(5432)
+    unsafe { pgrx::pg_sys::PostPortNumber as u16 }
 }
 
 /// Get the target database name that the background worker will connect to
