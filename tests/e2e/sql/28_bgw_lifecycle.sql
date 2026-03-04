@@ -81,6 +81,9 @@ END $$;
 -- 4) Re-create extension and run another workflow
 CREATE EXTENSION pg_durable;
 
+-- Restore df_e2e_user grants lost when the extension was dropped
+SELECT public._e2e_grant_df_to_e2e_user();
+
 CREATE TEMP TABLE _test_state2 (instance_id TEXT);
 INSERT INTO _test_state2
 SELECT df.start('SELECT 43 as answer', 'test-bgw-lifecycle-2');
