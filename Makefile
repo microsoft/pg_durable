@@ -51,9 +51,9 @@ pg-install:
 # Override version: make test-regress PG_VERSION=pg16
 test-regress:
 	@echo "Resetting PostgreSQL..."
-	./scripts/pg-reset.sh
+	./scripts/pg-reset.sh $(subst pg,,$(PG_VERSION))
 	@echo "Starting PostgreSQL with PGDATABASE=contrib_regression..."
-	PGDATABASE=contrib_regression ./scripts/pg-start.sh
+	PGDATABASE=contrib_regression ./scripts/pg-start.sh $(subst pg,,$(PG_VERSION))
 	@echo "Running pg_regress tests..."
 	PGHOST=$(HOME)/.pgrx PGUSER=postgres PG_CONFIG=$$(cargo pgrx info pg-config $(PG_VERSION)) $(MAKE) -e installcheck
 

@@ -137,7 +137,7 @@ jobs:
 
       - name: Run E2E tests (shared_preload_libraries enforcement)
         id: e2e_no_preload
-        run: ./scripts/test-e2e-local.sh --clean --no-preload
+        run: ./scripts/test-e2e-local.sh --clean --no-preload --pg-version ${{ matrix.pg_version }}
 
       - name: Run E2E tests
         id: e2e_tests
@@ -155,7 +155,7 @@ jobs:
 
       - name: Run pg_regress tests
         id: pg_regress
-        run: make test-regress
+        run: make test-regress PG_VERSION=pg${{ matrix.pg_version }}
 
       - name: Upload pg_regress results on failure
         if: steps.pg_regress.outcome == 'failure'
@@ -169,4 +169,4 @@ jobs:
 
       - name: Stop PostgreSQL after pg_regress
         if: steps.pg_regress.outcome != 'skipped'
-        run: ./scripts/pg-stop.sh
+        run: ./scripts/pg-stop.sh --pg-version ${{ matrix.pg_version }}
