@@ -63,7 +63,7 @@ cargo pgrx start "pg${PG_MAJOR}" 2>/dev/null || true
 # Wait for PostgreSQL to be ready
 PG_PORT="$((28800 + PG_MAJOR))"
 for i in {1..30}; do
-    if "$PGRX_BIN_DIR/pg_isready" -h localhost -p $PG_PORT -q 2>/dev/null; then
+    if "$PGRX_BIN_DIR/pg_isready" -h localhost -p $PG_PORT -U postgres -q 2>/dev/null; then
         break
     fi
     sleep 0.2

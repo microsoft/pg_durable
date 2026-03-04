@@ -48,7 +48,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Check if PostgreSQL is running
-if ! "$PG_ISREADY" -h localhost -p $PG_PORT &>/dev/null; then
+if ! "$PG_ISREADY" -h localhost -p $PG_PORT -U postgres &>/dev/null; then
     echo -e "${RED}Error: PostgreSQL is not running on port $PG_PORT${NC}"
     echo "Start with: ./scripts/pg-start.sh"
     exit 1
