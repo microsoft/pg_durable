@@ -84,8 +84,74 @@ DROP SCHEMA IF EXISTS df CASCADE;
 -- Recreate the extension properly for other tests to continue
 CREATE EXTENSION pg_durable;
 
--- Wait a moment for background worker to initialize
-SELECT pg_sleep(1);
+-- Re-grant permissions that were lost when the extension was dropped.
+-- These mirror the grants in 00_setup_playground.sql.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
+        EXECUTE 'GRANT USAGE ON SCHEMA df TO df_e2e_user';
+        EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO df_e2e_user';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances TO df_e2e_user';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON df.nodes TO df_e2e_user';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO df_e2e_user';
+        RAISE NOTICE 'Re-granted df_e2e_user permissions after extension recreate';
+    END IF;
+END $$;
+
+-- Wait for the background worker to fully reinitialize after the drop/recreate.
+--
+-- After CREATE EXTENSION, the new df._worker_epoch table is empty. The OLD
+-- runtime (from before the drop) is still running and can process functions, but
+-- its epoch sentinel check (every 5s) will eventually detect the sentinel is
+-- gone, shut down, and reinitialize. If we don't wait for this cycle to
+-- complete, the old runtime's late sentinel check will shut down mid-test and
+-- break later tests (like 27_user_isolation).
+--
+-- We wait for df._worker_epoch to be non-empty, which proves the worker has:
+-- 1. Detected old sentinel gone → 2. Shut down old runtime →
+-- 3. Waited for extension → 4. Reinitialized → 5. Written new sentinel
+DO $$
+DECLARE
+    attempts INT := 0;
+    sentinel_exists BOOLEAN;
+BEGIN
+    LOOP
+        SELECT EXISTS(SELECT 1 FROM df._worker_epoch) INTO sentinel_exists;
+        EXIT WHEN sentinel_exists OR attempts > 300;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF NOT sentinel_exists THEN
+        RAISE EXCEPTION 'TEST SETUP FAILED: worker did not reinitialize after extension recreate (no sentinel after 30s)';
+    END IF;
+
+    RAISE NOTICE 'Worker epoch sentinel detected — full restart cycle complete';
+END $$;
+
+-- Now verify the worker is actually processing functions by submitting a
+-- trivial function and waiting for completion.
+-- NOTE: df.start() must be outside the DO block so the transaction commits
+-- and the background worker can see the instance.
+CREATE TEMP TABLE _test_state_25 (instance_id TEXT);
+INSERT INTO _test_state_25 SELECT df.start(df.sql('SELECT 1'), 'verify-worker-ready');
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    final_status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state_25;
+    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+
+    IF final_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST SETUP FAILED: worker did not recover after extension recreate (status=%)', final_status;
+    END IF;
+
+    RAISE NOTICE 'Background worker reinitialized successfully';
+END $$;
+
+DROP TABLE _test_state_25;
 
 -- Verify extension is properly installed
 DO $$

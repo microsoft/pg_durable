@@ -355,7 +355,8 @@ GRANT TEMPORARY ON DATABASE postgres TO iso_ephemeral;
 -- This tests the realistic scenario: role dropped between nodes in a multi-node graph.
 
 -- Use a regular table (not temp) so we can access it after session switch
-CREATE TABLE IF NOT EXISTS _test_state_7_persistent (instance_id TEXT);
+DROP TABLE IF EXISTS _test_state_7_persistent;
+CREATE TABLE _test_state_7_persistent (instance_id TEXT);
 GRANT INSERT ON _test_state_7_persistent TO iso_ephemeral;
 
 SET SESSION AUTHORIZATION iso_ephemeral;
