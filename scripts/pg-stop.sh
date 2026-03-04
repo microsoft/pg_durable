@@ -4,19 +4,16 @@
 # Usage: ./scripts/pg-stop.sh [options]
 #
 # Options:
-#   --local      Stop local pgrx PostgreSQL (default)
-#   --docker     Stop Docker container
-#   --all        Stop both local and Docker
+#   --local              Stop local pgrx PostgreSQL (default)
+#   --docker             Stop Docker container
+#   --all                Stop both local and Docker
+#   --pg-version VER     PostgreSQL major version (default: 17)
 
 set -e
 
 STOP_LOCAL=false
 STOP_DOCKER=false
-
-# Parse arguments
-if [ $# -eq 0 ]; then
-    STOP_LOCAL=true
-fi
+PG_MAJOR="${PG_MAJOR:-17}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -33,13 +30,22 @@ while [[ $# -gt 0 ]]; do
             STOP_DOCKER=true
             shift
             ;;
+        --pg-version)
+            PG_MAJOR="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: ./scripts/pg-stop.sh [--local|--docker|--all]"
+            echo "Usage: ./scripts/pg-stop.sh [--local|--docker|--all] [--pg-version VER]"
             exit 1
             ;;
     esac
 done
+
+# Default to --local if neither --local, --docker, nor --all was specified
+if [ "$STOP_LOCAL" = false ] && [ "$STOP_DOCKER" = false ]; then
+    STOP_LOCAL=true
+fi
 
 # Colors
 GREEN='\033[0;32m'
@@ -49,9 +55,8 @@ NC='\033[0m'
 # Stop local pgrx PostgreSQL
 if [ "$STOP_LOCAL" = true ]; then
     PGRX_HOME="$HOME/.pgrx"
-    PG_VERSION="17"
-    PG_CTL=$(ls $PGRX_HOME/$PG_VERSION.*/pgrx-install/bin/pg_ctl 2>/dev/null | head -1)
-    DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
+    PG_CTL=$(ls $PGRX_HOME/$PG_MAJOR.*/pgrx-install/bin/pg_ctl 2>/dev/null | head -1)
+    DATA_DIR="$PGRX_HOME/data-$PG_MAJOR"
     
     if [ -n "$PG_CTL" ] && [ -d "$DATA_DIR" ]; then
         if "$PG_CTL" status -D "$DATA_DIR" &>/dev/null; then

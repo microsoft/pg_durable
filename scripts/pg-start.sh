@@ -1,25 +1,30 @@
 #!/bin/bash
 # pg-start.sh - Start local PostgreSQL with pg_durable extension
 #
-# Usage: ./scripts/pg-start.sh
+# Usage: ./scripts/pg-start.sh [pg_major_version]
+#
+# Arguments:
+#   pg_major_version  PostgreSQL major version number (default: 17)
 
 set -e
 
+PG_MAJOR="${1:-17}"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="$HOME/.pgrx/data-17"
+DATA_DIR="$HOME/.pgrx/data-$PG_MAJOR"
 PG_CONF="$DATA_DIR/postgresql.conf"
 
-# Resolve pg17 binaries from pgrx config (avoids hardcoding a patch version like 17.7).
+# Resolve binaries from pgrx config (avoids hardcoding a patch version).
 PGRX_CONFIG="$HOME/.pgrx/config.toml"
 if [ ! -f "$PGRX_CONFIG" ]; then
     echo "pgrx config not found at $PGRX_CONFIG"
     exit 1
 fi
 
-PG_CONFIG=$(grep -E '^pg17\s*=\s*"' "$PGRX_CONFIG" | head -1 | cut -d'"' -f2)
+PG_CONFIG=$(grep -E "^pg${PG_MAJOR}\s*=\s*\"" "$PGRX_CONFIG" | head -1 | cut -d'"' -f2)
 if [ -z "$PG_CONFIG" ]; then
-    echo "pg17 not configured in $PGRX_CONFIG"
+    echo "pg${PG_MAJOR} not configured in $PGRX_CONFIG"
     exit 1
 fi
 
@@ -53,26 +58,27 @@ if [ -f "$PG_CONF" ]; then
 fi
 
 echo -e "\033[0;33mStarting PostgreSQL...\033[0m"
-cargo pgrx start pg17 2>/dev/null || true
+cargo pgrx start "pg${PG_MAJOR}" 2>/dev/null || true
 
 # Wait for PostgreSQL to be ready
+PG_PORT="$((28800 + PG_MAJOR))"
 for i in {1..30}; do
-    if "$PGRX_BIN_DIR/pg_isready" -h localhost -p 28817 -q 2>/dev/null; then
+    if "$PGRX_BIN_DIR/pg_isready" -h localhost -p $PG_PORT -q 2>/dev/null; then
         break
     fi
     sleep 0.2
 done
 
 # Show version
-VERSION=$("$PGRX_BIN_DIR/psql" -h localhost -p 28817 -U postgres -d postgres -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n')
+VERSION=$("$PGRX_BIN_DIR/psql" -h localhost -p $PG_PORT -U postgres -d postgres -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n')
 echo -e "\033[0;32mPostgreSQL started with pg_durable $VERSION\033[0m"
 
 echo ""
 echo -e "\033[0;36mConnect:\033[0m"
-echo "  $PGRX_BIN_DIR/psql -h localhost -p 28817 -U postgres -d postgres"
+echo "  $PGRX_BIN_DIR/psql -h localhost -p $PG_PORT -U postgres -d postgres"
 echo ""
 echo -e "\033[0;36mLogs:\033[0m"
-echo "  tail -f ~/.pgrx/17.log"
+echo "  tail -f ~/.pgrx/${PG_MAJOR}.log"
 echo ""
 echo -e "\033[0;36mStop:\033[0m"
 echo "  ./scripts/pg-stop.sh"
