@@ -48,7 +48,7 @@ if [ -f "$PG_CONF" ]; then
     fi
     if ! grep -q "^pg_durable.database" "$PG_CONF"; then
         echo -e "\033[0;33mConfiguring pg_durable.database...\033[0m"
-        echo "pg_durable.database = 'postgres'" >> "$PG_CONF"
+        echo "pg_durable.database = '${PGDATABASE:-postgres}'" >> "$PG_CONF"
     fi
 fi
 

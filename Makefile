@@ -1,6 +1,9 @@
 # pg_durable Makefile
 
-.PHONY: build test test-unit test-e2e installcheck check clean docker-build docker-push
+# PostgreSQL major version for pgrx (override with: make ... PG_VERSION=pg16)
+PG_VERSION ?= pg17
+
+.PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install
 
 # Default target
 all: build
@@ -21,14 +24,6 @@ test-unit:
 test-e2e:
 	./scripts/test.sh --e2e
 
-# Run pg_regress tests (requires PostgreSQL running)
-installcheck:
-	@echo "Running pg_regress tests (PostgreSQL must be running with PGDATABASE=contrib_regression)..."
-	@cd test/regress && make installcheck
-
-# Alias for installcheck
-check: installcheck
-
 # Build Docker image
 docker-build:
 	docker build --platform linux/amd64 -t pg_durable:latest .
@@ -43,14 +38,24 @@ docker-push: docker-build
 run:
 	cargo pgrx run pg17
 
-# Clean build artifacts
-clean:
+# Clean build artifacts (renamed to avoid PGXS conflict)
+pg-clean:
 	cargo clean
 	rm -rf target/
 
-# Install extension locally
-install:
+# Install extension locally (renamed to avoid PGXS conflict)
+pg-install:
 	cargo pgrx install
+
+# Run pg_regress tests (convenience target)
+# Override version: make test-regress PG_VERSION=pg16
+test-regress:
+	@echo "Resetting PostgreSQL..."
+	./scripts/pg-reset.sh
+	@echo "Starting PostgreSQL with PGDATABASE=contrib_regression..."
+	PGDATABASE=contrib_regression ./scripts/pg-start.sh
+	@echo "Running pg_regress tests..."
+	PGHOST=$(HOME)/.pgrx PGUSER=postgres PG_CONFIG=$$(cargo pgrx info pg-config $(PG_VERSION)) $(MAKE) -e installcheck
 
 # Help
 help:
@@ -60,11 +65,38 @@ help:
 	@echo "  test          - Run all tests (unit + E2E)"
 	@echo "  test-unit     - Run pgrx unit tests only"
 	@echo "  test-e2e      - Run E2E tests only (Docker)"
-	@echo "  installcheck  - Run pg_regress tests (requires PostgreSQL running)"
-	@echo "  check         - Alias for installcheck"
+	@echo "  test-regress  - Run pg_regress tests (resets and starts PostgreSQL)"
+	@echo "  installcheck  - Run pg_regress tests (requires PostgreSQL running, via PGXS)"
 	@echo "  docker-build  - Build Docker image"
 	@echo "  docker-push   - Build and push to ACR"
 	@echo "  run           - Start local pgrx dev server"
-	@echo "  clean         - Clean build artifacts"
-	@echo "  install       - Install extension locally"
+	@echo "  pg-clean      - Clean build artifacts"
+	@echo "  pg-install    - Install extension locally"
+
+# ============================================================================
+# pg_regress (PGXS) configuration
+# ============================================================================
+EXTENSION = pg_durable
+DATA = pg_durable--0.1.1.sql
+
+REGRESS = 00_init simple sequence variables parallel conditional
+
+ifndef PG_CONFIG
+  PG_CONFIG := $(shell cargo pgrx info pg-config $(PG_VERSION) 2>/dev/null)
+  ifeq ($(PG_CONFIG),)
+    PG_CONFIG := $(shell which pg_config 2>/dev/null)
+  endif
+endif
+
+ifeq ($(PG_CONFIG),)
+  # PG_CONFIG is not available; handle PGXS targets explicitly.
+  ifneq ($(filter installcheck,$(MAKECMDGOALS)),)
+    $(error PG_CONFIG is not set and could not be auto-detected; cannot run 'make installcheck')
+  else
+    $(warning PG_CONFIG is not set and could not be auto-detected; PGXS-based targets such as 'installcheck' are unavailable)
+  endif
+else
+  PGXS := $(shell $(PG_CONFIG) --pgxs)
+  include $(PGXS)
+endif
 

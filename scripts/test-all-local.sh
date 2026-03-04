@@ -94,44 +94,23 @@ if [ "$RUN_REGRESS" = true ]; then
     echo -e "${YELLOW}[3/3] pg_regress Tests${NC}"
     echo "────────────────────────────────────────────────"
 
-    # Configure pg_durable.database for contrib_regression and start server
-    PG_CONF="$HOME/.pgrx/data-17/postgresql.conf"
-    if [ -f "$PG_CONF" ]; then
-        sed -i.bak '/^pg_durable.database/d' "$PG_CONF"
-        echo "pg_durable.database = 'contrib_regression'" >> "$PG_CONF"
-    fi
-
-    echo "Starting PostgreSQL (pg_durable.database=contrib_regression)..."
-    ./scripts/pg-start.sh
-
-    # Drop stale test database if it exists (worker may have connected to it)
-    PSQL=$(ls ~/.pgrx/17.*/pgrx-install/bin/psql 2>/dev/null | head -1)
-    "$PSQL" -h localhost -p 28817 -d postgres \
-        -c "DROP DATABASE IF EXISTS contrib_regression WITH (FORCE);" 2>/dev/null || true
-
-    # Give the worker a moment to enter retry mode
-    sleep 2
-
-    if make installcheck; then
+    # Delegate to the Makefile target which handles reset, start, and installcheck
+    if make test-regress; then
         REGRESS_RESULT="passed"
     else
         REGRESS_RESULT="FAILED"
         OVERALL=1
         # Show diffs on failure
-        if [ -f test/regress/regression.diffs ]; then
+        if [ -f regression.diffs ]; then
             echo ""
             echo -e "${RED}pg_regress diffs:${NC}"
-            cat test/regress/regression.diffs
+            cat regression.diffs
         fi
     fi
 
-    # Stop server and restore pg_durable.database for normal use
+    # Stop server after pg_regress
     echo "Stopping PostgreSQL..."
     ./scripts/pg-stop.sh
-    if [ -f "$PG_CONF" ]; then
-        sed -i.bak '/^pg_durable.database/d' "$PG_CONF"
-        echo "pg_durable.database = 'postgres'" >> "$PG_CONF"
-    fi
     echo ""
 else
     echo -e "${YELLOW}[3/3] pg_regress Tests — skipped${NC}"
