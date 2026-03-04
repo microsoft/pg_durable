@@ -40,6 +40,40 @@ END $$;
 
 SELECT public._e2e_grant_df_to_e2e_user();
 
+-- ---------------------------------------------------------------------------
+-- Reusable helper: wait for the background worker to fully reinitialize
+-- after DROP/CREATE EXTENSION. Called by tests 25, 28, 29.
+--
+-- After CREATE EXTENSION, the new df._worker_epoch table is empty. The OLD
+-- runtime (from before the drop) may still be running; its epoch sentinel
+-- check (every 5s) will eventually detect the sentinel is gone, shut down,
+-- and reinitialize. We wait for this cycle by:
+--   1. Polling df._worker_epoch until non-empty (sentinel written).
+--   2. Submitting a trivial df.sql('SELECT 1') and waiting for completion.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public._e2e_wait_for_worker_ready(
+    p_timeout_secs INT DEFAULT 30
+) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    attempts     INT := 0;
+    max_attempts INT := p_timeout_secs * 10;  -- poll every 100ms
+    sentinel_exists BOOLEAN;
+BEGIN
+    LOOP
+        SELECT EXISTS(SELECT 1 FROM df._worker_epoch) INTO sentinel_exists;
+        EXIT WHEN sentinel_exists OR attempts >= max_attempts;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF NOT sentinel_exists THEN
+        RAISE EXCEPTION 'worker did not reinitialize after extension recreate (no sentinel after %s s)', p_timeout_secs;
+    END IF;
+
+    RAISE NOTICE 'Worker epoch sentinel detected — full restart cycle complete';
+END $$;
+
 -- Install extensions needed by tests (requires superuser)
 CREATE EXTENSION IF NOT EXISTS dblink;
 
