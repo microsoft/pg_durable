@@ -173,7 +173,7 @@ END $$;
 
 DO $$
 DECLARE
-    connstr TEXT := 'host=localhost dbname=postgres port=28817';
+    connstr TEXT := format('host=localhost dbname=postgres port=%s user=postgres', current_setting('port'));
     result TEXT;
     instance_count INT;
 BEGIN
