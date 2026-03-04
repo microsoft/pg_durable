@@ -23,6 +23,9 @@ SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 CONTAINER_NAME="pg_durable_e2e"
 IMAGE_NAME="pg_durable:latest"
 
+# Test that requires --no-preload mode and must be skipped when running with shared_preload_libraries
+NO_PRELOAD_TEST="00_requires_shared_preload"
+
 # Defaults
 KEEP_RUNNING=false
 FORCE_REBUILD=false
@@ -182,7 +185,14 @@ for run in $(seq 1 $REPEAT_COUNT); do
         if [ -n "$TEST_FILTER" ] && [[ ! "$test_name" == *"$TEST_FILTER"* ]]; then
             continue
         fi
-        
+
+        # Skip the shared_preload_libraries enforcement test: Docker always runs with
+        # shared_preload_libraries=pg_durable configured, so this test cannot be run
+        # in a Docker container (it requires a server WITHOUT the preload configured).
+        if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]]; then
+            continue
+        fi
+
         echo -n "  $test_name ... "
         
         output=$(docker exec "$CONTAINER_NAME" psql -U postgres -v ON_ERROR_STOP=1 -f "/tests/$test_name.sql" 2>&1)

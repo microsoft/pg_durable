@@ -1,0 +1,131 @@
+name: Docker CI
+
+# Dedicated workflow for validating Docker support.
+#
+# Decision rationale (new workflow vs. extending existing CI):
+#   - Docker image builds take significantly longer than the pgrx-based local tests
+#     (~20-40 min for a full Rust compile inside Docker vs. ~5-10 min for local E2E).
+#   - Docker failures represent a distinct deployment concern and should not block
+#     the primary code-quality CI on every PR.
+#   - Path-based triggers ensure the workflow only runs when Docker-relevant files
+#     change, keeping CI overhead minimal.
+#   - A dedicated workflow can be scheduled and manually triggered independently,
+#     giving operators control without touching the main CI schedule.
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'docker-entrypoint-initdb.d/**'
+      - 'scripts/test-e2e-docker.sh'
+      - 'tests/e2e/sql/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'docker-entrypoint-initdb.d/**'
+  schedule:
+    - cron: '0 3 * * *'  # Nightly at 3 AM UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: pg_durable:latest
+
+concurrency:
+  group: docker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-build-and-test:
+    name: Docker Build & E2E Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg GITHUB_TOKEN=${{ secrets.GH_PAT }} \
+            --tag ${{ env.IMAGE_NAME }} \
+            --file Dockerfile \
+            .
+
+      - name: Smoke test — container starts and extension loads
+        run: |
+          CONTAINER="pg_durable_smoke"
+          docker run -d \
+            --name "$CONTAINER" \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            ${{ env.IMAGE_NAME }}
+
+          echo -n "Waiting for PostgreSQL"
+          READY_COUNT=0
+          for i in $(seq 1 90); do
+            if docker exec "$CONTAINER" pg_isready -U postgres &>/dev/null; then
+              READY_COUNT=$((READY_COUNT + 1))
+              if [ $READY_COUNT -ge 3 ]; then
+                echo " ready!"
+                break
+              fi
+            else
+              READY_COUNT=0
+            fi
+            echo -n "."
+            sleep 1
+          done
+
+          if [ $READY_COUNT -lt 3 ]; then
+            echo " TIMEOUT"
+            docker logs "$CONTAINER"
+            exit 1
+          fi
+
+          # Allow background worker to initialize
+          sleep 2
+
+          echo "Creating extension..."
+          docker exec "$CONTAINER" psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_durable;"
+
+          echo "Verifying extension version..."
+          VERSION=$(docker exec "$CONTAINER" psql -U postgres -t -c "SELECT df.version();")
+          echo "pg_durable version: $(echo "$VERSION" | tr -d ' \n')"
+
+          docker rm -f "$CONTAINER"
+
+      - name: Run E2E tests in Docker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: ./scripts/test-e2e-docker.sh
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/docker-logs
+          echo "=== Container logs (pg_durable_e2e) ==="
+          docker logs pg_durable_e2e 2>&1 | tee /tmp/docker-logs/pg_durable_e2e.log || echo "(container not running)"
+          echo "=== Container logs (pg_durable_smoke) ==="
+          docker logs pg_durable_smoke 2>&1 | tee /tmp/docker-logs/pg_durable_smoke.log || echo "(container not running)"
+          echo "=== Docker images ==="
+          docker images
+          echo "=== Docker containers ==="
+          docker ps -a
+
+      - name: Upload container logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs
+          path: /tmp/docker-logs/
+          if-no-files-found: ignore
