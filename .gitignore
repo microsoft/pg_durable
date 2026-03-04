@@ -27,3 +27,11 @@ Thumbs.db
 
 # Docker data
 data/
+
+# pg_regress test artifacts (at root level)
+regression.diffs
+regression.out
+results/
+tmp_check/
+tmp_check_iso/
+log/
