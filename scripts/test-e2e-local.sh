@@ -154,6 +154,12 @@ ensure_config() {
             echo "Configuring pg_durable.worker_role..."
             echo "pg_durable.worker_role = 'postgres'" >> "$DATA_DIR/postgresql.conf"
         fi
+        # Ensure database is set to 'postgres' (pg_regress may have changed it to contrib_regression)
+        if ! grep -q "^pg_durable.database = 'postgres'" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+            echo "Configuring pg_durable.database..."
+            sed -i.bak '/^#*pg_durable.database/d' "$DATA_DIR/postgresql.conf"
+            echo "pg_durable.database = 'postgres'" >> "$DATA_DIR/postgresql.conf"
+        fi
         # Ensure port is set
         if ! grep -q "^port = $PG_PORT" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
             sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"

@@ -36,7 +36,7 @@ if [ ! -d "$DATA_DIR" ]; then
     "$PGRX_BIN_DIR/initdb" -D "$DATA_DIR" -U postgres 2>/dev/null || true
 fi
 
-# Configure shared_preload_libraries for background worker and pg_durable.worker_role
+# Configure shared_preload_libraries and pg_durable GUCs
 if [ -f "$PG_CONF" ]; then
     if ! grep -q "shared_preload_libraries.*pg_durable" "$PG_CONF"; then
         echo -e "\033[0;33mConfiguring shared_preload_libraries...\033[0m"
@@ -45,6 +45,10 @@ if [ -f "$PG_CONF" ]; then
     if ! grep -q "^pg_durable.worker_role" "$PG_CONF"; then
         echo -e "\033[0;33mConfiguring pg_durable.worker_role...\033[0m"
         echo "pg_durable.worker_role = 'postgres'" >> "$PG_CONF"
+    fi
+    if ! grep -q "^pg_durable.database" "$PG_CONF"; then
+        echo -e "\033[0;33mConfiguring pg_durable.database...\033[0m"
+        echo "pg_durable.database = 'postgres'" >> "$PG_CONF"
     fi
 fi
 
