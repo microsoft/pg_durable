@@ -77,6 +77,7 @@ RUN mkdir -p /docker-entrypoint-initdb.d && \
     chmod +x /docker-entrypoint-initdb.d/01-init-pg-durable.sh
 
 # Configure shared_preload_libraries for background worker
-RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/postgresql.conf.sample
+RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample
 
 EXPOSE 5432

@@ -3,8 +3,8 @@
 -- Validates that CREATE EXTENSION fails when run in a database that doesn't
 -- match the one the background worker connects to.
 --
--- The background worker connects to ONE database (specified by POSTGRES_DB or
--- PGDATABASE environment variable, defaulting to 'postgres'). The extension
+-- The background worker connects to ONE database (specified by the
+-- pg_durable.database GUC, defaulting to 'postgres'). The extension
 -- must be created in that exact database.
 --
 -- This test validates that:

@@ -16,6 +16,7 @@ services:
     command: >
       postgres
       -c shared_preload_libraries=pg_durable
+      -c pg_durable.database=pg_durable
       -c log_statement=all
       -c log_destination=stderr
     healthcheck:

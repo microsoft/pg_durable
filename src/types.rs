@@ -22,6 +22,15 @@ pub fn get_worker_role() -> String {
         .unwrap_or_else(|| "azuresu".to_string())
 }
 
+/// Get the database from the `pg_durable.database` GUC.
+/// Falls back to `"postgres"` if the GUC is not set.
+pub fn get_database() -> String {
+    crate::DATABASE
+        .get()
+        .map(|cs: CString| cs.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "postgres".to_string())
+}
+
 /// Generate a short 8-character instance ID from a UUID
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();
@@ -40,9 +49,7 @@ pub fn postgres_connection_string() -> String {
     let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = unsafe { pgrx::pg_sys::PostPortNumber };
     let user = get_worker_role();
-    let database = std::env::var("POSTGRES_DB")
-        .or_else(|_| std::env::var("PGDATABASE"))
-        .unwrap_or_else(|_| "postgres".to_string());
+    let database = get_database();
 
     format!("postgres://{user}@{host}:{port}/{database}")
 }
@@ -61,9 +68,7 @@ pub fn get_port() -> u16 {
 /// This matches the logic in postgres_connection_string() for database selection
 #[pg_extern(immutable, parallel_safe, schema = "df")]
 pub fn target_database() -> String {
-    std::env::var("POSTGRES_DB")
-        .or_else(|_| std::env::var("PGDATABASE"))
-        .unwrap_or_else(|_| "postgres".to_string())
+    get_database()
 }
 
 /// Create a single PostgreSQL connection authenticated as `login_role`,

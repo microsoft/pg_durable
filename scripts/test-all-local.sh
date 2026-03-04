@@ -94,10 +94,14 @@ if [ "$RUN_REGRESS" = true ]; then
     echo -e "${YELLOW}[3/3] pg_regress Tests${NC}"
     echo "────────────────────────────────────────────────"
 
-    # Start server with PGDATABASE=contrib_regression
-    export PGDATABASE=contrib_regression
+    # Configure pg_durable.database for contrib_regression and start server
+    PG_CONF="$HOME/.pgrx/data-17/postgresql.conf"
+    if [ -f "$PG_CONF" ]; then
+        sed -i.bak '/^pg_durable.database/d' "$PG_CONF"
+        echo "pg_durable.database = 'contrib_regression'" >> "$PG_CONF"
+    fi
 
-    echo "Starting PostgreSQL (PGDATABASE=$PGDATABASE)..."
+    echo "Starting PostgreSQL (pg_durable.database=contrib_regression)..."
     ./scripts/pg-start.sh
 
     # Drop stale test database if it exists (worker may have connected to it)
@@ -121,10 +125,13 @@ if [ "$RUN_REGRESS" = true ]; then
         fi
     fi
 
-    # Stop server
+    # Stop server and restore pg_durable.database for normal use
     echo "Stopping PostgreSQL..."
     ./scripts/pg-stop.sh
-    unset PGDATABASE
+    if [ -f "$PG_CONF" ]; then
+        sed -i.bak '/^pg_durable.database/d' "$PG_CONF"
+        echo "pg_durable.database = 'postgres'" >> "$PG_CONF"
+    fi
     echo ""
 else
     echo -e "${YELLOW}[3/3] pg_regress Tests — skipped${NC}"

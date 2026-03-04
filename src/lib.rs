@@ -14,6 +14,9 @@ use std::ffi::CString;
 pub static WORKER_ROLE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"azuresu"));
 
+pub static DATABASE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"postgres"));
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -41,11 +44,21 @@ pub extern "C-unwind" fn _PG_init() {
             "pg_durable must be loaded via shared_preload_libraries.\n\nHINT: Add 'pg_durable' to shared_preload_libraries in postgresql.conf and restart the server."
         );
     }
+
     GucRegistry::define_string_guc(
         c"pg_durable.worker_role",
         c"PostgreSQL role used by the pg_durable background worker",
         c"",
         &WORKER_ROLE,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_durable.database",
+        c"PostgreSQL database used by the pg_durable background worker",
+        c"",
+        &DATABASE,
         GucContext::Postmaster,
         GucFlags::default(),
     );
@@ -147,8 +160,8 @@ extension_sql!(
     r#"
 -- Validate that CREATE EXTENSION is run in the correct database
 -- The background worker connects to one specific database (determined by
--- POSTGRES_DB or PGDATABASE environment variable). The extension must be
--- created in that database for workflows to execute.
+-- the pg_durable.database GUC, defaults to "postgres").
+-- The extension must be created in that database for workflows to execute.
 DO $$
 DECLARE
     current_db TEXT;
@@ -161,7 +174,7 @@ BEGIN
     SELECT df.target_database() INTO target_db;
     
     IF current_db != target_db THEN
-        RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). The background worker only processes functions in the database specified by POSTGRES_DB or PGDATABASE environment variable (defaults to "postgres").', target_db, current_db
+        RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). The background worker only processes functions in the database specified by the pg_durable.database GUC (defaults to "postgres").', target_db, current_db
             USING HINT = 'Connect to the correct database and run: CREATE EXTENSION pg_durable;';
     END IF;
 END $$;
@@ -1575,6 +1588,7 @@ pub mod pg_test {
         vec![
             "shared_preload_libraries = 'pg_durable'",
             "pg_durable.worker_role = 'postgres'",
+            "pg_durable.database = 'postgres'",
         ]
     }
 }
