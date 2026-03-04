@@ -34,6 +34,9 @@ END $$;
 -- 2) Create extension and run a simple workflow
 CREATE EXTENSION pg_durable;
 
+-- Wait for the background worker to initialize
+SELECT public._e2e_wait_for_worker_ready();
+
 CREATE TEMP TABLE _test_state (instance_id TEXT);
 INSERT INTO _test_state
 SELECT df.start('SELECT 42 as answer', 'test-bgw-lifecycle-1');
@@ -83,6 +86,9 @@ CREATE EXTENSION pg_durable;
 
 -- Restore df_e2e_user grants lost when the extension was dropped
 SELECT public._e2e_grant_df_to_e2e_user();
+
+-- Wait for the background worker to fully reinitialize
+SELECT public._e2e_wait_for_worker_ready();
 
 CREATE TEMP TABLE _test_state2 (instance_id TEXT);
 INSERT INTO _test_state2

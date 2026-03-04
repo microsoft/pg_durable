@@ -88,37 +88,9 @@ CREATE EXTENSION pg_durable;
 SELECT public._e2e_grant_df_to_e2e_user();
 
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
---
--- After CREATE EXTENSION, the new df._worker_epoch table is empty. The OLD
--- runtime (from before the drop) is still running and can process functions, but
--- its epoch sentinel check (every 5s) will eventually detect the sentinel is
--- gone, shut down, and reinitialize. If we don't wait for this cycle to
--- complete, the old runtime's late sentinel check will shut down mid-test and
--- break later tests (like 27_user_isolation).
---
--- We wait for df._worker_epoch to be non-empty, which proves the worker has:
--- 1. Detected old sentinel gone → 2. Shut down old runtime →
--- 3. Waited for extension → 4. Reinitialized → 5. Written new sentinel
-DO $$
-DECLARE
-    attempts INT := 0;
-    sentinel_exists BOOLEAN;
-BEGIN
-    LOOP
-        SELECT EXISTS(SELECT 1 FROM df._worker_epoch) INTO sentinel_exists;
-        EXIT WHEN sentinel_exists OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
+SELECT public._e2e_wait_for_worker_ready();
 
-    IF NOT sentinel_exists THEN
-        RAISE EXCEPTION 'TEST SETUP FAILED: worker did not reinitialize after extension recreate (no sentinel after 30s)';
-    END IF;
-
-    RAISE NOTICE 'Worker epoch sentinel detected — full restart cycle complete';
-END $$;
-
--- Now verify the worker is actually processing functions by submitting a
+-- Verify the worker is actually processing functions by submitting a
 -- trivial function and waiting for completion.
 -- NOTE: df.start() must be outside the DO block so the transaction commits
 -- and the background worker can see the instance.
