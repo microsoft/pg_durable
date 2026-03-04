@@ -7,10 +7,12 @@
 #   --skip-unit       Skip unit tests
 #   --skip-e2e        Skip E2E tests
 #   --skip-regress    Skip pg_regress tests
+#   --pg-version VER  PostgreSQL major version (default: 17)
 #
 # Examples:
-#   ./scripts/test-all-local.sh                # Run all three suites
-#   ./scripts/test-all-local.sh --skip-unit    # Skip unit tests
+#   ./scripts/test-all-local.sh                    # Run all three suites
+#   ./scripts/test-all-local.sh --skip-unit        # Skip unit tests
+#   ./scripts/test-all-local.sh --pg-version 18    # Run against PG18
 
 set -e
 
@@ -23,6 +25,7 @@ cd "$PROJECT_DIR"
 RUN_UNIT=true
 RUN_E2E=true
 RUN_REGRESS=true
+PG_VERSION="17"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -30,9 +33,17 @@ while [[ $# -gt 0 ]]; do
         --skip-unit)    RUN_UNIT=false;    shift ;;
         --skip-e2e)     RUN_E2E=false;     shift ;;
         --skip-regress) RUN_REGRESS=false; shift ;;
+        --pg-version)
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --pg-version requires a numeric argument, got: $2"
+                exit 1
+            fi
+            PG_VERSION="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: ./scripts/test-all-local.sh [--skip-unit] [--skip-e2e] [--skip-regress]"
+            echo "Usage: ./scripts/test-all-local.sh [--skip-unit] [--skip-e2e] [--skip-regress] [--pg-version VER]"
             exit 1
             ;;
     esac
@@ -53,7 +64,7 @@ OVERALL=0
 
 echo ""
 echo -e "${CYAN}================================================${NC}"
-echo -e "${CYAN}  pg_durable — Full Test Suite${NC}"
+echo -e "${CYAN}  pg_durable — Full Test Suite (PG${PG_VERSION})${NC}"
 echo -e "${CYAN}================================================${NC}"
 echo ""
 
@@ -61,7 +72,7 @@ echo ""
 if [ "$RUN_UNIT" = true ]; then
     echo -e "${YELLOW}[1/3] Unit Tests (pgrx)${NC}"
     echo "────────────────────────────────────────────────"
-    if ./scripts/test-unit.sh; then
+    if ./scripts/test-unit.sh --pg-version "$PG_VERSION"; then
         UNIT_RESULT="passed"
     else
         UNIT_RESULT="FAILED"
@@ -77,7 +88,7 @@ fi
 if [ "$RUN_E2E" = true ]; then
     echo -e "${YELLOW}[2/3] E2E Tests${NC}"
     echo "────────────────────────────────────────────────"
-    if ./scripts/test-e2e-local.sh; then
+    if ./scripts/test-e2e-local.sh --clean --pg-version "$PG_VERSION"; then
         E2E_RESULT="passed"
     else
         E2E_RESULT="FAILED"
@@ -95,7 +106,7 @@ if [ "$RUN_REGRESS" = true ]; then
     echo "────────────────────────────────────────────────"
 
     # Delegate to the Makefile target which handles reset, start, and installcheck
-    if make test-regress; then
+    if make test-regress PG_VERSION=pg"$PG_VERSION"; then
         REGRESS_RESULT="passed"
     else
         REGRESS_RESULT="FAILED"
@@ -110,7 +121,7 @@ if [ "$RUN_REGRESS" = true ]; then
 
     # Stop server after pg_regress
     echo "Stopping PostgreSQL..."
-    ./scripts/pg-stop.sh
+    ./scripts/pg-stop.sh --pg-version "$PG_VERSION"
     echo ""
 else
     echo -e "${YELLOW}[3/3] pg_regress Tests — skipped${NC}"
