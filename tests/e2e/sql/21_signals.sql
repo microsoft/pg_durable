@@ -61,19 +61,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_basic;
     RAISE NOTICE 'Testing basic signal: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 100;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: basic signal status = %', status;
     END IF;
     
@@ -119,19 +113,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_timeout;
     RAISE NOTICE 'Testing signal timeout: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 50;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: signal timeout status = %', status;
     END IF;
     
@@ -175,22 +163,16 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_data;
     
     -- Send signal with data
     PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
     RAISE NOTICE 'Testing signal with data: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 100;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: signal data status = %', status;
     END IF;
     

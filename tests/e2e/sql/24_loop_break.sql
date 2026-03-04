@@ -27,22 +27,16 @@ DECLARE
     v_instance_id TEXT;
     v_status TEXT;
     v_cnt INT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO v_instance_id FROM _test1_state;
     RAISE NOTICE 'Test 1 - df.break(): instance %', v_instance_id;
     
     -- Wait for completion
-    LOOP
-        SELECT s INTO v_status FROM df.status(v_instance_id) s;
-        EXIT WHEN lower(v_status) = 'completed' OR attempts > 100;
-        PERFORM pg_sleep(0.5);
-        attempts := attempts + 1;
-    END LOOP;
+    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
     
     SELECT COUNT(*) INTO v_cnt FROM test_break_log WHERE test_name = 'break_test';
     
-    IF lower(v_status) != 'completed' THEN
+    IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [break]: expected Completed, got %', v_status;
     END IF;
     
@@ -74,22 +68,16 @@ DECLARE
     v_instance_id TEXT;
     v_status TEXT;
     v_cnt INT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO v_instance_id FROM _test2_state;
     RAISE NOTICE 'Test 2 - while loop: instance %', v_instance_id;
     
     -- Wait for completion
-    LOOP
-        SELECT s INTO v_status FROM df.status(v_instance_id) s;
-        EXIT WHEN lower(v_status) = 'completed' OR attempts > 100;
-        PERFORM pg_sleep(0.5);
-        attempts := attempts + 1;
-    END LOOP;
+    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
     
     SELECT COUNT(*) INTO v_cnt FROM test_break_log WHERE test_name = 'while_test';
     
-    IF lower(v_status) != 'completed' THEN
+    IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [while]: expected Completed, got %', v_status;
     END IF;
     
@@ -125,20 +113,14 @@ DECLARE
     v_instance_id TEXT;
     v_status TEXT;
     v_result TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO v_instance_id FROM _test3_state;
     RAISE NOTICE 'Test 3 - df.break(value): instance %', v_instance_id;
     
     -- Wait for completion
-    LOOP
-        SELECT s INTO v_status FROM df.status(v_instance_id) s;
-        EXIT WHEN lower(v_status) = 'completed' OR attempts > 100;
-        PERFORM pg_sleep(0.5);
-        attempts := attempts + 1;
-    END LOOP;
+    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
     
-    IF lower(v_status) != 'completed' THEN
+    IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [break-value]: expected Completed, got %', v_status;
     END IF;
     
