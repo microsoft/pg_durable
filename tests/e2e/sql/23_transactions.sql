@@ -56,20 +56,14 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM txn_test_log WHERE msg = 'test1_instance_id';
     RAISE NOTICE 'Test 1: Waiting for DF: %', inst_id;
     
     -- Wait for completion (should succeed because retry logic waits for commit)
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled', 'cancelled') OR attempts > 100;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
     
-    IF lower(status) != 'completed' THEN
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: same-txn DF status = % (retry logic should have waited for commit)', status;
     END IF;
     

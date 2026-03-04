@@ -20,19 +20,13 @@ DECLARE
     inst_id TEXT;
     status TEXT;
     log_msgs TEXT[];
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing three-step workflow: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: three-step status = %', status;
     END IF;
     

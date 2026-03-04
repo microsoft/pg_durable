@@ -5,59 +5,49 @@
 DROP TABLE IF EXISTS test_race_log;
 CREATE TABLE test_race_log (id SERIAL, branch TEXT, variant TEXT, ts TIMESTAMP DEFAULT now());
 
+CREATE TEMP TABLE _test_state (instance_id TEXT, variant TEXT);
+
 -- Test A: df.race() function - fast vs slow
-SELECT df.start(
+INSERT INTO _test_state SELECT df.start(
     df.race(
         'INSERT INTO test_race_log (branch, variant) VALUES (''fast'', ''func'') RETURNING ''fast''',
         df.sleep(10) ~> 'INSERT INTO test_race_log (branch, variant) VALUES (''slow'', ''func'') RETURNING ''slow'''
     ),
     'test-race-func'
-);
+), 'func';
 
 -- Test B: | operator - fast vs slow
-SELECT df.start(
+INSERT INTO _test_state SELECT df.start(
     'INSERT INTO test_race_log (branch, variant) VALUES (''fast'', ''op'') RETURNING ''fast'''
     | (df.sleep(10) ~> 'INSERT INTO test_race_log (branch, variant) VALUES (''slow'', ''op'') RETURNING ''slow'''),
     'test-race-op'
-);
+), 'op';
 
--- Wait for completion
-SELECT pg_sleep(3);
-
--- Verify
+-- Wait and verify
 DO $$
 DECLARE
-    status_func TEXT;
-    status_op TEXT;
-    cnt_func INT;
-    cnt_op INT;
+    rec RECORD;
+    status TEXT;
+    cnt INT;
 BEGIN
-    SELECT status INTO status_func FROM df.instances WHERE label = 'test-race-func';
-    SELECT status INTO status_op FROM df.instances WHERE label = 'test-race-op';
-    
-    IF lower(status_func) != 'completed' THEN
-        RAISE EXCEPTION 'TEST FAILED [func]: status = %', status_func;
-    END IF;
-    
-    IF lower(status_op) != 'completed' THEN
-        RAISE EXCEPTION 'TEST FAILED [op]: status = %', status_op;
-    END IF;
-    
-    -- Only the fast branch should have completed
-    SELECT COUNT(*) INTO cnt_func FROM test_race_log WHERE variant = 'func' AND branch = 'fast';
-    SELECT COUNT(*) INTO cnt_op FROM test_race_log WHERE variant = 'op' AND branch = 'fast';
-    
-    IF cnt_func < 1 THEN
-        RAISE EXCEPTION 'TEST FAILED [func]: fast branch should have completed';
-    END IF;
-    
-    IF cnt_op < 1 THEN
-        RAISE EXCEPTION 'TEST FAILED [op]: fast branch should have completed';
-    END IF;
-    
+    FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
+        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+
+        IF status != 'completed' THEN
+            RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
+        END IF;
+
+        -- Only the fast branch should have completed
+        SELECT COUNT(*) INTO cnt FROM test_race_log WHERE variant = rec.variant AND branch = 'fast';
+        IF cnt < 1 THEN
+            RAISE EXCEPTION 'TEST FAILED [%]: fast branch should have completed', rec.variant;
+        END IF;
+    END LOOP;
+
     RAISE NOTICE 'PASSED: race [func + | operator]';
 END $$;
 
+DROP TABLE _test_state;
 DROP TABLE test_race_log;
 SELECT 'TEST PASSED' AS result;
 

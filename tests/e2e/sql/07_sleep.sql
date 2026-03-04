@@ -19,19 +19,13 @@ DECLARE
     status TEXT;
     cnt INT;
     time_diff INTERVAL;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing instance: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 500;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id, 50) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: status = %', status;
     END IF;
     

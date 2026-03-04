@@ -17,20 +17,13 @@ DECLARE
     rec RECORD;
     status TEXT;
     result TEXT;
-    attempts INT;
 BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
-        attempts := 0;
-        
-        LOOP
-            SELECT s INTO status FROM df.status(rec.instance_id) s;
-            EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-            PERFORM pg_sleep(0.1);
-            attempts := attempts + 1;
-        END LOOP;
-        
-        IF lower(status) != 'completed' THEN
+
+        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+
+        IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: expected completed, got %', rec.variant, status;
         END IF;
         
