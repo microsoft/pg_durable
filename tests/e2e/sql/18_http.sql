@@ -21,19 +21,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_get;
     RAISE NOTICE 'Testing HTTP GET: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP GET status = %', status;
     END IF;
     
@@ -64,19 +58,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_post;
     RAISE NOTICE 'Testing HTTP POST: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP POST status = %', status;
     END IF;
     
@@ -106,19 +94,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_headers;
     RAISE NOTICE 'Testing HTTP with headers: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP headers status = %', status;
     END IF;
     
@@ -153,19 +135,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_sequence;
     RAISE NOTICE 'Testing HTTP sequence: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP sequence status = %', status;
     END IF;
     
@@ -193,19 +169,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_parallel;
     RAISE NOTICE 'Testing HTTP parallel: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP parallel status = %', status;
     END IF;
     
@@ -234,20 +204,14 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_404;
     RAISE NOTICE 'Testing HTTP 404 handling: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
     -- 404 should NOT cause failure - we handle it in the workflow
-    IF lower(status) != 'completed' THEN
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP 404 should complete (user handles), got status = %', status;
     END IF;
     
@@ -273,19 +237,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_delay;
     RAISE NOTICE 'Testing HTTP delay: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP delay status = %', status;
     END IF;
     
@@ -314,19 +272,13 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_vars;
     RAISE NOTICE 'Testing HTTP with vars: %', inst_id;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP vars status = %', status;
     END IF;
     

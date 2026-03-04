@@ -22,22 +22,13 @@ DECLARE
     inst_id TEXT;
     inst_status TEXT;
     log_count INT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing parallel counts: %', inst_id;
-    
-    LOOP
-        SELECT s INTO inst_status FROM df.status(inst_id) s;
-        IF attempts % 50 = 0 THEN
-            RAISE NOTICE 'Status after % attempts: %', attempts, inst_status;
-        END IF;
-        EXIT WHEN inst_status IN ('Completed', 'completed', 'Failed', 'failed', 'Canceled', 'canceled', 'ContinuedAsNew') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(inst_status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO inst_status;
+
+    IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: parallel counts status = %', inst_status;
     END IF;
     

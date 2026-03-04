@@ -25,19 +25,13 @@ DECLARE
     inst_id TEXT;
     inst_status TEXT;
     processed_count INT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing order processing: %', inst_id;
-    
-    LOOP
-        SELECT s INTO inst_status FROM df.status(inst_id) s;
-        EXIT WHEN lower(inst_status) IN ('completed', 'failed', 'canceled') OR attempts > 500;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(inst_status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id, 50) INTO inst_status;
+
+    IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: order processing status = %', inst_status;
     END IF;
     

@@ -78,18 +78,12 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_signal;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 100;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: cross-connection signal status = %', status;
     END IF;
     
@@ -169,19 +163,14 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_cancel;
-    
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 50;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
+
+    -- Wait for cancellation (may show as 'failed' or 'cancelled')
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
     -- Canceled workflows end up as 'failed' or 'canceled'/'cancelled'
-    IF lower(status) NOT IN ('canceled', 'cancelled', 'failed') THEN
+    IF status NOT IN ('canceled', 'cancelled', 'failed') THEN
         RAISE EXCEPTION 'TEST FAILED: cross-connection cancel status = % (expected canceled/cancelled/failed)', status;
     END IF;
     
@@ -236,15 +225,9 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_monitor;
-    LOOP
-        SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 50;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
 END $$;
 
 DROP TABLE _test_cross_monitor;

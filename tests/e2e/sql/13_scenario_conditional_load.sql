@@ -29,7 +29,6 @@ DECLARE
     inst_status TEXT;
     pending_count INT;
     log_entry TEXT;
-    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing conditional task load: %', inst_id;
@@ -38,15 +37,10 @@ BEGIN
     SELECT COUNT(*) INTO pending_count 
     FROM playground.task_queue tq WHERE tq.status = 'pending';
     RAISE NOTICE 'Pending tasks: %', pending_count;
-    
-    LOOP
-        SELECT s INTO inst_status FROM df.status(inst_id) s;
-        EXIT WHEN lower(inst_status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
-        PERFORM pg_sleep(0.1);
-        attempts := attempts + 1;
-    END LOOP;
-    
-    IF lower(inst_status) != 'completed' THEN
+
+    SELECT df.wait_for_completion(inst_id) INTO inst_status;
+
+    IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: conditional status = %', inst_status;
     END IF;
     
