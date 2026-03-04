@@ -79,7 +79,7 @@ done
 # pgrx settings
 PGRX_HOME="$HOME/.pgrx"
 PG_PORT="$((28800 + PG_VERSION))"
-PG_USER="$USER"
+PG_USER="postgres"
 PG_DB="postgres"
 
 # Default non-privileged role for E2E tests (created by 00_setup_playground.sql)
@@ -149,6 +149,11 @@ ensure_config() {
             sed -i.bak '/^#*shared_preload_libraries/d' "$DATA_DIR/postgresql.conf"
             echo "shared_preload_libraries = 'pg_durable'" >> "$DATA_DIR/postgresql.conf"
         fi
+        # Ensure worker_role is set
+        if ! grep -q "^pg_durable.worker_role" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+            echo "Configuring pg_durable.worker_role..."
+            echo "pg_durable.worker_role = 'postgres'" >> "$DATA_DIR/postgresql.conf"
+        fi
         # Ensure port is set
         if ! grep -q "^port = $PG_PORT" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
             sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
@@ -187,7 +192,7 @@ start_server() {
     # Initialize if needed
     if [ ! -d "$DATA_DIR" ]; then
         echo "Initializing database..."
-        "$PGRX_BIN/initdb" -D "$DATA_DIR" --no-locale -E UTF8 >/dev/null 2>&1
+        "$PGRX_BIN/initdb" -D "$DATA_DIR" -U postgres --no-locale -E UTF8 >/dev/null 2>&1
     fi
     
     # Ensure config is correct (with or without preload)
@@ -202,7 +207,7 @@ start_server() {
     # 2. Restart server (so background worker reconnects with fresh cached plans)
     if "$PG_ISREADY" -h localhost -p $PG_PORT &>/dev/null; then
         # Drop schemas before restart (background worker will recreate on reconnect)
-        "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "DROP SCHEMA IF EXISTS duroxide CASCADE; DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP SCHEMA IF EXISTS duroxide CASCADE; DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
         echo -e "${YELLOW}Restarting PostgreSQL to reload extension...${NC}"
         stop_server
     fi
@@ -215,10 +220,10 @@ start_server() {
     if [ "$NO_PRELOAD" = true ]; then
         # Drop extension if it exists from a previous run (e.g., unit tests)
         # so the no-preload test can verify CREATE EXTENSION fails correctly
-        "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" >/dev/null 2>&1
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" >/dev/null 2>&1
     else
         # Create extension (duroxide schema will be created by background worker on first connect)
-        "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null 2>&1
+        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null 2>&1
     fi
 }
 
@@ -242,7 +247,7 @@ start_server
 # Show version and run setup (only when extension is loaded, not in --no-preload mode)
 if [ "$NO_PRELOAD" = false ]; then
     echo -n "pg_durable version: "
-    "$PSQL" -h localhost -p $PG_PORT -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
+    "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
     echo ""
     echo ""
 

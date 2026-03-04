@@ -82,7 +82,7 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
 async fn run_duroxide_runtime() {
     const WAIT_FOR_EXTENSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const EXTENSION_DROP_POLL_INTERVAL: Duration = Duration::from_secs(5);
-    const INIT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+    const INIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
     const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
     let pg_conn_str = postgres_connection_string();

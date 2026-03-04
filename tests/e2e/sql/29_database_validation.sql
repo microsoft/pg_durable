@@ -95,7 +95,7 @@ DECLARE
     err_msg TEXT;
 BEGIN
     connstr := format(
-        'host=localhost dbname=_test_wrong_db port=%s',
+        'host=localhost dbname=_test_wrong_db port=%s user=postgres',
         current_setting('port')
     );
 
