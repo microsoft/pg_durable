@@ -107,20 +107,19 @@ jobs:
       - name: Run E2E tests in Docker
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          PG_DURABLE_LOG_DIR: /tmp/docker-logs
         run: ./scripts/test-e2e-docker.sh
 
-      - name: Collect container logs on failure
+      - name: Collect smoke-test container logs on failure
         if: failure()
         run: |
           mkdir -p /tmp/docker-logs
-          echo "=== Container logs (pg_durable_e2e) ==="
-          docker logs pg_durable_e2e 2>&1 | tee /tmp/docker-logs/pg_durable_e2e.log || echo "(container not running)"
-          echo "=== Container logs (pg_durable_smoke) ==="
-          docker logs pg_durable_smoke 2>&1 | tee /tmp/docker-logs/pg_durable_smoke.log || echo "(container not running)"
-          echo "=== Docker images ==="
-          docker images
-          echo "=== Docker containers ==="
-          docker ps -a
+          # The E2E script exports its own logs via export_logs().
+          # Capture smoke-test container logs if it still exists.
+          if docker inspect pg_durable_smoke &>/dev/null; then
+            docker logs pg_durable_smoke &> /tmp/docker-logs/smoke-docker-stdout.log || true
+            docker cp pg_durable_smoke:/var/lib/postgresql/data/log/. /tmp/docker-logs/ 2>/dev/null || true
+          fi
 
       - name: Upload container logs on failure
         if: failure()

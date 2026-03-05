@@ -77,8 +77,13 @@ RUN mkdir -p /docker-entrypoint-initdb.d && \
     chmod +x /docker-entrypoint-initdb.d/01-init-pg-durable.sh
 
 # Configure shared_preload_libraries for background worker
+# Enable logging_collector so PG writes log files that can be extracted on failure
 RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
-    echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample
+    echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "logging_collector = on" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "log_directory = 'log'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "log_filename = 'postgresql.log'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "log_truncate_on_rotation = on" >> /usr/share/postgresql/postgresql.conf.sample
 
 EXPOSE 5432
