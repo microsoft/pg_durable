@@ -1,0 +1,4 @@
+[submodule "external/duroxide-pg-opt"]
+	path = external/duroxide-pg-opt
+	url = https://github.com/microsoft/duroxide-pg-opt.git
+	branch = pinodeca/migration-policy
