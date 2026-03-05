@@ -75,9 +75,25 @@ fi
 echo "================================================"
 echo ""
 
+# Directory for exporting logs on failure (CI picks these up as artifacts)
+LOG_EXPORT_DIR="${PG_DURABLE_LOG_DIR:-/tmp/docker-logs}"
+
+# Export container logs before removal so CI can upload them as artifacts
+export_logs() {
+    mkdir -p "$LOG_EXPORT_DIR"
+    echo -e "${YELLOW}Exporting container logs to $LOG_EXPORT_DIR ...${NC}"
+    docker logs "$CONTAINER_NAME" &> "$LOG_EXPORT_DIR/docker-stdout.log" || true
+    docker cp "$CONTAINER_NAME:/var/lib/postgresql/data/log/." "$LOG_EXPORT_DIR/" 2>/dev/null || true
+}
+
 # Cleanup function
 cleanup() {
+    local exit_code=$?
     if [ "$KEEP_RUNNING" = false ]; then
+        # On failure, dump logs before destroying the container
+        if [ $exit_code -ne 0 ]; then
+            export_logs
+        fi
         echo -e "${YELLOW}Stopping container...${NC}"
         docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
     else
