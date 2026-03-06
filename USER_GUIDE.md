@@ -18,12 +18,13 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 8. [Durable Function Variables](#durable-function-variables)
 9. [Loops & Cron Jobs](#loops--cron-jobs)
 10. [Signals](#signals)
-11. [Visualizing Functions](#visualizing-functions)
-12. [Monitoring](#monitoring)
-13. [User Isolation & Privileges](#user-isolation--privileges)
-14. [Troubleshooting](#troubleshooting)
-15. [Quick Reference Card](#quick-reference-card)
-16. [Appendix: Test Data Setup](#appendix-test-data-setup)
+11. [Multi-Database Support](#multi-database-support)
+12. [Visualizing Functions](#visualizing-functions)
+13. [Monitoring](#monitoring)
+14. [User Isolation & Privileges](#user-isolation--privileges)
+15. [Troubleshooting](#troubleshooting)
+16. [Quick Reference Card](#quick-reference-card)
+17. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -180,7 +181,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with return value | `df.break('{"done": true}')` |
-| `df.start(func, label)` | Start function | `df.start('SELECT 1', 'job')` |
+| `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
@@ -1084,6 +1085,55 @@ SELECT df.start(
 
 ---
 
+## Multi-Database Support
+
+By default, all SQL in a durable function runs in the database where the extension is installed (the `pg_durable.database` GUC, typically `postgres`). You can target a different database on the same cluster by passing the `database` parameter to `df.start()`.
+
+### Running SQL in Another Database
+
+```sql
+-- Run a query in the 'analytics' database
+SELECT df.start(
+    'INSERT INTO reports (date, total) SELECT now(), count(*) FROM events',
+    'daily-report',
+    'analytics'
+);
+
+-- Using named parameter syntax (skip the label)
+SELECT df.start(
+    'SELECT 1',
+    database => 'analytics'
+);
+```
+
+All SQL nodes in the function execute against the specified database. The DSL itself (`~>`, `&`, `df.sql()`, etc.) is unchanged — database is purely a property of the instance.
+
+### Key Points
+
+- **One database per invocation.** All SQL in a single `df.start()` call targets the same database. For cross-database workflows, start separate durable functions per database, or use `dblink`/`postgres_fdw` within your SQL.
+- **Backwards compatible.** Omitting `database` (or passing NULL) uses the extension database — existing queries are unaffected.
+- **Validated at submission time.** If the database doesn't exist, `df.start()` raises an immediate error.
+- **Role isolation preserved.** The function runs as the user who called `df.start()`, not the background worker. The login role must be able to connect to the target database (`GRANT CONNECT`).
+
+### Example: Multi-Tenant Processing
+
+```sql
+-- Process data in each tenant database
+SELECT df.start(
+    'CALL refresh_materialized_views()',
+    'tenant-alpha-refresh',
+    'tenant_alpha'
+);
+
+SELECT df.start(
+    'CALL refresh_materialized_views()',
+    'tenant-beta-refresh',
+    'tenant_beta'
+);
+```
+
+---
+
 ## Visualizing Functions
 
 ### df.explain()
@@ -1627,6 +1677,10 @@ Look for lines starting with `pg_durable:` for background worker activity.
 ```sql
 -- Start a durable function (plain SQL auto-wrapped)
 SELECT df.start('SELECT 1', 'optional-label');
+
+-- Start in a different database
+SELECT df.start('SELECT 1', 'label', 'analytics');
+SELECT df.start('SELECT 1', database => 'analytics');
 
 -- Chain steps with ~>
 SELECT df.start('SELECT 1' ~> 'SELECT 2' ~> 'SELECT 3');
