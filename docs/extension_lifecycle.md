@@ -206,7 +206,7 @@ Pure `pg_extension` polling can miss a DROP → CREATE cycle if both happen betw
 
 The **epoch sentinel** solves this:
 
-- Extension SQL declares `df._worker_epoch (epoch_id UUID PRIMARY KEY, started_at TIMESTAMPTZ)`.
+- Extension SQL declares `df._worker_epoch (epoch_id UUID PRIMARY KEY, started_at TIMESTAMPTZ, last_seen_at TIMESTAMPTZ)`.
 - After init, the BGW inserts a row with a fresh UUID.
 - The running-state poll checks: "does my UUID still exist?" instead of "does the extension exist?"
 - Three outcomes:
