@@ -1329,6 +1329,21 @@ SELECT df.status('a1b2c3d4');
 SELECT df.result('a1b2c3d4');
 ```
 
+### Worker Liveness
+
+Check whether the background worker is alive and healthy:
+
+```sql
+SELECT epoch_id, started_at, last_seen_at,
+       now() - last_seen_at AS time_since_last_heartbeat
+  FROM df._worker_epoch;
+```
+
+- `time_since_last_heartbeat < 15 seconds` → worker is alive (recent heartbeat)
+- No rows in `df._worker_epoch` or large `time_since_last_heartbeat` → worker is likely down or hasn't initialized yet
+
+The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
+
 ---
 
 ## User Isolation & Privileges

@@ -260,7 +260,7 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
     sqlx::query("DELETE FROM df._worker_epoch")
         .execute(pool)
         .await?;
-    sqlx::query("INSERT INTO df._worker_epoch (epoch_id) VALUES ($1::uuid)")
+    sqlx::query("INSERT INTO df._worker_epoch (epoch_id, started_at, last_seen_at) VALUES ($1::uuid, now(), now())")
         .bind(&epoch_id)
         .execute(pool)
         .await?;
@@ -273,14 +273,16 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
 /// `false` when it is missing or the query fails (extension dropped
 /// or drop+recreated).
 async fn check_epoch_sentinel(pool: &sqlx::PgPool, epoch_id: &str) -> bool {
-    let result: Result<(bool,), sqlx::Error> =
-        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM df._worker_epoch WHERE epoch_id = $1::uuid)")
-            .bind(epoch_id)
-            .fetch_one(pool)
-            .await;
+    let result = sqlx::query(
+        "UPDATE df._worker_epoch SET last_seen_at = now() WHERE epoch_id = $1::uuid RETURNING epoch_id",
+    )
+    .bind(epoch_id)
+    .fetch_optional(pool)
+    .await;
 
     // Query error (table/schema gone) ⇒ treat as "dropped"
-    result.map(|(exists,)| exists).unwrap_or(false)
+    // None ⇒ row missing (drop+recreated)
+    matches!(result, Ok(Some(_)))
 }
 
 async fn run_until_extension_dropped_or_shutdown(

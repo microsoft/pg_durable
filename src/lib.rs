@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS df.vars (
 -- recreation even though the extension is always "present" in pg_extension.
 CREATE TABLE IF NOT EXISTS df._worker_epoch (
     epoch_id UUID PRIMARY KEY,
-    started_at TIMESTAMPTZ DEFAULT now()
+    started_at TIMESTAMPTZ DEFAULT now(),
+    last_seen_at TIMESTAMPTZ DEFAULT now()
 );
 "#,
     name = "create_tables",
