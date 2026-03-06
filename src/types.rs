@@ -98,8 +98,8 @@ pub async fn connect_as_user(
         .await
         .map_err(|e| {
             format!(
-                "Failed to connect as '{}' (for effective role '{}'). Error: {}",
-                login_role, effective_role, e
+                "Failed to connect to database '{}' as '{}' (for effective role '{}'). Error: {}",
+                db, login_role, effective_role, e
             )
         })?;
 
