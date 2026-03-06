@@ -19,6 +19,9 @@ pub struct ExecuteSqlInput {
     pub query: String,
     pub submitted_by: String,
     pub login_role: String,
+    /// Target database (None = extension database)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 /// Execute a SQL query as the submitting user and return results as JSON
@@ -31,12 +34,24 @@ pub async fn execute(
         serde_json::from_str(&input_json).map_err(|e| format!("Invalid execute_sql input: {e}"))?;
 
     ctx.trace_info(format!(
-        "Executing SQL as '{}' (connected as '{}'): {}",
-        input.submitted_by, input.login_role, input.query
+        "Executing SQL as '{}' (connected as '{}'){}: {}",
+        input.submitted_by,
+        input.login_role,
+        input
+            .database
+            .as_ref()
+            .map(|db| format!(" in database '{db}'"))
+            .unwrap_or_default(),
+        input.query
     ));
 
     // Create a single connection as login_role, SET ROLE to submitted_by
-    let mut conn = connect_as_user(&input.login_role, &input.submitted_by).await?;
+    let mut conn = connect_as_user(
+        &input.login_role,
+        &input.submitted_by,
+        input.database.as_deref(),
+    )
+    .await?;
 
     match sqlx::query(&input.query).fetch_all(&mut conn).await {
         Ok(rows) => {

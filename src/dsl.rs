@@ -475,8 +475,13 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 /// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
 /// Variables from df.vars are captured and passed to the orchestration.
+/// Optional database parameter targets a specific database on the cluster.
 #[pg_extern(schema = "df")]
-pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
+pub fn start(
+    fut: &str,
+    label: default!(Option<&str>, "NULL"),
+    database: default!(Option<&str>, "NULL"),
+) -> String {
     let durofut = match Durofut::ensure_strict(fut) {
         Ok(d) => d,
         Err(e) => pgrx::error!("Invalid durable function: {}", e),
@@ -487,6 +492,19 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         pgrx::error!("Invalid durable function graph: {}", e);
     }
     let instance_id = short_id();
+
+    // Validate that the target database exists (if specified)
+    if let Some(db) = database {
+        let exists: Option<bool> = Spi::get_one(&format!(
+            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = '{}')",
+            db.replace('\'', "''")
+        ))
+        .ok()
+        .flatten();
+        if exists != Some(true) {
+            pgrx::error!("database \"{}\" does not exist", db);
+        }
+    }
 
     // Capture user identity for privilege isolation
     let session_user_oid = unsafe { pgrx::pg_sys::GetSessionUserId() };
@@ -505,6 +523,7 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         instance_id: &str,
         outer_user_oid: u32,
         session_user_oid: u32,
+        database: Option<&str>,
     ) -> String {
         let node_id = short_id();
 
@@ -512,11 +531,11 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         let left_id = node
             .left_node
             .as_ref()
-            .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid));
+            .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid, database));
         let right_id = node
             .right_node
             .as_ref()
-            .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid));
+            .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid, database));
 
         // Process config JSON to recursively insert embedded nodes and get their IDs
         let query_escaped = match node.transform_config_children(|child| {
@@ -525,6 +544,7 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
                 instance_id,
                 outer_user_oid,
                 session_user_oid,
+                database,
             ))
         }) {
             Ok(Some(updated_query)) => {
@@ -550,10 +570,14 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
             .map(|id| format!("'{id}'"))
             .unwrap_or_else(|| "NULL".to_string());
 
+        let database_escaped = database
+            .map(|db| format!("'{}'", db.replace('\'', "''")))
+            .unwrap_or_else(|| "NULL".to_string());
+
         // Insert this node with the generated ID
         let insert_sql = format!(
-            "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role)
-             VALUES ('{}', '{}', '{}', {}, {}, {}, {}, {}::oid::regrole, {}::oid::regrole)",
+            "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
+             VALUES ('{}', '{}', '{}', {}, {}, {}, {}, {}::oid::regrole, {}::oid::regrole, {})",
             node_id,
             instance_id,
             node.node_type.replace('\'', "''"),
@@ -562,7 +586,8 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
             left_node_escaped,
             right_node_escaped,
             outer_user_oid,
-            session_user_oid
+            session_user_oid,
+            database_escaped
         );
 
         if let Err(e) = Spi::run(&insert_sql) {
@@ -573,16 +598,27 @@ pub fn start(fut: &str, label: default!(Option<&str>, "NULL")) -> String {
         node_id
     }
 
-    let root_node_id = insert_nodes(&durofut, &instance_id, outer_oid_u32, session_oid_u32);
+    let root_node_id = insert_nodes(
+        &durofut,
+        &instance_id,
+        outer_oid_u32,
+        session_oid_u32,
+        database,
+    );
+
+    let database_sql = database
+        .map(|db| format!("'{}'", db.replace('\'', "''")))
+        .unwrap_or_else(|| "NULL".to_string());
 
     // Create instance record with root node ID
     let create_instance_sql = format!(
-        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role) VALUES ('{}', {}, '{}', 'pending', {}::oid::regrole, {}::oid::regrole)",
+        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role, database) VALUES ('{}', {}, '{}', 'pending', {}::oid::regrole, {}::oid::regrole, {})",
         instance_id,
         label_sql,
         root_node_id,
         outer_oid_u32,
-        session_oid_u32
+        session_oid_u32,
+        database_sql
     );
 
     if let Err(e) = Spi::run(&create_instance_sql) {

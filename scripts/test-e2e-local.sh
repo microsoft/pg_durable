@@ -312,6 +312,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
         # 27 creates users and tests permissions
         # 28 drops/creates the extension
         # 29 uses dblink and creates pg_durable in a different database
+        # 34 creates/drops a database for multi-database testing
         PSQL_USER="$E2E_USER"
         if [[ "$test_name" == "00_requires_shared_preload" \
            || "$test_name" == "22_cross_connection" \
@@ -320,7 +321,8 @@ for run in $(seq 1 $REPEAT_COUNT); do
            || "$test_name" == 26_superuser_* \
            || "$test_name" == "27_user_isolation" \
            || "$test_name" == "28_bgw_lifecycle" \
-           || "$test_name" == "29_database_validation" ]]; then
+           || "$test_name" == "29_database_validation" \
+           || "$test_name" == "34_multi_database" ]]; then
             PSQL_USER="$PG_USER"
         fi
         

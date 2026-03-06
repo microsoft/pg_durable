@@ -77,13 +77,16 @@ pub fn target_database() -> String {
 pub async fn connect_as_user(
     login_role: &str,
     effective_role: &str,
+    database: Option<&str>,
 ) -> Result<sqlx::postgres::PgConnection, String> {
     use sqlx::postgres::PgConnectOptions;
     use sqlx::Connection;
 
+    let default_db = target_database();
+    let db = database.unwrap_or(&default_db);
     let mut options = PgConnectOptions::new()
         .username(login_role)
-        .database(&target_database())
+        .database(db)
         .port(get_port());
 
     let host = get_host();
@@ -344,6 +347,9 @@ pub struct FunctionNode {
     pub submitted_by: String,
     /// Authenticated role (session user) for connection authentication
     pub login_role: String,
+    /// Target database for SQL execution (None = extension database)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 /// Represents the entire function graph for an instance

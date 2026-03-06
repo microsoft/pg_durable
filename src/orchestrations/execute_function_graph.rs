@@ -269,6 +269,7 @@ async fn execute_sql_node(
         "query": final_query,
         "submitted_by": node.submitted_by,
         "login_role": node.login_role,
+        "database": node.database,
     });
 
     let result = ctx
