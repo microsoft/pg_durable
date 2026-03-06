@@ -369,6 +369,108 @@ pub struct FunctionInput {
     pub label: Option<String>,
     #[serde(default)]
     pub vars: std::collections::HashMap<String, String>,
+    /// Maximum retry attempts for SQL and HTTP activities.
+    /// Captured from `pg_durable.max_retries` GUC at `df.start()` time.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Loop iteration metrics carried across `continue_as_new` boundaries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_metrics: Option<LoopMetrics>,
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+/// Tracks loop iteration outcomes across `continue_as_new` boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopMetrics {
+    pub total_iterations: u64,
+    pub total_successes: u64,
+    pub total_failures: u64,
+    pub consecutive_failures: u64,
+    /// Ring buffer of the last 5 iteration outcomes (carried across continue_as_new).
+    pub recent_outcomes: Vec<IterationOutcome>,
+}
+
+/// Outcome of a single loop iteration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IterationOutcome {
+    pub iteration: u64,
+    pub succeeded: bool,
+    /// Truncated error message (max ~200 chars) if the iteration failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for LoopMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoopMetrics {
+    pub fn new() -> Self {
+        Self {
+            total_iterations: 0,
+            total_successes: 0,
+            total_failures: 0,
+            consecutive_failures: 0,
+            recent_outcomes: Vec::new(),
+        }
+    }
+
+    pub fn record_success(&mut self) {
+        self.total_iterations += 1;
+        self.total_successes += 1;
+        self.consecutive_failures = 0;
+        self.push_outcome(IterationOutcome {
+            iteration: self.total_iterations,
+            succeeded: true,
+            error: None,
+        });
+    }
+
+    pub fn record_failure(&mut self, error: &str) {
+        self.total_iterations += 1;
+        self.total_failures += 1;
+        self.consecutive_failures += 1;
+        let truncated_error = if error.len() > 200 {
+            format!("{}...", &error[..200])
+        } else {
+            error.to_string()
+        };
+        self.push_outcome(IterationOutcome {
+            iteration: self.total_iterations,
+            succeeded: false,
+            error: Some(truncated_error),
+        });
+    }
+
+    fn push_outcome(&mut self, outcome: IterationOutcome) {
+        self.recent_outcomes.push(outcome);
+        // Keep only the last 5
+        if self.recent_outcomes.len() > 5 {
+            self.recent_outcomes.remove(0);
+        }
+    }
+
+    /// Summary string for trace logging.
+    pub fn summary(&self) -> String {
+        let recent: Vec<&str> = self
+            .recent_outcomes
+            .iter()
+            .map(|o| if o.succeeded { "ok" } else { "FAIL" })
+            .collect();
+        format!(
+            "{} iterations, {} successes, {} failures (consecutive: {}). Recent: [{}]",
+            self.total_iterations,
+            self.total_successes,
+            self.total_failures,
+            self.consecutive_failures,
+            recent.join(", ")
+        )
+    }
 }
 
 /// Configuration for HTTP requests

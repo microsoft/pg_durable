@@ -22,9 +22,10 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 12. [Visualizing Functions](#visualizing-functions)
 13. [Monitoring](#monitoring)
 14. [User Isolation & Privileges](#user-isolation--privileges)
-15. [Troubleshooting](#troubleshooting)
-16. [Quick Reference Card](#quick-reference-card)
-17. [Appendix: Test Data Setup](#appendix-test-data-setup)
+15. [Configuration](#configuration)
+16. [Troubleshooting](#troubleshooting)
+17. [Quick Reference Card](#quick-reference-card)
+18. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -54,6 +55,8 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 | **Eternal Loops** | Create forever-running jobs with `@>` operator or `df.loop()` |
 | **Signals** | Wait for external events with `df.wait_for_signal()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
+| **Automatic Retries** | SQL and HTTP nodes are retried on transient failure (configurable) |
+| **Loop Resilience** | Failed loop iterations are absorbed; the loop continues |
 | **Labels** | Tag functions with friendly names |
 | **Visualization** | Preview function structure with `df.explain()` |
 | **Monitoring** | Query function status, history, and metrics |
@@ -955,6 +958,28 @@ SELECT df.start(
 
 `df.break(value)` exits the loop and returns the value as the loop's final result.
 
+### Loop Resilience
+
+Loops are designed as **long-running supervisors**. When a loop body fails (after exhausting its retry attempts), the loop absorbs the error and continues to the next iteration instead of failing the entire durable function. This is critical for heartbeat loops, polling jobs, and periodic sync tasks that encounter transient failures.
+
+**Key behaviors:**
+
+- A failed iteration is logged but does not propagate — the loop continues.
+- Iteration metrics (successes, failures, consecutive failures) are tracked across iterations.
+- If **10 consecutive iterations** fail, the loop terminates with an error. This protects against permanently broken queries (e.g., dropped table, revoked permissions).
+- The while-condition is always evaluated even after a failed body. If the condition itself fails, the loop terminates.
+
+```sql
+-- This loop will continue even if process_item() occasionally fails
+SELECT df.start(
+    df.loop(
+        'SELECT process_item()' ~> df.sleep(5),
+        'SELECT count(*) > 0 FROM task_queue'
+    ),
+    'resilient-processor'
+);
+```
+
 ### Stopping a Loop Externally
 
 ```sql
@@ -1530,6 +1555,45 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO username;
 ```
 
 **Note:** These grants will become more restrictive as the security model evolves.
+
+## Configuration
+
+pg_durable exposes the following PostgreSQL GUC (Grand Unified Configuration) settings:
+
+| Setting | Type | Default | Reload? | Description |
+|---------|------|---------|---------|-------------|
+| `pg_durable.worker_role` | string | `azuresu` | Restart | PostgreSQL role used by the background worker |
+| `pg_durable.database` | string | `postgres` | Restart | Database the background worker connects to |
+| `pg_durable.max_retries` | integer | `3` | Reload | Maximum retry attempts for SQL and HTTP activities |
+
+### Retry Configuration
+
+The `pg_durable.max_retries` setting controls how many times a failed SQL or HTTP activity is retried before the error propagates. The default is 3 (one initial attempt plus two retries, using exponential backoff starting at 100ms).
+
+```sql
+-- Check current setting
+SHOW pg_durable.max_retries;
+
+-- Disable retries (fail immediately)
+SET pg_durable.max_retries = 1;
+
+-- Increase retries for flaky environments
+ALTER SYSTEM SET pg_durable.max_retries = 5;
+SELECT pg_reload_conf();  -- apply without restart
+```
+
+The retry value is captured at `df.start()` time, so changing the GUC only affects newly started durable functions — already-running functions keep the retry count they were started with.
+
+**What is retried:**
+
+| Node type | Retried? | Notes |
+|-----------|----------|-------|
+| SQL (`df.sql()`) | Yes | Connection drops, transient DB errors |
+| HTTP (`df.http()`) | Yes | Network timeouts, server errors |
+| Sleep, Signal, Loop, If, Join, Race, Break | No | Control flow — not I/O activities |
+
+**Backoff strategy:** Exponential backoff with 100ms base, 2x multiplier, capped at 30s. This is not user-configurable.
+
 ## Troubleshooting
 
 ### Extension Exists But Workflows Don't Start
@@ -1747,6 +1811,10 @@ SELECT df.result('id');
 
 -- Cancel
 SELECT df.cancel('id', 'reason');
+
+-- Configuration
+SHOW pg_durable.max_retries;             -- check retry setting (default: 3)
+SET pg_durable.max_retries = 1;          -- disable retries for this session
 ```
 
 ---

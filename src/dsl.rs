@@ -647,6 +647,8 @@ pub fn start(
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
         vars,
+        max_retries: crate::MAX_RETRIES.get() as u32,
+        loop_metrics: None,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 

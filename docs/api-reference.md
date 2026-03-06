@@ -34,6 +34,8 @@ Creates a SQL execution node.
 df.sql('SELECT * FROM users WHERE id = 1')
 ```
 
+**Retries:** SQL nodes are automatically retried on transient failure, controlled by `pg_durable.max_retries` (default 3).
+
 ---
 
 ### df.seq(a, b) / `~>` operator
@@ -138,6 +140,8 @@ df.if('SELECT count(*) > 0 FROM q', 'SELECT ''yes''', 'SELECT ''no''')
 
 Repeats body (forever or while condition is true).
 
+Failed iterations are absorbed — the loop continues to the next iteration. If 10 consecutive iterations fail, the loop terminates.
+
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
 | `body` | TEXT | ✅ Auto-wrap | Node to repeat |
@@ -219,6 +223,8 @@ df.wait_for_signal('approval', 3600)   -- 1 hour timeout
 ### df.http(url [, method, body, headers, timeout])
 
 Makes an HTTP request.
+
+**Retries:** HTTP nodes are automatically retried on failure, controlled by `pg_durable.max_retries` (default 3).
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|

@@ -17,6 +17,8 @@ pub static WORKER_ROLE: GucSetting<Option<CString>> =
 pub static DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
 
+pub static MAX_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(3);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -60,6 +62,17 @@ pub extern "C-unwind" fn _PG_init() {
         c"",
         &DATABASE,
         GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.max_retries",
+        c"Maximum retry attempts for SQL and HTTP activities (default 3)",
+        c"Controls how many times a failed SQL or HTTP activity is retried before the error propagates. Set to 1 to disable retries.",
+        &MAX_RETRIES,
+        1,    // min
+        100,  // max
+        GucContext::Sighup,
         GucFlags::default(),
     );
 

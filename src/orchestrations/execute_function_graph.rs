@@ -4,16 +4,22 @@
 //! - No I/O except through activities
 //! - No random numbers, current time, or other non-deterministic sources
 //! - Same input must always produce the same scheduling decisions
+//!
+//! Note: `RetryPolicy` configuration is read from `FunctionInput.max_retries`,
+//! which is captured at `df.start()` time. This is deterministic because the
+//! value is fixed for the function's lifetime and stored in the orchestration
+//! input. Duroxide's `schedule_activity_with_retry` replays from history for
+//! already-completed activities, so the policy only affects new scheduling.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use duroxide::OrchestrationContext;
+use duroxide::{BackoffStrategy, OrchestrationContext, RetryPolicy};
 
 use crate::activities;
 use crate::types::{
     evaluate_condition, substitute_all, substitute_all_raw, FunctionGraph, FunctionInput,
-    FunctionNode, SystemVars,
+    FunctionNode, LoopMetrics, SystemVars,
 };
 
 /// Orchestration name for ExecuteFunctionGraph
@@ -27,7 +33,23 @@ pub const SUBTREE_NAME: &str = "pg_durable::orchestration::execute-subtree";
 struct ExecutionContext {
     vars: HashMap<String, String>,
     label: Option<String>,
+    /// Retry policy for SQL and HTTP activities, derived from `FunctionInput.max_retries`.
+    activity_retry_policy: RetryPolicy,
+    /// Loop metrics carried across `continue_as_new` boundaries.
+    loop_metrics: Option<LoopMetrics>,
 }
+
+/// Fixed retry policy for status updates (update-node-status, update-instance-status).
+/// These are best-effort and use a simple fixed backoff.
+fn status_update_retry_policy() -> RetryPolicy {
+    RetryPolicy::new(3).with_backoff(BackoffStrategy::Fixed {
+        delay: Duration::from_secs(1),
+    })
+}
+
+/// Maximum consecutive loop iteration failures before the loop is terminated.
+/// Protects against permanently broken queries spinning forever.
+const MAX_CONSECUTIVE_LOOP_FAILURES: u64 = 10;
 
 /// Execute a complete function graph
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
@@ -51,6 +73,8 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         ctx.trace_info(format!("Workflow vars: {keys:?}"));
     }
 
+    ctx.trace_info(format!("Retry policy: max_attempts={}", input.max_retries));
+
     let graph_json = ctx
         .schedule_activity(
             activities::load_function_graph::NAME,
@@ -69,10 +93,12 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
 
     let mut results: HashMap<String, String> = HashMap::new();
 
-    // Create execution context with vars
+    // Create execution context with vars and retry policy
     let exec_ctx = ExecutionContext {
         vars: input.vars.clone(),
         label: input.label.clone(),
+        activity_retry_policy: RetryPolicy::new(input.max_retries),
+        loop_metrics: input.loop_metrics.clone(),
     };
 
     let function_result =
@@ -87,9 +113,10 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
                 "status": "completed"
             });
             let _ = ctx
-                .schedule_activity(
+                .schedule_activity_with_retry(
                     activities::update_instance_status::NAME,
                     status_input.to_string(),
+                    status_update_retry_policy(),
                 )
                 .await;
         }
@@ -100,9 +127,10 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
                 "status": "failed"
             });
             let _ = ctx
-                .schedule_activity(
+                .schedule_activity_with_retry(
                     activities::update_instance_status::NAME,
                     status_input.to_string(),
+                    status_update_retry_policy(),
                 )
                 .await;
         }
@@ -140,6 +168,8 @@ pub async fn execute_subtree(
     let exec_ctx = ExecutionContext {
         vars: HashMap::new(),
         label: None,
+        activity_retry_policy: RetryPolicy::default(),
+        loop_metrics: None,
     };
 
     let result =
@@ -173,9 +203,10 @@ async fn execute_function_node_with_vars(
         "status": "running"
     });
     let _ = ctx
-        .schedule_activity(
+        .schedule_activity_with_retry(
             activities::update_node_status::NAME,
             running_input.to_string(),
+            status_update_retry_policy(),
         )
         .await;
 
@@ -190,9 +221,10 @@ async fn execute_function_node_with_vars(
                 "result": result
             });
             let _ = ctx
-                .schedule_activity(
+                .schedule_activity_with_retry(
                     activities::update_node_status::NAME,
                     completed_input.to_string(),
+                    status_update_retry_policy(),
                 )
                 .await;
         }
@@ -203,9 +235,10 @@ async fn execute_function_node_with_vars(
                 "result": err
             });
             let _ = ctx
-                .schedule_activity(
+                .schedule_activity_with_retry(
                     activities::update_node_status::NAME,
                     failed_input.to_string(),
+                    status_update_retry_policy(),
                 )
                 .await;
         }
@@ -273,7 +306,11 @@ async fn execute_sql_node(
     });
 
     let result = ctx
-        .schedule_activity(activities::execute_sql::NAME, input.to_string())
+        .schedule_activity_with_retry(
+            activities::execute_sql::NAME,
+            input.to_string(),
+            exec_ctx.activity_retry_policy.clone(),
+        )
         .await?;
 
     if let Some(name) = &node.result_name {
@@ -403,11 +440,68 @@ async fn execute_loop_node(
         .as_ref()
         .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
 
-    ctx.trace_info("Executing loop iteration");
+    // Retrieve or initialize loop metrics (carried through continue_as_new across iterations)
+    let mut metrics = exec_ctx
+        .loop_metrics
+        .clone()
+        .unwrap_or_default();
+
+    ctx.trace_info(format!(
+        "Executing loop iteration {}",
+        metrics.total_iterations + 1
+    ));
+
+    // Execute body and absorb errors (loop resilience)
     let body_result = Box::pin(execute_function_node_with_vars(
         ctx, graph, body_id, results, exec_ctx,
     ))
-    .await?;
+    .await;
+
+    let body_result = match body_result {
+        Ok(result) => {
+            metrics.record_success();
+            ctx.trace_info(format!(
+                "Loop iteration {}: completed",
+                metrics.total_iterations
+            ));
+            result
+        }
+        Err(err) => {
+            metrics.record_failure(&err);
+            ctx.trace_warn(format!(
+                "Loop iteration {}: failed (error: {})",
+                metrics.total_iterations, err
+            ));
+            ctx.trace_info(format!("Loop stats: {}", metrics.summary()));
+
+            // Check consecutive failure limit
+            if metrics.consecutive_failures >= MAX_CONSECUTIVE_LOOP_FAILURES {
+                return Err(format!(
+                    "Loop terminated: {} consecutive failures exceeded limit of {}. Last error: {}",
+                    metrics.consecutive_failures, MAX_CONSECUTIVE_LOOP_FAILURES, err
+                ));
+            }
+
+            // Continue to next iteration despite failure
+            let new_input = FunctionInput {
+                instance_id: graph.instance_id.clone(),
+                label: exec_ctx.label.clone(),
+                vars: exec_ctx.vars.clone(),
+                max_retries: exec_ctx.activity_retry_policy.max_attempts,
+                loop_metrics: Some(metrics),
+            };
+            ctx.trace_info("Continuing loop after failed iteration");
+            return ctx
+                .continue_as_new(
+                    serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()),
+                )
+                .await
+                .map(|_| "null".to_string())
+                .map_err(|e| format!("continue_as_new failed: {e:?}"));
+        }
+    };
+
+    ctx.trace_info(format!("Loop stats: {}", metrics.summary()));
 
     // Check for break signal from body
     if is_break_signal(&body_result) {
@@ -447,11 +541,13 @@ async fn execute_loop_node(
     }
 
     ctx.trace_info("Continuing as new for next loop iteration");
-    // Preserve vars in continue_as_new input
+    // Preserve vars and metrics in continue_as_new input
     let new_input = FunctionInput {
         instance_id: graph.instance_id.clone(),
         label: exec_ctx.label.clone(),
         vars: exec_ctx.vars.clone(),
+        max_retries: exec_ctx.activity_retry_policy.max_attempts,
+        loop_metrics: Some(metrics),
     };
 
     // duroxide 0.1.1: continue_as_new returns an awaitable future - return it directly
@@ -762,7 +858,11 @@ async fn execute_http_node(
     ctx.trace_info(format!("Executing HTTP {method} {url}"));
 
     let result = ctx
-        .schedule_activity(activities::execute_http::NAME, final_config)
+        .schedule_activity_with_retry(
+            activities::execute_http::NAME,
+            final_config,
+            exec_ctx.activity_retry_policy.clone(),
+        )
         .await?;
 
     // Store result if named
