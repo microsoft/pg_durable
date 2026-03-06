@@ -1339,9 +1339,8 @@ SELECT epoch_id, started_at, last_seen_at,
   FROM df._worker_epoch;
 ```
 
-- `time_since_last_heartbeat < 15 seconds` → worker is alive and healthy
-- Table empty or large `time_since_last_heartbeat` → worker is likely down
-- No rows → worker hasn't initialized (or extension was just created)
+- `time_since_last_heartbeat < 15 seconds` → worker is alive (recent heartbeat)
+- No rows in `df._worker_epoch` or large `time_since_last_heartbeat` → worker is likely down or hasn't initialized yet
 
 The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
 
