@@ -495,13 +495,15 @@ pub fn start(
 
     // Validate that the target database exists (if specified)
     if let Some(db) = database {
-        let exists: Option<bool> = Spi::get_one(&format!(
+        let exists: bool = match Spi::get_one(&format!(
             "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = '{}')",
             db.replace('\'', "''")
-        ))
-        .ok()
-        .flatten();
-        if exists != Some(true) {
+        )) {
+            Ok(Some(v)) => v,
+            Ok(None) => false,
+            Err(e) => pgrx::error!("failed to check database existence: {}", e),
+        };
+        if !exists {
             pgrx::error!("database \"{}\" does not exist", db);
         }
     }

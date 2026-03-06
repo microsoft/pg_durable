@@ -108,12 +108,12 @@ DROP TABLE _test_state;
 -- Test 2: Invalid database raises immediate error
 -- ============================================================================
 
+SET SESSION AUTHORIZATION df_e2e_user;
+
 DO $$
 DECLARE
     err_msg TEXT;
 BEGIN
-    SET SESSION AUTHORIZATION df_e2e_user;
-
     BEGIN
         PERFORM df.start(
             'SELECT 1',
@@ -126,8 +126,6 @@ BEGIN
         err_msg := SQLERRM;
     END;
 
-    RESET SESSION AUTHORIZATION;
-
     IF err_msg NOT ILIKE '%nonexistent_database_abc%' THEN
         RAISE EXCEPTION 'TEST FAILED [invalid db]: expected error about nonexistent_database_abc, got: %', err_msg;
     END IF;
@@ -137,6 +135,8 @@ BEGIN
 
     RAISE NOTICE 'PASSED: invalid database correctly rejected: %', err_msg;
 END $$;
+
+RESET SESSION AUTHORIZATION;
 
 -- ============================================================================
 -- Test 3: Regression - df.start() without database still works
