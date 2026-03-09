@@ -45,6 +45,15 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
         ));
     })?;
 
+    // --- IP-literal check (catches http://169.254.169.254 etc., where reqwest
+    //     skips DNS resolution and our resolver never runs) ---
+    crate::ssrf::validate_url_host(&config.url).inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP BLOCKED (ip) url={} submitted_by={audit_user} login_role={audit_login}",
+            config.url
+        ));
+    })?;
+
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
         "HTTP {} {} submitted_by={audit_user} login_role={audit_login}",
@@ -82,6 +91,18 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
 
     // Execute request
     let response = request.send().await.map_err(|e| {
+        let err_string = e.to_string();
+
+        // Detect SSRF IP-blocklist rejections from the resolver and emit
+        // a structured audit log (mirrors the scheme-block log above).
+        if err_string.contains("Blocked:") && err_string.contains("restricted") {
+            ctx.trace_info(format!(
+                "HTTP BLOCKED (ip) url={} submitted_by={audit_user} login_role={audit_login}",
+                config.url
+            ));
+            return err_string;
+        }
+
         // Try to extract status code from error if available
         let status_info = e
             .status()

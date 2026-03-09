@@ -76,6 +76,62 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
     }
 }
 
+/// When the URL host is an IP literal (e.g. `http://169.254.169.254/...` or
+/// `http://[::1]/...`), check it against the blocklist *before* reqwest sees the
+/// URL.  reqwest does NOT call the DNS resolver for IP literals, so the
+/// resolver-based check alone is insufficient.
+///
+/// Returns `Ok(())` if the host is a hostname (will be checked by the resolver)
+/// or a non-blocked IP.  Returns `Err` if the IP is in a blocked range.
+#[cfg(feature = "ssrf-protection")]
+pub fn validate_url_host(url: &str) -> Result<(), String> {
+    // Strip scheme
+    let after_scheme = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => return Ok(()),
+    };
+    // Strip path/query — isolate authority (host + optional port)
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip userinfo (user:pass@)
+    let host_port = match authority.rfind('@') {
+        Some(i) => &authority[i + 1..],
+        None => authority,
+    };
+    // Extract host, handling bracketed IPv6 like [::1]:8080
+    let host = if host_port.starts_with('[') {
+        // IPv6 literal in brackets
+        match host_port.find(']') {
+            Some(i) => &host_port[1..i],
+            None => return Ok(()), // malformed, let reqwest handle it
+        }
+    } else {
+        // IPv4 or hostname — strip port
+        match host_port.rfind(':') {
+            Some(i) => &host_port[..i],
+            None => host_port,
+        }
+    };
+
+    // Try to parse as IP address.  If it's a hostname, return Ok — the
+    // SsrfSafeResolver will check it after DNS resolution.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Some(_reason) = check_blocked_ip(ip) {
+            return Err(format!(
+                "Blocked: the resolved IP address for '{}' is in a restricted \
+                 range. df.http() cannot access private or internal network addresses.",
+                host
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// No-op when the feature is disabled.
+#[cfg(not(feature = "ssrf-protection"))]
+pub fn validate_url_host(_url: &str) -> Result<(), String> {
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // SSRF-safe DNS resolver — wraps the default resolver and filters out blocked IPs
 // ---------------------------------------------------------------------------
@@ -315,5 +371,39 @@ mod tests {
     fn blocks_empty_and_malformed() {
         assert!(validate_url_scheme("").is_err());
         assert!(validate_url_scheme("no-scheme").is_err());
+    }
+
+    // --- URL host (IP literal) validation ---
+
+    #[test]
+    fn host_blocks_ipv4_literals() {
+        assert!(validate_url_host("http://169.254.169.254/metadata").is_err());
+        assert!(validate_url_host("http://127.0.0.1:8080/path").is_err());
+        assert!(validate_url_host("https://10.0.0.1/admin").is_err());
+        assert!(validate_url_host("http://192.168.1.1").is_err());
+        assert!(validate_url_host("http://172.16.0.1:443/").is_err());
+    }
+
+    #[test]
+    fn host_blocks_ipv6_literals() {
+        assert!(validate_url_host("http://[::1]/path").is_err());
+        assert!(validate_url_host("http://[::1]:8080/path").is_err());
+        assert!(validate_url_host("http://[fe80::1]/path").is_err());
+        assert!(validate_url_host("http://[::ffff:169.254.169.254]/meta").is_err());
+        assert!(validate_url_host("http://[::ffff:127.0.0.1]:80/").is_err());
+    }
+
+    #[test]
+    fn host_allows_public_ips() {
+        assert!(validate_url_host("http://8.8.8.8/dns").is_ok());
+        assert!(validate_url_host("https://93.184.216.34/page").is_ok());
+        assert!(validate_url_host("http://[2001:4860:4860::8888]/dns").is_ok());
+    }
+
+    #[test]
+    fn host_allows_hostnames() {
+        // Hostnames are not checked here — the resolver handles them
+        assert!(validate_url_host("http://example.com/path").is_ok());
+        assert!(validate_url_host("https://internal.corp:8443/api").is_ok());
     }
 }

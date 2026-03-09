@@ -152,8 +152,11 @@ jobs:
             https://${{ secrets.GH_PAT }}@github.com/microsoft/duroxide-pg-opt.git
           ./scripts/verify-duroxide-migrations.sh
 
-      - name: Run clippy
+      - name: Run clippy (without ssrf-protection)
         run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
+
+      - name: Run clippy (with ssrf-protection)
+        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }},ssrf-protection -- -D warnings
 
       - name: Run unit tests
         run: cargo pgrx test pg${{ matrix.pg_version }}
