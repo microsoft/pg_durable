@@ -1,4 +1,7 @@
 //! ExecuteHTTP activity - makes HTTP requests
+//!
+//! SSRF protection: when the `ssrf-protection` feature is enabled (default),
+//! requests to private/reserved IP ranges are blocked.  See src/ssrf.rs.
 
 use duroxide::ActivityContext;
 use std::time::Duration;
@@ -8,19 +11,48 @@ use crate::types::HttpConfig;
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-http";
 
+/// Build a reqwest Client with optional SSRF-safe DNS resolver.
+fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder().timeout(timeout);
+
+    #[cfg(feature = "ssrf-protection")]
+    let builder = {
+        use crate::ssrf::{SsrfSafeResolver, SystemResolver};
+        use std::sync::Arc;
+        let resolver = SsrfSafeResolver::wrapping(Arc::new(SystemResolver));
+        builder.dns_resolver(Arc::new(resolver))
+    };
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))
+}
+
 /// Execute an HTTP request and return the response as JSON
 pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String, String> {
     let config: HttpConfig =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid HTTP config: {e}"))?;
 
-    let start = std::time::Instant::now();
-    ctx.trace_info(format!("HTTP {} {}", config.method, config.url));
+    // Audit context
+    let audit_user = config.submitted_by.as_deref().unwrap_or("unknown");
+    let audit_login = config.login_role.as_deref().unwrap_or("unknown");
 
-    // Build client with timeout
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.timeout_seconds))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+    // --- Scheme validation (always enforced, regardless of feature flag) ---
+    crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP BLOCKED (scheme) url={} submitted_by={audit_user} login_role={audit_login}",
+            config.url
+        ));
+    })?;
+
+    let start = std::time::Instant::now();
+    ctx.trace_info(format!(
+        "HTTP {} {} submitted_by={audit_user} login_role={audit_login}",
+        config.method, config.url
+    ));
+
+    // Build client with SSRF-safe resolver (when feature enabled) and timeout
+    let client = build_client(Duration::from_secs(config.timeout_seconds))?;
 
     // Build request based on method
     let mut request = match config.method.as_str() {

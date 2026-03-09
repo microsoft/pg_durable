@@ -756,6 +756,10 @@ async fn execute_http_node(
         config["headers"] = serde_json::Value::Object(new_headers);
     }
 
+    // Inject audit context from the function node
+    config["submitted_by"] = serde_json::Value::String(node.submitted_by.clone());
+    config["login_role"] = serde_json::Value::String(node.login_role.clone());
+
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");
     let method = config["method"].as_str().unwrap_or("POST");
