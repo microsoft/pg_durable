@@ -118,22 +118,26 @@ INSERT INTO _test_cross_cancel SELECT df.start(
     'cross-conn-cancel'
 );
 
--- Wait for at least one iteration
-SELECT pg_sleep(2);
-
--- Verify workflow is running
+-- Wait for at least one loop iteration to be committed (poll instead of fixed sleep)
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
     iteration_count INT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_cancel;
+    LOOP
+        SELECT COUNT(*) INTO iteration_count FROM cross_conn_log WHERE msg = 'loop_iteration';
+        EXIT WHEN iteration_count >= 1 OR attempts > 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
     SELECT s INTO status FROM df.status(inst_id) s;
-    SELECT COUNT(*) INTO iteration_count FROM cross_conn_log WHERE msg = 'loop_iteration';
     
     IF iteration_count < 1 THEN
-        RAISE EXCEPTION 'TEST FAILED: loop should have at least 1 iteration, got %', iteration_count;
+        RAISE EXCEPTION 'TEST FAILED: loop should have at least 1 iteration after 10s, got %', iteration_count;
     END IF;
     
     RAISE NOTICE 'Workflow % is running (status: %, iterations: %)', inst_id, status, iteration_count;
