@@ -1498,38 +1498,56 @@ HTTP requests (`df.http()`) currently execute with the **background worker's pri
 
 #### Cross-Instance Visibility
 
-Any user with `SELECT` access to `df.instances` can see **all instances**, including:
-- Who submitted them (`submitted_by` column)
-- Their labels and status
-- When they were created
+Row-level security (RLS) restricts each user to their own instances and nodes:
 
-**Future:** Row-level security (RLS) to restrict visibility to own instances is planned.
+- Users can only see instances they submitted (`submitted_by = current_user`)
+- `df.list_instances()`, `df.status()`, `df.result()` automatically filter to the caller's own data
+- `df.cancel()` and `df.signal()` check ownership before acting — attempts on other users' instances return "Instance not found or access denied"
+- Superusers bypass RLS and can see all instances (standard PostgreSQL behavior)
 
 ### Security Best Practices
 
-1. **Grant minimal permissions** - Only grant `df` schema access to users who need it
-2. **Review df.vars usage** - Avoid storing secrets in shared variables
-3. **Use labels carefully** - Labels are visible to all users; avoid including sensitive info
-4. **Monitor instances** - Use `df.list_instances()` to see who's running what
-5. **Clean up** - Cancel or delete old instances to reduce cross-user visibility
+1. **Worker role must be superuser** — The background worker role (`pg_durable.worker_role`) must be a superuser to bypass RLS and manage all instances
+2. **Review df.vars usage** — Variables are currently shared across all users; avoid storing secrets
+3. **Use labels carefully** — Instance labels are visible only to the submitting user (RLS-filtered) and superusers
+4. **Monitor instances** — Superusers can use `df.list_instances()` to see all users' instances; regular users see only their own
 
 ### Privilege Grants
 
-To allow a user to use pg_durable:
+`CREATE EXTENSION pg_durable` automatically grants permissions to `PUBLIC`. No manual grants are required for basic usage — any database role can use `df.*` functions immediately, and RLS ensures per-user isolation.
+
+The automatic grants are:
 
 ```sql
--- Minimum grants for basic usage
-GRANT USAGE ON SCHEMA df TO username;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO username;
-
--- Current implementation requires table access
--- (This will be tightened in future releases)
-GRANT SELECT, INSERT, UPDATE ON df.instances TO username;
-GRANT SELECT, INSERT, UPDATE ON df.nodes TO username;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO username;
+-- Granted automatically by CREATE EXTENSION:
+GRANT USAGE ON SCHEMA df TO PUBLIC;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
+GRANT SELECT, INSERT ON df.instances TO PUBLIC;
+GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
+GRANT SELECT, INSERT ON df.nodes TO PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
 ```
 
-**Note:** These grants will become more restrictive as the security model evolves.
+Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — identity columns (`submitted_by`, `login_role`) and structural columns are protected.
+
+> **Warning:** `df.vars` is currently a shared global table with no RLS — any database role can read or overwrite any other user's variables. Do not store secrets or security-sensitive configuration in `df.vars`. Per-user variable scoping (via RLS) is planned for a future release. In multi-tenant environments, consider revoking `df.vars` grants from `PUBLIC` and granting only to trusted roles.
+
+To restrict access to specific roles instead of all users:
+
+```sql
+-- Revoke the default PUBLIC grants
+REVOKE ALL ON SCHEMA df FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA df FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA df FROM PUBLIC;
+
+-- Grant to specific roles only
+GRANT USAGE ON SCHEMA df TO app_role;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO app_role;
+GRANT SELECT, INSERT ON df.instances TO app_role;
+GRANT UPDATE (status, updated_at) ON df.instances TO app_role;
+GRANT SELECT, INSERT ON df.nodes TO app_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
+```
 ## Troubleshooting
 
 ### Extension Exists But Workflows Don't Start

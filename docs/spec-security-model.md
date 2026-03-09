@@ -1,9 +1,9 @@
 # pg_durable Security Model Specification
 
-**Status**: Draft  
+**Status**: Implementation in progress  
 **Authors**: pg_durable Team  
 **Created**: 2025-12-25  
-**Last Updated**: 2026-03-09
+**Last Updated**: 2026-03-10
 
 ---
 
@@ -95,10 +95,10 @@ The security guarantee is: **only superusers can install the extension**, theref
 | Threat | Severity | Status | Notes |
 |--------|----------|--------|-------|
 | **T8**: SSRF via HTTP Activity | **CRITICAL** | Implemented | Dataplane protection — see [spec-ssrf-protection.md](spec-ssrf-protection.md) |
-| **T4**: Information Disclosure via df.* Tables | **HIGH** | Not implemented | RLS policies needed |
+| **T4**: Information Disclosure via df.* Tables | **HIGH** | Implemented | RLS on `df.instances` and `df.nodes` — see [rls.md](rls.md) |
 | **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
 | **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
-| **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Not implemented | Per-user `df.vars` scoping via RLS |
+| **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Partially implemented | Instance/node isolation via RLS; `df.vars` scoping deferred — see [rls.md](rls.md) |
 | **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
 | **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
 | **T0**: SECURITY DEFINER Misuse | **MEDIUM** | Documentation-only | Expected PG behavior |
@@ -177,21 +177,15 @@ SELECT df.start(
 
 #### T4: Information Disclosure via df.* Tables
 
-**Severity**: HIGH  |  **Status**: Not implemented
+**Severity**: HIGH  |  **Status**: Implemented
 
-**Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions. Without RLS, any user with SELECT access can see all workflows, infer execution patterns, and read metadata belonging to other users.
+**Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions.
 
-**Mitigation**: Row-Level Security (RLS) on `df.instances` and `df.nodes`:
-```sql
-ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
-CREATE POLICY user_isolation ON df.instances
-    USING (submitted_by = current_user::regrole);
+**Mitigation (implemented)**: RLS policies on `df.instances` and `df.nodes` enforce per-user visibility using `submitted_by = current_user::regrole`. Auto-grants provide SELECT+INSERT on both tables and column-level `UPDATE (status, updated_at)` on instances (no DELETE). Ownership checks in `df.cancel()` and `df.signal()` prevent cross-user operations via the duroxide client. Monitoring functions (`df.list_instances()`, `df.instance_info()`, etc.) also enforce ownership.
 
-ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
--- Nodes inherit visibility from their instance (see Section 7 for the full policy)
-```
+See [rls.md](rls.md) for the full design, policy definitions, grant strategy, and decisions.
 
-**Residual Risk**: Low - RLS is well-tested PostgreSQL feature.
+**Residual Risk**: Low — RLS is a well-tested PostgreSQL feature.
 
 ---
 
@@ -280,28 +274,13 @@ See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specificatio
 
 #### T10: Cross-User Variable Injection via df.vars
 
-**Severity**: MEDIUM-HIGH  |  **Status**: Not implemented
+**Severity**: MEDIUM-HIGH  |  **Status**: Partially implemented
 
-**Threat**: `df.vars` is a database table used to pass workflow variables into `df.start()`. In the current design, if `df.vars` is globally writable/readable, one user can:
+**Threat**: `df.vars` is a global key-value table. Without per-user scoping, users can override or read each other's variables, potentially redirecting workflows.
 
-- Override variables that another user expects (integrity issue)
-- Read variables set by other users (confidentiality issue)
+**Mitigation (partially implemented)**: Instance and node isolation is enforced via RLS on `df.instances` and `df.nodes` (see T4). Per-user `df.vars` scoping (adding an `owner` column + RLS) is deferred to a follow-up PR — see [rls.md, Decision 5](rls.md).
 
-This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution. An attacker could redirect another user's workflow to an attacker-controlled endpoint by overwriting a variable like `api_endpoint`.
-
-**Mitigation (recommended)**: Scope variables per-user using a table key and RLS:
-
-- Add an `owner regrole NOT NULL DEFAULT current_user::regrole` column
-- Make the primary key `(owner, name)` (or a unique constraint)
-- Enable RLS and restrict rows to `owner = current_user::regrole`
-- Make `df.start()` capture only the caller's variables
-
-**Mitigation (simplest / restrictive)**: Admin-only variables:
-
-- Revoke `EXECUTE` on `df.setvar/df.unsetvar/df.clearvars` from non-admin roles
-- Revoke direct table access to `df.vars` from PUBLIC
-
-**Residual Risk**: Low with per-user RLS; Medium if global vars remain.
+**Residual Risk**: Medium — `df.vars` remains globally shared until Phase 2.
 
 ---
 
@@ -355,16 +334,7 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 
 **Security requirement**: Variables MUST NOT be global, cross-user state.
 
-Two supported security postures:
-
-1. **Recommended (multi-tenant safe)**: Per-user scoping using `owner regrole` + RLS so users can only read/write their own variables.
-2. **Restricted (admin-only)**: Only admins can set variables. This is simpler but breaks end-user parameterization.
-
-**What breaks if df.vars is admin-only**:
-
-- Any workflow that relies on `df.setvar()` to pass runtime parameters (e.g. tenant id, date ranges, hostnames)
-- Any application pattern where non-admin roles initiate workflows with variable substitution (common for multi-tenant apps)
-- Self-service usage: developers/operators without elevated roles can no longer parameterize workflows without embedding values directly into node queries
+**Current status**: Per-user `df.vars` scoping is deferred to a follow-up PR. Instance and node isolation is enforced via RLS (see T4). See [rls.md, Decision 5](rls.md) for the deferred design.
 
 ---
 
@@ -622,68 +592,16 @@ SELECT df.start(
 
 ## 7. Data Isolation (RLS)
 
-### 7.1 Overview
+**Status**: Implemented
 
-Users should only see their own durable function instances. This uses PostgreSQL's native RLS.
+RLS on `df.instances` and `df.nodes` enforces per-user data isolation. The extension auto-grants appropriate permissions to PUBLIC (SELECT+INSERT on both tables, column-level UPDATE on instances, no DELETE). The background worker bypasses RLS as a superuser.
 
-### 7.2 RLS Configuration
-
-```sql
--- Enable RLS on user-facing tables
-ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
-ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
-
--- Users can only see their own instances
-CREATE POLICY instances_user_isolation ON df.instances
-    FOR ALL
-    USING (submitted_by = current_user::regrole)
-    WITH CHECK (submitted_by = current_user::regrole);
-
--- Nodes inherit visibility from their instance
-CREATE POLICY nodes_user_isolation ON df.nodes
-    FOR ALL
-    USING (
-        instance_id IN (
-            SELECT id FROM df.instances 
-            WHERE submitted_by = current_user::regrole
-        )
-    )
-    WITH CHECK (
-        instance_id IN (
-            SELECT id FROM df.instances 
-            WHERE submitted_by = current_user::regrole
-        )
-    );
-
--- duroxide role bypasses RLS (needs to see all instances to execute them)
-ALTER ROLE duroxide BYPASSRLS;
-```
-
-### 7.3 User Experience
-
-```sql
--- User A creates instances
-SET ROLE user_a;
-SELECT df.start(df.sql('SELECT 1'), 'user-a-job-1');
-SELECT df.start(df.sql('SELECT 2'), 'user-a-job-2');
-
--- User A sees only their instances
-SELECT * FROM df.instances;
--- Returns: 2 rows (user-a-job-1, user-a-job-2)
-
--- User B creates an instance
-SET ROLE user_b;
-SELECT df.start(df.sql('SELECT 3'), 'user-b-job-1');
-
--- User B sees only their instance
-SELECT * FROM df.instances;
--- Returns: 1 row (user-b-job-1)
-
--- User A still sees only their own
-SET ROLE user_a;
-SELECT * FROM df.instances;
--- Returns: 2 rows (unchanged)
-```
+See [rls.md](rls.md) for the full design including:
+- RLS policy definitions and rationale
+- Grant strategy (column-level UPDATE, no DELETE)
+- Ownership checks in `df.cancel()`, `df.signal()`, and monitoring functions
+- Worker bypass strategy
+- Deferred `df.vars` scoping (Phase 2)
 
 ---
 
@@ -706,25 +624,9 @@ SELECT * FROM df.instances;
 
 **Note on earlier draft**: An earlier version of this spec proposed `submitted_by OID` and a `security_context JSONB` column. The implemented design uses `REGROLE` (which stores OIDs but displays as role names) and tracks two separate columns (`submitted_by` + `login_role`) instead of a JSON blob. See [user-isolation.md](user-isolation.md) for the full rationale.
 
-#### df.vars Table Updates (per-user scoping)
+#### df.vars Table Updates (per-user scoping) — Deferred
 
-`df.vars` must be scoped per-user to prevent cross-user injection and disclosure.
-
-```sql
--- Proposed schema
-CREATE TABLE IF NOT EXISTS df.vars (
-    owner REGROLE NOT NULL DEFAULT current_user::regrole,
-    name  TEXT    NOT NULL,
-    value TEXT,
-    PRIMARY KEY (owner, name)
-);
-
-ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
-CREATE POLICY vars_owner_isolation ON df.vars
-    FOR ALL
-    USING (owner = current_user::regrole)
-    WITH CHECK (owner = current_user::regrole);
-```
+Per-user scoping of `df.vars` (adding an `owner` column + RLS) is deferred to a follow-up PR. See [rls.md, Decision 5](rls.md) for the design.
 
 #### df.secrets Table (admin-managed, workflow-usable)
 
@@ -998,11 +900,13 @@ ORDER BY submitted_at DESC;
 ### 9.2 Administrator Workflow
 
 ```sql
+-- Table grants are auto-applied by CREATE EXTENSION (with RLS enforced).
+-- Admins only need to grant function access:
+
 -- 1. Grant basic df access to a role
 GRANT EXECUTE ON FUNCTION df.start TO app_backend;
 GRANT EXECUTE ON FUNCTION df.sql TO app_backend;
 GRANT EXECUTE ON FUNCTION df.status TO app_backend;
-GRANT SELECT ON df.instances TO app_backend;
 
 -- 2. Optionally enable HTTP for specific roles
 GRANT EXECUTE ON FUNCTION df.http TO etl_service;
@@ -1025,7 +929,8 @@ GROUP BY submitted_by;
 | SQL permission denied | `ERROR: permission denied for table secret_data` (in df.status result) |
 | HTTP host not allowed | `ERROR: HTTP request blocked: host 'evil.com' not in allowed list` |
 | SSRF blocked | `ERROR: HTTP request blocked: resolves to internal IP 169.254.169.254` |
-| RLS violation | (silent - user simply doesn't see other users' rows) |
+| RLS filtered | (silent — user simply doesn't see other users' rows) |
+| Cross-user cancel/signal | `ERROR: Instance not found or access denied: <id>` |
 
 ---
 
@@ -1481,7 +1386,7 @@ SELECT 'TEST PASSED: E2E-SEC-05 Function Permission Requirement' AS result;
 | E2E-SEC-01 | Privilege Isolation | T1, T2 | User accesses only own tables |
 | E2E-SEC-02 | RESET ROLE Escape | T1 | RESET ROLE has no effect |
 | E2E-SEC-03 | SET ROLE Escalation | T2 | SET ROLE to non-member fails |
-| E2E-SEC-04 | RLS Isolation | T4 | Users see only own instances |
+| E2E-SEC-04 | RLS Isolation | T4 | Users see only own instances (see also `37_rls.sql`) |
 | E2E-SEC-05 | Function Permission | - | Users without EXECUTE cannot use df.* |
 | E2E-SEC-06 | Dynamic SQL Escape | T3 | EXECUTE 'RESET ROLE' fails |
 | E2E-SEC-07 | HTTP SSRF Blocked | T8 | Internal IP requests denied |
@@ -1884,7 +1789,7 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 - [ ] `login_role` and `submitted_by` are captured from `GetSessionUserId()` / `GetOuterUserId()` at `df.start()` time, not from user input
 - [ ] Role names are properly quoted in `SET ROLE` (double-quote with `"` → `""` escaping)
 - [ ] Access control uses PostgreSQL-native function permissions (EXECUTE on df.start/df.sql/df.http)
-- [ ] RLS policies use `current_user`, not user-supplied values
+- [x] RLS policies use `current_user`, not user-supplied values
 - [ ] Error messages don't leak other users' data
 - [ ] Logging includes effective user for audit trail
 - [ ] `SET df.in_workflow = 'true'` is set on user connections to prevent variable mutation during execution (future: could also guard against recursive `df.start()`)

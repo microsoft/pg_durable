@@ -26,12 +26,8 @@ END $setup$;
 CREATE ROLE iso_alice LOGIN;
 CREATE ROLE iso_bob   LOGIN;
 
--- Grant df permissions
-GRANT USAGE ON SCHEMA df TO iso_alice, iso_bob;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO iso_alice, iso_bob;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances, df.nodes TO iso_alice, iso_bob;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO iso_alice, iso_bob;
--- Alice and Bob need CREATE TEMP TABLE for their test state tables
+-- df schema, functions, and table DML are auto-granted to PUBLIC by CREATE EXTENSION.
+-- Only grant non-auto privileges needed by these tests.
 GRANT TEMPORARY ON DATABASE postgres TO iso_alice, iso_bob;
 
 -- Create per-user tables
@@ -180,10 +176,7 @@ INSERT INTO iso_analyst_data (value) VALUES ('analyst report') ON CONFLICT DO NO
 
 -- Grant iso_analysts to alice and grant df permissions to the group role
 GRANT iso_analysts TO iso_alice;
-GRANT USAGE ON SCHEMA df TO iso_analysts;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO iso_analysts;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances, df.nodes TO iso_analysts;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO iso_analysts;
+-- df schema, functions, and table DML are auto-granted to PUBLIC by CREATE EXTENSION.
 GRANT TEMPORARY ON DATABASE postgres TO iso_analysts;
 
 SET SESSION AUTHORIZATION iso_alice;
@@ -344,10 +337,7 @@ BEGIN
 END $test7_setup$;
 
 CREATE ROLE iso_ephemeral LOGIN;
-GRANT USAGE ON SCHEMA df TO iso_ephemeral;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO iso_ephemeral;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances, df.nodes TO iso_ephemeral;
-GRANT SELECT ON df.vars TO iso_ephemeral;
+-- df schema, functions, and table DML are auto-granted to PUBLIC by CREATE EXTENSION.
 GRANT TEMPORARY ON DATABASE postgres TO iso_ephemeral;
 
 -- Submit a sequence: df.sleep(3) followed by df.sql('SELECT 1')

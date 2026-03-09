@@ -151,6 +151,66 @@ CREATE TABLE IF NOT EXISTS df._worker_epoch (
 );
 
 // ============================================================================
+// Row-Level Security Policies & Grants
+// ============================================================================
+
+extension_sql!(
+    r#"
+-- Enable RLS on df.instances (no FORCE — superuser/table-owner bypasses RLS)
+ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY instances_user_isolation ON df.instances
+    FOR ALL
+    USING (submitted_by = current_user::regrole)
+    WITH CHECK (submitted_by = current_user::regrole);
+
+-- Enable RLS on df.nodes
+ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY nodes_user_isolation ON df.nodes
+    FOR ALL
+    USING (submitted_by = current_user::regrole)
+    WITH CHECK (submitted_by = current_user::regrole);
+
+-- Auto-grant permissions to PUBLIC (safe with RLS enabled)
+GRANT USAGE ON SCHEMA df TO PUBLIC;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
+-- Users need INSERT for df.start(), SELECT for df.status()/result()
+-- Column-level UPDATE on instances: only status + updated_at (for df.cancel())
+-- No UPDATE on identity columns (submitted_by, login_role) or structural columns (root_node)
+-- No DELETE — instance/node deletion should happen via admin API or TTL
+GRANT SELECT, INSERT ON df.instances TO PUBLIC;
+GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
+GRANT SELECT, INSERT ON df.nodes TO PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
+
+-- Validate that the worker role is a superuser.
+-- The background worker must bypass RLS to manage all users' instances/nodes.
+-- If the worker role is not a superuser, workflows will silently fail because
+-- RLS will filter out rows the worker needs to read/update.
+DO $$
+DECLARE
+    wrole TEXT;
+    is_super BOOLEAN;
+BEGIN
+    wrole := current_setting('pg_durable.worker_role', true);
+    IF wrole IS NULL OR wrole = '' THEN
+        wrole := 'azuresu';
+    END IF;
+
+    SELECT rolsuper INTO is_super FROM pg_roles WHERE rolname = wrole;
+    IF is_super IS NULL THEN
+        RAISE WARNING 'pg_durable: worker role "%" does not exist. The background worker will not be able to process workflows. Create the role as a superuser before using pg_durable.', wrole;
+    ELSIF NOT is_super THEN
+        RAISE WARNING 'pg_durable: worker role "%" is not a superuser. The background worker must be a superuser to bypass RLS and manage all users'' instances. Grant superuser or BYPASSRLS to this role.', wrole;
+    END IF;
+END $$;
+"#,
+    name = "rls_and_grants",
+    requires = ["create_tables"]
+);
+
+// ============================================================================
 // Extension Validation (must run before duroxide schema creation)
 // ============================================================================
 

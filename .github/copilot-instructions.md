@@ -35,13 +35,14 @@ cargo build                    # or: make build
 
 # Run E2E tests locally
 ./scripts/test-e2e-local.sh              # all tests
-./scripts/test-e2e-local.sh 04_parallel  # specific test
+./scripts/test-e2e-local.sh --verbose    # -v, shows test output, use with filtering
+./scripts/test-e2e-local.sh 04_parallel  # filter/specific test
 ./scripts/test-e2e-local.sh --keep       # keep server running for debugging
 
 # Connect to test database (after --keep)
 ~/.pgrx/17.*/pgrx-install/bin/psql -h localhost -p 28817 -d postgres
 
-# View background worker logs
+# View background worker logs, do this especially when debugging E2E tests
 tail -f ~/.pgrx/17.log
 
 # Stop test server

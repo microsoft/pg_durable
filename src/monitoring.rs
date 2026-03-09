@@ -29,21 +29,43 @@ pub fn list_instances(
         name!(output, Option<String>),
     ),
 > {
+    if limit_count < 1 {
+        pgrx::error!("limit_count must be at least 1");
+    }
+    let limit_count = limit_count.min(10000);
+
     let pg_conn_str = postgres_connection_string();
 
-    // Fetch labels from PostgreSQL
-    let labels: std::collections::HashMap<String, Option<String>> = Spi::connect(|client| {
-        let mut map = std::collections::HashMap::new();
-        if let Ok(table) = client.select("SELECT id, label FROM df.instances", None, &[]) {
+    // Query df.instances via SPI first — RLS filters to calling user's rows only.
+    // This gives us the user's own instance IDs and labels.
+    let user_instances: Vec<(String, Option<String>)> = Spi::connect(|client| {
+        let sql = if let Some(status) = status_filter {
+            format!(
+                "SELECT id, label FROM df.instances WHERE status = '{}' ORDER BY created_at DESC LIMIT {}",
+                status.replace('\'', "''"),
+                limit_count
+            )
+        } else {
+            format!(
+                "SELECT id, label FROM df.instances ORDER BY created_at DESC LIMIT {}",
+                limit_count
+            )
+        };
+        let mut instances = Vec::new();
+        if let Ok(table) = client.select(&sql, None, &[]) {
             for row in table {
                 if let Ok(Some(id)) = row.get::<String>(1) {
                     let label: Option<String> = row.get(2).ok().flatten();
-                    map.insert(id, label);
+                    instances.push((id, label));
                 }
             }
         }
-        map
+        instances
     });
+
+    if user_instances.is_empty() {
+        return TableIterator::new(vec![]);
+    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -63,27 +85,13 @@ pub fn list_instances(
 
         let client = Client::new(store);
 
-        let instance_ids = if let Some(status) = status_filter {
-            client
-                .list_instances_by_status(status)
-                .await
-                .unwrap_or_default()
-        } else {
-            client.list_all_instances().await.unwrap_or_default()
-        };
-
-        let limited: Vec<_> = instance_ids
-            .into_iter()
-            .take(limit_count as usize)
-            .collect();
-
         let mut rows = Vec::new();
-        for id in limited {
-            if let Ok(info) = client.get_instance_info(&id).await {
-                let label = labels.get(&info.instance_id).cloned().flatten();
+        // Only query duroxide for the user's own instance IDs
+        for (id, label) in &user_instances {
+            if let Ok(info) = client.get_instance_info(id).await {
                 rows.push((
                     info.instance_id,
-                    label,
+                    label.clone(),
                     info.orchestration_name,
                     info.status,
                     info.current_execution_id as i64,
@@ -116,12 +124,26 @@ pub fn instance_info(
     let pg_conn_str = postgres_connection_string();
     let instance_id_str = instance_id.to_string();
 
+    // Ownership check: SPI goes through RLS, returning NULL for non-owned instances.
     let label: Option<String> = Spi::get_one(&format!(
         "SELECT label FROM df.instances WHERE id = '{}'",
         instance_id.replace('\'', "''")
     ))
     .ok()
     .flatten();
+
+    // Check if the instance exists for this user (RLS-filtered)
+    let exists: bool = Spi::get_one(&format!(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
+        instance_id.replace('\'', "''")
+    ))
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+
+    if !exists {
+        return TableIterator::new(vec![]);
+    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -174,7 +196,20 @@ pub fn instance_executions(
     ),
 > {
     let pg_conn_str = postgres_connection_string();
-    let instance_id = instance_id.to_string();
+    let instance_id_owned = instance_id.to_string();
+
+    // Ownership check: SPI goes through RLS, so non-owned instances are invisible.
+    let exists: bool = Spi::get_one(&format!(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
+        instance_id.replace('\'', "''")
+    ))
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+
+    if !exists {
+        return TableIterator::new(vec![]);
+    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -194,7 +229,7 @@ pub fn instance_executions(
 
         let client = Client::new(store);
 
-        let execution_ids = match client.list_executions(&instance_id).await {
+        let execution_ids = match client.list_executions(&instance_id_owned).await {
             Ok(ids) => ids,
             Err(_) => return vec![],
         };
@@ -205,7 +240,7 @@ pub fn instance_executions(
 
         let mut rows = Vec::new();
         for exec_id in limited {
-            if let Ok(info) = client.get_execution_info(&instance_id, exec_id).await {
+            if let Ok(info) = client.get_execution_info(&instance_id_owned, exec_id).await {
                 let duration_ms = info
                     .completed_at
                     .map(|end| end.saturating_sub(info.started_at))
