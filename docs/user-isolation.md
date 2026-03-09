@@ -260,7 +260,10 @@ pub async fn connect_as_user(
             .map_err(|e| format!("SET ROLE {} failed: {}", effective_role, e))?;
     }
 
-    // Prevent recursive df.start() calls
+    // Mark this connection as running inside a workflow.
+    // Currently used to prevent variable mutations (setvar/unsetvar/clearvars)
+    // during execution. Could also be checked in df.start() to prevent
+    // recursive workflow invocation in a future improvement.
     sqlx::query("SET df.in_workflow = 'true'")
         .execute(&mut conn)
         .await
@@ -273,7 +276,7 @@ pub async fn connect_as_user(
 Key details:
 - **Single connection**: `PgConnection` is a single, non-pooled connection. Created when needed, dropped when done.
 - **`SET ROLE` skipped when roles match**: The common case (no `SET ROLE` was active) avoids the extra round-trip.
-- **`SET df.in_workflow = 'true'`**: Prevents recursive `df.start()` calls from within a durable function.
+- **`SET df.in_workflow = 'true'`**: Marks the connection as running inside a workflow. Currently prevents variable mutations (`setvar`/`unsetvar`/`clearvars`) during execution. Does not yet prevent recursive `df.start()` calls — that is a potential future improvement.
 - **Identifier quoting**: Role names are double-quoted with internal `"` escaped to `""`.
 
 #### Future: Connection reuse across nodes in the same instance

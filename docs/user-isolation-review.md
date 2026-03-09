@@ -269,7 +269,7 @@ The per-user connection approach is **correct and properly implemented**:
 3. **Isolation safety**
    - Each SQL node gets a fresh connection with correct user identity
    - No cross-contamination between different users' SQL nodes
-   - `df.in_workflow = true` set to prevent recursive df.start()
+   - `df.in_workflow = true` set to prevent variable mutations during execution (does not yet prevent recursive `df.start()` — potential future improvement)
 
 ### ⚠️ Performance Considerations
 

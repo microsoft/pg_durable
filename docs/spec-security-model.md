@@ -3,7 +3,7 @@
 **Status**: Draft  
 **Authors**: pg_durable Team  
 **Created**: 2025-12-25  
-**Last Updated**: 2025-12-25
+**Last Updated**: 2026-03-09
 
 ---
 
@@ -30,24 +30,28 @@ pg_durable executes user-submitted SQL durably via a background worker. This cre
 
 For a detailed architectural overview of how function graphs are built and executed, please refer to the [Architecture Guide](ARCHITECTURE.md).
 
-**Chosen approach**: Use PostgreSQL's `SetUserIdAndSecContext()` C API to switch execution context before running user SQL via SPI. This provides **kernel-level privilege isolation** that cannot be escaped via SQL commands like `RESET ROLE`.
+**Implemented approach**: The background worker opens a dedicated sqlx connection authenticated as the submitting user's `login_role` (session user), then issues `SET ROLE` to the `submitted_by` (outer/effective user). User SQL executes on this per-user connection, inheriting standard PostgreSQL RBAC. Identity is captured at `df.start()` time via `GetSessionUserId()` and `GetOuterUserId()` and stored in `df.instances` and `df.nodes`.
+
+See [User Isolation: Design & Implementation Guide](user-isolation.md) for the full design rationale, including why two user identities are tracked and how they map to PostgreSQL's user identity stack.
+
+**Alternative considered (SPI + `SetUserIdAndSecContext`)**: An earlier draft of this spec proposed executing user SQL in-process via SPI with C-level security context switching. This would provide slightly stronger escape prevention (immune to `RESET ROLE` at the SQL level) and avoid the `pg_hba.conf` trust-auth requirement. However, the sqlx connection approach was chosen for simplicity, compatibility with the async duroxide runtime, and because it provides equivalent privilege isolation in practice. SPI remains a potential future optimization — see [Section 8.8](#88-spi-as-a-potential-future-optimization) for analysis.
 
 ### Key Security Properties
 
 | Property | Guarantee |
 |----------|-----------|
-| Privilege Isolation | User SQL executes with submitting user's privileges only |
-| Escape Prevention | SQL cannot escalate privileges via `SET ROLE`/`RESET ROLE` |
-| Audit Trail | All executions logged with original user identity |
+| Privilege Isolation | User SQL executes on a connection authenticated as the submitting user |
+| Escape Prevention | `RESET ROLE` reverts to `login_role` (the user's own session identity) — no escalation possible |
+| Audit Trail | All executions logged with original user identity (`submitted_by` and `login_role`) |
 | Trusted Extension Model | Extension code is trusted; installed by superuser only |
 
 ### Security Boundary
 
-**Important**: The pg_durable extension code (running in the background worker) has **full impersonation capability** via `SetUserIdAndSecContext()`. This is not a "minimal privilege" model — it's a **trusted code** model:
+**Important**: The pg_durable background worker connects to PostgreSQL as arbitrary users via sqlx, relying on `pg_hba.conf` trust (or peer) authentication for local connections. This is a **trusted code + trusted network** model:
 
-- The extension can impersonate ANY PostgreSQL role
-- Security relies on the extension code being correct and trustworthy
-- The `duroxide` role's SQL-level grants are largely irrelevant; the C code has broader powers
+- The extension can connect as ANY local PostgreSQL role (given permissive `pg_hba.conf`)
+- Security relies on the extension code being correct and the `pg_hba.conf` configuration being appropriate
+- The worker's ambient role (e.g., `duroxide_worker`) is used only for control-plane operations (loading graphs, updating status); user SQL runs on separate per-user connections
 - This is similar to how `pg_cron` operates — trusted extension code with elevated capabilities
 
 The security guarantee is: **only superusers can install the extension**, therefore the extension code is trusted.
@@ -106,9 +110,9 @@ SELECT df.start(
 );
 ```
 
-**Mitigation**: `SetUserIdAndSecContext()` operates at C level; SQL `RESET ROLE` only affects session-level role, not the security context.
+**Mitigation (implemented)**: User SQL runs on a dedicated sqlx connection authenticated as `login_role` (the user's session identity). `RESET ROLE` on this connection resets the effective role back to `login_role` — which is still the user's own authenticated identity. The connection never has the background worker's elevated privileges, so there is nothing to escape to.
 
-**Residual Risk**: None - architecturally eliminated.
+**Residual Risk**: None — the connection is authenticated as the user, not the worker.
 
 ---
 
@@ -123,9 +127,9 @@ SELECT df.start(
 );
 ```
 
-**Mitigation**: `SET ROLE` requires membership. After `SetUserIdAndSecContext(user_a)`, the session appears as `user_a` to PostgreSQL's permission system. `SET ROLE postgres` fails unless `user_a` is a member of `postgres`.
+**Mitigation (implemented)**: The sqlx connection is authenticated as `login_role`, then `SET ROLE` switches to `submitted_by`. Any further `SET ROLE` by user SQL requires role membership, checked against `login_role`. `SET ROLE postgres` fails unless `login_role` is a member of `postgres`. This is standard PostgreSQL RBAC enforced at the connection level.
 
-**Residual Risk**: None - standard PostgreSQL RBAC applies.
+**Residual Risk**: None — standard PostgreSQL RBAC applies.
 
 ---
 
@@ -140,7 +144,7 @@ SELECT df.start(
 );
 ```
 
-**Mitigation**: Dynamic SQL still executes within the security context set by `SetUserIdAndSecContext()`. The context switch is at the C level, not parseable/escapable.
+**Mitigation (implemented)**: Dynamic SQL runs on the same sqlx connection, which is authenticated as the user's `login_role`. The connection's authenticated identity cannot be changed by any SQL command — `RESET ROLE` only reverts to `login_role` (the user's own identity), and `SET ROLE` requires membership.
 
 **Residual Risk**: None.
 
@@ -179,15 +183,16 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T6: Background Worker Code Vulnerability
 
-**Threat**: Bug in extension code allows attacker to control which user is impersonated.
+**Threat**: Bug in extension code allows attacker to control which user the worker connects as.
 
-**Attack Vector**: If `user_oid` passed to `SetUserIdAndSecContext()` is derived from user-controlled data (e.g., stored in `df.nodes` by user), attacker could forge it.
+**Attack Vector**: If `login_role` or `submitted_by` values used by `connect_as_user()` are derived from user-controlled data, an attacker could forge them to connect as a different user.
 
-**Mitigation**:
-- `security_ctx.user_oid` is captured via `GetUserId()` at `df.start()` time in the backend
-- Stored in `df.instances.submitted_by` — a column users cannot write to directly
-- Worker reads from trusted `df.instances` table, not from user-controlled `df.nodes`
-- Code review checklist: verify user_oid provenance in all paths
+**Mitigation (implemented)**:
+- `submitted_by` is captured via `GetOuterUserId()` at `df.start()` time in the user's backend process
+- `login_role` is captured via `GetSessionUserId()` at `df.start()` time
+- Both are stored as `REGROLE` in `df.instances` and propagated to `df.nodes` — users cannot write to these columns directly (they are set by the extension's Rust code via SPI during `df.start()`)
+- Worker reads role names from `df.nodes` when loading the function graph, and passes them to the `execute_sql` activity
+- Code review checklist: verify role name provenance in all paths
 
 **Residual Risk**: Medium — relies on correct implementation. Code review critical.
 
@@ -195,15 +200,13 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T7: Extension Code Trustworthiness
 
-**Threat**: Malicious or buggy extension code abuses impersonation capability.
+**Threat**: Malicious or buggy extension code abuses its ability to connect as any user.
 
-**Context**: This is not a "minimal privilege" system. The extension code can:
-- Call `SetUserIdAndSecContext(ANY_ROLE)`
-- Execute arbitrary SQL as any user
-- Access any data in the database
+**Context**: PG's extension architecture has a full trust model - extension code must be safe and correct. Any extension can call C functions, which is stronger than "connect as any user".
 
 **Mitigation**:
 - Extension requires superuser to install (`CREATE EXTENSION pg_durable`)
+- `pg_hba.conf` must be configured to allow the worker's local connections (trust or peer auth)
 - Code is open source and auditable
 - Standard trusted extension model (same as pg_cron, postgis, etc.)
 
@@ -308,7 +311,7 @@ pg_durable follows PostgreSQL's native security patterns wherever possible:
 
 | Activity | Permission Model | Additional Controls |
 |----------|-----------------|---------------------|
-| `df.sql()` | PostgreSQL RBAC via `SetUserIdAndSecContext()` | None needed — native |
+| `df.sql()` | PostgreSQL RBAC via per-user sqlx connection | None needed — native |
 | `df.http()` | `GRANT EXECUTE` on function | SSRF blocking, URL allowlist GUC |
 | `df.start()` | `GRANT EXECUTE` on function | RLS on `df.instances` |
 | Future activities | `GRANT EXECUTE` on function | Activity-specific GUCs |
@@ -370,29 +373,32 @@ pg_durable supports shared secrets for workflows.
 
 ### 5.1 Overview
 
-SQL execution is the core activity. It uses PostgreSQL's native permission system via `SetUserIdAndSecContext()`.
+SQL execution is the core activity. It uses PostgreSQL's native permission system via dedicated per-user sqlx connections.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  df.sql() Security Model                                        │
+│  df.sql() Security Model (Implemented)                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  User calls: df.start(df.sql('SELECT * FROM my_table'), ...)   │
 │                                                                 │
 │  1. df.start() captures:                                       │
-│     • GetUserId() → user_oid (C-level, unforgeable)           │
-│     • current_setting('search_path')                           │
-│     • Stored in df.instances.submitted_by                      │
+│     • GetOuterUserId() → submitted_by (effective role)         │
+│     • GetSessionUserId() → login_role (authenticated role)     │
+│     • Both stored as REGROLE in df.instances and df.nodes      │
 │                                                                 │
 │  2. Background worker executes:                                │
-│     • SetUserIdAndSecContext(user_oid) ← C-level switch       │
-│     • SPI::run(user_sql) ← runs with user's privileges        │
-│     • SetUserIdAndSecContext(original) ← restore              │
+│     • connect_as_user(login_role, submitted_by) via sqlx       │
+│       → Authenticates TCP connection as login_role             │
+│       → SET ROLE submitted_by (if different from login_role)   │
+│       → SET df.in_workflow = 'true' (guard variable mutations) │
+│     • sqlx::query(user_sql) ← runs with user's privileges     │
+│     • Connection dropped after execution                       │
 │                                                                 │
 │  3. PostgreSQL permission checks:                              │
-│     • All ACL checks use the switched user_oid                 │
-│     • RLS policies evaluate against switched user              │
-│     • Audit logs show the original user                        │
+│     • All ACL checks use the connection's effective role        │
+│     • RLS policies evaluate against the connected user         │
+│     • pg_stat_activity shows the user's identity               │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -419,10 +425,10 @@ SELECT df.start(df.sql('SELECT * FROM user_a.my_data'), 'steal-data');
 
 | Attack | Why It Fails |
 |--------|--------------|
-| `RESET ROLE` | Only affects session role, not `SetUserIdAndSecContext` |
-| `SET ROLE postgres` | Requires membership; checked against switched user |
-| `EXECUTE 'RESET ROLE'` | Dynamic SQL runs in same security context |
-| `SELECT my_escape_func()` | Function runs in same security context |
+| `RESET ROLE` | Reverts to `login_role` — still the user's own identity, not the worker's |
+| `SET ROLE postgres` | Requires membership in `postgres`; checked against `login_role` |
+| `EXECUTE 'RESET ROLE'` | Dynamic SQL runs on the same connection — same identity constraints |
+| `SELECT my_escape_func()` | Function runs on the same connection — same identity constraints |
 
 ### 5.4 Implementation
 
@@ -676,12 +682,17 @@ SELECT df.start(
     - `REVOKE ALL ON SCHEMA public FROM duroxide_worker;` (and avoid grants in other schemas)
     - Future tables: ensure default privileges in those schemas keep the role scoped to df.* and duroxide.
 
-- **Privilege boundary vs execute_sql**: The `execute_sql` activity uses SPI with `SetUserIdAndSecContext` to *impersonate the submitting user* for the SQL node. That path necessarily bypasses the worker’s ambient role restrictions. All other worker SQL (loading graphs, updating status) should execute as the low-privilege `duroxide_worker` role.
+- **Privilege boundary vs execute_sql (implemented)**: The `execute_sql` activity opens a **separate sqlx connection** authenticated as the submitting user's `login_role`, then issues `SET ROLE` to `submitted_by`. This connection is completely independent of the worker's control-plane connection. All other worker SQL (loading graphs, updating status) runs on the worker's own pooled connection as the low-privilege `duroxide_worker` role.
+
+- **pg_hba.conf requirement for per-user connections**: The `execute_sql` activity connects as arbitrary users via TCP. This requires `pg_hba.conf` to allow trust (or peer) auth for local connections. In development with pgrx (TCP), the typical configuration is:
+    ```
+    host    all   all   127.0.0.1/32   trust
+    ```
 
 - **Safety notes**:
-    - Must connect via a socket path (not `127.0.0.1`) for `peer` to apply.
-    - This model still assumes trusted extension code; the bgworker can impersonate users inside `execute_sql`, but only that activity should do so.
-    - If sockets/`peer` are unavailable (managed services), fall back to client cert or AAD/Managed Identity as a “passwordless” token, while keeping the DB role scoped to df.* + duroxide.
+    - For control-plane connections, prefer socket path (not `127.0.0.1`) for `peer` to apply.
+    - This model still assumes trusted extension code; the worker can connect as any user for `execute_sql`, but only that activity should do so.
+    - If sockets/`peer` are unavailable (managed services), fall back to client cert or AAD/Managed Identity as a "passwordless" token, while keeping the DB role scoped to df.* + duroxide.
 
 ---
 
@@ -759,17 +770,17 @@ SELECT * FROM df.instances;
 #### df.instances Table Updates
 
 ```sql
-ALTER TABLE df.instances ADD COLUMN IF NOT EXISTS
-    submitted_by OID NOT NULL DEFAULT current_user::regrole;
+-- df.instances (implemented)
+-- submitted_by and login_role are created as part of the table definition in src/lib.rs
+-- submitted_by: REGROLE NOT NULL — effective role (outer user) when df.start() was called
+-- login_role:   REGROLE NOT NULL — authenticated role (session user) when df.start() was called
 
-ALTER TABLE df.instances ADD COLUMN IF NOT EXISTS
-    security_context JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- df.nodes (implemented)
+-- submitted_by: REGROLE — nullable, set when node is linked to an instance by df.start()
+-- login_role:   REGROLE — nullable, set when node is linked to an instance by df.start()
+```
 
-COMMENT ON COLUMN df.instances.submitted_by IS 
-    'OID of the role that called df.start()';
-
-COMMENT ON COLUMN df.instances.security_context IS 
-    'Captured session state: search_path, role settings, etc.';
+**Note on earlier draft**: An earlier version of this spec proposed `submitted_by OID` and a `security_context JSONB` column. The implemented design uses `REGROLE` (which stores OIDs but displays as role names) and tracks two separate columns (`submitted_by` + `login_role`) instead of a JSON blob. See [user-isolation.md](user-isolation.md) for the full rationale.
 
 #### df.vars Table Updates (per-user scoping)
 
@@ -827,7 +838,7 @@ Additional requirements:
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA df FROM PUBLIC;
 
 -- df.sql() - available to anyone who can use df.start()
--- (actual SQL permission checked via SetUserIdAndSecContext)
+-- (actual SQL permission checked via per-user sqlx connection)
 
 -- df.http() - disabled by default, DBA enables per-role  
 REVOKE EXECUTE ON FUNCTION df.http FROM PUBLIC;
@@ -878,227 +889,160 @@ GucRegistry::define_int_guc(
 );
 ```
 
-### 8.4 Security Context Capture
+### 8.4 Identity Capture (Implemented)
+
+Identity is captured at `df.start()` time in the user's backend process. DSL functions (`df.sql()`, `df.seq()`, etc.) do **not** capture identity — nodes are created without `submitted_by` or `login_role`, which remain NULL until linked to an instance.
 
 ```rust
-// src/dsl.rs
+// src/dsl.rs — inside df.start()
 
-use pgrx::prelude::*;
-use pgrx::pg_sys;
-use pgrx::{IntoDatum, PgBuiltInOids};
-use serde::{Deserialize, Serialize};
+// Capture both user identities directly from PostgreSQL (no SPI needed)
+let session_user_oid = unsafe { pgrx::pg_sys::GetSessionUserId() };  // login_role
+let outer_user_oid = unsafe { pgrx::pg_sys::GetOuterUserId() };      // submitted_by
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityContext {
-    pub user_oid: u32,
-    pub user_name: String,
-    pub search_path: String,
-    pub is_superuser: bool,
-}
-
-impl SecurityContext {
-    /// Capture the current session's security context
-    /// Called at df.start() time in the user's backend process
-    /// Note: Inside SECURITY DEFINER, this captures the definer's identity (expected PostgreSQL behavior).
-    pub fn capture() -> Self {
-        // Get user OID directly from PostgreSQL (unforgeable)
-        let user_oid = unsafe { pg_sys::GetUserId() };
-        
-        let user_name = Spi::get_one::<String>("SELECT current_user")
-            .expect("Failed to get current_user")
-            .expect("current_user is NULL");
-        
-        let search_path = Spi::get_one::<String>("SELECT current_setting('search_path')")
-            .expect("Failed to get search_path")
-            .expect("search_path is NULL");
-        
-        let is_superuser = unsafe { pg_sys::superuser() };
-        
-        SecurityContext {
-            user_oid,
-            user_name,
-            search_path,
-            is_superuser,
-        }
-    }
-}
+// Both OIDs are stored as REGROLE in the instance and node rows:
+//   INSERT INTO df.instances (..., submitted_by, login_role)
+//   VALUES (..., {outer_user_oid}::oid::regrole, {session_user_oid}::oid::regrole)
 ```
 
-### 8.5 Secure SQL Execution
+**Why `GetOuterUserId()` instead of `GetUserId()`**: Inside a `SECURITY DEFINER` function, `GetUserId()` returns the definer's identity. `GetOuterUserId()` returns the caller's identity — which is what we want for privilege isolation. See [user-isolation.md](user-isolation.md) for the full rationale.
+
+### 8.5 Secure SQL Execution (Implemented)
+
+User SQL is executed on a **dedicated sqlx connection** authenticated as the submitting user, not via SPI:
+
+```rust
+// src/types.rs — connect_as_user()
+
+pub async fn connect_as_user(
+    login_role: &str,
+    effective_role: &str,
+    database: Option<&str>,
+) -> Result<sqlx::postgres::PgConnection, String> {
+    let mut options = PgConnectOptions::new()
+        .username(login_role)       // Authenticate as login_role
+        .database(db)
+        .port(get_port());
+
+    let mut conn = PgConnection::connect_with(&options).await?;
+
+    // Switch to effective role if different from login role
+    if login_role != effective_role {
+        sqlx::query(&format!("SET ROLE \"{}\"", effective_role.replace('"', "\"\"")))
+            .execute(&mut conn)
+            .await?;
+    }
+
+    // Mark connection as running inside a workflow (prevents variable mutations)
+    sqlx::query("SET df.in_workflow = 'true'")
+        .execute(&mut conn)
+        .await?;
+
+    Ok(conn)
+}
+```
 
 ```rust
 // src/activities/execute_sql.rs
 
-use pgrx::prelude::*;
-use pgrx::pg_sys;
-
-/// Execute SQL within a specific user's security context
-/// 
-/// # Safety
-/// Uses unsafe PostgreSQL C APIs for security context switching.
-/// Context is always restored via RAII guard, even on error/panic.
-#[pg_guard]
-fn execute_sql_with_security_context(
-    security_ctx: SecurityContext,
-    query: String,
-) -> Result<String, String> {
-    // Save current context
-    let saved_context = unsafe {
-        let mut userid: pg_sys::Oid = 0;
-        let mut sec_context: i32 = 0;
-        pg_sys::GetUserIdAndSecContext(&mut userid, &mut sec_context);
-        (userid, sec_context)
-    };
-
-    // RAII guard ensures context is always restored
-    struct ContextGuard(pg_sys::Oid, i32);
-    impl Drop for ContextGuard {
-        fn drop(&mut self) {
-            unsafe { pg_sys::SetUserIdAndSecContext(self.0, self.1); }
-        }
-    }
-    let _guard = ContextGuard(saved_context.0, saved_context.1);
-
-    // Switch to submitting user's context
-    unsafe {
-        pg_sys::SetUserIdAndSecContext(
-            security_ctx.user_oid,
-            saved_context.1 | pg_sys::SECURITY_LOCAL_USERID_CHANGE as i32,
-        );
-    }
-
-    // Execute SQL via SPI - runs with user's privileges
-    // MUST run in a subtransaction to catch errors without aborting the worker
-    Spi::connect(|mut client| {
-        // Set search_path to match user's session safely (no string interpolation)
-        client.update(
-            "SELECT set_config('search_path', $1, true)",
-            None,
-            Some(vec![(PgBuiltInOids::TEXTOID.oid(), security_ctx.search_path.into_datum())])
-        ).map_err(|e| format!("Failed to set search_path: {}", e))?;
-
-        // Execute user's query
-        // Note: In real implementation, wrap this in a subtransaction (SAVEPOINT)
-        // so that SQL errors (e.g. div by zero) return Err instead of aborting.
-        let results = client.select(&query, None, None)
-            .map_err(|e| format!("SQL execution failed: {}", e))?;
-
-        // ... convert results to JSON ...
-        Ok(/* result JSON */)
-    })
-    // _guard dropped here → context restored
+#[derive(Serialize, Deserialize)]
+struct ExecuteSqlInput {
+    pub query: String,
+    pub submitted_by: String,       // Effective role name
+    pub login_role: String,         // Auth role name
+    pub database: Option<String>,   // Target database
 }
-```
-
-### 8.6 SPI Safety Constraints
-
-**Background Worker Threading Model**: The pg_durable background worker runs a **single-threaded tokio runtime** (`tokio::runtime::Builder::new_current_thread()`). The duroxide orchestrations and activities execute as async tasks on this runtime.
-
-**SPI Requirements**:
-1. **SPI initialization**: Worker must call `BackgroundWorker::connect_worker_to_spi(dbname, username)` once during startup
-5. **Subtransaction Isolation**: User SQL must run in a subtransaction (SAVEPOINT) so that SQL errors do not abort the worker's main transaction.
-
-**Note on Concurrency**: Due to the single-threaded nature of the Postgres backend and the global SPI lock, long-running SQL queries will block all other activities on the worker (Head-of-Line Blocking). Future versions will introduce a GUC to control the number of concurrent background workers to mitigate this.
-2. **Thread affinity**: All SPI calls must execute on the Postgres backend thread (the worker's main thread)
-3. **No concurrent SPI**: Only one SPI operation at a time per worker
-4. **No async yields during SPI**: Once entered, SPI operations must complete synchronously without `.await`
-
-**Implementation Strategy**:
-
-```rust
-// src/worker.rs - Worker initialization
-#[pg_guard]
-#[no_mangle]
-pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
-    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-    
-    // Connect to database for SPI access
-    // This establishes the "Execution Plane" connection (internal)
-    BackgroundWorker::connect_worker_to_spi(
-        Some("postgres"),  // or from GUC
-        Some("duroxide"),   // worker role (does NOT need to be superuser)
-    );
-    
-    // Initialize tokio current-thread runtime
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime");
-    
-    rt.block_on(async {
-        // The runtime establishes the "Control Plane" connection via sqlx
-        // This connection is separate from the SPI connection above
-    rt.block_on(async {
-        // The runtime establishes the "Control Plane" connection via sqlx
-        // This connection is separate from the SPI connection above
-        run_duroxide_runtime().await;
-    });
-}
-```
-
-```rust
-// src/activities/execute_sql.rs - SPI execution with safety
-use std::sync::Mutex;
-use once_cell::sync::Lazy;
-
-// Global lock to prevent concurrent SPI access
-static SPI_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub async fn execute(
     ctx: ActivityContext,
-    instance_id: String,
-    query: String,
+    _pool: Arc<PgPool>,             // shared pool — not used for user SQL
+    input_json: String,
 ) -> Result<String, String> {
-    // Activity runs on tokio current-thread runtime, so we're on the backend thread
-    // But we need to prevent concurrent activities from entering SPI simultaneously
-    
-    let _lock = SPI_LOCK.lock().unwrap();
-    
-    // 1. Load security context from df.instances (submitted_by)
-    let security_ctx = load_security_context(&instance_id)?;
-    
-    // 2. Execute SQL with security context (no .await inside SPI!)
-    let result = execute_sql_with_security_context(security_ctx, query)?;
-    
-    // _lock dropped here
-    Ok(result)
-}
+    let input: ExecuteSqlInput = serde_json::from_str(&input_json)?;
 
-fn load_security_context(instance_id: &str) -> Result<SecurityContext, String> {
-    // SPI call to fetch submitted_by from df.instances
-    Spi::connect(|client| {
-        let row = client.select(
-            "SELECT submitted_by, security_context FROM df.instances WHERE id = $1",
-            None,
-            Some(vec![(PgBuiltInOids::TEXTOID.oid(), instance_id.into_datum())]),
-        ).first();
-        
-        // ... parse and return SecurityContext
-    })
+    // Open a per-user connection (NOT the worker's shared pool)
+    let mut conn = connect_as_user(
+        &input.login_role,
+        &input.submitted_by,
+        input.database.as_deref(),
+    ).await?;
+
+    // Execute user SQL on the per-user connection
+    let result = sqlx::query(&input.query)
+        .fetch_all(&mut conn)
+        .await?;
+
+    // conn is dropped here — connection closed
+    Ok(/* serialized result */)
 }
 ```
 
-**Key Safety Properties**:
-- ✅ Single-threaded runtime → all activities execute on backend thread
-- ✅ SPI lock → prevents concurrent SPI access
-- ✅ No `.await` in SPI code → no yielding/context switching during SQL execution
-- ✅ RAII guards → security context always restored even on panic
+**Key properties of the implemented approach**:
+- User SQL runs on a connection authenticated as the user — never on the worker's shared pool
+- `RESET ROLE` reverts to `login_role` (the user's own identity) — no escalation possible
+- Each SQL node gets a fresh connection (future optimization: per-instance connection caching)
+- `SET df.in_workflow = 'true'` prevents variable mutations (`setvar`/`unsetvar`/`clearvars`) during workflow execution. Note: it does not currently prevent recursive `df.start()` calls — that is a potential future improvement
 
-**What Would Break Safety**:
-- ❌ Using `tokio::runtime::Builder::new_multi_thread()` → activities could run on different threads
-- ❌ Calling `.await` inside `Spi::connect()` → could yield to another task that also tries SPI
-- ❌ Using `spawn_blocking()` for SPI → moves to thread pool, not the backend thread
+### 8.6 Orchestration Wiring (Implemented)
 
----
+The orchestration packages the query and both identities together before scheduling the activity:
+
+```rust
+// src/orchestrations/execute_function_graph.rs
+
+let input = serde_json::json!({
+    "query": final_query,
+    "submitted_by": node.submitted_by,
+    "login_role": node.login_role,
+    "database": node.database,
+});
+
+let result = ctx
+    .schedule_activity(activities::execute_sql::NAME, input.to_string())
+    .into_activity()
+    .await?;
+```
+
+Both values come from the `FunctionNode` loaded via the `load_function_graph` activity. They are stable across replays (safe for determinism).
 
 ### 8.7 Fault Injection Hooks (Test-Only)
 
 To validate crash/panic behavior and restart semantics, pg_durable should include a **test-only fault injection mechanism** that can deterministically trigger failures inside `execute_sql`.
 
 **Mechanism (proposed)**:
-- A superuser-only GUC such as `df.test_fault_inject = 'none'|'execute_sql_error'|'execute_sql_panic_before'|'execute_sql_panic_after_switch'|'execute_sql_panic_after_spi'`.
+- A superuser-only GUC such as `df.test_fault_inject = 'none'|'execute_sql_error'|'execute_sql_panic_before'|'execute_sql_panic_after_connect'`.
 - The worker checks this setting at runtime and triggers the configured fault.
 - This GUC MUST NOT be enabled by default and should be documented as test-only.
+
+### 8.8 SPI as a Potential Future Optimization
+
+The current implementation executes user SQL via external sqlx connections. An alternative approach — executing via SPI with `SetUserIdAndSecContext()` — was considered during design and remains a potential future optimization.
+
+#### What SPI + SetUserIdAndSecContext would provide
+
+| Benefit | Description |
+|---------|-------------|
+| **Stronger escape prevention** | `SetUserIdAndSecContext()` operates at the C level. SQL commands like `RESET ROLE` only affect the session-level role, not the C-level security context. With the sqlx approach, `RESET ROLE` reverts to `login_role` — which is still the user's identity (no escalation), but the effective role does change. |
+| **No pg_hba.conf dependency** | SPI runs in-process; no TCP connection is needed for user SQL. The current approach requires `pg_hba.conf` trust auth so the worker process can connect as arbitrary users. |
+| **Lower connection overhead** | SPI avoids TCP connection setup/teardown per SQL node. This could matter for workflows with many SQL nodes. |
+| **Atomic with worker transaction** | SPI shares the worker's transaction context, which could simplify certain consistency scenarios. |
+
+#### Why the sqlx approach was chosen
+
+| Reason | Description |
+|--------|-------------|
+| **Async compatibility** | SPI is synchronous and has thread-affinity requirements. The duroxide runtime is async (tokio). Mixing SPI into an async context requires careful locking and prevents concurrent SQL execution across different instances. The sqlx approach naturally composes with async. |
+| **Concurrency** | With SPI, only one SQL query can execute at a time per background worker (global SPI lock + single backend thread). With sqlx, multiple SQL nodes from different instances could execute concurrently on separate connections. |
+| **Simplicity** | The sqlx approach uses standard PostgreSQL client semantics. SPI + SetUserIdAndSecContext requires unsafe C code, RAII guards, subtransaction management, and careful interaction with the duroxide runtime. |
+| **Equivalent security** | Both approaches provide privilege isolation. The sqlx connection is authenticated as the user — `RESET ROLE` only reverts to the user's own `login_role`, not the worker's identity. There is no privilege escalation path. |
+
+#### When to reconsider SPI
+
+SPI would be worth revisiting if:
+- Connection overhead becomes a bottleneck (many SQL nodes per workflow)
+- The `pg_hba.conf` trust requirement is unacceptable in a deployment environment
+- A need arises for tighter integration with the worker's transaction (e.g., savepoint-based partial rollback)
+- The C-level escape prevention of `SetUserIdAndSecContext` is required for compliance
 
 ---
 
@@ -1191,9 +1135,9 @@ fn test_security_context_capture() {
 
 #### UT2: Context Switch and Restore
 
-**Note**: This unit test validates PostgreSQL's security context APIs (`GetUserIdAndSecContext` / `SetUserIdAndSecContext`) and the general ability to switch/restores identities inside a backend. It does not, by itself, prove that pg_durable's worker executes user SQL under the captured `submitted_by` identity.
+**Note**: This unit test validates PostgreSQL's security context APIs (`GetUserIdAndSecContext` / `SetUserIdAndSecContext`) and the general ability to switch/restore identities inside a backend. These APIs are **not currently used** by pg_durable's implemented execution path (which uses sqlx connections instead), but this test documents the API's behavior for potential future SPI-based execution (see [Section 8.8](#88-spi-as-a-potential-future-optimization)).
 
-The pg_durable-specific verification is covered by the E2E tests (E2E-SEC-01..03) which assert privilege isolation against real tables.
+The pg_durable-specific verification of privilege isolation is covered by the E2E tests (E2E-SEC-01..03) which assert privilege isolation against real tables via the implemented sqlx connection approach.
 
 ```rust
 #[pg_test]
@@ -1395,7 +1339,8 @@ BEGIN
     END LOOP;
     
     -- The key assertion: even with RESET ROLE, the query should FAIL
-    -- because SetUserIdAndSecContext is immune to SQL-level role changes
+    -- because the connection is authenticated as sec_test_escape_user,
+    -- and RESET ROLE only reverts to that identity (no escalation possible)
     IF lower(status) = 'completed' THEN
         RAISE EXCEPTION 'SECURITY VULNERABILITY: RESET ROLE escape succeeded!';
     END IF;
@@ -1923,13 +1868,13 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 
 **E2E-SEC-12: execute_sql panic + restart**
 
-- Configure `df.test_fault_inject = 'execute_sql_panic_after_switch'` (superuser)
+- Configure `df.test_fault_inject = 'execute_sql_panic_after_connect'` (superuser)
 - Start a workflow that will hit SQL execution
 - Assert:
     - The worker process crashes/restarts (or is forcibly restarted)
     - On restart, the runtime resumes from durable state
     - The instance eventually becomes `failed` (or is retried if the orchestration semantics retry)
-    - No partial elevated privilege persists (security context restoration via RAII guard)
+    - No stale per-user connections remain after restart
 
 **Restart validation strategy**:
 - Use the existing E2E harness to stop/start Postgres (or restart the bgworker) between polling loops.
@@ -1975,7 +1920,7 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 **Question**: Should durable functions support cross-database queries (via postgres_fdw)?
 
 **Considerations**:
-- SetUserIdAndSecContext is per-database
+- Per-user sqlx connections are per-database (the `database` field in `ExecuteSqlInput` supports targeting a specific database)
 - FDW connections are separate sessions
 - Security model becomes complex
 
@@ -2011,18 +1956,20 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 
 ## Appendix A: Security Checklist for Code Review
 
-- [ ] All user SQL goes through `execute_sql_with_security_context()`
-- [ ] Security context is always restored (RAII guard)
-- [ ] No raw SPI calls outside security context wrapper
+- [ ] All user SQL goes through `connect_as_user()` → per-user sqlx connection (never the worker's shared pool)
+- [ ] `login_role` and `submitted_by` are captured from `GetSessionUserId()` / `GetOuterUserId()` at `df.start()` time, not from user input
+- [ ] Role names are properly quoted in `SET ROLE` (double-quote with `"` → `""` escaping)
 - [ ] Access control uses PostgreSQL-native function permissions (EXECUTE on df.start/df.sql/df.http)
-- [ ] df.instances.submitted_by is set from GetUserId(), not from user input
 - [ ] RLS policies use `current_user`, not user-supplied values
 - [ ] Error messages don't leak other users' data
 - [ ] Logging includes effective user for audit trail
+- [ ] `SET df.in_workflow = 'true'` is set on user connections to prevent variable mutation during execution (future: could also guard against recursive `df.start()`)
 
 ---
 
 ## Appendix B: Related PostgreSQL Internals
+
+**Note**: These internals are relevant to the potential future SPI-based execution path described in [Section 8.8](#88-spi-as-a-potential-future-optimization). The current implementation uses sqlx connections and does not directly call these APIs for user SQL execution.
 
 ### SetUserIdAndSecContext Flags
 

@@ -114,7 +114,10 @@ pub async fn connect_as_user(
         .map_err(|e| format!("SET ROLE {} failed: {}", effective_role, e))?;
     }
 
-    // Prevent recursive df.start() calls
+    // Mark this connection as running inside a workflow.
+    // Currently used to prevent variable mutations (setvar/unsetvar/clearvars)
+    // during execution. Could also be checked in df.start() to prevent
+    // recursive workflow invocation in a future improvement.
     sqlx::query("SET df.in_workflow = 'true'")
         .execute(&mut conn)
         .await
