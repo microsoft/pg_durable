@@ -90,7 +90,26 @@ The security guarantee is: **only superusers can install the extension**, theref
 
 ### 3.2 Threats and Mitigations
 
+#### Implementation Priority Summary
+
+| Threat | Severity | Status | Notes |
+|--------|----------|--------|-------|
+| **T8**: SSRF via HTTP Activity | **CRITICAL** | Not implemented | Dataplane protection — see [spec-ssrf-protection.md](spec-ssrf-protection.md) |
+| **T4**: Information Disclosure via df.* Tables | **HIGH** | Not implemented | RLS policies needed |
+| **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
+| **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
+| **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Not implemented | Per-user `df.vars` scoping via RLS |
+| **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
+| **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
+| **T0**: SECURITY DEFINER Misuse | **MEDIUM** | Documentation-only | Expected PG behavior |
+| **T7**: Extension Trustworthiness | **LOW** | Accepted | Standard PG trust model |
+| **T1–T3**: Privilege Escalation | **CRITICAL** | Implemented | Per-user sqlx connections |
+
+---
+
 #### T0: SECURITY DEFINER Invocation Captures Definer Privileges
+
+**Severity**: MEDIUM  |  **Status**: Documentation-only
 
 **Threat**: Calling `df.start()` inside a `SECURITY DEFINER` function captures the definer’s identity (because `GetUserId()`/`current_user` reflect the definer inside the function). Unprivileged callers could cause durable work to run with the definer’s privileges.
 
@@ -99,6 +118,8 @@ The security guarantee is: **only superusers can install the extension**, theref
 **Residual Risk**: High if misused. Safe if used intentionally and documented.
 
 #### T1: Privilege Escalation via RESET ROLE
+
+**Severity**: CRITICAL  |  **Status**: Implemented
 
 **Threat**: User submits SQL containing `RESET ROLE` to escape back to worker's identity.
 
@@ -118,6 +139,8 @@ SELECT df.start(
 
 #### T2: Privilege Escalation via SET ROLE
 
+**Severity**: CRITICAL  |  **Status**: Implemented
+
 **Threat**: User attempts to assume a more privileged role.
 
 ```sql
@@ -134,6 +157,8 @@ SELECT df.start(
 ---
 
 #### T3: Privilege Escalation via Dynamic SQL
+
+**Severity**: CRITICAL  |  **Status**: Implemented
 
 **Threat**: User obfuscates malicious commands.
 
@@ -152,7 +177,9 @@ SELECT df.start(
 
 #### T4: Information Disclosure via df.* Tables
 
-**Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions.
+**Severity**: HIGH  |  **Status**: Not implemented
+
+**Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions. Without RLS, any user with SELECT access can see all workflows, infer execution patterns, and read metadata belonging to other users.
 
 **Mitigation**: Row-Level Security (RLS) on `df.instances` and `df.nodes`:
 ```sql
@@ -170,6 +197,8 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T5: Denial of Service via Resource Exhaustion
 
+**Severity**: MEDIUM  |  **Status**: Not implemented (deferred)
+
 **Threat**: User creates many long-running durable functions to exhaust worker capacity.
 
 **Mitigation**: 
@@ -182,6 +211,8 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 ---
 
 #### T6: Background Worker Code Vulnerability
+
+**Severity**: MEDIUM  |  **Status**: Mitigated by design
 
 **Threat**: Bug in extension code allows attacker to control which user the worker connects as.
 
@@ -200,6 +231,8 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T7: Extension Code Trustworthiness
 
+**Severity**: LOW (accepted)  |  **Status**: N/A — inherent to PG extension model
+
 **Threat**: Malicious or buggy extension code abuses its ability to connect as any user.
 
 **Context**: PG's extension architecture has a full trust model - extension code must be safe and correct. Any extension can call C functions, which is stronger than "connect as any user".
@@ -216,49 +249,51 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T8: Server-Side Request Forgery (SSRF) via HTTP Activity
 
-**Threat**: Attacker uses `df.http()` to access internal services (cloud metadata, internal APIs).
+**Severity**: CRITICAL  |  **Status**: Not implemented
+
+**Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape — a malicious customer can probe/attack the hosting infrastructure's local network.
 
 ```sql
--- Attack: Access AWS metadata endpoint
+-- Attack: Access cloud metadata endpoint
 SELECT df.start(
     df.http('GET', 'http://169.254.169.254/latest/meta-data/iam/security-credentials/'),
     'ssrf-attack'
 );
 ```
 
-**Mitigation**:
-- Block private IP ranges by default (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16)
-- Block localhost (127.0.0.0/8, ::1)
-- DNS rebinding protection: resolve hostname, check IP, then connect
-- URL allowlist required — no HTTP requests without explicit permission
+**Mitigation**: Compile-time IP blocklist protecting the local network. See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification.
 
-**Residual Risk**: Low — defense in depth (IP blocking + allowlist).
+**Residual Risk**: Low once implemented — hardcoded blocklist cannot be bypassed by superusers.
 
 ---
 
 #### T9: Unauthorized HTTP Access
 
+**Severity**: HIGH  |  **Status**: Not implemented (future spec)
+
 **Threat**: User abuses `df.http()` to access external resources they shouldn't (exfiltrate data, attack external services).
 
-**Mitigation**:
+**Mitigation** (to be addressed in a future customer-facing access control spec):
 - `df.http()` function has EXECUTE permission revoked from PUBLIC by default
 - DBA grants EXECUTE to roles that need HTTP access
 - GUC-based URL allowlist (`df.http_allowed_hosts`) for fine-grained control
 - Rate limiting via GUCs
 - Audit logging of all HTTP activity
 
-**Residual Risk**: Low — defense in depth (function permission + URL allowlist + SSRF blocking).
+**Residual Risk**: Medium until customer-level controls are implemented. T8 (SSRF/dataplane) protection is independent and addressed first.
 
 ---
 
 #### T10: Cross-User Variable Injection via df.vars
+
+**Severity**: MEDIUM-HIGH  |  **Status**: Not implemented
 
 **Threat**: `df.vars` is a database table used to pass workflow variables into `df.start()`. In the current design, if `df.vars` is globally writable/readable, one user can:
 
 - Override variables that another user expects (integrity issue)
 - Read variables set by other users (confidentiality issue)
 
-This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution.
+This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution. An attacker could redirect another user's workflow to an attacker-controlled endpoint by overwriting a variable like `api_endpoint`.
 
 **Mitigation (recommended)**: Scope variables per-user using a table key and RLS:
 
@@ -278,7 +313,9 @@ This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution.
 
 #### T11: Secret Exfiltration via df.secrets
 
-**Threat**: `df.secrets` are intended to be admin-managed values (API keys, shared tokens) that workflows can use without hard-coding secrets into graphs. If secrets are directly readable by all users, they are not secrets.
+**Severity**: HIGH  |  **Status**: Not implemented (additive feature)
+
+**Threat**: `df.secrets` are intended to be admin-managed values (API keys, shared tokens) that workflows can use without hard-coding secrets into graphs. If secrets are directly readable by all users, they are not secrets. Without this feature, users must embed credentials directly in function graphs, where they are stored in `df.nodes` and potentially visible in logs.
 
 **Mitigation**:
 - Secrets MUST NOT be directly selectable by non-admin users
