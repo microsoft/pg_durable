@@ -1,6 +1,6 @@
 # Spec: SSRF Protection for `df.http()`
 
-**Status**: Draft  
+**Status**: Completed  
 **Threat**: T8 in [spec-security-model.md](spec-security-model.md)  
 **Severity**: CRITICAL
 
@@ -97,7 +97,7 @@ A successful SSRF attack from within the PG dataplane can:
 │                  Layer 1: Dataplane Protection            │
 │                  (this spec)                              │
 │                                                          │
-│  • Cargo feature: ssrf-protection (default = on)         │
+│  • Cargo feature: no-ssrf-protection (opt-in to disable) │
 │  • Blocks private/reserved IP ranges                     │
 │  • Cannot be bypassed by superusers or GUCs              │
 │  • Protects the hosting infrastructure                   │
@@ -114,7 +114,7 @@ A successful SSRF attack from within the PG dataplane can:
 └──────────────────────────────────────────────────────────┘
 ```
 
-Layer 1 runs **inside** the HTTP activity, before the request is sent. It is always active when the `ssrf-protection` feature is compiled in (which it is by default). There is no GUC, no table, no superuser override.
+Layer 1 runs **inside** the HTTP activity, before the request is sent. It is always active unless the `no-ssrf-protection` feature is explicitly compiled in. There is no GUC, no table, no superuser override.
 
 Layer 2 is orthogonal and additive. It will be specified separately and can be configured by database administrators.
 
@@ -190,15 +190,15 @@ A DNS rebinding attack works by returning a public IP on first lookup (passing t
 
 ```toml
 [features]
-default = ["pg17", "ssrf-protection"]
-ssrf-protection = []
+default = ["pg17"]
+no-ssrf-protection = []
 ```
 
-The `ssrf-protection` feature is **on by default**. When compiled without it (e.g., for local development or testing), all IP blocklist checks are skipped.
+SSRF protection is **on by default** — no feature flag needed. The `no-ssrf-protection` feature is an opt-in escape hatch. When compiled with it (e.g., for local development or testing), all IP blocklist checks are skipped.
 
-The blocklist logic is gated with `#[cfg(feature = "ssrf-protection")]`:
-- When enabled: IP blocklist is enforced, no override possible.
-- When disabled: all URLs are allowed (development/testing only).
+The blocklist logic is gated with `#[cfg(not(feature = "no-ssrf-protection"))]`:
+- Default (feature absent): IP blocklist is enforced, no override possible.
+- With `no-ssrf-protection` enabled: all URLs are allowed (development/testing only).
 
 ### 5.6 Error Messages
 
@@ -234,7 +234,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Check if an IP address is in a blocked range.
 /// Returns Some(reason) if blocked, None if allowed.
-#[cfg(feature = "ssrf-protection")]
+#[cfg(not(feature = "no-ssrf-protection"))]
 pub fn check_blocked_ip(ip: IpAddr) -> Option<&'static str> {
     // Handle IPv4-mapped IPv6: extract the embedded IPv4
     let ip = match ip {
@@ -373,10 +373,10 @@ SELECT df.start(
 
 ### 7.3 Feature Flag Test
 
-Verify that building without `ssrf-protection` allows all IPs (for development):
+Verify that building with `no-ssrf-protection` allows all IPs (for development):
 
 ```bash
-cargo build --features pg17 --no-default-features
+cargo build --features pg17,no-ssrf-protection
 ```
 
 ---

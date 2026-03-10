@@ -94,7 +94,7 @@ The security guarantee is: **only superusers can install the extension**, theref
 
 | Threat | Severity | Status | Notes |
 |--------|----------|--------|-------|
-| **T8**: SSRF via HTTP Activity | **CRITICAL** | Not implemented | Dataplane protection — see [spec-ssrf-protection.md](spec-ssrf-protection.md) |
+| **T8**: SSRF via HTTP Activity | **CRITICAL** | Implemented | Dataplane protection — see [spec-ssrf-protection.md](spec-ssrf-protection.md) |
 | **T4**: Information Disclosure via df.* Tables | **HIGH** | Not implemented | RLS policies needed |
 | **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
 | **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
@@ -249,21 +249,15 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T8: Server-Side Request Forgery (SSRF) via HTTP Activity
 
-**Severity**: CRITICAL  |  **Status**: Not implemented
+**Severity**: CRITICAL  |  **Status**: Implemented
 
-**Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape — a malicious customer can probe/attack the hosting infrastructure's local network.
+**Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape.
 
-```sql
--- Attack: Access cloud metadata endpoint
-SELECT df.start(
-    df.http('GET', 'http://169.254.169.254/latest/meta-data/iam/security-credentials/'),
-    'ssrf-attack'
-);
-```
+**Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers.
 
-**Mitigation**: Compile-time IP blocklist protecting the local network. See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification.
+See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification, blocked IP ranges, and implementation details.
 
-**Residual Risk**: Low once implemented — hardcoded blocklist cannot be bypassed by superusers.
+**Residual Risk**: Low — hardcoded blocklist cannot be bypassed.
 
 ---
 
@@ -555,120 +549,13 @@ ALTER SYSTEM SET df.http_max_response_bytes = 10485760;  -- 10MB
 
 ### 6.4 SSRF Protection
 
-**Always-on protections** (cannot be disabled):
+SSRF protection is implemented as a compile-time IP blocklist that blocks all private/reserved IP ranges (RFC 1918, link-local, loopback, IPv6 ULA, etc.), with DNS rebinding protection and IPv4-mapped IPv6 handling.
 
-| IP Range | Reason |
-|----------|--------|
-| `10.0.0.0/8` | Private network (RFC 1918) |
-| `172.16.0.0/12` | Private network (RFC 1918) |
-| `192.168.0.0/16` | Private network (RFC 1918) |
-| `169.254.0.0/16` | Link-local / Cloud metadata |
-| `127.0.0.0/8` | Localhost |
-| `::1` | IPv6 localhost |
-| `fc00::/7` | IPv6 private |
-
-**DNS rebinding protection**:
-```rust
-// 1. Resolve hostname to IP
-let ip = resolve_dns(&url.host())?;
-
-// 2. Check IP against blocklist BEFORE connecting
-if is_blocked_ip(&ip) {
-    return Err("SSRF: blocked IP address");
-}
-
-// 3. Disable redirects by default; if enabled, re-validate every hop
-let client = reqwest::Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .build()?;
-
-// 4. Connect to the resolved IP (not hostname)
-let response = client.get(&url).resolve(&url.host(), ip).send()?;
-
-// If redirects are explicitly enabled later, each redirect must:
-// - Resolve the new host, re-check blocklist/allowlist/IP
-// - Enforce the same port validation
-// - Reject if any hop violates the rules
-```
+See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification including blocked ranges, implementation architecture, and testing.
 
 ### 6.5 Implementation
 
-```rust
-// src/activities/execute_http.rs
-
-pub async fn execute(
-    ctx: ActivityContext,
-    security_ctx: SecurityContext,
-    method: String,
-    url: String,
-    headers: Option<HashMap<String, String>>,
-    body: Option<String>,
-) -> Result<String, String> {
-    // Note: Function-level permission already checked by PostgreSQL
-    // before df.http() could be called in df.start()
-    
-    // 1. Parse and validate URL
-    // Implementation Note: reqwest MUST use rustls-tls to avoid OpenSSL conflicts with Postgres
-    // Cargo.toml: reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-    let parsed_url = Url::parse(&url)
-        .map_err(|e| format!("Invalid URL: {}", e))?;
-    
-    // 2. SSRF Protection - resolve DNS and check IP
-    let ip = resolve_dns(parsed_url.host_str().unwrap_or(""))?;
-    if is_ssrf_blocked_ip(&ip) {
-        return Err(format!(
-            "HTTP request blocked: {} resolves to internal IP {}",
-            parsed_url.host_str().unwrap_or(""), ip
-        ));
-    }
-    
-    // 3. Check URL allowlist (GUC: df.http_allowed_hosts)
-    if !is_host_allowed(&parsed_url) {
-        return Err(format!(
-            "HTTP request blocked: host '{}' not in allowed list. \
-             Configure df.http_allowed_hosts to allow this host.",
-            parsed_url.host_str().unwrap_or("")
-        ));
-    }
-    
-    // 4. Redirect policy: disabled by default; if ever enabled, every hop must re-check SSRF + allowlist + port
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-    
-    // 5. Rate limiting
-    check_rate_limit(&security_ctx.user_name).await?;
-    
-    // 6. Execute request with timeout
-    let timeout = get_guc_int("df.http_timeout_seconds", 30);
-    let response = execute_http_request(method, parsed_url, ip, headers, body, timeout, client).await?;
-    
-    // 7. Log for audit
-    log_http_request(&security_ctx, &url, &method, response.status());
-    
-    Ok(response.to_json())
-}
-
-fn is_ssrf_blocked_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private() ||           // 10.x, 172.16-31.x, 192.168.x
-            ipv4.is_loopback() ||          // 127.x
-            ipv4.is_link_local() ||        // 169.254.x (cloud metadata!)
-            ipv4.is_broadcast() ||
-            ipv4.is_documentation() ||
-            ipv4.is_unspecified()
-        }
-        IpAddr::V6(ipv6) => {
-            ipv6.is_loopback() ||          // ::1
-            ipv6.is_unspecified() ||
-            // IPv6 private ranges
-            is_ipv6_private(ipv6)
-        }
-    }
-}
-```
+See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the SSRF implementation details. The access control layers (URL allowlist, rate limiting) described in Section 6.1 are not yet implemented.
 
 ### 6.6 User Experience
 

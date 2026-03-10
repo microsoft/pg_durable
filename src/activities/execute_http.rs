@@ -1,7 +1,7 @@
 //! ExecuteHTTP activity - makes HTTP requests
 //!
-//! SSRF protection: when the `ssrf-protection` feature is enabled (default),
-//! requests to private/reserved IP ranges are blocked.  See src/ssrf.rs.
+//! SSRF protection is enabled by default.  To disable it, compile with the
+//! `no-ssrf-protection` Cargo feature.  See src/ssrf.rs.
 
 use duroxide::ActivityContext;
 use std::time::Duration;
@@ -15,7 +15,7 @@ pub const NAME: &str = "pg_durable::activity::execute-http";
 fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder().timeout(timeout);
 
-    #[cfg(feature = "ssrf-protection")]
+    #[cfg(not(feature = "no-ssrf-protection"))]
     let builder = {
         use crate::ssrf::{SsrfSafeResolver, SystemResolver};
         use std::sync::Arc;
