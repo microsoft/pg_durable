@@ -462,6 +462,19 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
         pgrx::error!("Signal data must be valid JSON");
     }
 
+    // Ownership check: SPI goes through RLS, so this returns false for
+    // non-owned instances (the row is invisible to the calling user).
+    let exists: bool = Spi::get_one(&format!(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
+        instance_id.replace('\'', "''")
+    ))
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if !exists {
+        pgrx::error!("Instance not found or access denied: {}", instance_id);
+    }
+
     match raise_external_event(instance_id, signal_name, signal_data) {
         Ok(_) => "OK".to_string(),
         Err(e) => pgrx::error!("Failed to send signal: {}", e),
@@ -669,14 +682,30 @@ pub fn start(
 pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) -> String {
     use crate::client::cancel_durable_function;
 
+    // Ownership check: SPI goes through RLS, so this returns false for
+    // non-owned instances (the row is invisible to the calling user).
+    let exists: bool = Spi::get_one(&format!(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
+        instance_id.replace('\'', "''")
+    ))
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if !exists {
+        pgrx::error!("Instance not found or access denied: {}", instance_id);
+    }
+
     if let Err(e) = cancel_durable_function(instance_id, reason) {
         return format!("Failed to cancel: {e}");
     }
 
-    let update_sql = format!(
-        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = '{instance_id}'"
-    );
-    let _ = Spi::run(&update_sql);
+    // Update the instance status to 'cancelled' via SPI.
+    // User has column-level UPDATE on (status, updated_at) with RLS restricting to own rows.
+    Spi::run(&format!(
+        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = '{}'",
+        instance_id.replace('\'', "''")
+    ))
+    .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
 
     format!("Instance {instance_id} cancelled: {reason}")
 }

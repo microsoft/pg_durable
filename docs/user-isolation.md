@@ -109,15 +109,15 @@ COMMENT ON COLUMN df.instances.login_role IS
 
 The `REGROLE` type is a PostgreSQL OID alias that stores the role OID but displays as the role name. It resolves correctly even if the role is renamed, and raises an error at INSERT time if the role doesn't exist.
 
-**Important invariant:** On `df.nodes`, these columns are **nullable** and only set when a node is linked to an instance by `df.start()`. Unlinked nodes (created by DSL functions but not yet started) have `NULL` for both columns. On `df.instances`, they are `NOT NULL` — every instance always has identity.
+**Important invariant:** On `df.nodes`, these columns are **nullable** in the schema but are always set when a node is inserted by `df.start()`. On `df.instances`, they are `NOT NULL` — every instance always has identity.
 
 ### Where Identity Is Captured: Only in `df.start()`
 
-Unlike earlier designs, DSL functions (`df.sql()`, `df.seq()`, etc.) do **not** capture user identity. Nodes are created without `submitted_by` or `login_role` — these columns remain NULL until the node is linked to an instance.
+DSL functions (`df.sql()`, `df.seq()`, etc.) do **not** insert rows into `df.nodes`. They build an in-memory JSON tree (the `Durofut` struct). All node rows are inserted inside `df.start()` via its internal `insert_nodes()` function, which sets `instance_id`, `submitted_by`, and `login_role` on every node at INSERT time.
 
-Identity is captured **only** in `df.start()`, which is the security boundary. This simplifies the DSL functions and ensures a single authoritative capture point.
+Identity is captured **only** in `df.start()`, which is the security boundary. This simplifies the DSL functions and ensures a single authoritative capture point. There are no "unlinked" nodes with NULL identity columns.
 
-#### `df.start()` — instance creation and node linking
+#### `df.start()` — node insertion and instance creation
 
 When `df.start()` is called, three things happen:
 
@@ -129,7 +129,17 @@ let outer_user_oid = unsafe { pgrx::pg_sys::GetOuterUserId() };
 
 We intentionally keep these values as **OIDs**. PostgreSQL's `REGROLE` type stores role OIDs and renders them as names for display.
 
-**b) Instance row is created with both identity columns:**
+**b) All nodes are inserted into `df.nodes`** with identity columns set from the start. The internal `insert_nodes()` function recursively walks the in-memory `Durofut` tree, generating an ID for each node and inserting it with `instance_id`, `submitted_by`, and `login_role` already set:
+```sql
+INSERT INTO df.nodes (id, instance_id, node_type, query, result_name,
+                      left_node, right_node, submitted_by, login_role)
+VALUES ('{node_id}', '{instance_id}', 'SQL', 'SELECT 1', NULL,
+        NULL, NULL,
+        {outer_user_oid}::oid::regrole,
+        {session_user_oid}::oid::regrole)
+```
+
+**c) Instance row is created** with the root node ID and both identity columns:
 ```sql
 INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role)
 VALUES (
@@ -142,26 +152,11 @@ VALUES (
 )
 ```
 
-**c) All nodes in the graph are linked and their identity columns are set** from the instance:
-```sql
-UPDATE df.nodes
-SET instance_id  = '{instance_id}',
-    submitted_by = {outer_user_oid}::oid::regrole,
-    login_role   = {session_user_oid}::oid::regrole
-WHERE id = '{node_id}'
-```
+Note: Nodes are inserted before the instance because child nodes must be inserted first to generate their IDs, which parent nodes reference via `left_node`/`right_node`. The root node ID is then used in the instance row.
 
-### The `Durofut::insert_node()` change
+### DSL functions build in-memory JSON, not database rows
 
-The `insert_node()` method writes nodes to `df.nodes` but does **not** set `submitted_by` or `login_role`. These columns are omitted from the INSERT (they will be NULL):
-
-```sql
-INSERT INTO df.nodes (id, node_type, query, result_name, left_node, right_node)
-VALUES ('abcd1234', 'SQL', 'SELECT 1', NULL, NULL, NULL)
--- submitted_by and login_role are NULL until df.start() links this node
-```
-
-This means the DSL functions and `Durofut` struct do not need `submitted_by` or `login_role` fields at all. These are only on `FunctionNode` (the runtime representation loaded from the database).
+DSL functions (`df.sql()`, `df.seq()`, etc.) return a `Durofut` JSON string representing the node tree. No rows are inserted into `df.nodes` until `df.start()` is called. The `Durofut` struct does not have `submitted_by` or `login_role` fields — these are only on `FunctionNode` (the runtime representation loaded from the database).
 
 ### Rust struct changes
 
@@ -181,12 +176,11 @@ pub struct FunctionNode {
     pub login_role: String,
 }
 
-// Durofut is UNCHANGED — no identity fields needed
+// Durofut has no identity fields — it's the in-memory DSL representation
 pub struct Durofut {
-    pub node_id: String,
     pub node_type: String,
-    pub left_node: Option<String>,
-    pub right_node: Option<String>,
+    pub left_node: Option<Box<Durofut>>,
+    pub right_node: Option<Box<Durofut>>,
     pub query: Option<String>,
     pub result_name: Option<String>,
 }
@@ -454,15 +448,15 @@ So the membership invariant is guaranteed by PostgreSQL itself — we're replayi
 | File | Change |
 |------|--------|
 | `src/lib.rs` | Add `submitted_by REGROLE` and `login_role REGROLE` columns to `df.nodes` (nullable) and `df.instances` (NOT NULL) DDL; add column comments |
-| `src/types.rs` | Add `submitted_by` and `login_role` fields to `FunctionNode` only (not Durofut); add `connect_as_user(login_role, effective_role)` returning a single `PgConnection`; no changes to `Durofut` or `insert_node()` |
-| `src/dsl.rs` | Only `df.start()` changes: capture `GetSessionUserId()` and `GetOuterUserId()`, write both to instance row, propagate both to nodes via UPDATE |
+| `src/types.rs` | Add `submitted_by` and `login_role` fields to `FunctionNode` only (not Durofut); add `connect_as_user(login_role, effective_role)` returning a single `PgConnection` |
+| `src/dsl.rs` | Only `df.start()` changes: capture `GetSessionUserId()` and `GetOuterUserId()`, insert both into every node row and the instance row (all done inside `insert_nodes()`) |
 | `src/activities/execute_sql.rs` | Add `ExecuteSqlInput` struct with `query`, `submitted_by`, `login_role`; use `connect_as_user()` for a single connection; execute SQL on that connection |
 | `src/activities/load_function_graph.rs` | Add `submitted_by::text` and `login_role::text` to SELECT; map both into `FunctionNode` |
 | `src/orchestrations/execute_function_graph.rs` | Package `query` + `submitted_by` + `login_role` as JSON input when scheduling `execute_sql` activity |
 | `src/registry.rs` | Change activity registration from `query: String` to `input_json: String` |
 | `src/worker.rs` | Filter `sqlx_postgres::options::pgpass` warnings from tracing |
 
-**Not changed:** `src/explain.rs` (explain does not use identity columns), `Durofut` struct, DSL functions other than `df.start()`.
+**Not changed:** `src/explain.rs` (explain does not use identity columns), `Durofut` struct (no identity fields — in-memory DSL only), DSL functions other than `df.start()`.
 
 ## E2E Test Strategy
 

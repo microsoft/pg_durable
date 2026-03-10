@@ -16,30 +16,6 @@ BEGIN
     END IF;
 END $$;
 
--- Grant access to df API surface used by tests
--- ---------------------------------------------------------------------------
--- Reusable helper: restore df_e2e_user grants after DROP/CREATE EXTENSION.
--- Called here and by any test that drops & recreates the extension (25, 28).
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public._e2e_grant_df_to_e2e_user() RETURNS void
-LANGUAGE plpgsql AS $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
-        RETURN;
-    END IF;
-
-    GRANT USAGE ON SCHEMA df TO df_e2e_user;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO df_e2e_user;
-
-    -- df.start() links nodes/instances and reads vars via direct table access.
-    -- Until table hardening lands, E2E needs DML on these.
-    GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances TO df_e2e_user;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON df.nodes TO df_e2e_user;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO df_e2e_user;
-END $$;
-
-SELECT public._e2e_grant_df_to_e2e_user();
-
 -- ---------------------------------------------------------------------------
 -- Reusable helper: wait for the background worker to fully reinitialize
 -- after DROP/CREATE EXTENSION. Called by tests 25, 28, 29.

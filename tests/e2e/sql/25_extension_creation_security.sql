@@ -84,9 +84,6 @@ DROP SCHEMA IF EXISTS df CASCADE;
 -- Recreate the extension properly for other tests to continue
 CREATE EXTENSION pg_durable;
 
--- Re-grant permissions that were lost when the extension was dropped.
-SELECT public._e2e_grant_df_to_e2e_user();
-
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
 SELECT public._e2e_wait_for_worker_ready();
 

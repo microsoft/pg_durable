@@ -314,6 +314,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
         # 29 uses dblink and creates pg_durable in a different database
         # 34 creates/drops a database for multi-database testing
         # 35 reads df._worker_epoch (internal table)
+        # 37 tests RLS policies, including for superuser, changes users
         PSQL_USER="$E2E_USER"
         if [[ "$test_name" == "00_requires_shared_preload" \
            || "$test_name" == "22_cross_connection" \
@@ -324,7 +325,8 @@ for run in $(seq 1 $REPEAT_COUNT); do
            || "$test_name" == "28_bgw_lifecycle" \
            || "$test_name" == "29_database_validation" \
            || "$test_name" == "34_multi_database" \
-           || "$test_name" == "35_heartbeat_liveness" ]]; then
+           || "$test_name" == "35_heartbeat_liveness" \
+           || "$test_name" == "37_rls" ]]; then
             PSQL_USER="$PG_USER"
         fi
         
