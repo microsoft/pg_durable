@@ -109,19 +109,10 @@ trap cleanup EXIT
 # Stop any existing container
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
-# Load .env file if it exists (for GITHUB_TOKEN)
-if [ -f "$PROJECT_DIR/.env" ]; then
-    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
-fi
-
 # Build image if needed
 if [ "$FORCE_REBUILD" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo -e "${YELLOW}Building Docker image (linux/amd64)...${NC}"
-    BUILD_ARGS=""
-    if [ -n "$GITHUB_TOKEN" ]; then
-        BUILD_ARGS="--build-arg GITHUB_TOKEN=$GITHUB_TOKEN"
-    fi
-    docker build --platform linux/amd64 $BUILD_ARGS -t "$IMAGE_NAME" -f "$PROJECT_DIR/Dockerfile" "$PROJECT_DIR"
+    docker build --platform linux/amd64 -t "$IMAGE_NAME" -f "$PROJECT_DIR/Dockerfile" "$PROJECT_DIR"
 fi
 
 # Start container

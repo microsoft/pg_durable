@@ -40,7 +40,8 @@ jobs:
           rustup default nightly
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        # --all includes path dependencies; limit to our package to skip submodules
+        run: cargo fmt --package pg_durable -- --check
 
   prepare:
     name: Prepare Matrix
@@ -76,6 +77,9 @@ jobs:
     continue-on-error: ${{ matrix.pg_version == 18 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GH_PAT }}
 
       - name: Install Rust nightly
         run: |
@@ -139,18 +143,8 @@ jobs:
             echo "PostgreSQL ${{ matrix.pg_version }} already initialized, skipping download"
           fi
 
-      - name: Configure git credentials for private repos
-        run: |
-          git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
-
       - name: Verify duroxide migrations match upstream
-        run: |
-          # Clone duroxide-pg-opt to verify our checked-in copies match upstream.
-          # NOTE: The branch must match the duroxide-pg-opt ref in Cargo.toml.
-          # Update this when switching to a tag or a different branch.
-          git clone --depth=1 --branch pinodeca/initialization \
-            https://${{ secrets.GH_PAT }}@github.com/microsoft/duroxide-pg-opt.git
-          ./scripts/verify-duroxide-migrations.sh
+        run: ./scripts/verify-duroxide-migrations.sh
 
       - name: Run clippy
         run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings

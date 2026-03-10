@@ -34,32 +34,22 @@ SELECT df.start(
 - Rust (nightly)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
 
-### GitHub SSH Access (Required)
+### GitHub Access (Required)
 
-This project depends on a private repository (`microsoft/duroxide-pg-opt`) via SSH. You need SSH access to the Azure GitHub organization.
+This project includes `microsoft/duroxide-pg-opt` as a git submodule. You need access to this private repository.
 
-1. **Set up SSH key** with GitHub: https://docs.github.com/en/authentication/connecting-to-github-with-ssh
-2. **Authorize SSO** for the Azure organization on your SSH key
-3. **Configure Cargo** to use git CLI for fetching (required for SSH agent authentication):
+1. **Create a GitHub PAT** with `repo` scope: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+2. **Authorize SSO** for the Microsoft organization on the PAT
+3. **Configure git** to use the PAT for GitHub HTTPS URLs:
 
 ```bash
-# Add to ~/.cargo/config.toml
-mkdir -p ~/.cargo
-echo '[net]
-git-fetch-with-cli = true' >> ~/.cargo/config.toml
+git config --global url."https://<YOUR_PAT>@github.com/".insteadOf "https://github.com/"
 ```
 
-4. **Verify SSH access**:
+4. **Initialize the submodule** after cloning:
 
 ```bash
-git ls-remote ssh://git@github.com/microsoft/duroxide-pg-opt.git
-```
-
-5. **For Docker builds**, create a `.env` file in the project root with a GitHub PAT:
-
-```bash
-# .env (gitignored)
-GITHUB_TOKEN=ghp_your_token_here
+git submodule update --init
 ```
 
 ## Installation
@@ -77,7 +67,7 @@ CREATE EXTENSION pg_durable;
 ### Docker
 
 ```bash
-# Build and test (requires .env with GITHUB_TOKEN)
+# Build and test
 ./scripts/test-e2e-docker.sh --rebuild
 
 # Optional: Deploy to ACR (for custom PG17 image with pg_durable baked-in)
@@ -147,23 +137,20 @@ See [tests/e2e/](tests/e2e/) for details.
 
 ## Verifying Duroxide Migrations
 
-pg_durable includes checked-in copies of duroxide-pg-opt migration SQL files to ensure the extension owns the duroxide schema. To verify these copies match upstream:
+pg_durable includes checked-in copies of duroxide-pg-opt migration SQL files to ensure the extension owns the duroxide schema. The `duroxide-pg-opt` submodule provides the upstream source. To verify the copies match:
 
 ```bash
-# Clone duroxide-pg-opt at the repository root
-git clone --branch pinodeca/initialization \
-  https://github.com/microsoft/duroxide-pg-opt.git
+# Ensure the submodule is initialized
+git submodule update --init
 
 # Verify migrations match upstream
 ./scripts/verify-duroxide-migrations.sh
 ```
 
 **When to verify:**
-- After updating the `duroxide-pg-opt` dependency in Cargo.toml
+- After updating the `duroxide-pg-opt` submodule to a new commit
 - When contributing changes to pg_durable
 - CI automatically verifies on every pull request
-
-**Note:** The verification script requires the `duroxide-pg-opt` repository to be cloned at the root of the pg_durable repository.
 
 ## Documentation
 

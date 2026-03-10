@@ -37,7 +37,7 @@ Common clippy warnings to address:
 
 ### 3. Cargo Format
 ```bash
-cargo fmt --all
+cargo fmt
 ```
 
 Ensures consistent formatting across all code.
@@ -85,7 +85,7 @@ cargo build --features pg17
 cargo clippy --features pg17
 
 # 6. Format
-cargo fmt --all
+cargo fmt
 
 # 7. Test everything still works
 cargo pgrx test --features pg17
@@ -161,7 +161,7 @@ Before considering the cleanup complete:
 
 - [ ] `cargo build --features pg17` produces zero warnings
 - [ ] `cargo clippy --features pg17` produces zero warnings
-- [ ] `cargo fmt --all --check` produces no diff
+- [ ] `cargo fmt --check` produces no diff
 - [ ] `cargo pgrx test --features pg17` passes completely
 - [ ] `./scripts/test-e2e-local.sh` passes all tests
 - [ ] Spot-check: Run a few E2E tests to ensure they work

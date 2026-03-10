@@ -1,0 +1,3 @@
+[submodule "duroxide-pg-opt"]
+	path = duroxide-pg-opt
+	url = https://github.com/microsoft/duroxide-pg-opt.git

@@ -85,7 +85,7 @@ pg_durable includes the duroxide-pg-opt schema DDL as extension SQL to ensure pr
 
 ### Migration Files
 
-- **Upstream source**: `duroxide-pg-opt/migrations/000*.sql` (from duroxide-pg-opt repository)
+- **Upstream source**: `duroxide-pg-opt/migrations/000*.sql` (from duroxide-pg-opt submodule)
 - **Checked-in copies**: [sql/duroxide_upstream/](sql/duroxide_upstream/) (verbatim copies of upstream)
 - **Combined install SQL**: [sql/duroxide_install.sql](sql/duroxide_install.sql) (generated from copies)
 - **Extension integration**: [src/lib.rs](src/lib.rs) includes via `extension_sql_file!("../sql/duroxide_install.sql")`
@@ -100,34 +100,34 @@ pg_durable includes the duroxide-pg-opt schema DDL as extension SQL to ensure pr
 
 **Verify migrations match upstream:**
 ```bash
-# Requires duroxide-pg-opt cloned at repository root
-git clone --branch pinodeca/initialization \
-  https://github.com/microsoft/duroxide-pg-opt.git
+# Ensure the submodule is initialized
+git submodule update --init
 ./scripts/verify-duroxide-migrations.sh
 ```
 
 ### When to Update Migrations
 
-1. **Upgrading duroxide-pg-opt dependency**: When Cargo.toml points to a new version/tag/branch:
-   - Clone/pull the matching duroxide-pg-opt version
+1. **Upgrading duroxide-pg-opt dependency**: When updating the submodule to a new commit/branch:
+   - Update the submodule: `cd duroxide-pg-opt && git fetch && git checkout <new-ref>`
    - Copy new/updated migration files from `duroxide-pg-opt/migrations/` to `sql/duroxide_upstream/`
    - Run `./scripts/gen-duroxide-install-sql.sh` to regenerate install SQL
    - Run `./scripts/verify-duroxide-migrations.sh` to confirm sync
-   - Commit both the upstream copies and generated install SQL
+   - Commit the submodule update, upstream copies, and generated install SQL
 
-2. **After cloning pg_durable**: CI automatically verifies migrations on every PR
+2. **After cloning pg_durable**: Run `git submodule update --init`, CI automatically verifies migrations on every PR
 
 ### Important Notes
 
 - ⚠️ **Never manually edit `sql/duroxide_install.sql`** - it's generated
-- ⚠️ **Keep `sql/duroxide_upstream/` in sync** with the duroxide-pg-opt version referenced in Cargo.toml
-- ✅ **CI enforces sync** - `.github/workflows/ci.yml` clones duroxide-pg-opt and runs verification
+- ⚠️ **Keep `sql/duroxide_upstream/` in sync** with the duroxide-pg-opt submodule
+- ✅ **CI enforces sync** - uses `actions/checkout` with `submodules: true` and runs verification
 - ✅ **Extension owns the schema** - duroxide schema/tables are created by `CREATE EXTENSION pg_durable`
 
 ## Dependencies
 
 - **pgrx 0.16.1**: PostgreSQL extension framework (pinned version)
-- **duroxide/duroxide-pg**: Durable execution runtime
+- **duroxide**: Durable execution runtime
+- **duroxide-pg-opt**: duroxide provider/stores engine state in PostgreSQL (git submodule)
 - **sqlx**: Async PostgreSQL from background worker
 - **tokio**: Async runtime for background worker
 
@@ -138,7 +138,7 @@ git clone --branch pinodeca/initialization \
 ### Before Committing
 
 1. **Clean warnings**: Run `cargo build --features pg17` and `cargo clippy --features pg17` — fix all warnings
-2. **Format code**: Run `cargo fmt --all`
+2. **Format code**: Run `cargo fmt`
 3. **Run tests**: `./scripts/test-unit.sh` then `./scripts/test-e2e-local.sh`
 
 ### Handling Unused Code Warnings
@@ -211,7 +211,7 @@ SELECT 'TEST PASSED' AS result;
 Pull requests automatically run the CI workflow (`.github/workflows/ci.yml`):
 
 1. **Format Check**: `cargo fmt --check`
-2. **Migration Verification**: Clones duroxide-pg-opt and runs `./scripts/verify-duroxide-migrations.sh`
+2. **Migration Verification**: Uses submodule checkout and runs `./scripts/verify-duroxide-migrations.sh`
 3. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
 
 All checks must pass before a PR can be merged. Configure branch protection rules in GitHub to enforce this.

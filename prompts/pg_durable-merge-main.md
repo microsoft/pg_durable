@@ -62,7 +62,7 @@ az acr login --name toygresacr
 - **DO NOT** skip commit hooks with `--no-verify`
 - **DO NOT** commit or merge without user approval
 - **DO** ensure all tests pass before merging
-- **DO** run `cargo fmt --all` and `cargo clippy --features pg17` before committing
+- **DO** run `cargo fmt` and `cargo clippy --features pg17` before committing
 - **DO** create meaningful commit messages that future readers can understand
 
 ## Example Commit Messages
@@ -106,7 +106,7 @@ Before asking user to approve commit:
 
 - [ ] `cargo build --features pg17` succeeds
 - [ ] `cargo clippy --features pg17` has no warnings
-- [ ] `cargo fmt --all --check` shows no changes needed
+- [ ] `cargo fmt --check` shows no changes needed
 - [ ] `./scripts/test-unit.sh` passes
 - [ ] `./scripts/test-e2e-local.sh` passes (all tests)
 - [ ] No debug/temporary code left in changes

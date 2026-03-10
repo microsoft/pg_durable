@@ -48,9 +48,9 @@ Confirm the fix is mentioned in the release notes.
 
 If a fix is available in a new release:
 
-1. **Update Cargo.toml** - change the tag version:
-   ```toml
-   duroxide-pg-opt = { git = "ssh://git@github.com/microsoft/duroxide-pg-opt.git", tag = "v0.1.X", package = "duroxide-pg-opt" }
+1. **Update submodule** - point to the new version:
+   ```bash
+   cd duroxide-pg-opt && git fetch && git checkout v0.1.X && cd ..
    ```
 
 2. **Also update duroxide if needed** (check compatibility):

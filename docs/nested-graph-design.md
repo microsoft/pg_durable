@@ -327,7 +327,7 @@ All items completed in commit `fdfbd44` and subsequent fixes:
 - [x] Update `USER_GUIDE.md` with new graph construction model
 - [x] Update `docs/ARCHITECTURE.md` with stateless design
 - [x] Update `README.md` if needed (checked — no stale references)
-- [x] Run `cargo fmt --all`
+- [x] Run `cargo fmt`
 - [x] Run `cargo clippy --features pg17` and fix warnings
 - [x] Run `./scripts/test-unit.sh`
 - [x] Run `./scripts/test-e2e-local.sh`

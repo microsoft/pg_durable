@@ -22,8 +22,8 @@ cargo search duroxide --limit 5
 
 **Check for new duroxide-pg-opt tag:**
 ```bash
-# List recent tags from the microsoft/duroxide-pg-opt repo
-git ls-remote --tags ssh://git@github.com/microsoft/duroxide-pg-opt.git | tail -10
+# List recent tags from the duroxide-pg-opt submodule
+cd duroxide-pg-opt && git fetch --tags && git tag --sort=-v:refname | head -10 && cd ..
 ```
 
 ### 1.2 Ask User About Updates
@@ -46,17 +46,18 @@ Would you like to update to the new versions? (y/n)
 
 **If user approves updates:**
 
-Update `Cargo.toml` dependencies:
-```toml
-# Example update
-duroxide = "NEW_VERSION"
-duroxide-pg-opt = { git = "ssh://git@github.com/microsoft/duroxide-pg-opt.git", tag = "NEW_TAG", package = "duroxide-pg-opt" }
+Update `Cargo.toml` duroxide version and update the submodule:
+```bash
+# Update duroxide in Cargo.toml
+# duroxide = "NEW_VERSION"
+
+# Update submodule to new tag
+cd duroxide-pg-opt && git checkout NEW_TAG && cd ..
 ```
 
 Then run:
 ```bash
 cargo update -p duroxide
-cargo update -p duroxide-pg-opt
 ```
 
 ## Step 2: Update Package Version (if releasing)
@@ -122,7 +123,7 @@ Follow the guidance in `@pg_durable-clean-warnings.md`:
 
 ### 3.4 Format Code
 ```bash
-cargo fmt --all
+cargo fmt
 ```
 
 ### 3.5 Verify Clean Build
@@ -436,7 +437,7 @@ docker inspect pg_durable:latest --format '{{.Created}}'
 - [ ] Bump version in Cargo.toml if releasing
 - [ ] `cargo build --features pg17` - no errors
 - [ ] `cargo clippy --features pg17` - no warnings
-- [ ] `cargo fmt --all` - code formatted
+- [ ] `cargo fmt` - code formatted
 - [ ] Documentation reviewed and updated
 - [ ] New tests proposed and implemented (if applicable)
 - [ ] `./scripts/test-unit.sh` - all pass
