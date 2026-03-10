@@ -11,12 +11,12 @@
 //! The blocklist is hardcoded and cannot be bypassed by any database user,
 //! including superusers.  See docs/spec-ssrf-protection.md for the full spec.
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Check if an IP address is in a blocked (private/reserved) range.
 /// Returns `Some(reason)` if blocked, `None` if allowed.
-#[cfg(not(feature = "no-ssrf-protection"))]
+///
+/// When compiled with the `no-ssrf-protection` feature, always returns `None`.
 pub fn check_blocked_ip(ip: IpAddr) -> Option<&'static str> {
     // Handle IPv4-mapped IPv6 (::ffff:A.B.C.D) — extract the embedded IPv4
     let ip = match ip {
@@ -33,38 +33,52 @@ pub fn check_blocked_ip(ip: IpAddr) -> Option<&'static str> {
     }
 }
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 fn check_blocked_ipv4(ip: Ipv4Addr) -> Option<&'static str> {
-    let octets = ip.octets();
-    match octets {
-        [0, ..] => Some("reserved (0.0.0.0/8)"),
-        [10, ..] => Some("private (10.0.0.0/8)"),
-        [127, ..] => Some("loopback (127.0.0.0/8)"),
-        [169, 254, ..] => Some("link-local (169.254.0.0/16)"),
-        [172, b, ..] if (16..=31).contains(&b) => Some("private (172.16.0.0/12)"),
-        [192, 168, ..] => Some("private (192.168.0.0/16)"),
-        _ => None,
+    #[cfg(feature = "no-ssrf-protection")]
+    {
+        let _ = ip;
+        None
+    }
+    #[cfg(not(feature = "no-ssrf-protection"))]
+    {
+        let octets = ip.octets();
+        match octets {
+            [0, ..] => Some("reserved (0.0.0.0/8)"),
+            [10, ..] => Some("private (10.0.0.0/8)"),
+            [127, ..] => Some("loopback (127.0.0.0/8)"),
+            [169, 254, ..] => Some("link-local (169.254.0.0/16)"),
+            [172, b, ..] if (16..=31).contains(&b) => Some("private (172.16.0.0/12)"),
+            [192, 168, ..] => Some("private (192.168.0.0/16)"),
+            _ => None,
+        }
     }
 }
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 fn check_blocked_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
-    if ip.is_unspecified() {
-        return Some("unspecified (::)");
+    #[cfg(feature = "no-ssrf-protection")]
+    {
+        let _ = ip;
+        None
     }
-    if ip.is_loopback() {
-        return Some("loopback (::1)");
+    #[cfg(not(feature = "no-ssrf-protection"))]
+    {
+        if ip.is_unspecified() {
+            return Some("unspecified (::)");
+        }
+        if ip.is_loopback() {
+            return Some("loopback (::1)");
+        }
+        let segments = ip.segments();
+        // fe80::/10 — IPv6 link-local
+        if segments[0] & 0xffc0 == 0xfe80 {
+            return Some("link-local (fe80::/10)");
+        }
+        // fc00::/7 — IPv6 unique local address
+        if segments[0] & 0xfe00 == 0xfc00 {
+            return Some("unique local (fc00::/7)");
+        }
+        None
     }
-    let segments = ip.segments();
-    // fe80::/10 — IPv6 link-local
-    if segments[0] & 0xffc0 == 0xfe80 {
-        return Some("link-local (fe80::/10)");
-    }
-    // fc00::/7 — IPv6 unique local address
-    if segments[0] & 0xfe00 == 0xfc00 {
-        return Some("unique local (fc00::/7)");
-    }
-    None
 }
 
 /// Validate a URL scheme. Only `http` and `https` are permitted.
@@ -86,7 +100,6 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
 ///
 /// Returns `Ok(())` if the host is a hostname (will be checked by the resolver)
 /// or a non-blocked IP.  Returns `Err` if the IP is in a blocked range.
-#[cfg(not(feature = "no-ssrf-protection"))]
 pub fn validate_url_host(url: &str) -> Result<(), String> {
     // Strip scheme
     let after_scheme = match url.find("://") {
@@ -117,8 +130,8 @@ pub fn validate_url_host(url: &str) -> Result<(), String> {
 
     // Try to parse as IP address.  If it's a hostname, return Ok — the
     // SsrfSafeResolver will check it after DNS resolution.
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if let Some(_reason) = check_blocked_ip(ip) {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if check_blocked_ip(ip).is_some() {
             return Err(format!(
                 "Blocked: the resolved IP address for '{}' is in a restricted \
                  range. df.http() cannot access private or internal network addresses.",
@@ -129,17 +142,21 @@ pub fn validate_url_host(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// No-op when the feature is disabled.
-#[cfg(feature = "no-ssrf-protection")]
-pub fn validate_url_host(_url: &str) -> Result<(), String> {
-    Ok(())
+// Keep this marker in sync with the error message in SsrfSafeResolver::resolve().
+const SSRF_BLOCK_MARKER: &str = "Blocked:";
+const SSRF_RESTRICTED_MARKER: &str = "restricted";
+
+/// Returns `true` if `err_msg` looks like an SSRF IP-blocklist rejection
+/// produced by [`SsrfSafeResolver`].  Both marker strings are defined here,
+/// next to the resolver that emits them, so changes stay in sync.
+pub fn is_ssrf_block_error(err_msg: &str) -> bool {
+    err_msg.contains(SSRF_BLOCK_MARKER) && err_msg.contains(SSRF_RESTRICTED_MARKER)
 }
 
 // ---------------------------------------------------------------------------
 // SSRF-safe DNS resolver — wraps the default resolver and filters out blocked IPs
 // ---------------------------------------------------------------------------
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 mod resolver {
     use super::check_blocked_ip;
     use reqwest::dns::{Addrs, Name, Resolve, Resolving};
@@ -180,14 +197,12 @@ mod resolver {
     }
 }
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 pub use resolver::SsrfSafeResolver;
 
 // ---------------------------------------------------------------------------
 // Default (system) DNS resolver — needed as the "inner" for SsrfSafeResolver
 // ---------------------------------------------------------------------------
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 mod system_resolver {
     use reqwest::dns::{Addrs, Name, Resolve, Resolving};
     use std::net::ToSocketAddrs;
@@ -212,14 +227,13 @@ mod system_resolver {
     }
 }
 
-#[cfg(not(feature = "no-ssrf-protection"))]
 pub use system_resolver::SystemResolver;
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-#[cfg(all(test, not(feature = "no-ssrf-protection")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

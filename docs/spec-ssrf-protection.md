@@ -34,7 +34,7 @@ This spec defines the **dataplane protection layer** — a compile-time IP block
 **Cloud metadata exfiltration:**
 ```sql
 SELECT df.start(
-    df.http('GET', 'http://169.254.169.254/latest/meta-data/iam/security-credentials/'),
+    df.http('http://169.254.169.254/latest/meta-data/iam/security-credentials/', 'GET'),
     'steal-creds'
 );
 ```
@@ -42,7 +42,7 @@ SELECT df.start(
 **Localhost service probing:**
 ```sql
 SELECT df.start(
-    df.http('GET', 'http://127.0.0.1:8500/v1/agent/members'),
+    df.http('http://127.0.0.1:8500/v1/agent/members', 'GET'),
     'probe-consul'
 );
 ```
@@ -50,7 +50,7 @@ SELECT df.start(
 **Internal network scanning:**
 ```sql
 SELECT df.start(
-    df.http('GET', 'http://10.0.0.1:9090/api/v1/targets'),
+    df.http('http://10.0.0.1:9090/api/v1/targets', 'GET'),
     'probe-prometheus'
 );
 ```
@@ -59,7 +59,7 @@ SELECT df.start(
 ```sql
 -- Same as 169.254.169.254 but via IPv6 notation
 SELECT df.start(
-    df.http('GET', 'http://[::ffff:169.254.169.254]/latest/meta-data/'),
+    df.http('http://[::ffff:169.254.169.254]/latest/meta-data/', 'GET'),
     'ipv6-bypass'
 );
 ```
@@ -194,11 +194,11 @@ default = ["pg17"]
 no-ssrf-protection = []
 ```
 
-SSRF protection is **on by default** — no feature flag needed. The `no-ssrf-protection` feature is an opt-in escape hatch. When compiled with it (e.g., for local development or testing), all IP blocklist checks are skipped.
+SSRF protection is **on by default** — no feature flag needed. The `no-ssrf-protection` feature is an opt-in escape hatch. When compiled with it (e.g., for local development or testing), the IP blocklist is empty (all checks return "allowed") while all code paths remain compiled and exercised.
 
-The blocklist logic is gated with `#[cfg(not(feature = "no-ssrf-protection"))]`:
+The blocklist contents are gated with `#[cfg(not(feature = "no-ssrf-protection"))]` inside the check functions:
 - Default (feature absent): IP blocklist is enforced, no override possible.
-- With `no-ssrf-protection` enabled: all URLs are allowed (development/testing only).
+- With `no-ssrf-protection` enabled: blocklist is empty, all URLs are allowed (development/testing only).
 
 ### 5.6 Error Messages
 
@@ -272,7 +272,7 @@ fn check_blocked_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
         return Some("loopback (::1)");
     }
     let segments = ip.segments();
-    if segments[0] == 0xfe80 {
+    if segments[0] & 0xffc0 == 0xfe80 {
         return Some("link-local (fe80::/10)");
     }
     if segments[0] & 0xfe00 == 0xfc00 {
@@ -365,7 +365,7 @@ Create a test that verifies blocked requests fail with the expected error messag
 ```sql
 -- Test: SSRF protection blocks link-local addresses
 SELECT df.start(
-    df.http('GET', 'http://169.254.169.254/latest/meta-data/'),
+    df.http('http://169.254.169.254/latest/meta-data/', 'GET'),
     'test-ssrf-blocked'
 );
 -- Poll until failed, verify error contains "restricted range"

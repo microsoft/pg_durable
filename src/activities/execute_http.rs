@@ -12,10 +12,16 @@ use crate::types::HttpConfig;
 pub const NAME: &str = "pg_durable::activity::execute-http";
 
 /// Build a reqwest Client with optional SSRF-safe DNS resolver.
+///
+/// Redirects are disabled to prevent redirect-based SSRF bypasses: an attacker
+/// could host a 302 redirecting to `http://169.254.169.254/...`, and reqwest
+/// would follow it without calling our DNS resolver (since the target is an IP
+/// literal).
 fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder().timeout(timeout);
+    let builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none());
 
-    #[cfg(not(feature = "no-ssrf-protection"))]
     let builder = {
         use crate::ssrf::{SsrfSafeResolver, SystemResolver};
         use std::sync::Arc;
@@ -95,7 +101,7 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
 
         // Detect SSRF IP-blocklist rejections from the resolver and emit
         // a structured audit log (mirrors the scheme-block log above).
-        if err_string.contains("Blocked:") && err_string.contains("restricted") {
+        if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
                 "HTTP BLOCKED (ip) url={} submitted_by={audit_user} login_role={audit_login}",
                 config.url
