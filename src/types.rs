@@ -385,6 +385,12 @@ pub struct HttpConfig {
     pub headers: Option<serde_json::Value>,
     #[serde(default = "default_http_timeout")]
     pub timeout_seconds: u64,
+    /// Role that called df.start() (audit trail)
+    #[serde(default)]
+    pub submitted_by: Option<String>,
+    /// Authenticated connection role (audit trail)
+    #[serde(default)]
+    pub login_role: Option<String>,
 }
 
 fn default_http_timeout() -> u64 {

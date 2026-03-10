@@ -155,6 +155,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
 
+      - name: Run clippy (no-ssrf-protection)
+        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }},no-ssrf-protection -- -D warnings
+
       - name: Run unit tests
         run: cargo pgrx test pg${{ matrix.pg_version }}
 

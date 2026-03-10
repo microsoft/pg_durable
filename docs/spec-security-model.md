@@ -90,7 +90,26 @@ The security guarantee is: **only superusers can install the extension**, theref
 
 ### 3.2 Threats and Mitigations
 
+#### Implementation Priority Summary
+
+| Threat | Severity | Status | Notes |
+|--------|----------|--------|-------|
+| **T8**: SSRF via HTTP Activity | **CRITICAL** | Implemented | Dataplane protection — see [spec-ssrf-protection.md](spec-ssrf-protection.md) |
+| **T4**: Information Disclosure via df.* Tables | **HIGH** | Not implemented | RLS policies needed |
+| **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
+| **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
+| **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Not implemented | Per-user `df.vars` scoping via RLS |
+| **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
+| **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
+| **T0**: SECURITY DEFINER Misuse | **MEDIUM** | Documentation-only | Expected PG behavior |
+| **T7**: Extension Trustworthiness | **LOW** | Accepted | Standard PG trust model |
+| **T1–T3**: Privilege Escalation | **CRITICAL** | Implemented | Per-user sqlx connections |
+
+---
+
 #### T0: SECURITY DEFINER Invocation Captures Definer Privileges
+
+**Severity**: MEDIUM  |  **Status**: Documentation-only
 
 **Threat**: Calling `df.start()` inside a `SECURITY DEFINER` function captures the definer’s identity (because `GetUserId()`/`current_user` reflect the definer inside the function). Unprivileged callers could cause durable work to run with the definer’s privileges.
 
@@ -99,6 +118,8 @@ The security guarantee is: **only superusers can install the extension**, theref
 **Residual Risk**: High if misused. Safe if used intentionally and documented.
 
 #### T1: Privilege Escalation via RESET ROLE
+
+**Severity**: CRITICAL  |  **Status**: Implemented
 
 **Threat**: User submits SQL containing `RESET ROLE` to escape back to worker's identity.
 
@@ -118,6 +139,8 @@ SELECT df.start(
 
 #### T2: Privilege Escalation via SET ROLE
 
+**Severity**: CRITICAL  |  **Status**: Implemented
+
 **Threat**: User attempts to assume a more privileged role.
 
 ```sql
@@ -134,6 +157,8 @@ SELECT df.start(
 ---
 
 #### T3: Privilege Escalation via Dynamic SQL
+
+**Severity**: CRITICAL  |  **Status**: Implemented
 
 **Threat**: User obfuscates malicious commands.
 
@@ -152,7 +177,9 @@ SELECT df.start(
 
 #### T4: Information Disclosure via df.* Tables
 
-**Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions.
+**Severity**: HIGH  |  **Status**: Not implemented
+
+**Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions. Without RLS, any user with SELECT access can see all workflows, infer execution patterns, and read metadata belonging to other users.
 
 **Mitigation**: Row-Level Security (RLS) on `df.instances` and `df.nodes`:
 ```sql
@@ -170,6 +197,8 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T5: Denial of Service via Resource Exhaustion
 
+**Severity**: MEDIUM  |  **Status**: Not implemented (deferred)
+
 **Threat**: User creates many long-running durable functions to exhaust worker capacity.
 
 **Mitigation**: 
@@ -182,6 +211,8 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 ---
 
 #### T6: Background Worker Code Vulnerability
+
+**Severity**: MEDIUM  |  **Status**: Mitigated by design
 
 **Threat**: Bug in extension code allows attacker to control which user the worker connects as.
 
@@ -200,6 +231,8 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T7: Extension Code Trustworthiness
 
+**Severity**: LOW (accepted)  |  **Status**: N/A — inherent to PG extension model
+
 **Threat**: Malicious or buggy extension code abuses its ability to connect as any user.
 
 **Context**: PG's extension architecture has a full trust model - extension code must be safe and correct. Any extension can call C functions, which is stronger than "connect as any user".
@@ -216,49 +249,45 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 #### T8: Server-Side Request Forgery (SSRF) via HTTP Activity
 
-**Threat**: Attacker uses `df.http()` to access internal services (cloud metadata, internal APIs).
+**Severity**: CRITICAL  |  **Status**: Implemented
 
-```sql
--- Attack: Access AWS metadata endpoint
-SELECT df.start(
-    df.http('GET', 'http://169.254.169.254/latest/meta-data/iam/security-credentials/'),
-    'ssrf-attack'
-);
-```
+**Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape.
 
-**Mitigation**:
-- Block private IP ranges by default (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16)
-- Block localhost (127.0.0.0/8, ::1)
-- DNS rebinding protection: resolve hostname, check IP, then connect
-- URL allowlist required — no HTTP requests without explicit permission
+**Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers.
 
-**Residual Risk**: Low — defense in depth (IP blocking + allowlist).
+See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification, blocked IP ranges, and implementation details.
+
+**Residual Risk**: Low — hardcoded blocklist cannot be bypassed.
 
 ---
 
 #### T9: Unauthorized HTTP Access
 
+**Severity**: HIGH  |  **Status**: Not implemented (future spec)
+
 **Threat**: User abuses `df.http()` to access external resources they shouldn't (exfiltrate data, attack external services).
 
-**Mitigation**:
+**Mitigation** (to be addressed in a future customer-facing access control spec):
 - `df.http()` function has EXECUTE permission revoked from PUBLIC by default
 - DBA grants EXECUTE to roles that need HTTP access
 - GUC-based URL allowlist (`df.http_allowed_hosts`) for fine-grained control
 - Rate limiting via GUCs
 - Audit logging of all HTTP activity
 
-**Residual Risk**: Low — defense in depth (function permission + URL allowlist + SSRF blocking).
+**Residual Risk**: Medium until customer-level controls are implemented. T8 (SSRF/dataplane) protection is independent and addressed first.
 
 ---
 
 #### T10: Cross-User Variable Injection via df.vars
+
+**Severity**: MEDIUM-HIGH  |  **Status**: Not implemented
 
 **Threat**: `df.vars` is a database table used to pass workflow variables into `df.start()`. In the current design, if `df.vars` is globally writable/readable, one user can:
 
 - Override variables that another user expects (integrity issue)
 - Read variables set by other users (confidentiality issue)
 
-This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution.
+This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution. An attacker could redirect another user's workflow to an attacker-controlled endpoint by overwriting a variable like `api_endpoint`.
 
 **Mitigation (recommended)**: Scope variables per-user using a table key and RLS:
 
@@ -278,7 +307,9 @@ This can lead to wrong SQL/HTTP destinations if graphs use `$var` substitution.
 
 #### T11: Secret Exfiltration via df.secrets
 
-**Threat**: `df.secrets` are intended to be admin-managed values (API keys, shared tokens) that workflows can use without hard-coding secrets into graphs. If secrets are directly readable by all users, they are not secrets.
+**Severity**: HIGH  |  **Status**: Not implemented (additive feature)
+
+**Threat**: `df.secrets` are intended to be admin-managed values (API keys, shared tokens) that workflows can use without hard-coding secrets into graphs. If secrets are directly readable by all users, they are not secrets. Without this feature, users must embed credentials directly in function graphs, where they are stored in `df.nodes` and potentially visible in logs.
 
 **Mitigation**:
 - Secrets MUST NOT be directly selectable by non-admin users
@@ -518,120 +549,13 @@ ALTER SYSTEM SET df.http_max_response_bytes = 10485760;  -- 10MB
 
 ### 6.4 SSRF Protection
 
-**Always-on protections** (cannot be disabled):
+SSRF protection is implemented as a compile-time IP blocklist that blocks all private/reserved IP ranges (RFC 1918, link-local, loopback, IPv6 ULA, etc.), with DNS rebinding protection and IPv4-mapped IPv6 handling.
 
-| IP Range | Reason |
-|----------|--------|
-| `10.0.0.0/8` | Private network (RFC 1918) |
-| `172.16.0.0/12` | Private network (RFC 1918) |
-| `192.168.0.0/16` | Private network (RFC 1918) |
-| `169.254.0.0/16` | Link-local / Cloud metadata |
-| `127.0.0.0/8` | Localhost |
-| `::1` | IPv6 localhost |
-| `fc00::/7` | IPv6 private |
-
-**DNS rebinding protection**:
-```rust
-// 1. Resolve hostname to IP
-let ip = resolve_dns(&url.host())?;
-
-// 2. Check IP against blocklist BEFORE connecting
-if is_blocked_ip(&ip) {
-    return Err("SSRF: blocked IP address");
-}
-
-// 3. Disable redirects by default; if enabled, re-validate every hop
-let client = reqwest::Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .build()?;
-
-// 4. Connect to the resolved IP (not hostname)
-let response = client.get(&url).resolve(&url.host(), ip).send()?;
-
-// If redirects are explicitly enabled later, each redirect must:
-// - Resolve the new host, re-check blocklist/allowlist/IP
-// - Enforce the same port validation
-// - Reject if any hop violates the rules
-```
+See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification including blocked ranges, implementation architecture, and testing.
 
 ### 6.5 Implementation
 
-```rust
-// src/activities/execute_http.rs
-
-pub async fn execute(
-    ctx: ActivityContext,
-    security_ctx: SecurityContext,
-    method: String,
-    url: String,
-    headers: Option<HashMap<String, String>>,
-    body: Option<String>,
-) -> Result<String, String> {
-    // Note: Function-level permission already checked by PostgreSQL
-    // before df.http() could be called in df.start()
-    
-    // 1. Parse and validate URL
-    // Implementation Note: reqwest MUST use rustls-tls to avoid OpenSSL conflicts with Postgres
-    // Cargo.toml: reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-    let parsed_url = Url::parse(&url)
-        .map_err(|e| format!("Invalid URL: {}", e))?;
-    
-    // 2. SSRF Protection - resolve DNS and check IP
-    let ip = resolve_dns(parsed_url.host_str().unwrap_or(""))?;
-    if is_ssrf_blocked_ip(&ip) {
-        return Err(format!(
-            "HTTP request blocked: {} resolves to internal IP {}",
-            parsed_url.host_str().unwrap_or(""), ip
-        ));
-    }
-    
-    // 3. Check URL allowlist (GUC: df.http_allowed_hosts)
-    if !is_host_allowed(&parsed_url) {
-        return Err(format!(
-            "HTTP request blocked: host '{}' not in allowed list. \
-             Configure df.http_allowed_hosts to allow this host.",
-            parsed_url.host_str().unwrap_or("")
-        ));
-    }
-    
-    // 4. Redirect policy: disabled by default; if ever enabled, every hop must re-check SSRF + allowlist + port
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-    
-    // 5. Rate limiting
-    check_rate_limit(&security_ctx.user_name).await?;
-    
-    // 6. Execute request with timeout
-    let timeout = get_guc_int("df.http_timeout_seconds", 30);
-    let response = execute_http_request(method, parsed_url, ip, headers, body, timeout, client).await?;
-    
-    // 7. Log for audit
-    log_http_request(&security_ctx, &url, &method, response.status());
-    
-    Ok(response.to_json())
-}
-
-fn is_ssrf_blocked_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private() ||           // 10.x, 172.16-31.x, 192.168.x
-            ipv4.is_loopback() ||          // 127.x
-            ipv4.is_link_local() ||        // 169.254.x (cloud metadata!)
-            ipv4.is_broadcast() ||
-            ipv4.is_documentation() ||
-            ipv4.is_unspecified()
-        }
-        IpAddr::V6(ipv6) => {
-            ipv6.is_loopback() ||          // ::1
-            ipv6.is_unspecified() ||
-            // IPv6 private ranges
-            is_ipv6_private(ipv6)
-        }
-    }
-}
-```
+See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the SSRF implementation details. The access control layers (URL allowlist, rate limiting) described in Section 6.1 are not yet implemented.
 
 ### 6.6 User Experience
 

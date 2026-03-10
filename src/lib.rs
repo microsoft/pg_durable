@@ -25,6 +25,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod orchestrations;
 pub mod registry;
+pub mod ssrf;
 pub mod types;
 pub mod worker;
 
