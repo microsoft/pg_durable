@@ -89,7 +89,9 @@ The new `.so` must work against **all** previous versions' schemas (same major v
 
 **Changing the extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](../docs/upgrade-testing.md)
 
-**Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](../docs/upgrade-testing.md) for the full upgrade testing strategy.
+For Scenario A, treat the upgrade path as the contract for already-shipped versions: before release, fresh install for the new version should match what an existing customer gets by installing the previous version and applying the upgrade chain.
+
+**Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](..docs/upgrade-testing.md) for the full upgrade testing strategy.
 
 ## Duroxide Migration Sync Workflow
 

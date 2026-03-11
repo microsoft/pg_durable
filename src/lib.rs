@@ -131,9 +131,12 @@ CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);
 CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
 
 -- Table to store workflow variables (captured at df.start())
+-- Per-user scoping: each user has their own variable namespace.
 CREATE TABLE IF NOT EXISTS df.vars (
-    name TEXT PRIMARY KEY,
-    value TEXT
+    name TEXT NOT NULL,
+    value TEXT,
+    owner REGROLE NOT NULL DEFAULT current_user::regrole,
+    PRIMARY KEY (owner, name)
 );
 
 -- Sentinel table: the background worker writes its epoch_id here after
@@ -171,6 +174,14 @@ CREATE POLICY nodes_user_isolation ON df.nodes
     FOR ALL
     USING (submitted_by = current_user::regrole)
     WITH CHECK (submitted_by = current_user::regrole);
+
+-- Enable RLS on df.vars (per-user variable isolation)
+ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY vars_user_isolation ON df.vars
+    FOR ALL
+    USING (owner = current_user::regrole)
+    WITH CHECK (owner = current_user::regrole);
 
 -- Auto-grant permissions to PUBLIC (safe with RLS enabled)
 GRANT USAGE ON SCHEMA df TO PUBLIC;

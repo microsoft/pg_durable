@@ -98,7 +98,7 @@ The security guarantee is: **only superusers can install the extension**, theref
 | **T4**: Information Disclosure via df.* Tables | **HIGH** | Implemented | RLS on `df.instances` and `df.nodes` — see [rls.md](rls.md) |
 | **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
 | **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
-| **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Partially implemented | Instance/node isolation via RLS; `df.vars` scoping deferred — see [rls.md](rls.md) |
+| **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Implemented | Per-user `df.vars` scoping via `owner` column + RLS — see [rls.md](rls.md) |
 | **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
 | **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
 | **T0**: SECURITY DEFINER Misuse | **MEDIUM** | Documentation-only | Expected PG behavior |
@@ -274,13 +274,13 @@ See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specificatio
 
 #### T10: Cross-User Variable Injection via df.vars
 
-**Severity**: MEDIUM-HIGH  |  **Status**: Partially implemented
+**Severity**: MEDIUM-HIGH  |  **Status**: Implemented
 
-**Threat**: `df.vars` is a global key-value table. Without per-user scoping, users can override or read each other's variables, potentially redirecting workflows.
+**Threat**: `df.vars` is a key-value table. Without per-user scoping, users can override or read each other's variables, potentially redirecting workflows.
 
-**Mitigation (partially implemented)**: Instance and node isolation is enforced via RLS on `df.instances` and `df.nodes` (see T4). Per-user `df.vars` scoping (adding an `owner` column + RLS) is deferred to a follow-up PR — see [rls.md, Decision 5](rls.md).
+**Mitigation (implemented)**: `df.vars` has an `owner REGROLE` column with `DEFAULT current_user::regrole` and a composite primary key `(owner, name)`. RLS policy `vars_user_isolation` restricts each user to their own variables. All DSL functions (`df.setvar()`, `df.getvar()`, `df.unsetvar()`, `df.clearvars()`) and `df.start()` vars capture include explicit `WHERE owner = current_user::regrole` filters, ensuring correct scoping even for superusers who bypass RLS. See [rls.md, Decision 5](rls.md).
 
-**Residual Risk**: Medium — `df.vars` remains globally shared until Phase 2.
+**Residual Risk**: Low — per-user scoping is enforced at both the RLS and application layers.
 
 ---
 
@@ -334,7 +334,7 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 
 **Security requirement**: Variables MUST NOT be global, cross-user state.
 
-**Current status**: Per-user `df.vars` scoping is deferred to a follow-up PR. Instance and node isolation is enforced via RLS (see T4). See [rls.md, Decision 5](rls.md) for the deferred design.
+**Current status**: Implemented. `df.vars` has per-user scoping via an `owner REGROLE` column with RLS. Each user has their own variable namespace. Variables are captured at `df.start()` time from the calling user's namespace only. See [rls.md, Decision 5](rls.md).
 
 ---
 

@@ -49,8 +49,41 @@ pub fn debug_connection() -> String {
 // Variable Functions
 // ============================================================================
 
+fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch_part = parts.next()?;
+    let patch_digits = patch_part
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>();
+    let patch = patch_digits.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn installed_extension_version() -> String {
+    Spi::get_one::<String>("SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| pgrx::error!("pg_durable extension metadata not found"))
+}
+
+fn owner_scoped_vars_enabled() -> bool {
+    let extversion = installed_extension_version();
+    let ext_semver = parse_semver(&extversion).unwrap_or_else(|| {
+        pgrx::error!(
+            "Unsupported pg_durable extension version format: {}",
+            extversion
+        )
+    });
+
+    ext_semver >= (0, 2, 0)
+}
+
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
+/// Each user has their own variable namespace (owner = current_user).
 #[pg_extern(schema = "df")]
 pub fn setvar(name: &str, value: &str) -> String {
     // Check if we're inside a workflow execution
@@ -58,12 +91,21 @@ pub fn setvar(name: &str, value: &str) -> String {
         pgrx::error!("df.setvar() cannot be called inside a workflow - set variables before starting the workflow");
     }
 
-    let sql = format!(
-        "INSERT INTO df.vars (name, value) VALUES ('{}', '{}')
-         ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
-        name.replace('\'', "''"),
-        value.replace('\'', "''")
-    );
+    let escaped_name = name.replace('\'', "''");
+    let escaped_value = value.replace('\'', "''");
+    let sql = if owner_scoped_vars_enabled() {
+        format!(
+            "INSERT INTO df.vars (name, value) VALUES ('{}', '{}')
+             ON CONFLICT (owner, name) DO UPDATE SET value = EXCLUDED.value",
+            escaped_name, escaped_value
+        )
+    } else {
+        format!(
+            "INSERT INTO df.vars (name, value) VALUES ('{}', '{}')
+             ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+            escaped_name, escaped_value
+        )
+    };
     if let Err(e) = Spi::run(&sql) {
         pgrx::error!("Failed to set variable: {:?}", e);
     }
@@ -71,16 +113,23 @@ pub fn setvar(name: &str, value: &str) -> String {
 }
 
 /// Gets a workflow variable value.
+/// Returns the variable owned by the current user.
 #[pg_extern(schema = "df")]
 pub fn getvar(name: &str) -> Option<String> {
-    let sql = format!(
-        "SELECT value FROM df.vars WHERE name = '{}'",
-        name.replace('\'', "''")
-    );
+    let escaped_name = name.replace('\'', "''");
+    let sql = if owner_scoped_vars_enabled() {
+        format!(
+            "SELECT value FROM df.vars WHERE name = '{}' AND owner = current_user::regrole",
+            escaped_name
+        )
+    } else {
+        format!("SELECT value FROM df.vars WHERE name = '{}'", escaped_name)
+    };
     Spi::get_one::<String>(&sql).ok().flatten()
 }
 
 /// Removes a workflow variable.
+/// Only removes variables owned by the current user.
 #[pg_extern(schema = "df")]
 pub fn unsetvar(name: &str) -> String {
     // Check if we're inside a workflow execution
@@ -88,17 +137,22 @@ pub fn unsetvar(name: &str) -> String {
         pgrx::error!("df.unsetvar() cannot be called inside a workflow - manage variables before starting the workflow");
     }
 
-    let sql = format!(
-        "DELETE FROM df.vars WHERE name = '{}'",
-        name.replace('\'', "''")
-    );
+    let escaped_name = name.replace('\'', "''");
+    let sql = if owner_scoped_vars_enabled() {
+        format!(
+            "DELETE FROM df.vars WHERE name = '{}' AND owner = current_user::regrole",
+            escaped_name
+        )
+    } else {
+        format!("DELETE FROM df.vars WHERE name = '{}'", escaped_name)
+    };
     if let Err(e) = Spi::run(&sql) {
         pgrx::error!("Failed to unset variable: {:?}", e);
     }
     "OK".to_string()
 }
 
-/// Clears all workflow variables.
+/// Clears all workflow variables owned by the current user.
 #[pg_extern(schema = "df")]
 pub fn clearvars() -> String {
     // Check if we're inside a workflow execution
@@ -106,7 +160,13 @@ pub fn clearvars() -> String {
         pgrx::error!("df.clearvars() cannot be called inside a workflow - manage variables before starting the workflow");
     }
 
-    if let Err(e) = Spi::run("DELETE FROM df.vars") {
+    let sql = if owner_scoped_vars_enabled() {
+        "DELETE FROM df.vars WHERE owner = current_user::regrole"
+    } else {
+        "DELETE FROM df.vars"
+    };
+
+    if let Err(e) = Spi::run(sql) {
         pgrx::error!("Failed to clear variables: {:?}", e);
     }
     "OK".to_string()
@@ -640,10 +700,18 @@ pub fn start(
         pgrx::error!("Failed to create instance: {:?}", e);
     }
 
-    // Capture vars from df.vars table
+    // Capture vars from df.vars using the installed extension version as the
+    // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
+    // owner-scoped vars.
+    let vars_query = if owner_scoped_vars_enabled() {
+        "SELECT name, value FROM df.vars WHERE owner = current_user::regrole"
+    } else {
+        "SELECT name, value FROM df.vars"
+    };
+
     let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
         let mut vars = std::collections::HashMap::new();
-        if let Ok(table) = client.select("SELECT name, value FROM df.vars", None, &[]) {
+        if let Ok(table) = client.select(vars_query, None, &[]) {
             for row in table {
                 if let (Ok(Some(name)), Ok(Some(value))) =
                     (row.get::<String>(1), row.get::<String>(2))

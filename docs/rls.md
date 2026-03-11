@@ -38,7 +38,7 @@ RLS solves this: keep the DML grants (users need them for the SPI calls inside `
 |-------|-------------|--------|
 | `df.instances` | **Yes** | Contains per-user workflow state; has `submitted_by` column |
 | `df.nodes` | **Yes** | Contains per-user node definitions; has `submitted_by` column |
-| `df.vars` | **Decision needed** | Currently global; spec proposes per-user scoping |
+| `df.vars` | **Yes** | Per-user variable isolation; has `owner` column |
 
 ### Out of scope
 
@@ -64,10 +64,10 @@ These `df.*` functions access `df.instances` or `df.nodes` via SPI (which runs a
 | `df.list_instances()` | `df.instances` (SELECT for labels) | Read | User sees only own labels |
 | `df.instance_info()` | `df.instances` (SELECT for label) | Read | User sees only own |
 | `df.instance_nodes()` | `df.nodes` (SELECT) | Read | User sees only own |
-| `df.setvar()` | `df.vars` (INSERT/UPDATE) | Write | Depends on vars design |
-| `df.getvar()` | `df.vars` (SELECT) | Read | Depends on vars design |
-| `df.unsetvar()` | `df.vars` (DELETE) | Write | Depends on vars design |
-| `df.clearvars()` | `df.vars` (DELETE) | Write | Depends on vars design |
+| `df.setvar()` | `df.vars` (INSERT/UPDATE) | Write | User can only set own vars (RLS + explicit owner filter) |
+| `df.getvar()` | `df.vars` (SELECT) | Read | User can only read own vars (RLS + explicit owner filter) |
+| `df.unsetvar()` | `df.vars` (DELETE) | Write | User can only delete own vars (RLS + explicit owner filter) |
+| `df.clearvars()` | `df.vars` (DELETE) | Write | User can only clear own vars (RLS + explicit owner filter) |
 
 ### Background worker access (NOT affected by RLS)
 
@@ -159,14 +159,23 @@ There are no "unlinked" or "orphan" nodes with `submitted_by = NULL`. Every row 
 
 ### Decision 5: `df.vars` scoping
 
-Currently `df.vars` is a global key-value table with no user scoping. The security spec (Section 4.3) identifies this as a cross-user integrity/confidentiality issue and proposes two options:
+`df.vars` was originally a global key-value table with no user scoping. The security spec (Section 4.3) identified this as a cross-user integrity/confidentiality issue.
 
-**(A) Per-user scoping with `owner` column + RLS**:
+**Decision**: Option A — per-user scoping with `owner` column + RLS. ✅ Implemented in v0.2.0.
+
+**Schema** (fresh install):
 ```sql
-ALTER TABLE df.vars ADD COLUMN owner REGROLE NOT NULL DEFAULT current_user::regrole;
--- Change PK from (name) to (owner, name)
-ALTER TABLE df.vars DROP CONSTRAINT vars_pkey;
-ALTER TABLE df.vars ADD PRIMARY KEY (owner, name);
+CREATE TABLE IF NOT EXISTS df.vars (
+    owner REGROLE NOT NULL DEFAULT current_user::regrole,
+    name TEXT NOT NULL,
+    value TEXT,
+    PRIMARY KEY (owner, name)
+);
+```
+
+**RLS policy**:
+```sql
+ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY vars_user_isolation ON df.vars
     FOR ALL
@@ -174,18 +183,16 @@ CREATE POLICY vars_user_isolation ON df.vars
     WITH CHECK (owner = current_user::regrole);
 ```
 
-**(B) Admin-only** (revoke DML from non-admin users):
+**Upgrade script** (`pg_durable--0.1.1--0.2.0.sql`):
 ```sql
-REVOKE ALL ON df.vars FROM PUBLIC;
--- Only admins can set variables
+ALTER TABLE df.vars ADD COLUMN owner REGROLE NOT NULL DEFAULT current_user::regrole;
+ALTER TABLE df.vars DROP CONSTRAINT vars_pkey;
+ALTER TABLE df.vars ADD PRIMARY KEY (owner, name);
+ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
+CREATE POLICY vars_user_isolation ON df.vars ...;
 ```
 
-**Analysis**:
-- Option A is the multi-tenant-safe approach. But it requires a schema migration and changes to how `df.start()` captures vars (must filter by `owner`).
-- Option B is simpler but breaks any use case where non-admin users parameterize workflows.
-- A third option: **defer vars scoping** to a separate PR. RLS on `df.instances` and `df.nodes` is the higher-priority isolation fix. Vars scoping is a separate concern that can be addressed incrementally.
-
-**Decision**: Defer vars scoping to a follow-up PR. ✅ Decided. This PR focuses on `df.instances` and `df.nodes` only.
+**Superuser behavior**: Superusers bypass RLS, so they can see all users' variables via direct table queries. However, `df.start()`, `df.getvar()`, `df.setvar()`, `df.unsetvar()`, and `df.clearvars()` all use explicit `WHERE owner = current_user::regrole` filters in their SQL. This ensures that even superusers only interact with their own variables through the DSL functions — RLS is defense-in-depth for non-superusers, while the explicit filter provides correct scoping for all users including superusers.
 
 ### Decision 6: Worker role RLS bypass
 
@@ -298,7 +305,20 @@ CREATE POLICY nodes_user_isolation ON df.nodes
 
 No `submitted_by IS NULL` clause is needed — all nodes are inserted by `df.start()` with `submitted_by` already set (see Decision 4).
 
-### 4.3 Worker bypass
+### 4.3 `df.vars`
+
+```sql
+ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY vars_user_isolation ON df.vars
+    FOR ALL
+    USING (owner = current_user::regrole)
+    WITH CHECK (owner = current_user::regrole);
+```
+
+The `owner` column defaults to `current_user::regrole` on INSERT, so `df.setvar()` automatically assigns ownership. All DSL functions (`df.getvar()`, `df.unsetvar()`, `df.clearvars()`, and `df.start()` vars capture) also include explicit `WHERE owner = current_user::regrole` filters for correct behavior when RLS is bypassed (superusers).
+
+### 4.4 Worker bypass
 
 The worker role must be a superuser (see Decision 6). Superusers bypass RLS automatically — no additional configuration needed.
 
@@ -308,7 +328,7 @@ The worker role must be a superuser (see Decision 6). Superusers bypass RLS auto
 -- Superusers bypass all permission checks including RLS.
 ```
 
-### 4.4 `FORCE ROW LEVEL SECURITY`
+### 4.5 `FORCE ROW LEVEL SECURITY`
 
 `ENABLE ROW LEVEL SECURITY` only applies RLS to non-owner roles. If the table owner queries the table, RLS is bypassed. `FORCE ROW LEVEL SECURITY` makes RLS apply even to the table owner.
 
@@ -354,11 +374,15 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
    - Update `27_user_isolation.sql` to test RLS-enforced isolation
    - Add new RLS-specific tests
 
-### Phase 2: Variables scoping (future PR)
+### Phase 2: Variables scoping ✅ Implemented (v0.2.0)
 
-- Add `owner` column to `df.vars`
-- Migrate to per-user variable scoping
-- Add RLS policies for `df.vars`
+- Added `owner REGROLE` column to `df.vars` with `DEFAULT current_user::regrole`
+- Changed PK from `(name)` to `(owner, name)` for per-user namespace
+- Added RLS policy `vars_user_isolation` on `df.vars`
+- Updated all DSL functions (`setvar`, `getvar`, `unsetvar`, `clearvars`) with explicit `owner` filters
+- Updated `df.start()` vars capture to filter by `owner = current_user::regrole`
+- Created upgrade script `sql/pg_durable--0.1.1--0.2.0.sql`
+- Added E2E test `38_rls_vars.sql`
 
 ---
 
@@ -368,7 +392,7 @@ All decisions have been resolved. No open questions remain.
 
 ### Resolved decisions
 
-- **Decision 5 (vars scoping)**: Deferred to follow-up PR. This PR focuses on `df.instances` and `df.nodes`. ✅
+- **Decision 5 (vars scoping)**: Option A implemented — per-user scoping with `owner` column + RLS. ✅ Implemented in v0.2.0.
 - **Decision 6 (worker bypass)**: Worker role must be a superuser → bypasses RLS automatically. ✅
 - **Decision 7 (cancel/signal ownership)**: Explicit ownership check before duroxide client call. ✅
 - **Decision 8 (auto-grants)**: GRANT to PUBLIC in `CREATE EXTENSION` with column-level UPDATE on `(status, updated_at)` for instances, no DELETE on instances/nodes. ✅
@@ -419,13 +443,18 @@ RESET SESSION AUTHORIZATION;
 - Verify the background worker can load/update instances from any user
 - Verify workflows complete successfully with RLS enabled
 
-**Test: `df.vars` behavior** (if per-user scoping is implemented)
+**Test: `df.vars` per-user isolation** (implemented in `38_rls_vars.sql`)
 ```sql
 SET SESSION AUTHORIZATION alice;
 SELECT df.setvar('key', 'alice-value');
 RESET SESSION AUTHORIZATION;
 
 SET SESSION AUTHORIZATION bob;
-SELECT df.getvar('key');  -- Should return NULL (per-user) or 'alice-value' (global)
+SELECT df.getvar('key');  -- Returns NULL (per-user scoping)
+SELECT df.setvar('key', 'bob-value');  -- Bob gets his own 'key'
 RESET SESSION AUTHORIZATION;
+
+-- Each user's df.start() captures only their own vars
+-- df.clearvars() only clears the calling user's variables
+-- Superuser sees all vars via direct table access but df.start() captures only own
 ```
