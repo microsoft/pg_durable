@@ -114,22 +114,14 @@ pub fn setvar(name: &str, value: &str) -> String {
         pgrx::error!("df.setvar() cannot be called inside a workflow - set variables before starting the workflow");
     }
 
-    let escaped_name = name.replace('\'', "''");
-    let escaped_value = value.replace('\'', "''");
     let sql = if owner_scoped_vars_enabled() {
-        format!(
-            "INSERT INTO df.vars (name, value) VALUES ('{}', '{}')
-             ON CONFLICT (owner, name) DO UPDATE SET value = EXCLUDED.value",
-            escaped_name, escaped_value
-        )
+        "INSERT INTO df.vars (name, value) VALUES ($1, $2)
+         ON CONFLICT (owner, name) DO UPDATE SET value = EXCLUDED.value"
     } else {
-        format!(
-            "INSERT INTO df.vars (name, value) VALUES ('{}', '{}')
-             ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
-            escaped_name, escaped_value
-        )
+        "INSERT INTO df.vars (name, value) VALUES ($1, $2)
+         ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
     };
-    if let Err(e) = Spi::run(&sql) {
+    if let Err(e) = Spi::run_with_args(sql, &[name.into(), value.into()]) {
         pgrx::error!("Failed to set variable: {:?}", e);
     }
     "OK".to_string()
@@ -139,16 +131,14 @@ pub fn setvar(name: &str, value: &str) -> String {
 /// Returns the variable owned by the current user.
 #[pg_extern(schema = "df")]
 pub fn getvar(name: &str) -> Option<String> {
-    let escaped_name = name.replace('\'', "''");
     let sql = if owner_scoped_vars_enabled() {
-        format!(
-            "SELECT value FROM df.vars WHERE name = '{}' AND owner = current_user::regrole",
-            escaped_name
-        )
+        "SELECT value FROM df.vars WHERE name = $1 AND owner = current_user::regrole"
     } else {
-        format!("SELECT value FROM df.vars WHERE name = '{}'", escaped_name)
+        "SELECT value FROM df.vars WHERE name = $1"
     };
-    Spi::get_one::<String>(&sql).ok().flatten()
+    Spi::get_one_with_args::<String>(sql, &[name.into()])
+        .ok()
+        .flatten()
 }
 
 /// Removes a workflow variable.
@@ -160,16 +150,12 @@ pub fn unsetvar(name: &str) -> String {
         pgrx::error!("df.unsetvar() cannot be called inside a workflow - manage variables before starting the workflow");
     }
 
-    let escaped_name = name.replace('\'', "''");
     let sql = if owner_scoped_vars_enabled() {
-        format!(
-            "DELETE FROM df.vars WHERE name = '{}' AND owner = current_user::regrole",
-            escaped_name
-        )
+        "DELETE FROM df.vars WHERE name = $1 AND owner = current_user::regrole"
     } else {
-        format!("DELETE FROM df.vars WHERE name = '{}'", escaped_name)
+        "DELETE FROM df.vars WHERE name = $1"
     };
-    if let Err(e) = Spi::run(&sql) {
+    if let Err(e) = Spi::run_with_args(sql, &[name.into()]) {
         pgrx::error!("Failed to unset variable: {:?}", e);
     }
     "OK".to_string()
@@ -547,10 +533,10 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 
     // Ownership check: SPI goes through RLS, so this returns false for
     // non-owned instances (the row is invisible to the calling user).
-    let exists: bool = Spi::get_one(&format!(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
-        instance_id.replace('\'', "''")
-    ))
+    let exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        &[instance_id.into()],
+    )
     .ok()
     .flatten()
     .unwrap_or(false);
@@ -591,10 +577,10 @@ pub fn start(
 
     // Validate that the target database exists (if specified)
     if let Some(db) = database {
-        let exists: bool = match Spi::get_one(&format!(
-            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = '{}')",
-            db.replace('\'', "''")
-        )) {
+        let exists: bool = match Spi::get_one_with_args(
+            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+            &[db.into()],
+        ) {
             Ok(Some(v)) => v,
             Ok(None) => false,
             Err(e) => pgrx::error!("failed to check database existence: {}", e),
@@ -775,10 +761,10 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
 
     // Ownership check: SPI goes through RLS, so this returns false for
     // non-owned instances (the row is invisible to the calling user).
-    let exists: bool = Spi::get_one(&format!(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
-        instance_id.replace('\'', "''")
-    ))
+    let exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        &[instance_id.into()],
+    )
     .ok()
     .flatten()
     .unwrap_or(false);
@@ -792,10 +778,10 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
 
     // Update the instance status to 'cancelled' via SPI.
     // User has column-level UPDATE on (status, updated_at) with RLS restricting to own rows.
-    Spi::run(&format!(
-        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = '{}'",
-        instance_id.replace('\'', "''")
-    ))
+    Spi::run_with_args(
+        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = $1",
+        &[instance_id.into()],
+    )
     .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
 
     format!("Instance {instance_id} cancelled: {reason}")
@@ -804,11 +790,12 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
 /// Gets the status of a durable function instance.
 #[pg_extern(schema = "df")]
 pub fn status(instance_id: &str) -> Option<String> {
-    let sql = format!(
-        "SELECT status FROM df.instances WHERE id = '{}'",
-        instance_id.replace('\'', "''")
-    );
-    Spi::get_one::<String>(&sql).ok().flatten()
+    Spi::get_one_with_args::<String>(
+        "SELECT status FROM df.instances WHERE id = $1",
+        &[instance_id.into()],
+    )
+    .ok()
+    .flatten()
 }
 
 /// Manually runs pending durable functions.
@@ -824,13 +811,14 @@ pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
 /// Gets the result of a completed durable function.
 #[pg_extern(schema = "df")]
 pub fn result(instance_id: &str) -> Option<String> {
-    let escaped_instance_id = instance_id.replace('\'', "''");
-    let sql = format!(
-        r#"SELECT result::text FROM df.nodes 
-           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{escaped_instance_id}')
-           AND status = 'completed'"#
-    );
-    Spi::get_one::<String>(&sql).ok().flatten()
+    Spi::get_one_with_args::<String>(
+        r#"SELECT result::text FROM df.nodes
+           WHERE id = (SELECT root_node FROM df.instances WHERE id = $1)
+           AND status = 'completed'"#,
+        &[instance_id.into()],
+    )
+    .ok()
+    .flatten()
 }
 
 /// Waits for a durable function to complete, returning its final status.
@@ -863,13 +851,11 @@ pub fn wait_for_completion(
 
     loop {
         // Query instance status
-        let sql = format!(
-            "SELECT status FROM df.instances WHERE id = '{}'",
-            instance_id.replace('\'', "''")
-        );
-
-        let status: Option<String> =
-            Spi::get_one(&sql).map_err(|e| format!("Failed to query status: {:?}", e))?;
+        let status: Option<String> = Spi::get_one_with_args(
+            "SELECT status FROM df.instances WHERE id = $1",
+            &[instance_id.into()],
+        )
+        .map_err(|e| format!("Failed to query status: {:?}", e))?;
 
         if let Some(ref s) = status {
             let s_lower = s.to_lowercase();

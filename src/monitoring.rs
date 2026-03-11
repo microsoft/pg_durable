@@ -125,18 +125,18 @@ pub fn instance_info(
     let instance_id_str = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, returning NULL for non-owned instances.
-    let label: Option<String> = Spi::get_one(&format!(
-        "SELECT label FROM df.instances WHERE id = '{}'",
-        instance_id.replace('\'', "''")
-    ))
+    let label: Option<String> = Spi::get_one_with_args(
+        "SELECT label FROM df.instances WHERE id = $1",
+        &[instance_id.into()],
+    )
     .ok()
     .flatten();
 
     // Check if the instance exists for this user (RLS-filtered)
-    let exists: bool = Spi::get_one(&format!(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
-        instance_id.replace('\'', "''")
-    ))
+    let exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        &[instance_id.into()],
+    )
     .ok()
     .flatten()
     .unwrap_or(false);
@@ -199,10 +199,10 @@ pub fn instance_executions(
     let instance_id_owned = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, so non-owned instances are invisible.
-    let exists: bool = Spi::get_one(&format!(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = '{}')",
-        instance_id.replace('\'', "''")
-    ))
+    let exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        &[instance_id.into()],
+    )
     .ok()
     .flatten()
     .unwrap_or(false);
