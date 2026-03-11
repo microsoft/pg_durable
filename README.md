@@ -38,18 +38,48 @@ SELECT df.start(
 
 This project includes `microsoft/duroxide-pg-opt` as a git submodule. You need access to this private repository.
 
-1. **Create a GitHub PAT** with `repo` scope: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
-2. **Authorize SSO** for the Microsoft organization on the PAT
-3. **Configure git** to use the PAT for GitHub HTTPS URLs:
+1. **Create a fine-grained GitHub PAT** scoped only to `microsoft/duroxide-pg-opt` (minimum permission: `Contents: Read`): https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+2. **If your organization enforces SAML SSO, ensure org access is approved for the token.** For fine-grained PATs, this is handled in the org/resource-owner approval flow (not the classic PAT "Configure SSO" button).
+3. **Store the PAT in a credential helper** (recommended over PAT-in-URL rewrite rules). If your environment sets `GITHUB_TOKEN` or `GH_TOKEN` (for example, Codespaces), temporarily unset them for this step so `gh` stores your PAT:
 
 ```bash
-git config --global url."https://<YOUR_PAT>@github.com/".insteadOf "https://github.com/"
+read -rsp "GitHub PAT: " GH_PAT; echo
+printf '%s\n' "$GH_PAT" | env -u GITHUB_TOKEN -u GH_TOKEN gh auth login --hostname github.com --git-protocol https --with-token
+unset GH_PAT
+env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
 ```
 
-4. **Initialize the submodule** after cloning:
+4. **Scope credential helper usage to the submodule URL path** (so this PAT is used only for `duroxide-pg-opt`):
 
 ```bash
-git submodule update --init
+git config --global credential."https://github.com/microsoft/duroxide-pg-opt.git".helper '!env -u GITHUB_TOKEN -u GH_TOKEN gh auth git-credential'
+git config --global credential."https://github.com/microsoft/duroxide-pg-opt.git".useHttpPath true
+```
+
+5. **Initialize the submodule** after cloning. In environments like Codespaces, run with explicit helper settings so injected tokens/askpass do not override your PAT:
+
+```bash
+git submodule sync --recursive
+env -u GITHUB_TOKEN -u GH_TOKEN -u GIT_ASKPASS \
+    git -c credential.helper='!env -u GITHUB_TOKEN -u GH_TOKEN gh auth git-credential' \
+            -c credential.useHttpPath=true \
+            submodule update --init --recursive
+```
+
+6. **Persist submodule auth settings for normal git commands** (so `git fetch` works later in new shells):
+
+```bash
+cd duroxide-pg-opt
+git config --local credential.helper ''
+git config --local --add credential.helper '!env -u GITHUB_TOKEN -u GH_TOKEN gh auth git-credential'
+git config --local credential.useHttpPath true
+git config --local core.askPass ''
+```
+
+This avoids storing PATs in git URL rewrite settings such as:
+
+```bash
+git config --global url."https://<YOUR_PAT>@github.com/microsoft/duroxide-pg-opt".insteadOf "https://github.com/microsoft/duroxide-pg-opt"
 ```
 
 ## Installation
