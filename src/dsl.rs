@@ -804,7 +804,10 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
 /// Gets the status of a durable function instance.
 #[pg_extern(schema = "df")]
 pub fn status(instance_id: &str) -> Option<String> {
-    let sql = format!("SELECT status FROM df.instances WHERE id = '{instance_id}'");
+    let sql = format!(
+        "SELECT status FROM df.instances WHERE id = '{}'",
+        instance_id.replace('\'', "''")
+    );
     Spi::get_one::<String>(&sql).ok().flatten()
 }
 
@@ -821,9 +824,10 @@ pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
 /// Gets the result of a completed durable function.
 #[pg_extern(schema = "df")]
 pub fn result(instance_id: &str) -> Option<String> {
+    let escaped_instance_id = instance_id.replace('\'', "''");
     let sql = format!(
         r#"SELECT result::text FROM df.nodes 
-           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{instance_id}')
+           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{escaped_instance_id}')
            AND status = 'completed'"#
     );
     Spi::get_one::<String>(&sql).ok().flatten()

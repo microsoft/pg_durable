@@ -3,7 +3,7 @@
 **Status**: Implementation in progress  
 **Authors**: pg_durable Team  
 **Created**: 2025-12-25  
-**Last Updated**: 2026-03-10
+**Last Updated**: 2026-03-11
 
 ---
 
@@ -102,7 +102,7 @@ The security guarantee is: **only superusers can install the extension**, theref
 | **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
 | **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
 | **T0**: SECURITY DEFINER Misuse | **MEDIUM** | Documentation-only | Expected PG behavior |
-| **T12**: SQL Injection in Internal SPI Queries | **CRITICAL** | **Not fixed** | `df.status()` and `df.result()` — see [security-todo.md](security-todo.md) |
+| **T12**: SQL Injection in Internal SPI Queries | **CRITICAL** | **Implemented** | `df.status()` and `df.result()` now escape `instance_id`; parameterized SPI still recommended |
 | **T7**: Extension Trustworthiness | **LOW** | Accepted | Standard PG trust model |
 | **T13**: `search_path` Manipulation in PL/pgSQL Helpers | **LOW** | Not fixed | Defense-in-depth; all calls are schema-qualified |
 | **T14**: Extension Object Pre-creation | **LOW** | Accepted | Requires operator error; superuser-only install |
@@ -304,9 +304,9 @@ See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specificatio
 
 #### T12: SQL Injection in Internal SPI Queries
 
-**Severity**: CRITICAL  |  **Status**: Not fixed
+**Severity**: CRITICAL  |  **Status**: Implemented
 
-**Threat**: Two extension functions (`df.status()` and `df.result()`) interpolate the user-supplied `instance_id` parameter directly into SQL via `format!()` without escaping single quotes. An attacker can inject arbitrary SQL to bypass RLS and read other users' instance data.
+**Threat**: Two extension functions (`df.status()` and `df.result()`) previously interpolated user-supplied `instance_id` directly into SQL without escaping single quotes. That allowed SQL injection to bypass RLS and read other users' instance data.
 
 ```sql
 -- Attack: bypass RLS to read any user's instance status
@@ -316,22 +316,26 @@ SELECT df.status('x'' OR 1=1--');
 SELECT df.result('x'' UNION SELECT secret FROM admin_table--');
 ```
 
-**Vulnerable code** (`src/dsl.rs`):
+**Current mitigation** (`src/dsl.rs`):
 ```rust
-// df.status() — MISSING escaping
-let sql = format!("SELECT status FROM df.instances WHERE id = '{instance_id}'");
+// df.status() — escapes single quotes in instance_id
+let sql = format!(
+     "SELECT status FROM df.instances WHERE id = '{}'",
+     instance_id.replace('\'', "''")
+);
 
-// df.result() — MISSING escaping
+// df.result() — escapes single quotes in instance_id
+let escaped_instance_id = instance_id.replace('\'', "''");
 let sql = format!(r#"SELECT result::text FROM df.nodes
-   WHERE id = (SELECT root_node FROM df.instances WHERE id = '{instance_id}')
+    WHERE id = (SELECT root_node FROM df.instances WHERE id = '{escaped_instance_id}')
    AND status = 'completed'"#);
 ```
 
-**Fix**: Add `instance_id.replace('\'', "''")` (consistent with `df.cancel()`, `df.signal()`, `df.wait_for_completion()`, and all monitoring functions which already escape correctly). Better yet, migrate to parameterized SPI queries via `Spi::get_one_with_args()`.
+**Fix implemented**: Added `instance_id.replace('\'', "''")` in both functions (consistent with `df.cancel()`, `df.signal()`, `df.wait_for_completion()`, and monitoring functions). As defense-in-depth, migrating to parameterized SPI queries via `Spi::get_one_with_args()` remains recommended.
 
 **Note on variable substitution**: The `substitute_all_with_options()` function in `src/types.rs` inserts user variables (`{name}`) as-is into SQL without quoting. This is **by design** — variables are intended to be SQL fragments (e.g., table names, expressions). Users choose what to put in their own variables, and the SQL executes with their own privileges on a per-user connection. This is analogous to `psql` variable substitution (`:name`). Result substitution (`$name`) does properly quote string values.
 
-**Residual Risk**: Critical until fixed. After fix, low.
+**Residual Risk**: Low after escaping fix. Remaining hardening item: migrate internal SPI lookups to parameterized queries.
 
 See [security-todo.md](security-todo.md) Finding 1 for full analysis.
 

@@ -10,14 +10,14 @@
 
 | # | Claim | Verdict | Severity | Action |
 |---|-------|---------|----------|--------|
-| 1 | SQL Injection via `format!()` and `.replace()` | **Partially valid** | **CRITICAL** (2 functions) / LOW (rest) | Fix `df.status()` and `df.result()`; document var substitution design |
+| 1 | SQL Injection via `format!()` and `.replace()` | **Partially valid (fixed)** | **CRITICAL** (2 functions) / LOW (rest) | Fixed `df.status()` and `df.result()` escaping; variable substitution documented in spec |
 | 2 | `CREATE IF NOT EXISTS` / `CREATE OR REPLACE` | Valid but low risk | LOW | Document as accepted risk in spec |
 | 3 | Missing `SET search_path` in PL/pgSQL functions | Partially valid | MEDIUM | Add `SET search_path` to PL/pgSQL helpers |
 | 4 | Control file missing `schema =` | Valid but intentional | LOW | Document rationale |
 | 5 | Worker defaults to superuser / unclear context | Mostly invalid | N/A | Already mitigated; minor doc clarification |
 | 6 | SSRF / arbitrary HTTP | Invalid (already addressed) | N/A | Already implemented and spec'd |
 | 7 | Secrets table permissions | Not applicable | N/A | Table doesn't exist yet |
-| 8 | Missing identifier quoting in dynamic SQL | Partially valid | CRITICAL (same as #1) | Same fix as #1 |
+| 8 | Missing identifier quoting in dynamic SQL | Partially valid (fixed overlap) | CRITICAL (same as #1) | Fixed via claim #1 remediation |
 
 ---
 
@@ -27,31 +27,32 @@
 
 **Claim**: Multiple locations use `format!()` and manual `.replace()` for query construction without safe quoting.
 
-**Evaluation**: The claim is **partially valid**. Most of the codebase correctly escapes single quotes, but two functions are vulnerable:
+**Evaluation**: The claim was **partially valid**. Most of the codebase already escaped single quotes, and two functions were vulnerable. Both have now been fixed in `src/dsl.rs`.
 
-#### Vulnerable: `df.status()` — [src/dsl.rs, line ~716](../src/dsl.rs)
+#### Fixed: `df.status()` — [src/dsl.rs](../src/dsl.rs)
 
 ```rust
 pub fn status(instance_id: &str) -> Option<String> {
-    let sql = format!("SELECT status FROM df.instances WHERE id = '{instance_id}'");
-    //                                                         ^^^^^^^^^^^^^^^^^^^^
-    //                                              NOT ESCAPED — SQL injection possible
+    let sql = format!(
+        "SELECT status FROM df.instances WHERE id = '{}'",
+        instance_id.replace('\'', "''")
+    );
     Spi::get_one::<String>(&sql).ok().flatten()
 }
 ```
 
 **Attack**: `SELECT df.status('x'' OR 1=1--')` — can bypass RLS to read status of other users' instances.
 
-#### Vulnerable: `df.result()` — [src/dsl.rs, line ~735](../src/dsl.rs)
+#### Fixed: `df.result()` — [src/dsl.rs](../src/dsl.rs)
 
 ```rust
 pub fn result(instance_id: &str) -> Option<String> {
+    let escaped_instance_id = instance_id.replace('\'', "''");
     let sql = format!(
         r#"SELECT result::text FROM df.nodes
-           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{instance_id}')
+           WHERE id = (SELECT root_node FROM df.instances WHERE id = '{escaped_instance_id}')
            AND status = 'completed'"#
     );
-    //  instance_id NOT ESCAPED — SQL injection possible
     Spi::get_one::<String>(&sql).ok().flatten()
 }
 ```
@@ -86,9 +87,9 @@ This is **intentional**: users write `SELECT {table_name}` expecting `{table_nam
 Result substitution (`$name`) **does** quote string values: `format!("'{escaped}'")` with `s.replace('\'', "''")`.
 
 **Remediation**:
-- [ ] **P0**: Fix `df.status()`: add `instance_id.replace('\'', "''")`
-- [ ] **P0**: Fix `df.result()`: add `instance_id.replace('\'', "''")`
-- [ ] **P1**: Add threat T12 to spec-security-model.md documenting variable substitution design
+- [x] **P0**: Fix `df.status()`: add `instance_id.replace('\'', "''")`
+- [x] **P0**: Fix `df.result()`: add `instance_id.replace('\'', "''")`
+- [x] **P1**: Add threat T12 to spec-security-model.md documenting variable substitution design
 - [ ] **P2**: Consider parameterized queries (SPI with args) for all internal lookups
 
 ---
@@ -215,9 +216,9 @@ URL allowlist (GUC-based) and rate limiting are documented as future work (Threa
 - `login_role` passed to `PgConnectOptions::username()` — typed parameter, not string-interpolated ✓
 - Single-quote escaping throughout `df.start()`, `df.cancel()`, etc. ✓
 
-**Not quoted** (same as Finding 1):
-- `df.status()` — missing `instance_id` escaping
-- `df.result()` — missing `instance_id` escaping
+**Previously not quoted** (same as Finding 1, now fixed):
+- `df.status()` — now escapes `instance_id`
+- `df.result()` — now escapes `instance_id`
 
 **Design note**: The codebase uses SPI with string formatting rather than parameterized SPI queries. pgrx's SPI API supports `Spi::get_one_with_args()` for parameterized queries, but this isn't used in the codebase. Migrating to parameterized queries would eliminate this class of vulnerability entirely.
 
@@ -230,12 +231,12 @@ URL allowlist (GUC-based) and rate limiting are documented as future work (Threa
 ## Priority Summary
 
 ### P0 — Fix Immediately
-- [ ] Fix SQL injection in `df.status()` (Finding 1)
-- [ ] Fix SQL injection in `df.result()` (Finding 1)
+- [x] Fix SQL injection in `df.status()` (Finding 1)
+- [x] Fix SQL injection in `df.result()` (Finding 1)
 
 ### P2 — Should Fix
 - [ ] Add `SET search_path` to PL/pgSQL/SQL helper functions (Finding 3)
-- [ ] Add threat T12 to spec for variable substitution design (Finding 1)
+- [x] Add threat T12 to spec for variable substitution design (Finding 1)
 - [ ] Evaluate migrating to parameterized SPI queries (Finding 8)
 
 ### P3 — Document / Low Priority
