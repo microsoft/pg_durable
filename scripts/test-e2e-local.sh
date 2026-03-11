@@ -8,6 +8,8 @@
 #   --clean           Start with fresh database (wipes all data)
 #   --verbose         Show all NOTICE messages and full error output
 #   -v                Same as --verbose
+#   --keep-going      Continue running tests after a failure (default: exit on first failure)
+#   -k                Same as --keep-going
 #   --pg-version VER  PostgreSQL major version to use (default: 17)
 #   --no-preload      Start PostgreSQL WITHOUT shared_preload_libraries=pg_durable
 #                     (runs only 00_requires_shared_preload test)
@@ -22,6 +24,7 @@
 #   ./scripts/test-e2e-local.sh -v 27_database_guc      # Run test with verbose output
 #   ./scripts/test-e2e-local.sh --pg-version 18         # Run all tests against PG18
 #   ./scripts/test-e2e-local.sh --no-preload            # Test shared_preload_libraries enforcement
+#   ./scripts/test-e2e-local.sh --keep-going            # Run all tests, don't stop on failure
 
 set -e
 
@@ -33,6 +36,7 @@ SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
+KEEP_GOING=false
 NO_PRELOAD=false
 TEST_FILTER=""
 REPEAT_COUNT=1
@@ -51,6 +55,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verbose|-v)
             VERBOSE=true
+            shift
+            ;;
+        --keep-going|-k)
+            KEEP_GOING=true
             shift
             ;;
         --pg-version)
@@ -124,6 +132,9 @@ if [ "$KEEP_RUNNING" = true ]; then
 fi
 if [ "$VERBOSE" = true ]; then
     echo -e "Mode: ${YELLOW}Verbose output (show NOTICE messages)${NC}"
+fi
+if [ "$KEEP_GOING" = true ]; then
+    echo -e "Mode: ${YELLOW}Keep going on failure${NC}"
 fi
 if [ "$NO_PRELOAD" = true ]; then
     echo -e "Mode: ${YELLOW}No-preload (testing shared_preload_libraries enforcement)${NC}"
@@ -269,6 +280,12 @@ fi
 # Run tests
 TOTAL_PASSED=0
 TOTAL_FAILED=0
+FAILED_TESTS=()
+
+# When --keep-going is set, don't exit on test failure
+if [ "$KEEP_GOING" = true ]; then
+    set +e
+fi
 
 for run in $(seq 1 $REPEAT_COUNT); do
     if [ "$REPEAT_COUNT" -gt 1 ]; then
@@ -344,6 +361,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
             else
                 echo -e "  ${RED}FAIL${NC}"
                 FAILED=$((FAILED + 1))
+                FAILED_TESTS+=("$test_name")
             fi
         else
             # Non-verbose mode: capture output and show summary
@@ -358,6 +376,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
                     echo -e "${RED}FAIL${NC}"
                     echo "$output" | grep -E "(NOTICE|ERROR|TEST FAILED)" | tail -15
                     FAILED=$((FAILED + 1))
+                    FAILED_TESTS+=("$test_name")
                 else
                     echo -e "${GREEN}PASS${NC}"
                     PASSED=$((PASSED + 1))
@@ -366,6 +385,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
                 echo -e "${RED}FAIL${NC}"
                 echo "$output" | grep -E "(NOTICE|ERROR)" | tail -15
                 FAILED=$((FAILED + 1))
+                FAILED_TESTS+=("$test_name")
             fi
         fi
     done
@@ -385,6 +405,13 @@ if [ "$REPEAT_COUNT" -gt 1 ]; then
     echo "Total Results ($REPEAT_COUNT runs):"
 fi
 echo -e "Results: ${GREEN}$TOTAL_PASSED passed${NC}, ${RED}$TOTAL_FAILED failed${NC}"
+if [ ${#FAILED_TESTS[@]} -gt 0 ]; then
+    echo ""
+    echo -e "${RED}Failed tests:${NC}"
+    for t in "${FAILED_TESTS[@]}"; do
+        echo -e "  ${RED}- $t${NC}"
+    done
+fi
 echo "================================================"
 
 [ $TOTAL_FAILED -eq 0 ]
