@@ -21,6 +21,7 @@ pg_durable is a **PostgreSQL extension** (pgrx/Rust) providing durable SQL funct
 | [src/activities/](src/activities/) | Duroxide activities (I/O happens here) |
 | [src/types.rs](src/types.rs) | Core types: `Durofut`, `FunctionGraph`, `FunctionNode` |
 | [tests/e2e/sql/](tests/e2e/sql/) | SQL-based E2E tests (numbered, run sequentially) |
+| [sql/pg_durable--0.1.1.sql](sql/pg_durable--0.1.1.sql) | First version install SQL fixture (for upgrade testing) |
 | [sql/duroxide_upstream/](sql/duroxide_upstream/) | Checked-in copies of duroxide-pg-opt migrations |
 | [scripts/gen-duroxide-install-sql.sh](scripts/gen-duroxide-install-sql.sh) | Generates combined install SQL from upstream copies |
 | [scripts/verify-duroxide-migrations.sh](scripts/verify-duroxide-migrations.sh) | Verifies upstream copies match duroxide-pg-opt |
@@ -38,6 +39,10 @@ cargo build                    # or: make build
 ./scripts/test-e2e-local.sh --verbose    # -v, shows test output, use with filtering
 ./scripts/test-e2e-local.sh 04_parallel  # filter/specific test
 ./scripts/test-e2e-local.sh --keep       # keep server running for debugging
+
+# Run upgrade tests (schema comparison + backward compat)
+./scripts/test-upgrade.sh                # test upgrade from previous version
+./scripts/test-upgrade.sh --verbose      # show detailed diff on failure
 
 # Connect to test database (after --keep)
 ~/.pgrx/17.*/pgrx-install/bin/psql -h localhost -p 28817 -d postgres
@@ -71,6 +76,9 @@ Tests in `tests/e2e/sql/` follow this pattern:
 3. Assert results, raise exception on failure
 4. Cleanup and output `SELECT 'TEST PASSED'`
 
+### Binary Backward Compatibility
+The new `.so` must work against **all** previous versions' schemas (same major version) because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
+
 ## Common Tasks
 
 **Adding a new DSL function:** Add to [src/dsl.rs](src/dsl.rs) with `#[pg_extern(schema = "df")]`
@@ -78,6 +86,10 @@ Tests in `tests/e2e/sql/` follow this pattern:
 **Adding a new activity:** Create file in `src/activities/`, add `pub const NAME`, register in [src/registry.rs](src/registry.rs)
 
 **Adding E2E test:** Create numbered SQL file in `tests/e2e/sql/`, follow existing pattern (see [02_sequence.sql](tests/e2e/sql/02_sequence.sql))
+
+**Changing the extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](docs/upgrade-testing.md)
+
+**Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](docs/upgrade-testing.md) for the full upgrade testing strategy.
 
 ## Duroxide Migration Sync Workflow
 
@@ -201,7 +213,7 @@ SELECT 'TEST PASSED' AS result;
 
 ### Merging to Main
 
-1. Verify all tests pass (unit + E2E)
+1. Verify all tests pass (unit + E2E + upgrade)
 2. Use descriptive commit messages in imperative mood
 3. **DO NOT** use `--force` or skip hooks with `--no-verify`
 4. After merge, optionally deploy: `./scripts/deploy-acr.sh`
@@ -213,6 +225,7 @@ Pull requests automatically run the CI workflow (`.github/workflows/ci.yml`):
 1. **Format Check**: `cargo fmt --check`
 2. **Migration Verification**: Uses submodule checkout and runs `./scripts/verify-duroxide-migrations.sh`
 3. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
+4. **Upgrade Tests**: `./scripts/test-upgrade.sh` (schema comparison + backward compat)
 
 All checks must pass before a PR can be merged. Configure branch protection rules in GitHub to enforce this.
 

@@ -1,0 +1,190 @@
+# Upgrade Testing Plan
+
+## Deployment Model
+
+pg_durable follows a two-phase upgrade model:
+
+1. **Binary update** (maintenance window): The `.so` shared library is replaced. PostgreSQL processes load the new `.so` on next connection. This happens during scheduled maintenance.
+2. **Schema update** (customer-initiated): `ALTER EXTENSION pg_durable UPDATE TO '<version>'` runs the upgrade SQL script. Customers may defer this for days, months, or indefinitely.
+
+This means the new `.so` **must be backward compatible** with the previous version's schema. The `.so` and the upgrade script are not atomic — there is an extended period where the new binary runs against the old schema.
+
+We never downgrade. Downgrade scripts are not needed.
+
+## Test Scenarios
+
+### Chain tests vs. direct-contact tests
+
+Scenarios A and B2 are **chain tests**: PostgreSQL applies upgrade scripts sequentially (v0.1.1→v0.2.0→v0.3.0), so each step is validated transitively by its own version's CI. Testing the current upgrade script against the immediately previous version is sufficient.
+
+Scenario B1 is a **direct-contact test**: the `.so` faces whatever raw schema the customer has, with no intermediate transformation. There is no chain — a customer on v0.1.1 who receives the v0.5.0 binary without ever upgrading has a v0.1.1 schema with a v0.5.0 `.so`. That's why B1 must test against all previous versions.
+
+### Major version boundaries
+
+All three scenarios scope to versions within the same major version:
+- **B1**: A major version bump is the boundary where binary backward compatibility may be dropped. The new `.so` does not need to work with schemas from a previous major version.
+- **A and B2**: Upgrade scripts still need to work across a major version bump — customers must be able to upgrade their schema. However, the transitive chain property means testing only the immediately previous version is still sufficient.
+
+### Scenario A: Schema Upgrade Correctness
+
+**Goal:** Verify that `ALTER EXTENSION UPDATE` produces an identical schema to a fresh `CREATE EXTENSION`.
+
+**Method:**
+1. Install current `.so` and all upgrade SQL files
+2. Database 1: `CREATE EXTENSION pg_durable VERSION '<prev>'` → `ALTER EXTENSION pg_durable UPDATE TO '<current>'`
+3. Database 2: `CREATE EXTENSION pg_durable` (fresh install at current version)
+4. Compare schemas: tables, columns, types, constraints, indexes, RLS policies, grants
+
+**What it catches:**
+- Missing DDL in upgrade script (forgotten tables, columns, policies)
+- Wrong column types, defaults, or constraint names
+- Ordering issues in upgrade SQL
+
+**Why only the immediately previous version?** Upgrade scripts are frozen once shipped. The chain of upgrades (v0.1.1 → v0.2.0 → v0.3.0) is validated transitively — each version's CI tests its own upgrade script. Only the current work-in-progress upgrade script might introduce an inconsistency, so testing it against the immediately previous version is sufficient.
+
+**Priority:** High — foundational test, catches the most common class of upgrade bugs.
+
+### Scenario B1: Binary Backward Compatibility
+
+**Goal:** Verify that the new `.so` works correctly against **all** previous versions' schemas, not just the immediately previous one. Customers may never run `ALTER EXTENSION UPDATE`, so the new binary must work against any older schema.
+
+This is the **most deployment-critical test** because the new binary may run against any older schema indefinitely. A customer on v0.1.1 who receives the v0.5.0 binary without ever upgrading must still be able to use the extension.
+
+We test against all previous versions within the same major version. A major version bump is the boundary where backward compatibility may be dropped.
+
+**Method:**
+1. Install the new `.so`
+2. For each previous version (same major): create the extension with that version's install SQL
+3. Exercise all SQL-callable functions against each schema
+4. Verify: no errors, correct results
+
+**What to test (expand per-version as the API surface grows):**
+
+| Area | Functions |
+|------|-----------|
+| Variable functions | `df.setvar()`, `df.getvar()`, `df.unsetvar()`, `df.clearvars()` |
+| Variable capture | `df.start()` with vars set |
+| DSL construction | `df.sql()`, `df.seq()`, `df.if()`, `df.loop()`, `df.sleep()`, `df.http()` |
+| Execution | Starting and completing orchestrations |
+| Monitoring | `df.status()`, `df.result()`, `df.list_instances()`, `df.instance_info()` |
+| In-flight work | Orchestrations started before `.so` swap complete after swap |
+
+**What it catches:**
+- SQL queries in Rust code referencing columns/constraints that don't exist in the old schema
+- Changed function signatures that conflict with old SQL wrappers
+- Behavioral regressions for customers who haven't run the upgrade script
+
+**Priority:** Critical — this reflects the real-world deployment state for potentially all customers.
+
+### Scenario B2: Data Compatibility After Upgrade
+
+**Goal:** Verify that data created under the previous version remains accessible and functional after `ALTER EXTENSION UPDATE`.
+
+This is a **chain test** (like Scenario A) — upgrade scripts are applied sequentially, so testing against the immediately previous version is sufficient. Each intermediate upgrade was validated by its own version's CI.
+
+**Method:**
+1. Create extension at previous version
+2. Insert test data (vars, DSL constructions)
+3. Run `ALTER EXTENSION UPDATE`
+4. Verify: existing data is accessible, functions work on the new schema
+
+**What to test (expand per-version as changes accumulate):**
+
+| Area | What to verify |
+|------|---------------|
+| Variables | Pre-existing vars accessible via `df.getvar()` after upgrade |
+| DSL construction | `df.sql()` works after upgrade |
+| Monitoring | `df.status()`, `df.list_instances()` work after upgrade |
+| New operations | `df.start()` works with new schema |
+
+**Priority:** High — validates the upgrade doesn't corrupt or lose existing data.
+
+## Backward Compatibility Patterns
+
+When a new `.so` must support both old and new schemas (Scenario B1), code should detect the schema state at runtime. Approaches:
+
+### Option 1: Runtime schema detection (preferred)
+
+Check column/table existence and branch accordingly:
+
+```rust
+// Example: check if a column exists before referencing it
+let has_column = Spi::get_one::<bool>(
+    "SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'df' AND table_name = 'example' AND column_name = 'new_col'
+    )"
+).unwrap_or(Some(false)).unwrap_or(false);
+
+if has_column {
+    // New schema: use new query
+} else {
+    // Old schema: use compatible query
+}
+```
+
+Cache the result per-session to avoid repeated catalog queries.
+
+### Option 2: SQL that works on both schemas
+
+Write queries valid regardless of which schema version is active. Not always possible (e.g., `ON CONFLICT` must name actual constraint columns).
+
+### Option 3: Use extension version from pg_catalog
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'
+```
+
+Returns the version that was last installed/updated. Compare against known thresholds.
+
+## Implementation
+
+### Test infrastructure
+
+- `sql/pg_durable--0.1.1.sql` — first install SQL for the current major version (only the first version per major needs a fixture; intermediate versions are reconstructed by chaining upgrade scripts)
+- `sql/pg_durable--0.1.1--0.2.0.sql` — upgrade script (initially empty, populated by subsequent PRs)
+- `scripts/test-upgrade.sh` — runs Scenarios A, B1, and B2
+- CI step in `.github/workflows/ci.yml`
+
+### Per-version checklist
+
+Each PR that changes the extension schema or modifies SQL queries in Rust code should:
+
+1. Add the necessary DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`)
+2. Ensure the `.so` is backward compatible with **all** previous schemas within the same major version (Scenario B1)
+3. Add version-specific notes to this document under "Version-Specific Changes" below
+4. Pass upgrade tests in CI
+
+### Future work
+
+- **pg_regress-style upgrade test**: pg_cron and similar extensions use `pg_regress` with expected-output diffs to validate upgrade scripts. This is simpler than our Scenario A schema snapshot approach but less thorough — it doesn't cover B1 (binary backward compat) or B2 (data survival). Consider adopting as a complementary check if `pg_regress` integration becomes worthwhile.
+
+### Preparing for the next version
+
+**Minor release** (e.g. 0.2.0 → 0.3.0):
+1. Create empty `sql/pg_durable--<N>--<N+1>.sql` upgrade script
+2. Bump `Cargo.toml` version to `<N+1>`
+
+If this is the first minor after a new major (e.g. 1.0.0 → 1.1.0), also:
+
+3. Check in `sql/pg_durable--<major>.sql` as the first install SQL fixture for the new major (e.g. copy the generated `pg_durable--1.0.0.sql` from the extension directory)
+4. Optionally delete the previous major's install SQL fixture and upgrade scripts — they are no longer needed by any of A, B1, or B2
+
+No additional fixture is needed for subsequent minors — intermediate versions are reconstructed by chaining `ALTER EXTENSION UPDATE` from the first version's install SQL.
+
+**Major release** (e.g. 0.x → 1.0.0):
+1. Create empty `sql/pg_durable--<N>--<1.0.0>.sql` upgrade script
+2. Bump `Cargo.toml` version to `<1.0.0>`
+
+`cargo pgrx package` generates the new major's install SQL. The previous major's install SQL and upgrade scripts are still needed for the A/B2 upgrade chain. B1 will be a no-op — there are no previous versions within the new major to test backward compatibility against.
+
+---
+
+## Version-Specific Changes
+
+Each schema-changing PR should add a section here documenting what changed,
+what the upgrade script handles, and any backward compatibility considerations.
+
+### v0.1.1 → v0.2.0
+
+_(No changes yet — upgrade script is empty. Subsequent PRs will add changes here.)_

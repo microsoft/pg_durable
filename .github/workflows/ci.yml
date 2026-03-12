@@ -163,6 +163,10 @@ jobs:
         id: e2e_tests
         run: ./scripts/test-e2e-local.sh --clean --pg-version ${{ matrix.pg_version }}
 
+      - name: Run upgrade tests
+        id: upgrade_tests
+        run: ./scripts/test-upgrade.sh --pg-version ${{ matrix.pg_version }}
+
       - name: Upload PostgreSQL logs on E2E failure
         if: failure()
         uses: actions/upload-artifact@v4
