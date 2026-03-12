@@ -77,7 +77,6 @@ help:
 # pg_regress (PGXS) configuration
 # ============================================================================
 EXTENSION = pg_durable
-DATA = pg_durable--0.1.1.sql
 
 REGRESS = 00_init simple sequence variables parallel conditional
 
