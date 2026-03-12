@@ -6,7 +6,7 @@ pg_durable is a **PostgreSQL extension** (pgrx/Rust) providing durable SQL funct
 
 **Two execution contexts:**
 1. **Backend processes** (user sessions): Build function graphs via DSL operators (`~>`, `|=>`, `&`, `|`)
-2. **Background worker**: Executes graphs durably via [duroxide](https://github.com/anthropics/duroxide) runtime
+2. **Background worker**: Executes graphs durably via [duroxide](https://github.com/microsoft/duroxide) runtime
 
 **Data flow:** User calls `df.start()` → nodes saved to `df.nodes` → instance queued → background worker picks up → duroxide orchestration executes nodes → results in `df.instances`
 
@@ -14,17 +14,17 @@ pg_durable is a **PostgreSQL extension** (pgrx/Rust) providing durable SQL funct
 
 | Path | Purpose |
 |------|---------|
-| [src/lib.rs](src/lib.rs) | Extension entry, schema/table definitions, SQL operators |
-| [src/dsl.rs](src/dsl.rs) | DSL functions: `df.sql()`, `df.seq()`, `df.if()`, `df.loop()` |
-| [src/worker.rs](src/worker.rs) | Background worker setup, duroxide runtime initialization |
-| [src/orchestrations/](src/orchestrations/) | Duroxide orchestrations (⚠️ deterministic code only) |
-| [src/activities/](src/activities/) | Duroxide activities (I/O happens here) |
-| [src/types.rs](src/types.rs) | Core types: `Durofut`, `FunctionGraph`, `FunctionNode` |
-| [tests/e2e/sql/](tests/e2e/sql/) | SQL-based E2E tests (numbered, run sequentially) |
-| [sql/pg_durable--0.1.1.sql](sql/pg_durable--0.1.1.sql) | First version install SQL fixture (for upgrade testing) |
-| [sql/duroxide_upstream/](sql/duroxide_upstream/) | Checked-in copies of duroxide-pg-opt migrations |
-| [scripts/gen-duroxide-install-sql.sh](scripts/gen-duroxide-install-sql.sh) | Generates combined install SQL from upstream copies |
-| [scripts/verify-duroxide-migrations.sh](scripts/verify-duroxide-migrations.sh) | Verifies upstream copies match duroxide-pg-opt |
+| [src/lib.rs](../src/lib.rs) | Extension entry, schema/table definitions, SQL operators |
+| [src/dsl.rs](../src/dsl.rs) | DSL functions: `df.sql()`, `df.seq()`, `df.if()`, `df.loop()` |
+| [src/worker.rs](../src/worker.rs) | Background worker setup, duroxide runtime initialization |
+| [src/orchestrations/](../src/orchestrations/) | Duroxide orchestrations (⚠️ deterministic code only) |
+| [src/activities/](../src/activities/) | Duroxide activities (I/O happens here) |
+| [src/types.rs](../src/types.rs) | Core types: `Durofut`, `FunctionGraph`, `FunctionNode` |
+| [tests/e2e/sql/](../tests/e2e/sql/) | SQL-based E2E tests (numbered, run sequentially) |
+| [sql/pg_durable--0.1.1.sql](../sql/pg_durable--0.1.1.sql) | First version install SQL fixture (for upgrade testing) |
+| [sql/duroxide_upstream/](../sql/duroxide_upstream/) | Checked-in copies of duroxide-pg-opt migrations |
+| [scripts/gen-duroxide-install-sql.sh](../scripts/gen-duroxide-install-sql.sh) | Generates combined install SQL from upstream copies |
+| [scripts/verify-duroxide-migrations.sh](../scripts/verify-duroxide-migrations.sh) | Verifies upstream copies match duroxide-pg-opt |
 ## Development Commands
 
 ```bash
@@ -77,19 +77,19 @@ Tests in `tests/e2e/sql/` follow this pattern:
 4. Cleanup and output `SELECT 'TEST PASSED'`
 
 ### Binary Backward Compatibility
-The new `.so` must work against **all** previous versions' schemas (same major version) because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
+The new `.so` must work against **all** previous versions' schemas (same major version) because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](../docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
 
 ## Common Tasks
 
-**Adding a new DSL function:** Add to [src/dsl.rs](src/dsl.rs) with `#[pg_extern(schema = "df")]`
+**Adding a new DSL function:** Add to [src/dsl.rs](../src/dsl.rs) with `#[pg_extern(schema = "df")]`
 
-**Adding a new activity:** Create file in `src/activities/`, add `pub const NAME`, register in [src/registry.rs](src/registry.rs)
+**Adding a new activity:** Create file in `src/activities/`, add `pub const NAME`, register in [src/registry.rs](../src/registry.rs)
 
-**Adding E2E test:** Create numbered SQL file in `tests/e2e/sql/`, follow existing pattern (see [02_sequence.sql](tests/e2e/sql/02_sequence.sql))
+**Adding E2E test:** Create numbered SQL file in `tests/e2e/sql/`, follow existing pattern (see [02_sequence.sql](../tests/e2e/sql/02_sequence.sql))
 
-**Changing the extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](docs/upgrade-testing.md)
+**Changing the extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](../docs/upgrade-testing.md)
 
-**Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](docs/upgrade-testing.md) for the full upgrade testing strategy.
+**Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](../docs/upgrade-testing.md) for the full upgrade testing strategy.
 
 ## Duroxide Migration Sync Workflow
 
@@ -98,9 +98,9 @@ pg_durable includes the duroxide-pg-opt schema DDL as extension SQL to ensure pr
 ### Migration Files
 
 - **Upstream source**: `duroxide-pg-opt/migrations/000*.sql` (from duroxide-pg-opt submodule)
-- **Checked-in copies**: [sql/duroxide_upstream/](sql/duroxide_upstream/) (verbatim copies of upstream)
-- **Combined install SQL**: [sql/duroxide_install.sql](sql/duroxide_install.sql) (generated from copies)
-- **Extension integration**: [src/lib.rs](src/lib.rs) includes via `extension_sql_file!("../sql/duroxide_install.sql")`
+- **Checked-in copies**: [sql/duroxide_upstream/](../sql/duroxide_upstream/) (verbatim copies of upstream)
+- **Combined install SQL**: [sql/duroxide_install.sql](../sql/duroxide_install.sql) (generated from copies)
+- **Extension integration**: [src/lib.rs](../src/lib.rs) includes via `extension_sql_file!("../sql/duroxide_install.sql")`
 
 ### Scripts
 
