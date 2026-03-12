@@ -31,8 +31,8 @@ All three scenarios scope to versions within the same major version:
 
 **Method:**
 1. Install current `.so` and all upgrade SQL files
-2. Database 1: `CREATE EXTENSION pg_durable VERSION '<prev>'` → `ALTER EXTENSION pg_durable UPDATE TO '<current>'`
-3. Database 2: `CREATE EXTENSION pg_durable` (fresh install at current version)
+2. In a clean test database, run `CREATE EXTENSION pg_durable VERSION '<prev>'` → `ALTER EXTENSION pg_durable UPDATE TO '<current>'`, then capture a schema snapshot
+3. In the same clean test database (after dropping the extension) or in a second clean database, run `CREATE EXTENSION pg_durable` and capture a fresh-install snapshot
 4. Compare schemas: tables, columns, types, constraints, indexes, RLS policies, grants
 
 **What it catches:**
@@ -84,7 +84,7 @@ This is a **chain test** (like Scenario A) — upgrade scripts are applied seque
 
 **Method:**
 1. Create extension at previous version
-2. Insert test data (vars, DSL constructions)
+2. Insert test data (vars, completed instances, and optionally in-flight work)
 3. Run `ALTER EXTENSION UPDATE`
 4. Verify: existing data is accessible, functions work on the new schema
 
@@ -93,8 +93,8 @@ This is a **chain test** (like Scenario A) — upgrade scripts are applied seque
 | Area | What to verify |
 |------|---------------|
 | Variables | Pre-existing vars accessible via `df.getvar()` after upgrade |
-| DSL construction | `df.sql()` works after upgrade |
-| Monitoring | `df.status()`, `df.list_instances()` work after upgrade |
+| Pre-existing instances | `df.result()`, `df.instance_info()`, and `df.list_instances()` work for instances created before upgrade |
+| In-flight work | Work started before `ALTER EXTENSION UPDATE` can still complete afterward |
 | New operations | `df.start()` works with new schema |
 
 **Priority:** High — validates the upgrade doesn't corrupt or lose existing data.
