@@ -511,7 +511,7 @@ We treat the Duroxide provider schema as part of pg_durable’s extension SQL:
 
 - PostgreSQL Extension Documentation: https://www.postgresql.org/docs/current/extend-extensions.html
 - pgrx Background Worker Documentation: https://github.com/pgcentralfoundation/pgrx/blob/develop/pgrx-examples/bgworker/src/lib.rs
-- duroxide-pg-opt: https://github.com/anthropics/duroxide/tree/main/duroxide-pg-opt
+- duroxide-pg-opt: https://github.com/microsoft/duroxide-pg-opt
 - pg_durable current architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Timeline Estimate

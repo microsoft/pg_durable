@@ -165,7 +165,7 @@ pg_durable consists of:
 2. **Duroxide Runtime** — Background worker that executes functions durably
 3. **PostgreSQL Tables** — Store function definitions, state, and history
 
-The runtime is powered by [duroxide](https://github.com/anthropics/duroxide), a durable task framework for Rust.
+The runtime is powered by [duroxide](https://github.com/microsoft/duroxide), a durable task framework for Rust.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
