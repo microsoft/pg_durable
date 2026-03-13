@@ -189,9 +189,8 @@ pub fn evaluate_condition(result: &str) -> Result<bool, String> {
         return Ok(is_truthy(&json));
     }
 
-    let lower = result.to_lowercase().trim().to_string();
-    Ok(matches!(lower.as_str(), "true" | "t" | "yes" | "1")
-        || lower.parse::<i64>().map(|n| n != 0).unwrap_or(false))
+    // Raw string fallback: delegate to is_truthy for consistent behavior
+    Ok(is_truthy(&serde_json::Value::String(result.to_string())))
 }
 
 pub fn is_truthy(value: &serde_json::Value) -> bool {
@@ -202,9 +201,23 @@ pub fn is_truthy(value: &serde_json::Value) -> bool {
                 || n.as_f64().map(|f| f != 0.0).unwrap_or(false)
         }
         serde_json::Value::String(s) => {
-            let lower = s.to_lowercase();
-            matches!(lower.as_str(), "true" | "t" | "yes" | "1")
-                || s.parse::<i64>().map(|n| n != 0).unwrap_or(!s.is_empty())
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            let lower = trimmed.to_lowercase();
+            if matches!(lower.as_str(), "true" | "t" | "yes") {
+                return true;
+            }
+            if matches!(lower.as_str(), "false" | "f" | "no") {
+                return false;
+            }
+            // Numeric strings: try float parsing (covers both ints and floats)
+            if let Ok(n) = lower.parse::<f64>() {
+                return n != 0.0;
+            }
+            // Non-empty, non-boolean, non-numeric strings are truthy
+            true
         }
         serde_json::Value::Array(a) => !a.is_empty(),
         serde_json::Value::Object(o) => !o.is_empty(),
@@ -647,5 +660,92 @@ fn summarize_json_type(v: &serde_json::Value) -> &'static str {
         serde_json::Value::String(_) => "a string",
         serde_json::Value::Array(_) => "an array",
         serde_json::Value::Object(_) => "an object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn is_truthy_all_types() {
+        // (input, expected, label)
+        let cases: Vec<(serde_json::Value, bool, &str)> = vec![
+            // Booleans
+            (json!(true), true, "bool true"),
+            (json!(false), false, "bool false"),
+            // Numbers
+            (json!(1), true, "int 1"),
+            (json!(0), false, "int 0"),
+            (json!(-1), true, "int -1"),
+            (json!(0.1), true, "float 0.1"),
+            (json!(0.0), false, "float 0.0"),
+            // String boolean words (+ case variants)
+            (json!("true"), true, "str 'true'"),
+            (json!("false"), false, "str 'false'"),
+            (json!("TRUE"), true, "str 'TRUE'"),
+            (json!("FALSE"), false, "str 'FALSE'"),
+            (json!("yes"), true, "str 'yes'"),
+            (json!("Yes"), true, "str 'Yes'"),
+            (json!("no"), false, "str 'no'"),
+            (json!("No"), false, "str 'No'"),
+            (json!("t"), true, "str 't'"),
+            (json!("f"), false, "str 'f'"),
+            // String numerics
+            (json!("1"), true, "str '1'"),
+            (json!("0"), false, "str '0'"),
+            (json!("-1"), true, "str '-1'"),
+            (json!("3.14"), true, "str '3.14'"),
+            (json!("0.0"), false, "str '0.0'"),
+            // String edge cases
+            (json!(""), false, "empty string"),
+            (json!("  true  "), true, "whitespace-padded 'true'"),
+            (json!("  false  "), false, "whitespace-padded 'false'"),
+            (json!("hello"), true, "arbitrary non-empty string"),
+            // Null / Array / Object
+            (json!(null), false, "null"),
+            (json!([]), false, "empty array"),
+            (json!([1]), true, "non-empty array"),
+            (json!({}), false, "empty object"),
+            (json!({"a": 1}), true, "non-empty object"),
+        ];
+
+        for (input, expected, label) in &cases {
+            assert_eq!(is_truthy(input), *expected, "is_truthy failed for: {label}");
+        }
+    }
+
+    #[test]
+    fn evaluate_condition_json_rows() {
+        let cases: Vec<(&str, bool, &str)> = vec![
+            (r#"{"rows":[{"col":true}]}"#, true, "bool true"),
+            (r#"{"rows":[{"col":false}]}"#, false, "bool false"),
+            (r#"{"rows":[{"col":"false"}]}"#, false, "string 'false'"),
+            (r#"{"rows":[{"col":"no"}]}"#, false, "string 'no'"),
+            (r#"{"rows":[{"col":0}]}"#, false, "int 0"),
+            (r#"{"rows":[{"col":null}]}"#, false, "null"),
+        ];
+
+        for (input, expected, label) in &cases {
+            assert_eq!(
+                evaluate_condition(input).unwrap(),
+                *expected,
+                "evaluate_condition failed for JSON rows with: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_condition_raw_string_fallback() {
+        let cases: Vec<(&str, bool)> = vec![("true", true), ("false", false), ("no", false)];
+
+        for (input, expected) in &cases {
+            assert_eq!(
+                evaluate_condition(input).unwrap(),
+                *expected,
+                "evaluate_condition raw fallback failed for: {input}"
+            );
+        }
     }
 }
