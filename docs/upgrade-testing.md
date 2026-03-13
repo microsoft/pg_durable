@@ -189,6 +189,12 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.1.1 → v0.2.0
 
+#### #51 security hardening (helper `search_path` pinning + SPI parameterization)
+- **DDL change:** Upgrade SQL now redefines helper SQL/PLpgSQL functions (`df.as_op()`, `df.if_then_op()`, `df.if_else_op()`, `df.ensure_durofut()`, `df.loop_prefix_op()`) with `SET search_path = pg_catalog, df, pg_temp` for defense-in-depth.
+- **Scenario A considerations:** Schema comparison should verify helper function definitions match fresh-install SQL, including the `SET search_path` clause in `proconfig`/function definition text.
+- **Scenario B1 considerations:** Runtime code moved key internal lookups to parameterized SPI/sqlx queries. This is backward compatible with prior schemas because query parameterization changed execution style, not table/column contracts.
+- **Scenario B2 considerations:** Existing instances/graphs created pre-upgrade should remain readable and executable after `ALTER EXTENSION UPDATE`; tests should include status/result and graph loading paths to cover updated internal query call sites.
+
 #### #53 per-user df.vars scoping via owner column + RLS
 - **DDL change:** `df.vars` adds `owner REGROLE NOT NULL DEFAULT current_user::regrole`, changes the primary key from `(name)` to `(owner, name)`, enables RLS, and adds the `vars_user_isolation` policy.
 - **Scenario A considerations:** The schema comparison must verify the new column, its default, the new primary key definition, RLS enabled state, the `vars_user_isolation` policy, and table grants. Because the upgrade script adds `owner` with `ALTER TABLE ... ADD COLUMN`, upgraded schemas place `owner` after the existing columns. Fresh-install DDL for v0.2.0 has been aligned to that order so Scenario A continues to compare `ordinal_position`.

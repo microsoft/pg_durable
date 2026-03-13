@@ -102,9 +102,9 @@ The security guarantee is: **only superusers can install the extension**, theref
 | **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
 | **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
 | **T0**: SECURITY DEFINER Misuse | **MEDIUM** | Documentation-only | Expected PG behavior |
-| **T12**: SQL Injection in Internal SPI Queries | **CRITICAL** | **Implemented** | `df.status()` and `df.result()` now escape `instance_id`; parameterized SPI still recommended |
+| **T12**: SQL Injection in Internal SPI Queries | **CRITICAL** | **Implemented** | `df.status()` and `df.result()` now use parameterized SPI queries (`Spi::get_one_with_args`) |
 | **T7**: Extension Trustworthiness | **LOW** | Accepted | Standard PG trust model |
-| **T13**: `search_path` Manipulation in PL/pgSQL Helpers | **LOW** | Not fixed | Defense-in-depth; all calls are schema-qualified |
+| **T13**: `search_path` Manipulation in PL/pgSQL Helpers | **LOW** | Implemented | Helper function definitions set `search_path = pg_catalog, df, pg_temp` |
 | **T14**: Extension Object Pre-creation | **LOW** | Accepted | Requires operator error; superuser-only install |
 | **T1–T3**: Privilege Escalation | **CRITICAL** | Implemented | Per-user sqlx connections |
 
@@ -318,44 +318,47 @@ SELECT df.result('x'' UNION SELECT secret FROM admin_table--');
 
 **Current mitigation** (`src/dsl.rs`):
 ```rust
-// df.status() — escapes single quotes in instance_id
-let sql = format!(
-     "SELECT status FROM df.instances WHERE id = '{}'",
-     instance_id.replace('\'', "''")
-);
+// df.status() — parameterized SPI query
+let status: Option<String> = Spi::get_one_with_args(
+    "SELECT status FROM df.instances WHERE id = $1",
+    &[instance_id.into_datum()],
+)
+.expect("SPI query failed");
 
-// df.result() — escapes single quotes in instance_id
-let escaped_instance_id = instance_id.replace('\'', "''");
-let sql = format!(r#"SELECT result::text FROM df.nodes
-    WHERE id = (SELECT root_node FROM df.instances WHERE id = '{escaped_instance_id}')
-   AND status = 'completed'"#);
+// df.result() — parameterized SPI query
+let result: Option<String> = Spi::get_one_with_args(
+    "SELECT result::text FROM df.nodes\n     WHERE id = (SELECT root_node FROM df.instances WHERE id = $1)\n       AND status = 'completed'",
+    &[instance_id.into_datum()],
+)
+.expect("SPI query failed");
 ```
 
-**Fix implemented**: Added `instance_id.replace('\'', "''")` in both functions (consistent with `df.cancel()`, `df.signal()`, `df.wait_for_completion()`, and monitoring functions). As defense-in-depth, migrating to parameterized SPI queries via `Spi::get_one_with_args()` remains recommended.
+**Fix implemented**: Replaced string interpolation with parameterized SPI in `df.status()` and `df.result()` using `Spi::get_one_with_args()`. This removes quote-escaping as a correctness requirement for these call sites. Other internal SPI queries should also prefer parameterization wherever supported; manual escaping is fallback-only for cases where parameters are not available.
 
 **Note on variable substitution**: The `substitute_all_with_options()` function in `src/types.rs` inserts user variables (`{name}`) as-is into SQL without quoting. This is **by design** — variables are intended to be SQL fragments (e.g., table names, expressions). Users choose what to put in their own variables, and the SQL executes with their own privileges on a per-user connection. This is analogous to `psql` variable substitution (`:name`). Result substitution (`$name`) does properly quote string values.
 
-**Residual Risk**: Low after escaping fix. Remaining hardening item: migrate internal SPI lookups to parameterized queries.
+**Residual Risk**: Low. Remaining hardening is to continue migrating any remaining string-formatted SPI lookups to parameterized calls where possible.
 
-See [security-todo.md](security-todo.md) Finding 1 for full analysis.
+See this section and Appendix A checklist for ongoing SPI query hardening work.
 
 ---
 
 #### T13: `search_path` Manipulation in PL/pgSQL Helper Functions
 
-**Severity**: LOW  |  **Status**: Not fixed (defense-in-depth)
+**Severity**: LOW  |  **Status**: Implemented
 
 **Threat**: The extension's PL/pgSQL helper functions (`df.if_then_op()`, `df.if_else_op()`, `df.ensure_durofut()`) and SQL wrapper functions (`df.as_op()`, `df.loop_prefix_op()`) do not set a fixed `search_path`. If an attacker can place a malicious function in a schema that appears earlier in `search_path`, they could shadow a built-in or extension function.
 
-**Current mitigations (already in place)**:
+**Mitigations (implemented)**:
 - All function calls within the helpers are already schema-qualified: `df.ensure_durofut()`, `df.sql()`, `df.if()`, `df.loop()`, `df.as()`
 - Built-in functions used (`jsonb_build_object`) are in `pg_catalog`, which is always implicitly first in `search_path`
 - The functions are created in the `df` schema (owned by superuser)
 - The extension requires superuser to install
+- Helper definitions in both fresh install SQL and upgrade SQL include `SET search_path = pg_catalog, df, pg_temp`
 
-**Recommended fix**: Add `SET search_path = pg_catalog, df, pg_temp` to all PL/pgSQL and SQL helper function definitions as defense-in-depth. This prevents future edits from accidentally introducing unqualified references.
+**Fix implemented**: Added `SET search_path = pg_catalog, df, pg_temp` to the helper function definitions (`df.if_then_op()`, `df.if_else_op()`, `df.ensure_durofut()`, `df.as_op()`, `df.loop_prefix_op()`) in both install and upgrade paths.
 
-**Residual Risk**: Low — all current references are schema-qualified.
+**Residual Risk**: Low — current references are schema-qualified and helper search path is pinned as defense-in-depth.
 
 ---
 
@@ -1870,7 +1873,7 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 - [ ] Error messages don't leak other users' data
 - [ ] Logging includes effective user for audit trail
 - [ ] `SET df.in_workflow = 'true'` is set on user connections to prevent variable mutation during execution (future: could also guard against recursive `df.start()`)
-- [ ] All SPI queries that accept user-supplied parameters use `.replace('\'', "''")` escaping (or parameterized `Spi::get_one_with_args()`). Cross-check: `df.status()`, `df.result()`, `df.cancel()`, `df.signal()`, monitoring functions
+- [ ] All SPI queries that accept user-supplied parameters prefer parameterized APIs (`Spi::get_one_with_args()` / `Spi::run_with_args()`). Use manual `.replace('\'', "''")` escaping only as fallback where parameters cannot be used. Cross-check: `df.status()`, `df.result()`, `df.cancel()`, `df.signal()`, monitoring functions
 - [ ] PL/pgSQL and SQL helper functions include `SET search_path = pg_catalog, df, pg_temp`
 - [ ] All function/table references in dynamic SQL are schema-qualified (`df.instances`, not `instances`)
 

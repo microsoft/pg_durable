@@ -26,12 +26,13 @@ pub async fn execute(
         "Loading function graph for instance: {instance_id}"
     ));
 
-    let instance_query = format!("SELECT root_node FROM df.instances WHERE id = '{instance_id}'");
+    let instance_query = "SELECT root_node FROM df.instances WHERE id = $1";
 
     // Retry loop: wait for instance data to appear
     let start_time = std::time::Instant::now();
     let root_node_id: String = loop {
-        match sqlx::query_scalar(&instance_query)
+        match sqlx::query_scalar::<_, String>(instance_query)
+            .bind(&instance_id)
             .fetch_one(pool.as_ref())
             .await
         {
@@ -54,16 +55,18 @@ pub async fn execute(
         }
     };
 
-    let nodes_query = format!(
-        r#"SELECT id, node_type, query, result_name,
+    let nodes_query = r#"SELECT id, node_type, query, result_name,
            left_node, right_node,
            submitted_by::text AS submitted_by,
            login_role::text AS login_role,
            database
-        FROM df.nodes WHERE instance_id = '{instance_id}'"#
-    );
+        FROM df.nodes WHERE instance_id = $1"#;
 
-    let rows = match sqlx::query(&nodes_query).fetch_all(pool.as_ref()).await {
+    let rows = match sqlx::query(nodes_query)
+        .bind(&instance_id)
+        .fetch_all(pool.as_ref())
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => return Err(format!("Failed to load function nodes: {e}")),
     };
