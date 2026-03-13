@@ -54,6 +54,21 @@ cd /tmp && git clone https://github.com/microsoft/duroxide-pg-opt
 
 ## Installation
 
+### Codespaces / Dev Container (Recommended)
+
+Open this repo in a **GitHub Codespace** or a **VS Code Dev Container**. PostgreSQL 17 starts automatically with pg_durable installed and ready to use:
+
+```bash
+~/.pgrx/17.*/pgrx-install/bin/psql -h localhost -p 28817 -U postgres -d postgres
+```
+
+```sql
+-- Try it immediately
+SELECT df.start('SELECT 1' ~> 'SELECT 2');
+```
+
+See the [User Guide](USER_GUIDE.md) for more examples.
+
 ### Local Development
 
 ```bash
