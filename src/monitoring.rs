@@ -39,20 +39,21 @@ pub fn list_instances(
     // Query df.instances via SPI first — RLS filters to calling user's rows only.
     // This gives us the user's own instance IDs and labels.
     let user_instances: Vec<(String, Option<String>)> = Spi::connect(|client| {
-        let sql = if let Some(status) = status_filter {
-            format!(
-                "SELECT id, label FROM df.instances WHERE status = '{}' ORDER BY created_at DESC LIMIT {}",
-                status.replace('\'', "''"),
-                limit_count
+        use pgrx::datum::DatumWithOid;
+
+        let (sql, args): (&str, Vec<DatumWithOid>) = if let Some(status) = status_filter {
+            (
+                "SELECT id, label FROM df.instances WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                vec![status.into(), (limit_count as i64).into()],
             )
         } else {
-            format!(
-                "SELECT id, label FROM df.instances ORDER BY created_at DESC LIMIT {}",
-                limit_count
+            (
+                "SELECT id, label FROM df.instances ORDER BY created_at DESC LIMIT $1",
+                vec![(limit_count as i64).into()],
             )
         };
         let mut instances = Vec::new();
-        if let Ok(table) = client.select(&sql, None, &[]) {
+        if let Ok(table) = client.select(sql, None, &args) {
             for row in table {
                 if let Ok(Some(id)) = row.get::<String>(1) {
                     let label: Option<String> = row.get(2).ok().flatten();
@@ -347,12 +348,10 @@ pub fn instance_nodes(
         Option<String>,
         Option<TimestampWithTimeZone>,
     )> = Spi::connect(|client| {
-        let sql = format!(
-            r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, updated_at
-                   FROM df.nodes WHERE instance_id = '{instance_id}'"#
-        );
+        let sql = r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, updated_at
+                   FROM df.nodes WHERE instance_id = $1"#;
         let mut nodes = Vec::new();
-        if let Ok(table) = client.select(&sql, None, &[]) {
+        if let Ok(table) = client.select(sql, None, &[instance_id.as_str().into()]) {
             for row in table {
                 if let Ok(Some(id)) = row.get::<String>(1) {
                     let node_type: String = row.get(2).ok().flatten().unwrap_or_default();

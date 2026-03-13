@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use cron::Schedule as CronSchedule;
+use pgrx::datum::DatumWithOid;
 use pgrx::prelude::*;
 use std::str::FromStr;
 
@@ -594,19 +595,12 @@ pub fn start(
     let session_user_oid = unsafe { pgrx::pg_sys::GetSessionUserId() };
     let outer_user_oid = unsafe { pgrx::pg_sys::GetOuterUserId() };
 
-    let label_sql = label
-        .map(|l| format!("'{}'", l.replace('\'', "''")))
-        .unwrap_or_else(|| "NULL".to_string());
-
-    let outer_oid_u32: u32 = outer_user_oid.into();
-    let session_oid_u32: u32 = session_user_oid.into();
-
     // Insert all nodes from the nested graph into df.nodes, returning root node ID
     fn insert_nodes(
         node: &Durofut,
         instance_id: &str,
-        outer_user_oid: u32,
-        session_user_oid: u32,
+        outer_user_oid: pgrx::pg_sys::Oid,
+        session_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
     ) -> String {
         let node_id = short_id();
@@ -622,7 +616,7 @@ pub fn start(
             .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid, database));
 
         // Process config JSON to recursively insert embedded nodes and get their IDs
-        let query_escaped = match node.transform_config_children(|child| {
+        let query_val: Option<String> = match node.transform_config_children(|child| {
             Ok(insert_nodes(
                 child,
                 instance_id,
@@ -631,50 +625,49 @@ pub fn start(
                 database,
             ))
         }) {
-            Ok(Some(updated_query)) => {
-                format!("'{}'", updated_query.replace('\'', "''"))
-            }
-            Ok(None) => "NULL".to_string(),
+            Ok(updated_query) => updated_query,
             Err(e) => pgrx::error!("Invalid config in {} node: {}", node.node_type, e),
         };
 
-        let result_name_escaped = node
-            .result_name
-            .as_ref()
-            .map(|n| format!("'{}'", n.replace('\'', "''")))
-            .unwrap_or_else(|| "NULL".to_string());
+        // Build parameterized args for the INSERT
+        let query_arg: DatumWithOid = match &query_val {
+            Some(q) => q.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let result_name_arg: DatumWithOid = match &node.result_name {
+            Some(n) => n.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let left_node_arg: DatumWithOid = match &left_id {
+            Some(id) => id.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let right_node_arg: DatumWithOid = match &right_id {
+            Some(id) => id.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let database_arg: DatumWithOid = match database {
+            Some(db) => db.into(),
+            None => DatumWithOid::null::<String>(),
+        };
 
-        let left_node_escaped = left_id
-            .as_ref()
-            .map(|id| format!("'{id}'"))
-            .unwrap_or_else(|| "NULL".to_string());
-
-        let right_node_escaped = right_id
-            .as_ref()
-            .map(|id| format!("'{id}'"))
-            .unwrap_or_else(|| "NULL".to_string());
-
-        let database_escaped = database
-            .map(|db| format!("'{}'", db.replace('\'', "''")))
-            .unwrap_or_else(|| "NULL".to_string());
-
-        // Insert this node with the generated ID
-        let insert_sql = format!(
+        // Insert this node with parameterized query
+        if let Err(e) = Spi::run_with_args(
             "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
-             VALUES ('{}', '{}', '{}', {}, {}, {}, {}, {}::oid::regrole, {}::oid::regrole, {})",
-            node_id,
-            instance_id,
-            node.node_type.replace('\'', "''"),
-            query_escaped,
-            result_name_escaped,
-            left_node_escaped,
-            right_node_escaped,
-            outer_user_oid,
-            session_user_oid,
-            database_escaped
-        );
-
-        if let Err(e) = Spi::run(&insert_sql) {
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)",
+            &[
+                node_id.as_str().into(),
+                instance_id.into(),
+                node.node_type.as_str().into(),
+                query_arg,
+                result_name_arg,
+                left_node_arg,
+                right_node_arg,
+                outer_user_oid.into(),
+                session_user_oid.into(),
+                database_arg,
+            ],
+        ) {
             pgrx::error!("Failed to insert node {}: {:?}", node_id, e);
         }
 
@@ -685,27 +678,33 @@ pub fn start(
     let root_node_id = insert_nodes(
         &durofut,
         &instance_id,
-        outer_oid_u32,
-        session_oid_u32,
+        outer_user_oid,
+        session_user_oid,
         database,
     );
 
-    let database_sql = database
-        .map(|db| format!("'{}'", db.replace('\'', "''")))
-        .unwrap_or_else(|| "NULL".to_string());
+    // Build parameterized args for the instance INSERT
+    let label_arg: DatumWithOid = match label {
+        Some(l) => l.into(),
+        None => DatumWithOid::null::<String>(),
+    };
+    let database_arg: DatumWithOid = match database {
+        Some(db) => db.into(),
+        None => DatumWithOid::null::<String>(),
+    };
 
     // Create instance record with root node ID
-    let create_instance_sql = format!(
-        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role, database) VALUES ('{}', {}, '{}', 'pending', {}::oid::regrole, {}::oid::regrole, {})",
-        instance_id,
-        label_sql,
-        root_node_id,
-        outer_oid_u32,
-        session_oid_u32,
-        database_sql
-    );
-
-    if let Err(e) = Spi::run(&create_instance_sql) {
+    if let Err(e) = Spi::run_with_args(
+        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role, database) VALUES ($1, $2, $3, 'pending', $4::oid::regrole, $5::oid::regrole, $6)",
+        &[
+            instance_id.as_str().into(),
+            label_arg,
+            root_node_id.as_str().into(),
+            outer_user_oid.into(),
+            session_user_oid.into(),
+            database_arg,
+        ],
+    ) {
         pgrx::error!("Failed to create instance: {:?}", e);
     }
 

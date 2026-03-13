@@ -48,11 +48,8 @@ pub fn explain(input: &str) -> String {
 fn explain_instance(instance_id: &str) -> String {
     // Get instance info from PostgreSQL
     let instance_info: Option<(String, Option<String>, String)> = Spi::connect(|client| {
-        let sql = format!(
-            "SELECT root_node, label, status FROM df.instances WHERE id = '{}'",
-            instance_id.replace('\'', "''")
-        );
-        if let Ok(table) = client.select(&sql, None, &[]) {
+        let sql = "SELECT root_node, label, status FROM df.instances WHERE id = $1";
+        if let Ok(table) = client.select(sql, None, &[instance_id.into()]) {
             for row in table {
                 let root_node: Option<String> = row.get(1).ok().flatten();
                 let label: Option<String> = row.get(2).ok().flatten();
@@ -296,23 +293,28 @@ fn collect_nodes(
 
 /// Load nodes from a table into a HashMap
 fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<String, ExplainNode> {
-    let sql = if let Some(id) = instance_id {
-        format!(
-            r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text
-               FROM {} WHERE instance_id = '{}'"#,
-            table,
-            id.replace('\'', "''")
-        )
-    } else {
-        format!(
-            "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {table}"
-        )
-    };
-
+    // Note: table name is always a hardcoded value ("df.nodes") from internal callers,
+    // so it is safe to interpolate. Only instance_id is parameterized.
     let mut nodes = HashMap::new();
 
     Spi::connect(|client| {
-        if let Ok(table_result) = client.select(&sql, None, &[]) {
+        let (sql, args): (String, Vec<pgrx::datum::DatumWithOid>) = if let Some(id) = instance_id {
+            (
+                format!(
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {} WHERE instance_id = $1",
+                    table
+                ),
+                vec![id.into()],
+            )
+        } else {
+            (
+                format!(
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {table}"
+                ),
+                vec![],
+            )
+        };
+        if let Ok(table_result) = client.select(&sql, None, &args) {
             for row in table_result {
                 if let Ok(Some(id)) = row.get::<String>(1) {
                     let node = ExplainNode {
