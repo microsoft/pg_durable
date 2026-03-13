@@ -50,6 +50,34 @@ BEGIN
     RAISE NOTICE 'Worker epoch sentinel detected — full restart cycle complete';
 END $$;
 
+-- ---------------------------------------------------------------------------
+-- Reusable helper: DROP EXTENSION pg_durable with deadlock retry.
+--
+-- After a durable function completes, the duroxide runtime may still be
+-- acknowledging the orchestration item (ack_orchestration_item). If DROP
+-- EXTENSION tries to take AccessExclusiveLock on those tables at the same
+-- time, PostgreSQL detects a deadlock. This helper retries on deadlock.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public._e2e_drop_extension_safe()
+RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    attempts INT := 0;
+BEGIN
+    LOOP
+        BEGIN
+            EXECUTE 'DROP EXTENSION IF EXISTS pg_durable CASCADE';
+            RETURN;
+        EXCEPTION WHEN deadlock_detected THEN
+            attempts := attempts + 1;
+            IF attempts >= 5 THEN
+                RAISE;
+            END IF;
+            PERFORM pg_sleep(1);
+        END;
+    END LOOP;
+END $$;
+
 -- Install extensions needed by tests (requires superuser)
 CREATE EXTENSION IF NOT EXISTS dblink;
 

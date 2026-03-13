@@ -38,7 +38,7 @@ END $$;
 -- ============================================================================
 -- Test 1: CREATE EXTENSION should succeed in the correct database
 -- ============================================================================
-DROP EXTENSION IF EXISTS pg_durable CASCADE;
+SELECT public._e2e_drop_extension_safe();
 CREATE EXTENSION pg_durable;
 
 -- Wait for the background worker to fully reinitialize

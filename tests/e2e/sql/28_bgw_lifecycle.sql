@@ -7,7 +7,7 @@
 -- 4) After re-create, workflows execute again.
 
 -- Ensure a clean starting point
-DROP EXTENSION IF EXISTS pg_durable CASCADE;
+SELECT public._e2e_drop_extension_safe();
 
 -- 1) Verify BGW does not create duroxide schema pre-extension
 DO $$
@@ -66,7 +66,7 @@ END $$;
 DROP TABLE _test_state;
 
 -- 3) Drop extension and verify schema removed
-DROP EXTENSION pg_durable CASCADE;
+SELECT public._e2e_drop_extension_safe();
 
 DO $$
 DECLARE

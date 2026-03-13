@@ -6,7 +6,7 @@
 
 -- Note: This test drops and recreates the extension to test installation security
 -- Any running instances will be lost, but E2E tests are self-contained
-DROP EXTENSION IF EXISTS pg_durable CASCADE;
+SELECT public._e2e_drop_extension_safe();
 
 -- ============================================================================
 -- Test 1: Non-superuser cannot create extension
