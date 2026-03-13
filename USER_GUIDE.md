@@ -1469,24 +1469,6 @@ If the user who submitted a function is dropped **before execution**:
 
 ### Current Limitations
 
-#### Shared Variables
-
-The `df.vars` table is currently **shared across all users**:
-
-```sql
--- User alice sets a variable
-SET SESSION AUTHORIZATION alice;
-SELECT df.setvar('api_key', 'alice-secret');
-
--- User bob can read it! ⚠️
-SET SESSION AUTHORIZATION bob;
-SELECT df.getvar('api_key');  -- Returns 'alice-secret'
-```
-
-**Workaround:** Use namespaced variable names: `df.setvar('alice.api_key', ...)`
-
-**Future:** User-scoped variables with row-level security (RLS) are planned.
-
 #### HTTP Requests
 
 HTTP requests (`df.http()`) currently execute with the **background worker's privileges**, not the submitting user's privileges:
@@ -1508,7 +1490,7 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 ### Security Best Practices
 
 1. **Worker role must be superuser** — The background worker role (`pg_durable.worker_role`) must be a superuser to bypass RLS and manage all instances
-2. **Review df.vars usage** — Variables are currently shared across all users; avoid storing secrets
+2. **Review df.vars usage** — Variables are scoped per-user via RLS, but avoid storing secrets in plain text
 3. **Use labels carefully** — Instance labels are visible only to the submitting user (RLS-filtered) and superusers
 4. **Monitor instances** — Superusers can use `df.list_instances()` to see all users' instances; regular users see only their own
 
@@ -1530,7 +1512,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
 
 Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — identity columns (`submitted_by`, `login_role`) and structural columns are protected.
 
-> **Warning:** `df.vars` is currently a shared global table with no RLS — any database role can read or overwrite any other user's variables. Do not store secrets or security-sensitive configuration in `df.vars`. Per-user variable scoping (via RLS) is planned for a future release. In multi-tenant environments, consider revoking `df.vars` grants from `PUBLIC` and granting only to trusted roles.
+> **Note:** `df.vars` uses per-user scoping via an `owner` column and RLS — each user can only read and write their own variables. Superusers bypass RLS but the DSL functions (`df.setvar()`, `df.getvar()`, etc.) still scope to the calling user via explicit filters. Avoid storing secrets in plain text.
 
 To restrict access to specific roles instead of all users:
 

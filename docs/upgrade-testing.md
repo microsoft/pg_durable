@@ -29,6 +29,8 @@ All three scenarios scope to versions within the same major version:
 
 **Goal:** Verify that `ALTER EXTENSION UPDATE` produces an identical schema to a fresh `CREATE EXTENSION`.
 
+**Contract:** For a not-yet-released version, the fresh-install schema is expected to match what an existing customer would get by starting from the immediately previous shipped version and applying the shipped upgrade chain to the new version. In other words, Scenario A treats the upgrade result as the reference shape for already-shipped versions. If fresh install and upgrade differ before release, prefer aligning the new version's fresh-install DDL with the upgrade path unless there is a deliberate reason to change the contract.
+
 **Method:**
 1. Install current `.so` and all upgrade SQL files
 2. In a clean test database, run `CREATE EXTENSION pg_durable VERSION '<prev>'` → `ALTER EXTENSION pg_durable UPDATE TO '<current>'`, then capture a schema snapshot
@@ -187,4 +189,9 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.1.1 → v0.2.0
 
-_(No changes yet — upgrade script is empty. Subsequent PRs will add changes here.)_
+#### #53 per-user df.vars scoping via owner column + RLS
+- **DDL change:** `df.vars` adds `owner REGROLE NOT NULL DEFAULT current_user::regrole`, changes the primary key from `(name)` to `(owner, name)`, enables RLS, and adds the `vars_user_isolation` policy.
+- **Scenario A considerations:** The schema comparison must verify the new column, its default, the new primary key definition, RLS enabled state, the `vars_user_isolation` policy, and table grants. Because the upgrade script adds `owner` with `ALTER TABLE ... ADD COLUMN`, upgraded schemas place `owner` after the existing columns. Fresh-install DDL for v0.2.0 has been aligned to that order so Scenario A continues to compare `ordinal_position`.
+- **Scenario B1 considerations:** This change touches the highest-risk upgrade surface because the Rust code now queries `df.vars.owner` and uses `ON CONFLICT (owner, name)`. The new `.so` still has to work against the v0.1.1 schema, which has neither the `owner` column nor the `(owner, name)` primary key. The implementation therefore uses the installed extension version as the compatibility boundary: v0.1.x stays in legacy global-vars mode, while v0.2.0+ uses owner-scoped queries.
+- **Scenario B2 considerations:** The upgrade script assigns all pre-existing `df.vars` rows to the role running `ALTER EXTENSION` via the `DEFAULT current_user::regrole` backfill. Upgrade tests verify that existing vars remain readable after upgrade for the role that performed the upgrade, that the migrated row is re-homed to that upgrade-running role, and that new post-upgrade writes/executions use owner-scoped semantics. This migration does not preserve per-user ownership for legacy rows; it intentionally re-homes them to the upgrade runner.
+- **Current status on this branch:** `scripts/test-upgrade.sh` now passes all Scenario A, B1, and B2 checks for this change.

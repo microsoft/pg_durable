@@ -318,7 +318,7 @@ SELECT df.result('a1b2c3d4');
 
 ### df.setvar(name, value)
 
-Sets a workflow variable (before `df.start()`).
+Sets a workflow variable for the current user (before `df.start()`). Each user has their own variable namespace — variables set by one user are invisible to others.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
@@ -333,7 +333,7 @@ SELECT df.setvar('api_url', 'https://api.example.com');
 
 ### df.getvar(name)
 
-Gets a workflow variable.
+Gets a workflow variable owned by the current user.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
@@ -347,7 +347,7 @@ SELECT df.getvar('api_url');
 
 ### df.unsetvar(name)
 
-Removes a workflow variable.
+Removes a workflow variable owned by the current user.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
@@ -361,7 +361,7 @@ SELECT df.unsetvar('api_url');
 
 ### df.clearvars()
 
-Clears all workflow variables.
+Clears all workflow variables owned by the current user.
 
 ```sql
 SELECT df.clearvars();

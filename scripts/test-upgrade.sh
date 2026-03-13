@@ -732,6 +732,7 @@ test_b2_data_survives_upgrade() {
 
     # Step 3: Verify pre-upgrade data is still accessible under the new schema
     assert_sql_equals "SELECT df.getvar('b2_key');" "b2_value" &&
+    assert_sql_equals "SELECT owner::text FROM df.vars WHERE name = 'b2_key';" "postgres" &&
     assert_sql_equals "SELECT msg FROM test_upgrade_b2_log WHERE kind = 'pre' ORDER BY id DESC LIMIT 1;" "b2_value"
 }
 
