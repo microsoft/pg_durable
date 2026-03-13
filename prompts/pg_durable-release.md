@@ -22,8 +22,8 @@ cargo search duroxide --limit 5
 
 **Check for new duroxide-pg-opt tag:**
 ```bash
-# List recent tags from the duroxide-pg-opt submodule
-cd duroxide-pg-opt && git fetch --tags && git tag --sort=-v:refname | head -10 && cd ..
+# Check current duroxide-pg-opt version
+grep '^version' duroxide-pg-opt/Cargo.toml
 ```
 
 ### 1.2 Ask User About Updates
@@ -46,13 +46,13 @@ Would you like to update to the new versions? (y/n)
 
 **If user approves updates:**
 
-Update `Cargo.toml` duroxide version and update the submodule:
+Update `Cargo.toml` duroxide version and update the vendored dependency:
 ```bash
 # Update duroxide in Cargo.toml
 # duroxide = "NEW_VERSION"
 
-# Update submodule to new tag
-cd duroxide-pg-opt && git checkout NEW_TAG && cd ..
+# Update vendored duroxide-pg-opt to new version
+# (replace files in duroxide-pg-opt/ with the new release)
 ```
 
 Then run:

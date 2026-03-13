@@ -36,7 +36,7 @@ COPY Cargo.toml Cargo.lock* ./
 COPY .cargo .cargo
 COPY build.rs ./
 
-# Copy duroxide-pg-opt submodule (path dependency)
+# Copy duroxide-pg-opt (path dependency)
 COPY duroxide-pg-opt ./duroxide-pg-opt
 
 # Copy source code

@@ -1,0 +1,6 @@
+/target
+.env
+Cargo.lock
+.vscode/
+logs/*
+!logs/.gitkeep

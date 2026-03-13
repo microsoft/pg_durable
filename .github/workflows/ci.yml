@@ -40,7 +40,7 @@ jobs:
           rustup default nightly
 
       - name: Check formatting
-        # --all includes path dependencies; limit to our package to skip submodules
+        # --all includes path dependencies; limit to our package to skip vendored deps
         run: cargo fmt --package pg_durable -- --check
 
   prepare:
@@ -77,9 +77,6 @@ jobs:
     continue-on-error: ${{ matrix.pg_version == 18 }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-          token: ${{ secrets.GH_PAT }}
 
       - name: Install Rust nightly
         run: |

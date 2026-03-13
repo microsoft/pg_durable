@@ -34,9 +34,9 @@ SELECT df.start(
 - Rust (nightly)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
 
-### GitHub Access (Required)
+### GitHub Access to duroxide-pg-opt (Optional)
 
-This project includes `microsoft/duroxide-pg-opt` as a git submodule. You need access to this private repository.
+This project includes `duroxide-pg-opt` as a vendored path dependency (checked into the repo). You will only need access to the private repository if you want to update the vendored version.
 
 1. **Create a GitHub PAT** with `repo` scope: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
 2. **Authorize SSO** for the Microsoft organization on the PAT
@@ -46,10 +46,10 @@ This project includes `microsoft/duroxide-pg-opt` as a git submodule. You need a
 git config --global url."https://<YOUR_PAT>@github.com/".insteadOf "https://github.com/"
 ```
 
-4. **Initialize the submodule** after cloning:
+4. **Clone duroxide-pg-opt** into a different directory than the vendored path ./duroxide-pg-opt:
 
 ```bash
-git submodule update --init
+cd /tmp && git clone https://github.com/microsoft/duroxide-pg-opt
 ```
 
 ## Installation
@@ -137,18 +137,14 @@ See [tests/e2e/](tests/e2e/) for details.
 
 ## Verifying Duroxide Migrations
 
-pg_durable includes checked-in copies of duroxide-pg-opt migration SQL files to ensure the extension owns the duroxide schema. The `duroxide-pg-opt` submodule provides the upstream source. To verify the copies match:
+pg_durable includes checked-in copies of duroxide-pg-opt migration SQL files to ensure the extension owns the duroxide schema. The `duroxide-pg-opt` directory provides the upstream source. To verify the copies match:
 
 ```bash
-# Ensure the submodule is initialized
-git submodule update --init
-
-# Verify migrations match upstream
 ./scripts/verify-duroxide-migrations.sh
 ```
 
 **When to verify:**
-- After updating the `duroxide-pg-opt` submodule to a new commit
+- After updating files in `duroxide-pg-opt/`
 - When contributing changes to pg_durable
 - CI automatically verifies on every pull request
 

@@ -1,6 +1,26 @@
 # Check Upstream Fixes and Update Dependencies
 
-**Purpose:** Check if fixes for tracked blockers have been released in upstream dependencies (duroxide-pg-opt) and guide updating pg_durable.
+**Purpose:** Check if fixes for tracked blockers have been released in upstream dependencies (duroxide) and guide updating duroxide-pg-opt.
+
+**Last Updated:** 2025-01-07
+
+---
+
+## Quick Reference - Active Blockers
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| [#50](https://github.com/microsoft/duroxide/issues/50) | Provider validation missing prune for Running instances test | 🔴 Open |
+| [#36](https://github.com/microsoft/duroxide/issues/36) | Provider validation missing lock extension verification | 🔴 Open |
+| [#40](https://github.com/microsoft/duroxide/issues/40) | Idempotency test uses cross-execution activity cancellation | 🔴 Open |
+
+## Resolved Blockers (duroxide v0.1.7)
+
+| Issue | Title | Resolution |
+|-------|-------|------------|
+| [#31](https://github.com/microsoft/duroxide/issues/31) | Configurable `wait_for_orchestration` timeout | ✅ `wait_timeout_secs` field added |
+| [#32](https://github.com/microsoft/duroxide/issues/32) | Validation test timing race | ✅ Fixed race condition |
+| [#34](https://github.com/microsoft/duroxide/issues/34) | Lock renewal timing sensitivity | ✅ Increased timing margins |
 
 ---
 
@@ -16,7 +36,7 @@ For each active blocker, check if the GitHub issue has been closed/resolved:
 
 ```bash
 # Check issue status (replace ISSUE_NUMBER with actual number)
-gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide-pg-opt --json state,title,closedAt
+gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide --json state,title,closedAt
 ```
 
 If the issue is still open, stop here - no action needed.
@@ -27,10 +47,10 @@ If an issue is closed, check if it's included in a release:
 
 ```bash
 # List recent releases
-gh release list --repo microsoft/duroxide-pg-opt --limit 10
+gh release list --repo microsoft/duroxide --limit 10
 
 # Check what version we currently use
-grep 'duroxide-pg-opt' Cargo.toml
+grep 'duroxide = ' Cargo.toml
 ```
 
 Compare the release date with the issue close date. If there's a release after the issue was closed, the fix is likely available.
@@ -39,7 +59,7 @@ Compare the release date with the issue close date. If there's a release after t
 
 ```bash
 # View specific release notes (replace TAG with version like v0.1.7)
-gh release view <TAG> --repo microsoft/duroxide-pg-opt
+gh release view <TAG> --repo microsoft/duroxide
 ```
 
 Confirm the fix is mentioned in the release notes.
@@ -48,17 +68,16 @@ Confirm the fix is mentioned in the release notes.
 
 If a fix is available in a new release:
 
-1. **Update vendored copy** - git clone duroxide-pg-opt into /tmp, or any path other than ./duroxide-pg-opt (needs credentials)
-
-2. **Also update duroxide if needed** (check compatibility):
+1. **Update Cargo.toml** - change the duroxide version:
    ```toml
    duroxide = "0.1.X"
    ```
 
-3. **Build and test**:
+2. **Build and test**:
    ```bash
    cargo build
-   ./scripts/test-e2e-local.sh --clean
+   cargo test
+   ./scripts/run-stress-tests.sh
    ```
 
 ### Step 6: Remove Workarounds
@@ -97,23 +116,24 @@ Present the changes to the user for review before committing. Include:
 ## Quick Reference Commands
 
 ```bash
-# Check all tracked issues at once
-gh issue view 6 --repo microsoft/duroxide-pg-opt --json state,title
+# Check active issue
+gh issue view 36 --repo microsoft/duroxide --json state,title
 
 # Current dependency versions
-grep -E 'duroxide|duroxide-pg-opt' Cargo.toml
+grep 'duroxide = ' Cargo.toml
 
 # Find all workarounds in codebase
 grep -rn "STOPGAP\|BLOCKED on duroxide\|TODO.*duroxide" --include="*.rs" .
 
-# Test after update (--clean ensures fresh schema)
-./scripts/test-e2e-local.sh --clean
+# Run tests after update
+cargo test
+./scripts/run-stress-tests.sh
 ```
 
 ---
 
 ## Notes
 
-- We depend on `microsoft/duroxide-pg-opt`, not `microsoft/duroxide-pg`. Only act on fixes released in duroxide-pg-opt.
-- The `--clean` flag is important when testing dependency updates to ensure fresh schema creation.
-- Always check the Version Compatibility Matrix to ensure duroxide and duroxide-pg-opt versions are compatible.
+- We depend on `microsoft/duroxide`. Only act on fixes released there.
+- Always check the Version Compatibility Matrix to ensure versions are compatible.
+- Run the full test suite including stress tests after any dependency update.

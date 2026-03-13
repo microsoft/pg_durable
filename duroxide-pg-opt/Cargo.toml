@@ -1,0 +1,56 @@
+[workspace]
+members = [".", "pg-stress"]
+
+[package]
+name = "duroxide-pg-opt"
+version = "0.1.18"
+edition = "2021"
+authors = ["Affan Dar <affandar@gmail.com>"]
+description = "A PostgreSQL-based provider implementation for Duroxide, a durable task orchestration framework"
+license = "MIT"
+repository = "https://github.com/microsoft/duroxide-pg-opt"
+readme = "README.md"
+keywords = ["duroxide", "postgresql", "workflow", "orchestration", "durable-execution"]
+categories = ["database", "asynchronous"]
+exclude = [
+    "pg-stress/",
+    "tests/",
+    "scripts/",
+    "docs/",
+    "prompts/",
+    "logs/",
+    "target/",
+    ".env*",
+    "STATUS.md",
+    "QUICK_REFERENCE.txt",
+    "STRESS_TEST_SUMMARY.md",
+    "TODO.md",
+]
+
+[dependencies]
+duroxide = { version = "0.1.20", features = ["provider-test"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono"], default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenvy = "0.15"
+uuid = { version = "1.0", features = ["v4"] }
+anyhow = "1.0"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+semver = "1.0"
+include_dir = "0.7"
+
+# Metrics (optional, for database operation instrumentation)
+metrics = { version = "0.24", optional = true }
+
+[features]
+default = ["test-fault-injection"]
+test-fault-injection = []
+db-metrics = ["metrics"]
+
+[dev-dependencies]
+duroxide-pg-stress = { path = "pg-stress" }
+metrics-util = { version = "0.19", features = ["debugging"] }
