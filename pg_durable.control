@@ -4,5 +4,10 @@ module_pathname = 'pg_durable'
 relocatable = false
 superuser = true
 trusted = false
+# Note: 'schema' is intentionally omitted. This extension manages two schemas
+# (df and duroxide), and PostgreSQL's control file only supports a single schema
+# directive. The df schema is created by pgrx (#[pg_schema]), and the duroxide
+# schema is created by sql/duroxide_install.sql. relocatable = false prevents
+# schema relocation attacks.
 
 

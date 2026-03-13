@@ -300,7 +300,7 @@ CREATE OPERATOR ~> (
 -- Operator |=> for naming: fut |=> 'name' means "name this result as $name"
 CREATE OR REPLACE FUNCTION df.as_op(fut text, name text) RETURNS text AS $$
     SELECT df.as(fut, name);
-$$ LANGUAGE SQL IMMUTABLE;
+$$ LANGUAGE SQL IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
 CREATE OPERATOR |=> (
     FUNCTION = df.as_op,
@@ -344,7 +344,7 @@ BEGIN
     );
     RETURN result_obj::text;
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
 -- Helper: partial_if !> else completes the if node
 CREATE OR REPLACE FUNCTION df.if_else_op(partial_if text, else_branch text) RETURNS text AS $$
@@ -368,7 +368,7 @@ BEGIN
     -- Now call the real df.if function
     RETURN df.if(cond_text, then_text, else_fut);
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
 -- Helper to ensure a value is a durofut (returns JSON string)
 -- Rejects JSON with unknown node_type values.
@@ -402,7 +402,7 @@ BEGIN
     -- It's plain SQL, wrap it
     RETURN df.sql(val);
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
 CREATE OPERATOR ?> (
     FUNCTION = df.if_then_op,
@@ -420,7 +420,7 @@ CREATE OPERATOR !> (
 -- This is a PREFIX operator with lowest precedence
 CREATE OR REPLACE FUNCTION df.loop_prefix_op(body text) RETURNS text AS $$
     SELECT df.loop(body);
-$$ LANGUAGE SQL IMMUTABLE;
+$$ LANGUAGE SQL IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
 CREATE OPERATOR @> (
     FUNCTION = df.loop_prefix_op,

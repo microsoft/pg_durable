@@ -139,8 +139,8 @@ The Rust `#[pg_extern]` functions use SPI, and all SPI SQL in the codebase uses 
 **Best practice recommendation**: Add `SET search_path = pg_catalog, df` to all PL/pgSQL and SQL helper functions as defense-in-depth.
 
 **Remediation**:
-- [ ] **P2**: Add `SET search_path = pg_catalog, df, pg_temp` to `df.if_then_op()`, `df.if_else_op()`, `df.ensure_durofut()`, `df.as_op()`, `df.loop_prefix_op()`
-- [ ] **P3**: Document as best practice in spec
+- [x] **P2**: Add `SET search_path = pg_catalog, df, pg_temp` to `df.if_then_op()`, `df.if_else_op()`, `df.ensure_durofut()`, `df.as_op()`, `df.loop_prefix_op()`
+- [x] **P3**: Document as best practice in spec
 
 ---
 
@@ -224,7 +224,7 @@ URL allowlist (GUC-based) and rate limiting are documented as future work (Threa
 
 **Remediation**:
 - Same as Finding 1 (P0 fixes)
-- [ ] **P2**: Evaluate migrating internal SPI queries to `Spi::get_one_with_args()` / parameterized form
+- [x] **P2**: Evaluate migrating internal SPI queries to `Spi::get_one_with_args()` / parameterized form
 
 ---
 
@@ -235,12 +235,12 @@ URL allowlist (GUC-based) and rate limiting are documented as future work (Threa
 - [x] Fix SQL injection in `df.result()` (Finding 1)
 
 ### P2 — Should Fix
-- [ ] Add `SET search_path` to PL/pgSQL/SQL helper functions (Finding 3)
+- [x] Add `SET search_path` to PL/pgSQL/SQL helper functions (Finding 3)
 - [x] Add threat T12 to spec for variable substitution design (Finding 1)
-- [ ] Evaluate migrating to parameterized SPI queries (Finding 8)
+- [x] Evaluate migrating to parameterized SPI queries (Finding 8)
 
 ### P3 — Document / Low Priority
 - [ ] Document CREATE IF NOT EXISTS as accepted risk (Finding 2)
-- [ ] Document multi-schema rationale for missing `schema =` (Finding 4)
+- [x] Document multi-schema rationale for missing `schema =` (Finding 4)
 - [ ] Clarify default worker role name in spec (Finding 5)
-- [ ] Add search_path best practice to spec (Finding 3)
+- [x] Add search_path best practice to spec (Finding 3)
