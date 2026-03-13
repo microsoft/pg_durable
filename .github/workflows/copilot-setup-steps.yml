@@ -24,6 +24,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          token: ${{ secrets.DUROXIDE_PG_OPT_TOKEN }}
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -53,7 +56,7 @@ jobs:
       - name: Verify pgrx installation
         run: cargo pgrx --version
 
-      # Strongly recommended for private git deps + auth in CI-like envs
+      # Keep Cargo git transport behavior consistent in CI.
       - name: Configure Cargo to use git CLI
         run: |
           mkdir -p ~/.cargo
@@ -62,15 +65,10 @@ jobs:
           git-fetch-with-cli = true
           EOF
 
-      # Provide non-interactive auth for *all* https://github.com/* git fetches
-      # using an environment secret in the `copilot` environment.
-      - name: Configure git auth for private GitHub deps (PAT)
-        run: |
-          test -n "${{ secrets.DUROXIDE_PG_OPT_TOKEN }}"
-          git config --global --add url."https://x-access-token:${{ secrets.DUROXIDE_PG_OPT_TOKEN }}@github.com/".insteadOf "https://github.com/"
-          git config --global --add url."https://x-access-token:${{ secrets.DUROXIDE_PG_OPT_TOKEN }}@github.com/".insteadOf "https://api.github.com/"
-
-      # Warm the Cargo git/db caches so later `cargo update/test` is fast and reliable.
-      - name: Prefetch Rust dependencies (including private git deps)
+      # Warm Cargo caches so later builds/tests are faster and more reliable.
+      - name: Prefetch Rust dependencies
         run: |
           cargo fetch
+
+      - name: Verify duroxide migrations match upstream
+        run: ./scripts/verify-duroxide-migrations.sh
