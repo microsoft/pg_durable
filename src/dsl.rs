@@ -5,6 +5,9 @@ use cron::Schedule as CronSchedule;
 use pgrx::prelude::*;
 use std::str::FromStr;
 
+use std::cell::RefCell;
+use std::time::Instant;
+
 use crate::client::start_durable_function;
 use crate::types::{short_id, Durofut, FunctionInput};
 
@@ -63,10 +66,30 @@ fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
 }
 
 fn installed_extension_version() -> String {
-    Spi::get_one::<String>("SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'")
+    thread_local! {
+        static CACHE: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
+    }
+    const TTL_SECS: u64 = 5;
+
+    CACHE.with(|cache| {
+        let cached = cache.borrow();
+        if let Some((ref version, ref ts)) = *cached {
+            if ts.elapsed().as_secs() < TTL_SECS {
+                return version.clone();
+            }
+        }
+        drop(cached);
+
+        let version = Spi::get_one::<String>(
+            "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'",
+        )
         .ok()
         .flatten()
-        .unwrap_or_else(|| pgrx::error!("pg_durable extension metadata not found"))
+        .unwrap_or_else(|| pgrx::error!("pg_durable extension metadata not found"));
+
+        *cache.borrow_mut() = Some((version.clone(), Instant::now()));
+        version
+    })
 }
 
 fn owner_scoped_vars_enabled() -> bool {
