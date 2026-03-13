@@ -64,7 +64,7 @@ These `df.*` functions access `df.instances` or `df.nodes` via SPI (which runs a
 | `df.list_instances()` | `df.instances` (SELECT for labels) | Read | User sees only own labels |
 | `df.instance_info()` | `df.instances` (SELECT for label) | Read | User sees only own |
 | `df.instance_nodes()` | `df.nodes` (SELECT) | Read | User sees only own |
-| `df.setvar()` | `df.vars` (INSERT/UPDATE) | Write | User can only set own vars (RLS + explicit owner filter) |
+| `df.setvar()` | `df.vars` (INSERT/UPDATE) | Write | User can only set own vars (RLS + owner DEFAULT + ON CONFLICT) |
 | `df.getvar()` | `df.vars` (SELECT) | Read | User can only read own vars (RLS + explicit owner filter) |
 | `df.unsetvar()` | `df.vars` (DELETE) | Write | User can only delete own vars (RLS + explicit owner filter) |
 | `df.clearvars()` | `df.vars` (DELETE) | Write | User can only clear own vars (RLS + explicit owner filter) |
@@ -166,9 +166,9 @@ There are no "unlinked" or "orphan" nodes with `submitted_by = NULL`. Every row 
 **Schema** (fresh install):
 ```sql
 CREATE TABLE IF NOT EXISTS df.vars (
-    owner REGROLE NOT NULL DEFAULT current_user::regrole,
     name TEXT NOT NULL,
     value TEXT,
+    owner REGROLE NOT NULL DEFAULT current_user::regrole,
     PRIMARY KEY (owner, name)
 );
 ```
@@ -192,7 +192,7 @@ ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
 CREATE POLICY vars_user_isolation ON df.vars ...;
 ```
 
-**Superuser behavior**: Superusers bypass RLS, so they can see all users' variables via direct table queries. However, `df.start()`, `df.getvar()`, `df.setvar()`, `df.unsetvar()`, and `df.clearvars()` all use explicit `WHERE owner = current_user::regrole` filters in their SQL. This ensures that even superusers only interact with their own variables through the DSL functions — RLS is defense-in-depth for non-superusers, while the explicit filter provides correct scoping for all users including superusers.
+**Superuser behavior**: Superusers bypass RLS, so they can see all users' variables via direct table queries. However, read/delete functions (`df.getvar()`, `df.unsetvar()`, `df.clearvars()`) and `df.start()` vars capture use explicit `WHERE owner = current_user::regrole` filters, while `df.setvar()` scopes ownership via the column DEFAULT and `ON CONFLICT (owner, name)`. This ensures that even superusers only interact with their own variables through the DSL functions — RLS is defense-in-depth for non-superusers, while the explicit scoping provides correct behavior for all users including superusers.
 
 ### Decision 6: Worker role RLS bypass
 
@@ -316,7 +316,7 @@ CREATE POLICY vars_user_isolation ON df.vars
     WITH CHECK (owner = current_user::regrole);
 ```
 
-The `owner` column defaults to `current_user::regrole` on INSERT, so `df.setvar()` automatically assigns ownership. All DSL functions (`df.getvar()`, `df.unsetvar()`, `df.clearvars()`, and `df.start()` vars capture) also include explicit `WHERE owner = current_user::regrole` filters for correct behavior when RLS is bypassed (superusers).
+The `owner` column defaults to `current_user::regrole` on INSERT, so `df.setvar()` automatically assigns ownership via the column DEFAULT and `ON CONFLICT (owner, name)`. Read/delete functions (`df.getvar()`, `df.unsetvar()`, `df.clearvars()`) and `df.start()` vars capture include explicit `WHERE owner = current_user::regrole` filters for correct behavior when RLS is bypassed (superusers).
 
 ### 4.4 Worker bypass
 

@@ -278,7 +278,7 @@ See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specificatio
 
 **Threat**: `df.vars` is a key-value table. Without per-user scoping, users can override or read each other's variables, potentially redirecting workflows.
 
-**Mitigation (implemented)**: `df.vars` has an `owner REGROLE` column with `DEFAULT current_user::regrole` and a composite primary key `(owner, name)`. RLS policy `vars_user_isolation` restricts each user to their own variables. All DSL functions (`df.setvar()`, `df.getvar()`, `df.unsetvar()`, `df.clearvars()`) and `df.start()` vars capture include explicit `WHERE owner = current_user::regrole` filters, ensuring correct scoping even for superusers who bypass RLS. See [rls.md, Decision 5](rls.md).
+**Mitigation (implemented)**: `df.vars` has an `owner REGROLE` column with `DEFAULT current_user::regrole` and a composite primary key `(owner, name)`. RLS policy `vars_user_isolation` restricts each user to their own variables. `df.setvar()` scopes ownership via the column DEFAULT and `ON CONFLICT (owner, name)`; read/delete functions (`df.getvar()`, `df.unsetvar()`, `df.clearvars()`) and `df.start()` vars capture use explicit `WHERE owner = current_user::regrole` filters. This ensures correct scoping even for superusers who bypass RLS. See [rls.md, Decision 5](rls.md).
 
 **Residual Risk**: Low — per-user scoping is enforced at both the RLS and application layers.
 
