@@ -4,7 +4,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## v0.2.0 (in development)
 
-- Breaking change: `df.vars` now uses per-user scoping via RLS. After upgrading from `v0.1.1`, variables that were already defined become visible only to the role that ran `ALTER EXTENSION pg_durable UPDATE`.
+- Breaking change: `df.vars` now uses per-user scoping via RLS. After upgrading from `v0.1.1`, all pre-existing variables are re-homed to the role that ran `ALTER EXTENSION pg_durable UPDATE`; other users will lose access to any variables they had set before the upgrade.
 
 ## v0.1.1 (Released)
 

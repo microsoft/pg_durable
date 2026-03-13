@@ -334,14 +334,14 @@ The worker role must be a superuser (see Decision 6). Superusers bypass RLS auto
 
 Question: Should we use `FORCE`? In pg_durable, the table "owner" is whoever ran `CREATE EXTENSION` (typically the superuser). `FORCE` would make RLS apply even to the superuser, which may be undesirable for debugging. However, without `FORCE`, the superuser sees all rows — which is expected admin behavior.
 
-**Recommendation**: Do NOT use `FORCE ROW LEVEL SECURITY`. Superusers should see all rows (standard PostgreSQL convention). The spec already notes that superusers are trusted (they install the extension).
+**Recommendation**: Do NOT use `FORCE ROW LEVEL SECURITY` on any `df.*` table (`df.instances`, `df.nodes`, `df.vars`). Superusers should see all rows (standard PostgreSQL convention). The spec already notes that superusers are trusted (they install the extension). Additionally, the background worker runs as a superuser (see Decision 6) and must bypass RLS to manage all users' data — `FORCE` would break worker access.
 
 Revised:
 ```sql
 ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
--- No FORCE — superuser/table-owner bypasses RLS (standard behavior)
-
 ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
+-- No FORCE on any table — superuser/table-owner bypasses RLS (standard behavior)
 ```
 
 ---

@@ -891,3 +891,39 @@ pub fn wait_for_completion(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_semver;
+
+    #[test]
+    fn test_parse_semver_basic() {
+        assert_eq!(parse_semver("0.1.1"), Some((0, 1, 1)));
+        assert_eq!(parse_semver("0.2.0"), Some((0, 2, 0)));
+        assert_eq!(parse_semver("1.0.0"), Some((1, 0, 0)));
+        assert_eq!(parse_semver("12.34.56"), Some((12, 34, 56)));
+    }
+
+    #[test]
+    fn test_parse_semver_with_prerelease_suffix() {
+        assert_eq!(parse_semver("0.2.0-rc1"), Some((0, 2, 0)));
+        assert_eq!(parse_semver("1.0.0-beta.2"), Some((1, 0, 0)));
+    }
+
+    #[test]
+    fn test_parse_semver_invalid() {
+        assert_eq!(parse_semver(""), None);
+        assert_eq!(parse_semver("0"), None);
+        assert_eq!(parse_semver("0.1"), None);
+        assert_eq!(parse_semver("abc.def.ghi"), None);
+        assert_eq!(parse_semver("0.1.abc"), None);
+    }
+
+    #[test]
+    fn test_parse_semver_comparison() {
+        assert!(parse_semver("0.2.0").unwrap() >= (0, 2, 0));
+        assert!(parse_semver("0.1.1").unwrap() < (0, 2, 0));
+        assert!(parse_semver("0.3.0").unwrap() >= (0, 2, 0));
+        assert!(parse_semver("1.0.0").unwrap() >= (0, 2, 0));
+    }
+}

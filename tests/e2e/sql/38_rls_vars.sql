@@ -243,11 +243,11 @@ DO $$
 DECLARE
     total_count INT;
 BEGIN
-    -- Superuser should see ALL vars (bypasses RLS): Alice's + superuser's
+    -- Superuser should see exactly 2 vars (bypasses RLS): Alice's shared_key + superuser's su_var
     SELECT count(*) INTO total_count FROM df.vars;
 
-    IF total_count < 2 THEN
-        RAISE EXCEPTION 'TEST 5 FAILED: Superuser should see at least 2 vars (alice + su), saw %', total_count;
+    IF total_count != 2 THEN
+        RAISE EXCEPTION 'TEST 5 FAILED: Superuser should see exactly 2 vars (alice + su), saw %', total_count;
     END IF;
 
     RAISE NOTICE 'Test 5 PASSED: Superuser sees all variables (% total)', total_count;
