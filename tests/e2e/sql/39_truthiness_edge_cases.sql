@@ -32,13 +32,13 @@ BEGIN
         format('truth-%s', p_variant)
     );
 
-    -- Wait up to 3s for the loop to either stop on its own or run 2 iterations
+    -- Wait up to 10s for the loop to either stop on its own or run 2 iterations
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
         SELECT COUNT(*) INTO cnt FROM test_truth_log WHERE variant = p_variant;
         EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled', 'cancelled')
                OR cnt >= 2
-               OR attempts > 30;
+               OR attempts > 100;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
@@ -46,8 +46,8 @@ BEGIN
     IF lower(status) IN ('completed', 'failed', 'canceled', 'cancelled') THEN
         -- Loop stopped by itself → condition was falsy
         RETURN 'falsy';
-    ELSE
-        -- Loop kept running → condition is truthy; cancel it
+    ELSIF cnt >= 2 THEN
+        -- Loop kept running beyond 1 iteration → condition is truthy; cancel it
         PERFORM df.cancel(inst_id, 'truth-test-done');
         -- Wait for cancel to land
         attempts := 0;
@@ -59,6 +59,10 @@ BEGIN
             attempts := attempts + 1;
         END LOOP;
         RETURN 'truthy';
+    ELSE
+        -- Timeout: instance did not start within 10s (worker busy or dead)
+        PERFORM df.cancel(inst_id, 'truth-test-timeout');
+        RAISE EXCEPTION 'Timeout waiting for truth test [%] (status=%, cnt=%)', p_variant, status, cnt;
     END IF;
 END $$;
 
