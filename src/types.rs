@@ -538,6 +538,42 @@ impl Durofut {
         Ok(())
     }
 
+    /// Validate structural constraints that depend on nesting context.
+    ///
+    /// Specifically, `df.break()` is only valid inside a `df.loop()` body.
+    /// Call this with `in_loop = false` at the graph root.
+    pub fn validate_structural(&self, in_loop: bool) -> Result<(), String> {
+        match self.node_type.as_str() {
+            "BREAK" if !in_loop => {
+                return Err(
+                    "df.break() used outside of a loop — df.break() is only valid inside a df.loop() body"
+                        .to_string(),
+                );
+            }
+            "LOOP" => {
+                // The loop body (left_node) runs in a loop context.
+                if let Some(ref body) = self.left_node {
+                    body.validate_structural(true)?;
+                }
+                // The while-condition (config condition_node) is not a loop body;
+                // df.break() there doesn't make sense either.
+                self.for_each_config_child(|child| child.validate_structural(false))?;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // For all other nodes propagate the current loop context.
+        if let Some(ref left) = self.left_node {
+            left.validate_structural(in_loop)?;
+        }
+        if let Some(ref right) = self.right_node {
+            right.validate_structural(in_loop)?;
+        }
+        self.for_each_config_child(|child| child.validate_structural(in_loop))?;
+        Ok(())
+    }
+
     /// Extract config-embedded Durofut children from the `query` JSON field and apply
     /// a callback to each. This is the single source of truth for walking `condition_node`
     /// (in IF/LOOP nodes) and `extra_nodes` (in JOIN nodes).

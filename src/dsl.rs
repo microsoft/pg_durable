@@ -574,6 +574,10 @@ pub fn start(
     if let Err(e) = durofut.validate_recursive() {
         pgrx::error!("Invalid durable function graph: {}", e);
     }
+    // Validate structural constraints (e.g. df.break() must be inside df.loop())
+    if let Err(e) = durofut.validate_structural(false) {
+        pgrx::error!("Invalid durable function graph: {}", e);
+    }
     let instance_id = short_id();
 
     // Validate that the target database exists (if specified)
