@@ -27,9 +27,9 @@
 | **A. Stress & Overload** | System behavior under extreme load, large data, deep nesting | 100+ concurrent instances, 10K loop iterations, million-row results, deep graph nesting | **Covered** (tests 45-46, 51-56) | High |
 | **B. Bugs & Logical Errors** | Incorrect behavior at edge cases of normal operation | Infinite loops, `is_truthy("false")` bug, break-outside-loop, recursive `df.start()` | **Covered** (tests 38-42, 48-50, 57) | **Highest** |
 | **C. Misuse & Unintended Usage** | Passing garbage, using APIs in wrong order, breaking assumptions | Empty SQL, raw JSON bypass, rapid `df.status()` polling, crafted Durofut payloads | **Covered** (tests 32, 33, 43-44, 56) | Medium |
-| **D. Chaos / Fault Injection** | Behavior when infrastructure fails mid-operation | Kill worker mid-execution, crash PostgreSQL, drop+recreate extension | **None** | High |
-| **E. Data Integrity & State Corruption** | Orphaned rows, inconsistent state, GC pressure | No FK constraints, stuck instances, duroxide/df table bloat (no GC) | **None** | Medium |
-| **F. Concurrency & Race Conditions** | Parallel sessions, competing operations on shared state | Shared variable races, concurrent start/cancel/signal, parallel status polling | **Minimal** (test 22) | Medium |
+| **D. Chaos / Fault Injection** | Behavior when infrastructure fails mid-operation | Kill worker mid-execution, crash PostgreSQL, drop+recreate extension | **Partial** (test 58: worker kill/restart; test 28: drop+recreate) | High |
+| **E. Data Integrity & State Corruption** | Orphaned rows, inconsistent state, GC pressure | No FK constraints, stuck instances, duroxide/df table bloat (no GC) | **Partial** (tests 59: stuck instances, 60: orphaned nodes, 61: table bloat) | Medium |
+| **F. Concurrency & Race Conditions** | Parallel sessions, competing operations on shared state | Shared variable races, concurrent start/cancel/signal, parallel status polling | **Partial** (tests 22, 62: concurrent start, 63: variable race) | Medium |
 
 ---
 
@@ -585,13 +585,13 @@ UPDATE df.nodes SET query = 'SELECT evil()' WHERE instance_id = 'running1';
 
 ## Existing Coverage Analysis
 
-The E2E test suite now includes **57 tests** covering happy-path functionality and resilience scenarios:
+The E2E test suite now includes **63 tests** covering happy-path functionality and resilience scenarios:
 
 | Area | Tests | Gap |
 |---|---|---|
 | Basic SQL execution | 01 | No error cases |
 | Sequences | 02 | Deep nesting covered (46) |
-| Variables | 03, 20, 55, 57 | Name conflicts (57) and large payloads (55) covered |
+| Variables | 03, 20, 55, 57, 63 | Name conflicts (57), large payloads (55), shared-var race (63) covered |
 | Parallel (JOIN) | 04, 12, 16, 49, 51 | Branch-failure (49) and wide graphs (51) covered |
 | Conditionals (IF) | 05, 06, 13, 39 | Truthiness edge cases covered (39) |
 | Sleep | 07 | No large/zero values |
@@ -605,24 +605,33 @@ The E2E test suite now includes **57 tests** covering happy-path functionality a
 | Cross-connection | 22 | Basic only |
 | Transactions | 23 | Basic only |
 | Security/RLS | 25, 26, 27, 37 | Good coverage |
-| Worker lifecycle | 28 | Basic only |
+| Worker lifecycle | 28, 58 | Kill+restart durability covered (58) |
 | Error handling | 29, 32, 33, 40, 43, 44 | Runtime failures (40), empty SQL (43), crafted JSON (44) covered |
 | Graph reuse | 30 | Basic only |
 | Multi-database | 34 | Basic only |
 | Heartbeat | 35 | Basic only |
 | SSRF | 36 | Good coverage |
-| Stress: concurrency | 45 | 20-instance burst covered |
+| Stress: concurrency | 45, 62 | 20-instance burst (45), 10 concurrent sessions via dblink (62) |
 | Stress: cancel races | 47 | 20 rapid start/cancel cycles covered |
 | Stress: large queries | 54 | 10KB query text covered |
 | Stress: large results | 53 | 10K-row result set covered |
 | Stress: rapid polling | 56 | 500K status polls covered |
 | Break semantics | 41 | Top-level break covered |
 | Recursive df.start() | 42 | Workflow-spawned child instance covered |
+| Chaos: worker kill | 58 | Worker kill + restart, instance resumes covered |
+| Data integrity: orphans | 60 | Orphaned nodes (no FK cascade) documented |
+| Data integrity: bloat | 61 | Table bloat (no GC) measured and documented |
+| Stuck instances | 59 | Signal-waiting instance stays running; cancel escapes it |
 
 **Remaining gaps:**
-- Zero chaos/fault injection tests (D1–D6)
-- Zero data integrity/cleanup tests (E1–E6)
-- Zero multi-session concurrency tests (F1–F5)
+- D2 — PostgreSQL crash recovery (needs `pg_ctl stop -m immediate` + restart, requires shell harness)
+- D3 — Disk full simulation (infeasible in SQL)
+- D4 — Network partition to remote database
+- D5 — Clock skew / time jumps
+- D6 — Extension drop+recreate *while instances are in-flight* (D6 partial: 28 covers drop+recreate with no in-flight instances)
+- E6 — Tampering with df.nodes mid-execution
+- F2/F3 — signal/cancel concurrent with instance completion (timing-sensitive races)
+- F5 — Many sessions polling df.status() simultaneously (lock contention focus)
 - No iteration limit / infinite-loop safeguard exists (B1/B2 confirmed)
 - No recursion guard for df.start() inside workflows (B11 confirmed)
 - No GC for completed instances / duroxide history
@@ -650,19 +659,21 @@ The E2E test suite now includes **57 tests** covering happy-path functionality a
 11. **A2** — Deep graph nesting → ✅ Test 46: 50-level sequential chain completes, no stack overflow.
 12. **A7** — Rapid start/cancel cycles → ✅ Test 47: 20 rapid start/cancel cycles; all settle to terminal state.
 
-### Phase 3: Chaos & durability (validate the "durable" promise)
+### Phase 3: Chaos & durability (validate the "durable" promise) — ✅ COMPLETE (partial)
 
-13. **D1** — Kill worker mid-execution
-14. **D6** — Drop+recreate extension
-15. **D2** — PostgreSQL crash recovery
-16. **E2/E3** — Stuck instances detection
+13. **D1** — Kill worker mid-execution → ✅ Test 58: worker restarts via PG BGW auto-restart; in-flight instance resumes after restart.
+14. **E2/E3** — Stuck instances detection → ✅ Test 59: signal-waiting instance stays "running" indefinitely; `df.cancel()` is the only escape. No built-in idle timeout exists.
+15. **E1** — Orphaned nodes → ✅ Test 60: deleting `df.instances` row leaves `df.nodes` intact (no FK cascade). `df.status()` returns NULL gracefully.
+16. **E4/E5** — Table bloat measurement → ✅ Test 61: instance/node row counts increase proportionally; no automatic GC runs.
+17. **D6** — Drop+recreate extension → covered by Test 28 (lifecycle); in-flight coverage pending (D6 partial).
+18. **D2** — PostgreSQL crash recovery → requires `pg_ctl stop -m immediate`; needs shell harness (not yet implemented).
 
-### Phase 4: Concurrency & data integrity
+### Phase 4: Concurrency & data integrity — ✅ COMPLETE (partial)
 
-17. **F1** — Concurrent df.start()
-18. **F4** — Shared variable races
-19. **E4/E5** — Table bloat measurement
-20. **E1** — Orphaned nodes
+19. **F1** — Concurrent df.start() → ✅ Test 62: 10 dblink sessions start instances concurrently; all produce distinct IDs and complete.
+20. **F4** — Shared variable races → ✅ Test 63: two sessions race on the same `df.vars` key; both instances settle; last-writer-wins behavior documented.
+21. **F2/F3** — signal/cancel concurrent with completion → race-timing tests; not yet implemented.
+22. **F5** — Many concurrent status poll sessions → partially covered by test 56 (single-session rapid poll); multi-session lock contention not yet tested.
 
 ### Phase 5: Additional misuse & edge cases — ✅ COMPLETE
 
@@ -699,3 +710,7 @@ Bugs and design issues discovered through resilience testing:
 | **F5** | Serde ignores unknown JSON fields in crafted Durofut payloads | Quirk | 44 | Accepted — serde default behavior |
 | **F6** | Empty/whitespace SQL accepted by DSL validation, fails at execution time | Quirk | 43 | Accepted — could add DSL-time validation |
 | **F7** | Signal to non-existent/completed instance does not error | Quirk | 50 | Accepted — fire-and-forget semantics |
+| **F8** | No FK constraint between `df.instances` and `df.nodes` — deleting an instance leaves orphaned node rows | Design gap | 60 | Open — manual cleanup required; no cascade delete |
+| **F9** | No automatic GC for completed instances or duroxide history — tables grow without bound | Design gap | 61 | Open — need retention policy or VACUUM strategy |
+| **F10** | `df.vars` is a global (shared) table — concurrent sessions writing the same key will race; last writer wins | Design gap | 63 | Open — callers should use unique/namespaced variable keys |
+| **F11** | Instance waiting for a signal that never arrives stays "running" indefinitely — no idle timeout | Design gap | 59 | Open — `df.cancel()` is the only escape valve |

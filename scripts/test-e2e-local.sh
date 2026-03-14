@@ -333,6 +333,10 @@ for run in $(seq 1 $REPEAT_COUNT); do
         # 35 reads df._worker_epoch (internal table)
         # 37 tests RLS policies, including for superuser, changes users
         # 38 tests per-user vars RLS isolation, changes users
+        # 58 kills background worker (requires pg_terminate_backend + _worker_epoch)
+        # 60 deletes instance rows directly (bypasses RLS, superuser only)
+        # 62 uses dblink with postgres credentials for concurrent sessions
+        # 63 uses dblink with postgres credentials for variable race test
         PSQL_USER="$E2E_USER"
         if [[ "$test_name" == "00_requires_shared_preload" \
            || "$test_name" == "22_cross_connection" \
@@ -345,7 +349,11 @@ for run in $(seq 1 $REPEAT_COUNT); do
            || "$test_name" == "34_multi_database" \
            || "$test_name" == "35_heartbeat_liveness" \
            || "$test_name" == "37_rls" \
-           || "$test_name" == "38_rls_vars" ]]; then
+           || "$test_name" == "38_rls_vars" \
+           || "$test_name" == "58_kill_worker_mid_execution" \
+           || "$test_name" == "60_orphaned_nodes" \
+           || "$test_name" == "62_concurrent_sessions" \
+           || "$test_name" == "63_shared_variable_race" ]]; then
             PSQL_USER="$PG_USER"
         fi
         
