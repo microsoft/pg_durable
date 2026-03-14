@@ -52,11 +52,52 @@ jobs:
               libxslt1-dev \
               libicu-dev
 
+      - name: Cache Cargo assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin/cargo-pgrx
+          key: ${{ runner.os }}-copilot-setup-cargo-pgrx-0.16.1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-copilot-setup-cargo-pgrx-0.16.1-
+
+      - name: Cache pgrx PostgreSQL downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx/config.toml
+            ~/.pgrx/17.*
+            ~/.pgrx/18.*
+          key: ${{ runner.os }}-copilot-setup-pgrx-0.16.1-pg17-18-v1
+
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version 0.16.1 --locked
+        run: |
+          if ! command -v cargo-pgrx &> /dev/null || ! cargo pgrx --version | grep -q "0.16.1"; then
+            cargo install cargo-pgrx --version 0.16.1 --locked
+          else
+            echo "cargo-pgrx 0.16.1 already installed, skipping"
+          fi
 
       - name: Initialize pgrx (PostgreSQL 17 and 18)
-        run: cargo pgrx init --pg17 download --pg18 download
+        run: |
+          has_pg17="$(compgen -G "$HOME/.pgrx/17.*" || true)"
+          has_pg18="$(compgen -G "$HOME/.pgrx/18.*" || true)"
+          if [ -z "$has_pg17" ]; then
+            echo "PostgreSQL 17 missing; initializing"
+            cargo pgrx init --pg17 download
+          else
+            echo "PostgreSQL 17 already initialized, skipping download"
+          fi
+
+          if [ -z "$has_pg18" ]; then
+            echo "PostgreSQL 18 missing; initializing"
+            cargo pgrx init --pg18 download
+          else
+            echo "PostgreSQL 18 already initialized, skipping download"
+          fi
 
       - name: Verify pgrx installation
         run: cargo pgrx --version
