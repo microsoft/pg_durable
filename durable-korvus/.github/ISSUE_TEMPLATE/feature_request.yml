@@ -1,0 +1,63 @@
+name: "durable-korvus: Feature Request"
+description: Propose a new feature or improvement for the durable-korvus crate.
+labels: ["enhancement", "durable-korvus"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to propose an improvement to **durable-korvus**!
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Motivation
+      description: |
+        What problem are you trying to solve? What use case is currently unsupported or painful?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: |
+        Describe the feature or API change you'd like to see. Include example code where helpful.
+      placeholder: |
+        ```rust
+        // Proposed API
+        collection.search_hybrid("query", &pipeline, 5, None).await?;
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Are there workarounds or alternative approaches you've considered?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature Area
+      options:
+        - "Ingestion (document upsert / chunking)"
+        - "Embeddings (provider / batching)"
+        - "Search (vector / hybrid / filtering)"
+        - "Schema / migrations"
+        - "Durability / workflow semantics"
+        - "Korvus migration / compatibility"
+        - "Documentation"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Links to related issues, specs, or external references.
+    validations:
+      required: false

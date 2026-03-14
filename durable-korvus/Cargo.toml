@@ -1,0 +1,29 @@
+[package]
+name = "durable-korvus"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/microsoft/pg_durable"
+description = "Durable, fault-tolerant vector search and RAG pipeline built on pg_durable and pgvector"
+keywords = ["rag", "vector-search", "postgresql", "pgvector", "embeddings"]
+categories = ["database"]
+
+# TODO: publish to crates.io once implementation is complete
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+# Enable integration tests (requires a running PostgreSQL with pg_durable and pgvector)
+integration = []

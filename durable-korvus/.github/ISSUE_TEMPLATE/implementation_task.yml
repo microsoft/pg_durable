@@ -1,0 +1,50 @@
+name: "durable-korvus: Implementation Task"
+description: Track implementation work for a specific durable-korvus component.
+labels: ["implementation", "durable-korvus"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to open implementation tasks for **durable-korvus** components
+        that are currently stubs (marked with `// TODO` in the source).
+
+  - type: textarea
+    id: component
+    attributes:
+      label: Component / Module
+      description: Which stub function or module is this task for?
+      placeholder: |
+        e.g., `src/chunker.rs` — `chunk_fixed_size()` implementation
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: |
+        What needs to be implemented? Reference the relevant section of SPEC.md or ARCHITECTURE.md.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: |
+        How will we know this task is done? What tests should pass?
+      placeholder: |
+        - [ ] `chunk_fixed_size` correctly splits text with overlap
+        - [ ] Empty trailing chunks are dropped
+        - [ ] Unit tests in `src/chunker.rs` pass
+        - [ ] Integration test in `examples/basic_rag.rs` works end-to-end
+    validations:
+      required: true
+
+  - type: textarea
+    id: design_notes
+    attributes:
+      label: Design Notes / Open Questions
+      description: Any open questions from SPEC.md that need resolution before implementing?
+    validations:
+      required: false

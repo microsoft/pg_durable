@@ -1,0 +1,86 @@
+name: "durable-korvus: Bug Report"
+description: Report a bug in the durable-korvus crate.
+labels: ["bug", "durable-korvus"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug in **durable-korvus**! Please fill in the sections below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      description: |
+        Minimal code or SQL to reproduce the issue.
+      placeholder: |
+        ```rust
+        let client = Client::connect("...").await?;
+        // ...
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages and stack traces.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: durable-korvus Version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: pg_version
+    attributes:
+      label: PostgreSQL Version
+      placeholder: "17.x"
+    validations:
+      required: false
+
+  - type: input
+    id: pgvector_version
+    attributes:
+      label: pgvector Version
+      placeholder: "0.7.x"
+    validations:
+      required: false
+
+  - type: input
+    id: pg_durable_version
+    attributes:
+      label: pg_durable Version
+      placeholder: "0.2.x"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context about the problem (logs, environment, etc.).
+    validations:
+      required: false
