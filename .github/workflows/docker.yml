@@ -15,20 +15,13 @@ name: Docker CI
 on:
   pull_request:
     paths:
+      - '.github/workflows/docker.yml'
       - 'Dockerfile'
       - 'docker-compose.yml'
       - 'docker-entrypoint-initdb.d/**'
       - 'scripts/test-e2e-docker.sh'
-      - 'tests/e2e/sql/**'
-      - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-  push:
-    branches: [main]
-    paths:
-      - 'Dockerfile'
-      - 'docker-compose.yml'
-      - 'docker-entrypoint-initdb.d/**'
   schedule:
     - cron: '0 3 * * *'  # Nightly at 3 AM UTC
   workflow_dispatch:
