@@ -52,17 +52,23 @@ jobs:
               libxslt1-dev \
               libicu-dev
 
-      - name: Cache Cargo assets
+      - name: Cache cargo-pgrx tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin/cargo-pgrx
+          key: ${{ runner.os }}-copilot-setup-cargo-pgrx-0.16.1-v1
+
+      - name: Cache Cargo dependency sources
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cargo/.crates2.json
-            ~/.cargo/bin/cargo-pgrx
-          key: ${{ runner.os }}-copilot-setup-cargo-pgrx-0.16.1-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-copilot-setup-cargo-deps-rust-stable-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-copilot-setup-cargo-pgrx-0.16.1-
+            ${{ runner.os }}-copilot-setup-cargo-deps-rust-stable-
 
       - name: Cache pgrx PostgreSQL downloads
         uses: actions/cache@v4
