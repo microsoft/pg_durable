@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.pyc
+local.settings.json
+.azure-functions.env
