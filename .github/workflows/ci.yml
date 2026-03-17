@@ -22,6 +22,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -95,6 +96,15 @@ jobs:
           submodules: true
           token: ${{ secrets.GH_PAT }}
 
+      - name: Free disk space and show usage
+        run: |
+          echo "Disk usage before cleanup"
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          docker system prune -af || true
+          echo "Disk usage after cleanup"
+          df -h
+
       - name: Install Rust nightly
         run: |
           rustup toolchain install nightly --profile minimal --component clippy
@@ -116,20 +126,26 @@ jobs:
               libxslt1-dev \
               libicu-dev
 
-      - name: Cache cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache cargo-pgrx tool
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin/cargo-pgrx
+          key: ${{ runner.os }}-cargo-pgrx-0.16.1-v1
+
+      - name: Cache Cargo dependency sources
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cargo/bin/cargo-pgrx
-            target
-          key: ${{ runner.os }}-cargo-pg${{ matrix.pg_version }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-pg${{ matrix.pg_version }}-
+            ${{ runner.os }}-cargo-deps-
 
       - name: Cache PostgreSQL build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.pgrx/config.toml
