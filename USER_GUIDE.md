@@ -1652,6 +1652,101 @@ CREATE EXTENSION pg_durable;
 2. Verify the background worker is running (see "Extension Exists But Workflows Don't Start")
 3. Check for resource contention (CPU, disk I/O, connection limits)
 
+### Debugging Failed Workflows
+
+When a durable function fails or produces unexpected results, use these steps to diagnose the issue from `psql` — no server log access required.
+
+#### Step 1: Check Status
+
+```sql
+SELECT df.status('a1b2c3d4');
+-- Returns: Completed, Failed, Running, Pending, or Canceled
+```
+
+If the status is `Failed`, proceed to the next steps. If it's `Completed` but results are wrong, skip to Step 3.
+
+#### Step 2: Check the Overall Result
+
+```sql
+SELECT df.result('a1b2c3d4');
+```
+
+For failed instances, this often contains an error message from the runtime. Look for clues like connection errors, permission denied, or SQL syntax errors.
+
+#### Step 3: Visualize the Execution Tree
+
+```sql
+SELECT df.explain('a1b2c3d4');
+```
+
+This shows the graph structure with status markers on each node:
+- `✓ Completed` — node finished successfully
+- `✗ Failed` — node encountered an error
+- `⏳ Running` — node was in progress when the instance failed or was inspected
+- `○ Pending` — node never started
+
+`df.explain()` tells you **where** in the graph execution stopped, but not **why**. For that, inspect individual nodes.
+
+#### Step 4: Inspect Individual Nodes
+
+```sql
+SELECT node_id, node_type, result_name, status, 
+       left(query, 80) AS query,
+       left(result, 120) AS result
+FROM df.instance_nodes('a1b2c3d4');
+```
+
+This shows every node in the graph with its status and result. Key things to look for:
+
+| What to check | What it means |
+|---------------|---------------|
+| A node with `status = 'failed'` | This is the node that caused the failure |
+| A node with `result = NULL` and `status = 'completed'` | The SQL returned no rows |
+| Result contains `{"jsonb": null}` | Possible type extraction issue — see "Known Limitations" below |
+| A `running` node with no result | Execution was interrupted at this node |
+
+#### Step 5: Trace Variable Flow
+
+When using `|=>` to pass results between steps, check how values flow through the graph:
+
+```sql
+-- Show only nodes that produce named results
+SELECT result_name, status, result
+FROM df.instance_nodes('a1b2c3d4')
+WHERE result_name IS NOT NULL
+ORDER BY node_id;
+```
+
+If a downstream step received the wrong value:
+1. Find the node that produced the variable (by `result_name`)
+2. Check its `result` column — this is the JSON that gets substituted for `$name`
+3. Verify the JSON structure matches what the downstream SQL expects
+
+#### Example: Diagnosing a Variable Issue
+
+```sql
+-- Suppose step 'total' should produce a number, but downstream SQL fails
+SELECT result_name, result FROM df.instance_nodes('a1b2c3d4')
+WHERE result_name = 'total';
+
+-- If result is: {"rows": [{"count": 42}], "row_count": 1}
+-- Then $total substitutes the FULL JSON object, not just 42
+-- Fix: use ($total::jsonb->'rows'->0->>'count')::int in downstream SQL
+```
+
+#### Known Limitations of Node Inspection
+
+- **Template SQL only**: The `query` column shows the SQL template with `$name` placeholders, not the substituted SQL that actually ran. If variable substitution caused the bug, you won't see the final SQL.
+- **No per-node error messages**: When a node fails, the error details are in the PostgreSQL server logs, not in the nodes table. The `result` column for a failed node may be NULL.
+
+#### Debugging Checklist
+
+1. **Status is `Failed`?** → Check `df.result()` for the error, then `df.instance_nodes()` to find which node failed
+2. **Status is `Completed` but wrong results?** → Trace variable flow through `df.instance_nodes()`, check each named result
+3. **Status stuck on `Pending` or `Running`?** → Check that the background worker is alive (see "Extension Exists But Workflows Don't Start")
+4. **Variable has unexpected value?** → Check the producing node's `result` column; remember results are JSON objects, not bare values
+5. **Still stuck?** → Check PostgreSQL server logs for lines starting with `pg_durable:` (see below)
+
 ### Check Background Worker Logs
 
 To debug background worker issues, check PostgreSQL logs:
