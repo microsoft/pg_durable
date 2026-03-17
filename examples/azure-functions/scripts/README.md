@@ -8,6 +8,7 @@ This directory contains helper scripts to provision and deploy the Azure Functio
 - `deploy_function.sh`
 - `configure_pg.sh`
 - `cleanup_azure.sh`
+- `smoke_check.sh`
 
 ## Script responsibilities
 
@@ -45,9 +46,17 @@ This directory contains helper scripts to provision and deploy the Azure Functio
 - Delete the resource group and all contained resources
 - Prompt for confirmation unless `-y` is supplied
 
+### smoke_check.sh
+
+- Run fast, non-cloud validation for this example
+- Check shell syntax for all scripts in this directory
+- Check Python syntax for the function code
+- Validate JSON files used by Azure Functions host/runtime
+
 ## Usage notes
 
 - Keep scripts non-interactive where possible (flags/env vars)
 - Fail fast with clear error messages
 - Avoid writing secrets to tracked files
 - Print copy/paste-safe outputs for SQL setup
+- Use `./scripts/smoke_check.sh` locally before opening a PR
