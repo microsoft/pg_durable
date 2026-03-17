@@ -53,7 +53,7 @@ jobs:
               libicu-dev
 
       - name: Cache cargo-pgrx tool
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/.crates2.json
@@ -61,7 +61,7 @@ jobs:
           key: ${{ runner.os }}-copilot-setup-cargo-pgrx-0.16.1-v1
 
       - name: Cache Cargo dependency sources
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -71,7 +71,7 @@ jobs:
             ${{ runner.os }}-copilot-setup-cargo-deps-rust-stable-
 
       - name: Cache pgrx PostgreSQL downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.pgrx/config.toml
