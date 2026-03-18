@@ -238,6 +238,49 @@ SELECT df.start(
 );
 ```
 
+#### Dot-Notation (`$name.column`)
+
+Access specific columns by name instead of just the first column:
+
+```sql
+SELECT df.start(
+    $$SELECT 42 AS id, 'Alice' AS name$$ |=> 'user'
+    ~> $$SELECT $user.id, $user.name$$          -- access specific columns
+);
+```
+
+#### Null-Safe Accessor (`$name?`, `$name.column?`)
+
+By default, referencing a result with no rows or a NULL value **fails** the instance with a clear error. Use the `?` suffix to substitute `NULL` instead:
+
+```sql
+SELECT df.start(
+    $$SELECT NULL::text AS val$$ |=> 'x'
+    ~> $$SELECT COALESCE($x.val?, 'fallback')$$   -- NULL → 'fallback'
+);
+```
+
+| Pattern | No rows | NULL value |
+|---------|---------|------------|
+| `$name` | **Fails** | **Fails** |
+| `$name.col` | **Fails** | **Fails** |
+| `$name?` | → `NULL` | → `NULL` |
+| `$name.col?` | → `NULL` | → `NULL` |
+
+#### Row-Set Expansion (`$name.*`)
+
+Expand a multi-row result into an inline `VALUES` subquery:
+
+```sql
+SELECT df.start(
+    $$SELECT id, name FROM users WHERE active$$ |=> 'batch'
+    ~> $$SELECT count(*) FROM $batch.*$$                   -- FROM expansion
+);
+```
+
+This is useful for passing row sets between steps. The expansion generates SQL like `(VALUES (1,'Alice'), (2,'Bob')) AS batch(id, name)`.
+
+
 ### Cron Expression Format
 
 ```
@@ -461,6 +504,22 @@ SELECT df.start(
         'INSERT INTO playground.logs (msg) VALUES (''Queue normal'')'
     ),
     'check-task-load-func'
+);
+```
+
+#### Branching on Row Count with `df.if_rows`
+
+Use `df.if_rows()` to branch based on whether a named result has rows — without executing an extra SQL query:
+
+```sql
+SELECT df.start(
+    $$SELECT id FROM orders WHERE status = 'pending'$$ |=> 'pending'
+    ~> df.if_rows(
+        'pending',                                               -- result name
+        $$UPDATE orders SET status = 'processing' WHERE id = $pending.id$$,  -- then
+        $$INSERT INTO logs (msg) VALUES ('No pending orders')$$               -- else
+    ),
+    'check-pending'
 );
 ```
 

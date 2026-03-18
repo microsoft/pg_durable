@@ -262,7 +262,7 @@ async fn execute_sql_node(
         .as_ref()
         .ok_or_else(|| format!("SQL node {node_id} has no query"))?;
 
-    let final_query = substitute_all(query, results, &exec_ctx.vars, sys_vars);
+    let final_query = substitute_all(query, results, &exec_ctx.vars, sys_vars)?;
     ctx.trace_info(format!("Executing SQL: {final_query}"));
 
     let input = serde_json::json!({
@@ -508,10 +508,6 @@ async fn execute_if_node(
     let config: serde_json::Value =
         serde_json::from_str(config_str).map_err(|e| format!("Invalid IF config: {e}"))?;
 
-    let condition_node_id = config["condition_node"]
-        .as_str()
-        .ok_or_else(|| "IF node missing condition_node".to_string())?;
-
     let then_id = node
         .left_node
         .as_ref()
@@ -521,17 +517,46 @@ async fn execute_if_node(
         .as_ref()
         .ok_or_else(|| format!("IF node {node_id} has no else branch"))?;
 
-    ctx.trace_info("Evaluating IF condition");
-    let condition_result = Box::pin(execute_function_node_with_vars(
-        ctx,
-        graph,
-        condition_node_id,
-        results,
-        exec_ctx,
-    ))
-    .await?;
+    let is_true =
+        if config.get("condition_type").and_then(|ct| ct.as_str()) == Some("result_has_rows") {
+            // df.if_rows: check row_count from in-memory results — no activity needed
+            let result_name = config["result_name"]
+                .as_str()
+                .ok_or_else(|| "df.if_rows: missing result_name".to_string())?;
+            let result_json = results
+                .get(result_name)
+                .ok_or_else(|| format!("df.if_rows: result '{result_name}' not found"))?;
+            let parsed: serde_json::Value = serde_json::from_str(result_json)
+                .map_err(|e| format!("df.if_rows: invalid result JSON: {e}"))?;
+            let row_count = parsed
+                .get("row_count")
+                .and_then(|rc| rc.as_u64())
+                .ok_or_else(|| {
+                    format!(
+                    "df.if_rows: result '{result_name}' is not a SQL result (missing row_count)"
+                )
+                })?;
+            ctx.trace_info(format!("if_rows '{result_name}': {row_count} rows"));
+            row_count > 0
+        } else {
+            // df.if: execute condition node as SQL
+            let condition_node_id = config["condition_node"]
+                .as_str()
+                .ok_or_else(|| "IF node missing condition_node".to_string())?;
 
-    let is_true = evaluate_condition(&condition_result)?;
+            ctx.trace_info("Evaluating IF condition");
+            let condition_result = Box::pin(execute_function_node_with_vars(
+                ctx,
+                graph,
+                condition_node_id,
+                results,
+                exec_ctx,
+            ))
+            .await?;
+
+            evaluate_condition(&condition_result)?
+        };
+
     ctx.trace_info(format!("Condition evaluated to: {is_true}"));
 
     if is_true {
@@ -727,13 +752,13 @@ async fn execute_http_node(
 
     // Substitute variables in body if present
     if let Some(body) = config.get("body").and_then(|b| b.as_str()) {
-        let substituted_body = substitute_all_raw(body, results, &exec_ctx.vars, sys_vars);
+        let substituted_body = substitute_all_raw(body, results, &exec_ctx.vars, sys_vars)?;
         config["body"] = serde_json::Value::String(substituted_body);
     }
 
     // Substitute variables in URL if present
     if let Some(url) = config.get("url").and_then(|u| u.as_str()) {
-        let substituted_url = substitute_all_raw(url, results, &exec_ctx.vars, sys_vars);
+        let substituted_url = substitute_all_raw(url, results, &exec_ctx.vars, sys_vars)?;
         config["url"] = serde_json::Value::String(substituted_url);
     }
 
@@ -746,7 +771,7 @@ async fn execute_http_node(
         for key in sorted_keys {
             if let Some(value) = headers.get(key) {
                 if let Some(v) = value.as_str() {
-                    let substituted = substitute_all_raw(v, results, &exec_ctx.vars, sys_vars);
+                    let substituted = substitute_all_raw(v, results, &exec_ctx.vars, sys_vars)?;
                     new_headers.insert(key.clone(), serde_json::Value::String(substituted));
                 } else {
                     new_headers.insert(key.clone(), value.clone());

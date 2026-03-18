@@ -222,3 +222,9 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario B1 considerations:** The BGW uses `MigrationPolicy::ApplyAll`. A database that has only migrations 0001–0005 is handled gracefully: the BGW detects the gap and applies 0006–0010 at startup. No manual intervention is needed.
 - **Scenario B2 considerations:** All five new migrations are additive (new tables and columns with defaults or nullable). Existing `df.vars`, `df.nodes`, `df.instances`, and `df.graphs` data is untouched.
 - **Current status:** Implemented — submodule at `4a6bf6b`, `Cargo.toml` pinned to `duroxide = "=0.1.26"`.
+
+#### Named Results v2 — df.if_rows
+- **DDL change:** Upgrade script adds `CREATE FUNCTION df.if_rows(result_name text, then_branch text, else_branch text)` — a new C-language function backed by the pgrx `#[pg_extern]` `if_rows_fn_wrapper` symbol.
+- **Scenario A considerations:** Fresh install picks up `df.if_rows` automatically from pgrx-generated SQL. The upgrade path required an explicit `CREATE FUNCTION` in the upgrade script to match.
+- **Scenario B1 considerations:** No backward compatibility concern. `df.if_rows` is a new function that doesn't exist in v0.1.1 schemas — it simply won't be callable until the customer runs `ALTER EXTENSION UPDATE`. The `.so` symbol exists but is never invoked from old schemas. All other changes (substitution engine rewrite, `Result` return type) are internal to orchestration code and don't touch any SQL queries or table schemas.
+- **Scenario B2 considerations:** No data migration needed. The change is purely additive (new function) with no table or column changes.

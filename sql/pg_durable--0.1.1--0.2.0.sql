@@ -108,3 +108,16 @@ $$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 CREATE OR REPLACE FUNCTION df.loop_prefix_op(body text) RETURNS text AS $$
     SELECT df.loop(body);
 $$ LANGUAGE SQL IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
+
+-- ============================================================================
+-- 4. Add df.if_rows() — branches on whether a named result has rows
+-- ============================================================================
+
+CREATE FUNCTION df."if_rows"(
+    "result_name" TEXT,
+    "then_branch" TEXT,
+    "else_branch" TEXT
+) RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'if_rows_fn_wrapper';
