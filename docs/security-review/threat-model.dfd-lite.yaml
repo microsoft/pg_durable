@@ -1,0 +1,267 @@
+model:
+  name: "pg_durable Security Review"
+  description: >
+    pg_durable is a PostgreSQL extension (pgrx/Rust) providing durable SQL function
+    execution. Everything runs inside the PostgreSQL server — no external services.
+    Users build function graphs via a SQL DSL and a background worker executes them
+    durably via the duroxide runtime. Single-tenant deployment model.
+  owner: "pg_durable Team"
+  assumptions:
+    - "Single-tenant PostgreSQL deployment — one organization per database instance"
+    - "Extension installed by superuser (trusted extension model)"
+    - "pg_hba.conf configured for trust or peer auth on localhost for background worker connections"
+    - "Background worker role (azuresu) is a PostgreSQL superuser"
+    - "No external services — everything runs inside the PostgreSQL server process"
+    - "Users have database role accounts with appropriate PostgreSQL RBAC"
+  externalDependencies:
+    - "PostgreSQL 17 (host database engine)"
+    - "duroxide (durable execution runtime, embedded Rust crate)"
+    - "duroxide-pg-opt (PostgreSQL persistence provider for duroxide)"
+    - "sqlx (async PostgreSQL driver for background worker connections)"
+    - "reqwest (HTTP client for df.http() activity)"
+    - "pgrx 0.16.1 (PostgreSQL extension framework)"
+
+diagrams:
+  - name: "pg_durable System Overview"
+    layout:
+      direction: TB
+      algorithm: layered
+
+    trustBoundaries:
+      TB-PG:
+        name: "PostgreSQL Server Process"
+        contains: ["P-BACKEND", "P-WORKER", "DS-TABLES", "DS-DUROXIDE", "DS-VARS"]
+      TB-USER:
+        name: "User Session (Backend Process)"
+        contains: ["P-BACKEND"]
+        parent: "TB-PG"
+      TB-BGW:
+        name: "Background Worker Process"
+        contains: ["P-WORKER"]
+        parent: "TB-PG"
+      TB-EXTERNAL:
+        name: "External Network"
+        contains: ["EE-USER", "EE-HTTP-TARGET"]
+
+    elements:
+      EE-USER:
+        type: external
+        name: "Database User"
+        description: >
+          Application user or DBA connecting to PostgreSQL via psql, application
+          driver, or other PostgreSQL client. Authenticated via pg_hba.conf.
+        properties:
+          Type: "Human"
+          Authenticates Itself: "Yes"
+
+      EE-HTTP-TARGET:
+        type: external
+        name: "External HTTP Service"
+        description: >
+          External HTTP/HTTPS endpoint called by df.http() activity. Could be
+          Azure Functions, webhooks, third-party APIs, or any HTTP service.
+        properties:
+          Type: "Code"
+          Authenticates Itself: "No"
+
+      P-BACKEND:
+        type: process
+        name: "pg_durable Backend (User Session)"
+        description: >
+          Extension code running in the user's PostgreSQL backend process.
+          Executes DSL functions (df.sql, df.http, df.start, etc.) via SPI.
+          Captures user identity (session_user, outer_user) at df.start() time.
+          Builds function graph in-memory (Durofut) and persists to df.nodes/df.instances.
+        properties:
+          Code Type: "Unmanaged"
+          Running As: "Standard User Without Elevation"
+          Accepts Input From: "Any Remote User or Entity"
+          Implements or Uses an Authentication Mechanism: "Yes"
+          Implements or Uses an Authorization Mechanism: "Yes"
+          Sanitizes Input: "Yes"
+          Sanitizes Output: "Yes"
+
+      P-WORKER:
+        type: process
+        name: "pg_durable Background Worker"
+        description: >
+          Persistent background worker process registered via shared_preload_libraries.
+          Runs duroxide runtime (orchestrations + activities). Connects to PostgreSQL
+          as worker role (superuser) for control-plane operations. Creates per-user
+          sqlx connections for SQL execution (privilege isolation).
+        properties:
+          Code Type: "Unmanaged"
+          Running As: "System"
+          Accepts Input From: "Kernel, System, or Local Admin"
+          Implements or Uses an Authentication Mechanism: "Yes"
+          Implements or Uses an Authorization Mechanism: "Yes"
+          Implements or Uses a Communication Protocol: "Yes"
+          Sanitizes Input: "Yes"
+          Sanitizes Output: "Yes"
+
+      DS-TABLES:
+        type: datastore
+        name: "df.instances / df.nodes"
+        description: >
+          Core extension tables storing function graph definitions (df.nodes)
+          and instance metadata (df.instances). Protected by RLS policies
+          (submitted_by = current_user::regrole). Contains user identity
+          columns (submitted_by, login_role) for privilege isolation.
+        properties:
+          Store Type: "SQL Relational Database"
+          Stores Credentials: "No"
+          Encrypted: "No"
+          Signed: "No"
+          Write Access: "Yes"
+          Backup: "Yes"
+
+      DS-DUROXIDE:
+        type: datastore
+        name: "duroxide.* Tables"
+        description: >
+          Internal duroxide runtime state tables (orchestration history,
+          work items, checkpoints). Accessed only by the background worker
+          role. Users do not have direct access.
+        properties:
+          Store Type: "SQL Relational Database"
+          Stores Credentials: "No"
+          Encrypted: "No"
+          Write Access: "Yes"
+          Backup: "Yes"
+
+      DS-VARS:
+        type: datastore
+        name: "df.vars"
+        description: >
+          Per-user key-value variable store. Protected by RLS
+          (owner = current_user::regrole). Values stored as plaintext.
+          Used for variable substitution in SQL and HTTP queries.
+        properties:
+          Store Type: "SQL Relational Database"
+          Stores Credentials: "No"
+          Encrypted: "No"
+          Write Access: "Yes"
+
+    flows:
+      DF-1:
+        name: "SQL DSL Calls"
+        from: "EE-USER"
+        to: "P-BACKEND"
+        description: >
+          User issues SQL commands calling df.* functions (df.sql, df.start,
+          df.status, df.result, df.cancel, df.http, etc.) via PostgreSQL
+          wire protocol (libpq).
+        properties:
+          Source Authenticated: "Yes"
+          Destination Authenticated: "Yes"
+          Provides Confidentiality: "No"
+          Provides Integrity: "No"
+          JSON Payload: "No"
+
+      DF-2:
+        name: "Graph Persistence (SPI)"
+        from: "P-BACKEND"
+        to: "DS-TABLES"
+        description: >
+          Backend process writes function graph nodes and instance metadata
+          to df.nodes and df.instances via SPI (Server Programming Interface).
+          SPI runs as the calling user, subject to RLS policies.
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-3:
+        name: "Variable Read/Write (SPI)"
+        from: "P-BACKEND"
+        to: "DS-VARS"
+        description: >
+          Backend process reads/writes user variables via df.setvar(),
+          df.getvar(), etc. through SPI. RLS enforces per-user isolation.
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-4:
+        name: "Instance Enqueue"
+        from: "P-BACKEND"
+        to: "DS-DUROXIDE"
+        description: >
+          df.start() enqueues a new orchestration instance into duroxide
+          tables via the cached Duroxide client (sqlx connection as worker role).
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-5:
+        name: "Work Item Polling"
+        from: "P-WORKER"
+        to: "DS-DUROXIDE"
+        description: >
+          Background worker polls duroxide tables for pending orchestration
+          and activity work items. Uses long-polling with sqlx pool
+          (5 connections as worker role).
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-6:
+        name: "Graph Loading"
+        from: "P-WORKER"
+        to: "DS-TABLES"
+        description: >
+          load_function_graph activity reads df.instances and df.nodes
+          to reconstruct the function graph for execution. Reads submitted_by
+          and login_role for privilege isolation.
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-7:
+        name: "Status Updates"
+        from: "P-WORKER"
+        to: "DS-TABLES"
+        description: >
+          update_instance_status and update_node_status activities write
+          status changes and results back to df.instances and df.nodes.
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-8:
+        name: "User SQL Execution"
+        from: "P-WORKER"
+        to: "DS-TABLES"
+        description: >
+          execute_sql activity creates a per-user sqlx connection (authenticated
+          as login_role, SET ROLE to submitted_by) and executes user-supplied
+          SQL queries. Results returned as JSON to the orchestration.
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "Yes"
+
+      DF-9:
+        name: "External HTTP Requests"
+        from: "P-WORKER"
+        to: "EE-HTTP-TARGET"
+        description: >
+          execute_http activity makes outbound HTTP/HTTPS requests to external
+          services. Protected by SSRF IP blocklist, scheme validation, DNS
+          rebinding protection, and redirect disabling.
+        properties:
+          Source Authenticated: "No"
+          Destination Authenticated: "No"
+          Provides Confidentiality: "No"
+          Provides Integrity: "No"
+          REST Payload: "Yes"
+          JSON Payload: "Yes"
+
+      DF-10:
+        name: "Query Results to User"
+        from: "P-BACKEND"
+        to: "EE-USER"
+        description: >
+          Backend returns query results (instance_id, status, result JSON)
+          to the user via PostgreSQL wire protocol.
+        properties:
+          Source Authenticated: "Yes"
+          Provides Integrity: "No"
