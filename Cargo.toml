@@ -32,7 +32,7 @@ serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # duroxide integration
-duroxide = "=0.1.20"
+duroxide = "=0.1.26"
 duroxide-pg-opt = { path = "duroxide-pg-opt", package = "duroxide-pg-opt" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 

@@ -209,3 +209,16 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario B1 considerations:** Readiness checking is internal to the Rust binary — no SQL function needs to be registered. The new `.so` continues to work against v0.1.1 schemas that have not run `ALTER EXTENSION UPDATE`.
 - **Scenario B2 considerations:** The BGW readiness check (`wait_for_ready()`) is called in both B1 and B2 scenarios to ensure the BGW has applied all pending duroxide migrations before exercising the extension.
 - **Current status on this branch:** Implemented. BGW now uses `MigrationPolicy::ApplyAll`, verifies duroxide schema extension ownership before applying, and writes `duroxide._worker_ready` after initialization completes.
+
+#### Bump to duroxide 0.1.26 + duroxide-pg-opt 4a6bf6b (migrations 0006–0010)
+- **DDL change (df schema):** None. All new schema objects are in the `duroxide` schema and are applied at runtime by the BGW.
+- **DDL change (duroxide schema):** Five new migrations applied by BGW at startup:
+  - 0006: `worker_queue.tag TEXT` column + index; updated `enqueue_worker_work` and `fetch_work_item` SPs
+  - 0007: `fetch_orchestration_item` SP body change only (no schema change)
+  - 0008: new `kv_store` table; updated `fetch_orchestration_item`, `ack_orchestration_item`, deletion/pruning SPs
+  - 0009: `kv_store.last_updated_at_ms BIGINT` column; updated KV materialization SPs
+  - 0010: new `kv_delta` table; two-table KV write model; delta→store merge on terminal transition
+- **Scenario A considerations:** The `df` schema equivalence contract is unchanged. The `duroxide` schema is excluded from snapshot diffs — fresh installs start with an empty `duroxide` schema (BGW fills it in at runtime) while upgrades carry forward the fully-populated schema from v0.1.1. This is expected and acceptable.
+- **Scenario B1 considerations:** The BGW uses `MigrationPolicy::ApplyAll`. A database that has only migrations 0001–0005 is handled gracefully: the BGW detects the gap and applies 0006–0010 at startup. No manual intervention is needed.
+- **Scenario B2 considerations:** All five new migrations are additive (new tables and columns with defaults or nullable). Existing `df.vars`, `df.nodes`, `df.instances`, and `df.graphs` data is untouched.
+- **Current status:** Implemented — submodule at `4a6bf6b`, `Cargo.toml` pinned to `duroxide = "=0.1.26"`.
