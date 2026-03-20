@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pg_durable Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+    --purple: #bc8cff; --cyan: #39d2c0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  .refresh-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .refresh-btn:hover { border-color: var(--accent); }
+  .auto-refresh { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-left: auto; }
+
+  .stats { display: flex; gap: 12px; padding: 16px 24px; flex-wrap: wrap; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; min-width: 120px; }
+  .stat-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .stat-card.completed .value { color: var(--green); }
+  .stat-card.failed .value { color: var(--red); }
+  .stat-card.pending .value { color: var(--yellow); }
+  .stat-card.running .value { color: var(--blue); }
+  .stat-card.total .value { color: var(--text); }
+
+  .main { display: flex; height: calc(100vh - 140px); }
+  .instance-list { width: 420px; min-width: 320px; border-right: 1px solid var(--border); overflow-y: auto; }
+  .graph-panel { flex: 1; overflow: auto; position: relative; }
+
+  .list-header { padding: 12px 16px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  .instance-item { padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
+  .instance-item:hover { background: var(--surface); }
+  .instance-item.selected { background: var(--surface); border-left: 3px solid var(--accent); }
+  .instance-item .top-row { display: flex; justify-content: space-between; align-items: center; }
+  .instance-item .label-text { font-weight: 600; font-size: 14px; }
+  .instance-item .id-text { font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; font-size: 11px; color: var(--muted); }
+  .instance-item .bottom-row { display: flex; justify-content: space-between; margin-top: 6px; align-items: center; }
+  .instance-item .time-text { font-size: 12px; color: var(--muted); }
+
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; text-transform: capitalize; }
+  .badge.completed { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge.failed { background: rgba(248,81,73,0.15); color: var(--red); }
+  .badge.pending { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .badge.running, .badge.Running { background: rgba(88,166,255,0.15); color: var(--blue); }
+
+  .graph-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
+  .graph-placeholder svg { width: 64px; height: 64px; opacity: 0.3; margin-bottom: 16px; }
+  .graph-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--bg); z-index: 10; }
+  .graph-header h2 { font-size: 16px; font-weight: 600; }
+  .graph-header .instance-meta { font-size: 13px; color: var(--muted); }
+
+  .dag-container { padding: 32px; overflow: auto; }
+
+  /* DAG Nodes */
+  .dag-node { position: absolute; background: var(--surface); border: 2px solid var(--border); border-radius: 10px; padding: 10px 14px; transition: border-color 0.2s, box-shadow 0.2s; cursor: default; z-index: 2; }
+  .dag-node:hover { box-shadow: 0 0 16px rgba(88,166,255,0.2); z-index: 5; }
+  .dag-node.completed { border-color: var(--green); }
+  .dag-node.failed { border-color: var(--red); }
+  .dag-node.pending { border-color: var(--yellow); }
+  .dag-node.running { border-color: var(--blue); box-shadow: 0 0 12px rgba(88,166,255,0.3); }
+
+  .dag-node .node-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; gap: 8px; }
+  .dag-node .node-type { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; padding: 1px 6px; border-radius: 4px; }
+  .dag-node .node-type.SQL { background: rgba(88,166,255,0.15); color: var(--blue); }
+  .dag-node .node-type.THEN { background: rgba(139,148,158,0.15); color: var(--muted); }
+  .dag-node .node-type.JOIN { background: rgba(57,210,192,0.15); color: var(--cyan); }
+  .dag-node .node-type.RACE { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .dag-node .node-type.IF { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .dag-node .node-type.LOOP { background: rgba(248,81,73,0.15); color: var(--red); }
+  .dag-node .node-type.HTTP { background: rgba(63,185,80,0.15); color: var(--green); }
+  .dag-node .node-type.SLEEP { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .dag-node .node-type.SIGNAL { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .dag-node .node-type.BREAK { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  .dag-node .node-id { font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; font-size: 9px; color: var(--muted); }
+  .dag-node .node-query { font-size: 11px; color: var(--muted); word-break: break-word; margin-top: 4px; line-height: 1.4; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; }
+  .dag-node .node-result-name { font-size: 11px; color: var(--accent); margin-top: 3px; font-weight: 600; }
+  .dag-node .node-result { font-size: 10px; color: var(--green); margin-top: 3px; word-break: break-word; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; }
+  .dag-node .node-error { font-size: 10px; color: var(--red); margin-top: 3px; }
+
+  .edge-label { position: absolute; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 1px 5px; border-radius: 3px; z-index: 3; pointer-events: none; background: var(--bg); }
+  .edge-label.c-green { color: var(--green); }
+  .edge-label.c-red { color: var(--red); }
+  .edge-label.c-cyan { color: var(--cyan); }
+  .edge-label.c-yellow { color: var(--yellow); }
+  .edge-label.c-muted { color: var(--muted); }
+
+  .dag-svg { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; }
+
+  @media (max-width: 768px) {
+    .main { flex-direction: column; height: auto; }
+    .instance-list { width: 100%; max-height: 300px; border-right: none; border-bottom: 1px solid var(--border); }
+    .graph-panel { min-height: 500px; }
+  }
+
+  .loading { display: flex; align-items: center; justify-content: center; padding: 40px; color: var(--muted); }
+  .spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Tabs */
+  .tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 2; }
+  .tab-btn { flex: 1; padding: 10px 12px; border: none; background: none; color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.2s; }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-btn .tab-count { font-size: 11px; background: rgba(88,166,255,0.15); color: var(--accent); padding: 1px 6px; border-radius: 8px; margin-left: 5px; }
+  .tab-btn .tab-count.warn { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Review Panel */
+  .review-panel { padding: 20px; }
+  .review-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .review-card .review-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .review-card .review-label { font-weight: 600; font-size: 15px; }
+  .review-card .review-id { font-family: 'SF Mono', monospace; font-size: 11px; color: var(--muted); }
+  .review-card .review-meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .review-card .signal-tag { display: inline-block; background: rgba(188,140,255,0.12); color: var(--purple); font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-right: 6px; }
+
+  .review-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .review-actions .btn { border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.2s; }
+  .review-actions .btn-approve { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.3); }
+  .review-actions .btn-approve:hover { background: rgba(63,185,80,0.3); }
+  .review-actions .btn-reject { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3); }
+  .review-actions .btn-reject:hover { background: rgba(248,81,73,0.3); }
+  .review-actions .btn-custom { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.25); }
+  .review-actions .btn-custom:hover { background: rgba(88,166,255,0.2); }
+
+  .signal-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .signal-form label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  .signal-form input, .signal-form textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px 10px; font-size: 13px; font-family: 'SF Mono', monospace; margin-bottom: 10px; }
+  .signal-form textarea { resize: vertical; min-height: 60px; }
+  .signal-form input:focus, .signal-form textarea:focus { outline: none; border-color: var(--accent); }
+
+  .signal-result { margin-top: 10px; padding: 8px 12px; border-radius: 6px; font-size: 12px; }
+  .signal-result.success { background: rgba(63,185,80,0.1); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
+  .signal-result.error { background: rgba(248,81,73,0.1); color: var(--red); border: 1px solid rgba(248,81,73,0.2); }
+
+  .no-waiting { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .no-waiting .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.4; }
+  .no-waiting p { font-size: 14px; line-height: 1.6; }
+  .no-waiting code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 12px; color: var(--purple); }
+
+  /* Graph panel signal bar */
+  .signal-bar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .signal-bar .pulse { width: 10px; height: 10px; background: var(--purple); border-radius: 50%; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .signal-bar span { font-size: 13px; color: var(--purple); font-weight: 600; }
+  .signal-bar .btn-sm { padding: 4px 12px; font-size: 12px; border-radius: 4px; border: 1px solid rgba(188,140,255,0.3); background: rgba(188,140,255,0.1); color: var(--purple); cursor: pointer; }
+  .signal-bar .btn-sm:hover { background: rgba(188,140,255,0.2); }
+
+  /* AI Pipeline styles */
+  .pipeline-list { padding: 12px; }
+  .pipeline-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; cursor: pointer; transition: border-color 0.2s; }
+  .pipeline-card:hover { border-color: var(--accent); }
+  .pipeline-card.selected { border-color: var(--accent); border-left: 3px solid var(--accent); }
+  .pipeline-card .pipe-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .pipeline-card .pipe-name { font-weight: 700; font-size: 15px; color: var(--text); }
+  .pipeline-card .pipe-trigger { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  .pipeline-card .pipe-trigger.on_change { background: rgba(63,185,80,0.12); color: var(--green); }
+  .pipeline-card .pipe-trigger.manual { background: rgba(139,148,158,0.12); color: var(--muted); }
+  .pipeline-card .pipe-trigger.schedule { background: rgba(210,153,34,0.12); color: var(--yellow); }
+  .pipeline-card .pipe-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .pipeline-card .pipe-meta span { margin-right: 12px; }
+  .pipeline-card .pipe-status-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pipeline-card .pipe-stat { font-size: 11px; color: var(--muted); }
+  .pipeline-card .pipe-stat strong { color: var(--text); }
+  .pipeline-card .pipe-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .pipeline-card .pipe-actions .btn-pipe { border: none; padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 600; transition: all 0.15s; }
+  .pipeline-card .btn-run { background: rgba(63,185,80,0.12); color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+  .pipeline-card .btn-run:hover { background: rgba(63,185,80,0.25); }
+  .pipeline-card .btn-pause { background: rgba(210,153,34,0.12); color: var(--yellow); border: 1px solid rgba(210,153,34,0.25); }
+  .pipeline-card .btn-pause:hover { background: rgba(210,153,34,0.25); }
+  .pipeline-card .btn-backfill { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.2); }
+  .pipeline-card .btn-backfill:hover { background: rgba(88,166,255,0.2); }
+  .pipeline-card .btn-explain { background: rgba(188,140,255,0.1); color: var(--purple); border: 1px solid rgba(188,140,255,0.2); }
+  .pipeline-card .btn-explain:hover { background: rgba(188,140,255,0.2); }
+
+  .pipeline-detail { padding: 20px; }
+  .pipeline-detail h3 { font-size: 16px; margin-bottom: 12px; }
+  .pipeline-explain { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-family: 'SF Mono', monospace; font-size: 13px; line-height: 1.6; white-space: pre; overflow-x: auto; color: var(--text); margin-bottom: 16px; }
+  .pipeline-runs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .pipeline-runs-table th { text-align: left; padding: 8px 10px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+  .pipeline-runs-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .pipeline-runs-table tr:hover { background: var(--surface); }
+  .pipeline-runs-table .inst-link { color: var(--accent); cursor: pointer; font-family: 'SF Mono', monospace; font-size: 11px; }
+  .pipeline-runs-table .inst-link:hover { text-decoration: underline; }
+  .no-pipelines { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .no-pipelines .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.4; }
+  .no-pipelines p { font-size: 14px; line-height: 1.6; }
+  .no-pipelines code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 12px; color: var(--cyan); }
+  .pipe-result { margin-top: 8px; padding: 6px 10px; border-radius: 5px; font-size: 11px; }
+  .pipe-result.success { background: rgba(63,185,80,0.1); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
+  .pipe-result.error { background: rgba(248,81,73,0.1); color: var(--red); border: 1px solid rgba(248,81,73,0.2); }
+
+  /* SQL Detail Modal */
+  .sql-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 100; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); }
+  .sql-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: 92%; max-width: 860px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  .sql-modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .sql-modal-header h3 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .sql-modal-header .close-btn { background: none; border: 1px solid var(--border); color: var(--muted); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+  .sql-modal-header .close-btn:hover { border-color: var(--red); color: var(--red); }
+  .sql-modal-meta { padding: 10px 18px; display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  .sql-modal-meta .meta-item { display: flex; align-items: center; gap: 4px; }
+  .sql-modal-meta .meta-label { font-weight: 600; color: var(--text); }
+  .sql-modal-body { flex: 1; overflow: auto; padding: 16px 18px; }
+  .sql-modal-body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--text); overflow-x: auto; margin: 0; }
+  .sql-modal-body .section-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 16px 0 6px 0; }
+  .sql-modal-body .section-label:first-child { margin-top: 0; }
+  .sql-modal-body .result-pre { border-color: rgba(63,185,80,0.2); background: rgba(63,185,80,0.04); }
+  .sql-modal-body .error-pre { border-color: rgba(248,81,73,0.2); background: rgba(248,81,73,0.04); color: var(--red); }
+  /* SQL syntax highlighting */
+  .sql-modal-body pre .sql-kw { color: var(--purple); font-weight: 600; }
+  .sql-modal-body pre .sql-fn { color: var(--cyan); }
+  .sql-modal-body pre .sql-str { color: var(--green); }
+  .sql-modal-body pre .sql-num { color: var(--yellow); }
+  .sql-modal-body pre .sql-comment { color: var(--muted); font-style: italic; }
+  .sql-modal-body pre .sql-op { color: var(--red); font-weight: 600; }
+  /* Result table */
+  .result-table-wrap { border: 1px solid rgba(63,185,80,0.2); border-radius: 8px; overflow: hidden; background: rgba(63,185,80,0.02); margin: 0; }
+  .result-table-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: rgba(63,185,80,0.06); border-bottom: 1px solid rgba(63,185,80,0.15); }
+  .result-table-header .row-count { font-size: 11px; color: var(--green); font-weight: 600; }
+  .result-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .result-table th { text-align: left; padding: 8px 12px; color: var(--accent); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; border-bottom: 1px solid var(--border); background: rgba(88,166,255,0.04); }
+  .result-table td { padding: 7px 12px; border-bottom: 1px solid rgba(48,54,61,0.5); font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; font-size: 12px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result-table td.val-null { color: var(--muted); font-style: italic; }
+  .result-table td.val-num { color: var(--yellow); }
+  .result-table td.val-bool { color: var(--purple); font-weight: 600; }
+  .result-table td.val-str { color: var(--text); }
+  .result-table td.val-json { color: var(--cyan); font-size: 11px; }
+  .result-table tr:hover td { background: rgba(88,166,255,0.04); }
+  .result-table tr:last-child td { border-bottom: none; }
+  .result-empty { padding: 16px; text-align: center; color: var(--muted); font-size: 12px; font-style: italic; }
+  .sql-modal-footer { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+  .sql-modal-footer .btn-copy { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.2); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s; }
+  .sql-modal-footer .btn-copy:hover { background: rgba(88,166,255,0.2); }
+  .sql-modal-footer .btn-copy.copied { background: rgba(63,185,80,0.15); color: var(--green); border-color: rgba(63,185,80,0.3); }
+
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>pg_durable</span> Dashboard</h1>
+  <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+  <div class="auto-refresh">
+    <input type="checkbox" id="autoRefresh" checked>
+    <label for="autoRefresh">Auto-refresh (5s)</label>
+  </div>
+</header>
+
+<div class="stats" id="statsBar"></div>
+<div id="sqlModal"></div>
+
+<div class="main">
+  <div class="instance-list">
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('instances')">Instances <span class="tab-count" id="instanceCount">0</span></button>
+      <button class="tab-btn" onclick="switchTab('pipelines')">AI Pipelines <span class="tab-count" id="pipelineCount" style="background:rgba(57,210,192,0.15);color:var(--cyan);">0</span></button>
+      <button class="tab-btn" onclick="switchTab('review')">Human Review <span class="tab-count warn" id="reviewCount">0</span></button>
+    </div>
+    <div id="tabInstances" class="tab-content active">
+      <div id="instanceList"></div>
+    </div>
+    <div id="tabPipelines" class="tab-content">
+      <div id="pipelineList"></div>
+    </div>
+    <div id="tabReview" class="tab-content">
+      <div id="reviewList"></div>
+    </div>
+  </div>
+  <div class="graph-panel" id="graphPanel">
+    <div class="graph-placeholder">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5z"/>
+        <path d="M14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5z"/>
+        <path d="M4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4z"/>
+        <path d="M10 7h4M7 10v4"/>
+      </svg>
+      <p>Select an instance to view its execution graph</p>
+    </div>
+  </div>
+</div>
+
+<script>
+/**
+ * pg_durable DAG Dashboard
+ *
+ * Node type semantics (from src/dsl.rs):
+ *   THEN:  left_node runs first → then right_node (sequential chain)
+ *   JOIN:  left_node ‖ right_node run in parallel, wait for all. query.extra_nodes for join3+
+ *   RACE:  left_node ‖ right_node run in parallel, first to finish wins
+ *   IF:    query.condition_node is evaluated, left_node = THEN branch, right_node = ELSE branch
+ *   LOOP:  left_node = body, right_node = optional condition. query.condition_node
+ *   SQL, HTTP, SLEEP, SIGNAL, BREAK, WAIT_SCHEDULE: leaf nodes (no children)
+ */
+
+const API = '';
+let selectedInstance = null;
+let refreshTimer = null;
+let waitingInstances = [];
+
+const NODE_W = 260;
+const NODE_GAP_X = 70;
+const NODE_GAP_Y = 55;
+const PAD = 40;
+
+async function fetchJSON(url) {
+  const res = await fetch(API + url);
+  return res.json();
+}
+
+// ===== Stats =====
+async function loadStats() {
+  const stats = await fetchJSON('/api/stats');
+  if (stats.error) return;
+  const c = { completed: 0, failed: 0, pending: 0, running: 0, total: 0 };
+  stats.forEach(s => { const k = s.status?.toLowerCase()||'unknown'; c[k] = (c[k]||0) + parseInt(s.count); c.total += parseInt(s.count); });
+  document.getElementById('statsBar').innerHTML = `
+    <div class="stat-card total"><div class="label">Total</div><div class="value">${c.total}</div></div>
+    <div class="stat-card completed"><div class="label">Completed</div><div class="value">${c.completed}</div></div>
+    <div class="stat-card failed"><div class="label">Failed</div><div class="value">${c.failed}</div></div>
+    <div class="stat-card pending"><div class="label">Pending</div><div class="value">${c.pending}</div></div>
+    ${c.running?`<div class="stat-card running"><div class="label">Running</div><div class="value">${c.running}</div></div>`:''}`;
+}
+
+// ===== Instances =====
+async function loadInstances() {
+  const instances = await fetchJSON('/api/instances');
+  if (instances.error) { document.getElementById('instanceList').innerHTML = `<div class="loading" style="color:var(--red)">${instances.error}</div>`; return; }
+  document.getElementById('instanceCount').textContent = instances.length;
+  document.getElementById('instanceList').innerHTML = instances.map(i => {
+    const dur = i.duration_secs ? `${parseFloat(i.duration_secs).toFixed(1)}s` : '';
+    return `<div class="instance-item ${selectedInstance===i.id?'selected':''}" onclick="selectInstance('${i.id}')">
+      <div class="top-row"><span class="label-text">${i.label||'(no label)'}</span><span class="badge ${i.status?.toLowerCase()}">${i.status}</span></div>
+      <div class="bottom-row"><span class="id-text">${i.id}</span><span class="time-text">${i.created_at||''} ${dur?'· '+dur:''}</span></div></div>`;
+  }).join('');
+}
+
+async function selectInstance(id) {
+  selectedInstance = id;
+  document.querySelectorAll('.instance-item').forEach(el => el.classList.toggle('selected', el.querySelector('.id-text')?.textContent===id));
+  const panel = document.getElementById('graphPanel');
+  panel.innerHTML = '<div class="loading"><div class="spinner"></div>Loading graph…</div>';
+  const nodes = await fetchJSON(`/api/nodes?instance_id=${id}`);
+  if (nodes.error) { panel.innerHTML = `<div class="loading" style="color:var(--red)">${nodes.error}</div>`; return; }
+  renderDAG(id, nodes);
+}
+
+// ===== Tree Builder =====
+function buildTree(nodes) {
+  const map = {};
+  nodes.forEach(n => { map[n.id] = n; });
+  const childIds = new Set();
+  nodes.forEach(n => {
+    if (n.left_node) childIds.add(n.left_node);
+    if (n.right_node) childIds.add(n.right_node);
+    if ((n.node_type==='IF'||n.node_type==='LOOP') && n.query) {
+      try { const c = JSON.parse(n.query); if (c.condition_node) childIds.add(c.condition_node); } catch(e) {}
+    }
+    if (n.node_type==='JOIN' && n.query) {
+      try { const c = JSON.parse(n.query); if (c.extra_nodes) c.extra_nodes.forEach(id => childIds.add(id)); } catch(e) {}
+    }
+  });
+  let rootId = null;
+  for (const n of nodes) { if (!childIds.has(n.id)) { rootId = n.id; break; } }
+  if (!rootId && nodes.length > 0) rootId = nodes[0].id;
+  return { map, rootId };
+}
+
+// ===== Layout Engine =====
+const LEAF_TYPES = ['SQL','HTTP','SLEEP','SIGNAL','BREAK','WAIT_SCHEDULE'];
+
+function layoutNode(nodeId, map, x, y) {
+  const node = map[nodeId];
+  if (!node) return { width: 0, height: 0, items: [], edges: [] };
+
+  if (LEAF_TYPES.includes(node.node_type)) {
+    const h = measureH(node);
+    return { width: NODE_W, height: h, items: [{ id: node.id, x, y, w: NODE_W, h, node }], edges: [] };
+  }
+  if (node.node_type === 'THEN') return layoutSequential(flattenThen(nodeId, map), map, x, y);
+  if (node.node_type === 'JOIN') return layoutParallel(node, map, x, y, 'JOIN');
+  if (node.node_type === 'RACE') return layoutParallel(node, map, x, y, 'RACE');
+  if (node.node_type === 'IF') return layoutConditional(node, map, x, y);
+  if (node.node_type === 'LOOP') return layoutLoop(node, map, x, y);
+
+  // Unknown type fallback
+  const h = measureH(node);
+  return { width: NODE_W, height: h, items: [{ id: node.id, x, y, w: NODE_W, h, node }], edges: [] };
+}
+
+function flattenThen(nodeId, map) {
+  const node = map[nodeId];
+  if (!node) return [];
+  if (node.node_type !== 'THEN') return [nodeId];
+  return [...flattenThen(node.left_node, map), ...flattenThen(node.right_node, map)];
+}
+
+function layoutSequential(nodeIds, map, startX, startY) {
+  const items = [], edges = [], subs = [];
+  let y = startY, maxW = 0;
+  for (const nid of nodeIds) {
+    const sub = layoutNode(nid, map, startX, y);
+    subs.push(sub); items.push(...sub.items); edges.push(...sub.edges);
+    maxW = Math.max(maxW, sub.width);
+    y += sub.height + NODE_GAP_Y;
+  }
+  // Center narrower children
+  for (const sub of subs) {
+    if (sub.width < maxW) {
+      const dx = Math.floor((maxW - sub.width) / 2);
+      sub.items.forEach(it => { it.x += dx; });
+    }
+  }
+  // Sequential edges
+  for (let i = 0; i < subs.length - 1; i++) {
+    const f = bottomItem(subs[i].items), t = topItem(subs[i+1].items);
+    if (f && t) edges.push({ from: f, to: t, label: '', type: 'sequence' });
+  }
+  return { width: maxW, height: Math.max(y - startY - NODE_GAP_Y, 0), items, edges };
+}
+
+function layoutParallel(node, map, x, y, type) {
+  const branches = [node.left_node, node.right_node].filter(Boolean);
+  if (node.query) { try { const c = JSON.parse(node.query); if (c.extra_nodes) branches.push(...c.extra_nodes); } catch(e) {} }
+
+  const items = [], edges = [];
+  const hdrH = 38;
+
+  // Layout branches
+  let bx = x, maxBH = 0;
+  const branchY = y + hdrH + NODE_GAP_Y;
+  const bSubs = [];
+  for (const bid of branches) {
+    const sub = layoutNode(bid, map, bx, branchY);
+    bSubs.push(sub); items.push(...sub.items); edges.push(...sub.edges);
+    maxBH = Math.max(maxBH, sub.height);
+    bx += sub.width + NODE_GAP_X;
+  }
+  const totalBW = Math.max(bx - x - NODE_GAP_X, NODE_W);
+
+  // Header centered
+  const hdr = { id: node.id+'-hdr', x: x + Math.max(0, Math.floor((totalBW-NODE_W)/2)), y, w: NODE_W, h: hdrH,
+    node: { ...node, _label: type==='JOIN'?'⑂ PARALLEL — wait all':'⚡ RACE — first wins' }, isConnector: true, connType: type };
+  items.push(hdr);
+
+  // Footer
+  const ftrY = branchY + maxBH + NODE_GAP_Y;
+  const ftr = { id: node.id+'-ftr', x: hdr.x, y: ftrY, w: NODE_W, h: hdrH,
+    node: { ...node, _label: '⊕ merge' }, isConnector: true, connType: 'merge' };
+  items.push(ftr);
+
+  // Edges
+  for (let i = 0; i < bSubs.length; i++) {
+    const t = topItem(bSubs[i].items), b = bottomItem(bSubs[i].items);
+    if (t) edges.push({ from: hdr, to: t, label: `branch ${i+1}`, type: 'fork', idx: i });
+    if (b) edges.push({ from: b, to: ftr, label: '', type: 'join' });
+  }
+
+  return { width: totalBW, height: ftrY + hdrH - y, items, edges };
+}
+
+function layoutConditional(node, map, x, y) {
+  const items = [], edges = [];
+  let condNodeId = null;
+  if (node.query) { try { condNodeId = JSON.parse(node.query).condition_node; } catch(e) {} }
+
+  let curY = y;
+  // Condition node
+  if (condNodeId && map[condNodeId]) {
+    const cL = layoutNode(condNodeId, map, x, curY);
+    items.push(...cL.items); edges.push(...cL.edges);
+    curY += cL.height + NODE_GAP_Y;
+  }
+
+  // IF header
+  const hdrH = 38;
+  const hdr = { id: node.id+'-if', x, y: curY, w: NODE_W, h: hdrH,
+    node: { ...node, _label: '❓ IF condition' }, isConnector: true, connType: 'IF' };
+  items.push(hdr);
+
+  if (condNodeId && map[condNodeId]) {
+    const condBot = bottomItem(items.filter(it => it.id !== hdr.id));
+    if (condBot) edges.push({ from: condBot, to: hdr, label: 'eval', type: 'sequence' });
+  }
+
+  // Branches
+  const brY = curY + hdrH + NODE_GAP_Y;
+  const thenL = node.left_node ? layoutNode(node.left_node, map, x, brY) : null;
+  const thenW = thenL?.width || NODE_W;
+  const elseL = node.right_node ? layoutNode(node.right_node, map, x + thenW + NODE_GAP_X, brY) : null;
+  if (thenL) { items.push(...thenL.items); edges.push(...thenL.edges); }
+  if (elseL) { items.push(...elseL.items); edges.push(...elseL.edges); }
+
+  const totalBW = thenW + (elseL ? NODE_GAP_X + elseL.width : 0);
+  hdr.x = x + Math.max(0, Math.floor((totalBW - NODE_W) / 2));
+
+  if (thenL) { const t = topItem(thenL.items); if (t) edges.push({ from: hdr, to: t, label: 'TRUE ✓', type: 'cond-true' }); }
+  if (elseL) { const t = topItem(elseL.items); if (t) edges.push({ from: hdr, to: t, label: 'FALSE ✗', type: 'cond-false' }); }
+
+  // Merge footer
+  const maxBH = Math.max(thenL?.height||0, elseL?.height||0);
+  const ftrY = brY + maxBH + NODE_GAP_Y;
+  const ftr = { id: node.id+'-endif', x: hdr.x, y: ftrY, w: NODE_W, h: hdrH,
+    node: { ...node, _label: '⊕ end if' }, isConnector: true, connType: 'merge' };
+  items.push(ftr);
+  if (thenL) { const b = bottomItem(thenL.items); if (b) edges.push({ from: b, to: ftr, label: '', type: 'join' }); }
+  if (elseL) { const b = bottomItem(elseL.items); if (b) edges.push({ from: b, to: ftr, label: '', type: 'join' }); }
+
+  return { width: Math.max(totalBW, NODE_W), height: ftrY + hdrH - y, items, edges };
+}
+
+function layoutLoop(node, map, x, y) {
+  const items = [], edges = [];
+  const hdrH = 38;
+  const hdr = { id: node.id+'-loop', x, y, w: NODE_W, h: hdrH,
+    node: { ...node, _label: '🔄 LOOP' }, isConnector: true, connType: 'LOOP' };
+  items.push(hdr);
+
+  const bodyY = y + hdrH + NODE_GAP_Y;
+  const bodyL = node.left_node ? layoutNode(node.left_node, map, x + 20, bodyY) : null;
+
+  if (bodyL) {
+    items.push(...bodyL.items); edges.push(...bodyL.edges);
+    const t = topItem(bodyL.items); if (t) edges.push({ from: hdr, to: t, label: 'body', type: 'sequence' });
+  }
+
+  let condNodeId = null;
+  if (node.query) { try { condNodeId = JSON.parse(node.query).condition_node; } catch(e) {} }
+
+  let totalH = (bodyL?.height||0);
+  if (condNodeId && map[condNodeId]) {
+    const condY = bodyY + (bodyL?.height||0) + NODE_GAP_Y;
+    const condL = layoutNode(condNodeId, map, x + 20, condY);
+    items.push(...condL.items); edges.push(...condL.edges);
+    if (bodyL) { const b = bottomItem(bodyL.items), ct = topItem(condL.items); if(b&&ct) edges.push({from:b,to:ct,label:'check',type:'sequence'}); }
+    const cb = bottomItem(condL.items);
+    if (cb) edges.push({ from: cb, to: hdr, label: 'repeat', type: 'loop-back' });
+    totalH = condY + condL.height - bodyY + NODE_GAP_Y;
+  } else if (bodyL) {
+    const b = bottomItem(bodyL.items);
+    if (b) edges.push({ from: b, to: hdr, label: 'repeat ∞', type: 'loop-back' });
+  }
+
+  return { width: Math.max((bodyL?.width||0) + 40, NODE_W), height: hdrH + NODE_GAP_Y + totalH + 10, items, edges };
+}
+
+// ===== Helpers =====
+function measureH(node) {
+  let h = 44;
+  if (node.query) h += Math.min(Math.ceil(node.query.length / 35), 3) * 14 + 4;
+  if (node.result_name) h += 16;
+  if (node.result && node.result !== '{"rows": [], "row_count": 0}') h += 16;
+  if (node.error) h += 16;
+  return Math.max(h, 50);
+}
+function topItem(items) { return items.length ? items.reduce((a,b) => a.y < b.y ? a : b) : null; }
+function bottomItem(items) { return items.length ? items.reduce((a,b) => (a.y+a.h)>(b.y+b.h)?a:b) : null; }
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function trunc(s, n) { return !s ? '' : s.length > n ? s.substring(0,n)+'…' : s; }
+
+// ===== Render DAG =====
+function renderDAG(instanceId, nodes) {
+  const panel = document.getElementById('graphPanel');
+  const instLabel = document.querySelector('.instance-item.selected .label-text')?.textContent || instanceId;
+  const instStatus = document.querySelector('.instance-item.selected .badge')?.textContent || '';
+
+  const { map, rootId } = buildTree(nodes);
+  _dagNodes = map;  // Store for modal lookups
+  if (!rootId) { panel.innerHTML = '<div class="loading">No nodes found</div>'; return; }
+
+  const layout = layoutNode(rootId, map, PAD, PAD);
+  const cW = layout.width + PAD * 2 + 80;
+  const cH = layout.height + PAD * 2 + 60;
+
+  const leafCount = nodes.filter(n => !['THEN'].includes(n.node_type)).length;
+  const signalNodes = nodes.filter(n => n.node_type === 'SIGNAL');
+  const isRunning = instStatus.toLowerCase() === 'running';
+  const isPending = instStatus.toLowerCase() === 'pending';
+  const waitingSignal = signalNodes.find(n => n.status?.toLowerCase() === 'running' || n.status?.toLowerCase() === 'pending');
+
+  let signalBarHtml = '';
+  if (isRunning || isPending) {
+    let sigName = 'human_decision';
+    if (waitingSignal && waitingSignal.query) {
+      try { sigName = JSON.parse(waitingSignal.query).signal_name || 'human_decision'; } catch(e) {}
+    }
+    signalBarHtml = `<div class="signal-bar">
+      <div class="pulse"></div>
+      <span>${waitingSignal ? 'Waiting for signal: ' + esc(sigName) : 'Awaiting action'}</span>
+      <button class="btn-sm" onclick="quickSignal('${instanceId}','${esc(sigName)}',true)">✓ Approve</button>
+      <button class="btn-sm" style="border-color:rgba(248,81,73,0.3);color:var(--red);background:rgba(248,81,73,0.1);" onclick="quickSignal('${instanceId}','${esc(sigName)}',false)">✗ Reject</button>
+      <button class="btn-sm" onclick="switchTab('review')">⚙ Custom</button>
+    </div>`;
+  }
+
+  let html = `
+    <div class="graph-header">
+      <h2>${esc(instLabel)} <span class="badge ${instStatus.toLowerCase()}">${instStatus}</span></h2>
+      <span class="instance-meta">${leafCount} steps · ID: ${instanceId}</span>
+    </div>
+    ${signalBarHtml}
+    <div class="dag-container">
+      <div style="position:relative;width:${cW}px;height:${cH}px;">
+  `;
+
+  // SVG layer
+  html += `<svg class="dag-svg" width="${cW}" height="${cH}">`;
+  html += `<defs>
+    <marker id="a-seq" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#3fb950"/></marker>
+    <marker id="a-fork" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#39d2c0"/></marker>
+    <marker id="a-true" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#3fb950"/></marker>
+    <marker id="a-false" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#f85149"/></marker>
+    <marker id="a-join" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#8b949e"/></marker>
+    <marker id="a-loop" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#d29922"/></marker>
+  </defs>`;
+
+  for (const edge of layout.edges) {
+    html += drawEdge(edge);
+  }
+  html += '</svg>';
+
+  // Edge labels
+  for (const edge of layout.edges) {
+    if (edge.label && edge.type !== 'join' && edge.type !== 'sequence') {
+      html += drawEdgeLabel(edge);
+    }
+  }
+
+  // Nodes
+  for (const item of layout.items) {
+    html += drawNode(item);
+  }
+
+  html += '</div></div>';
+  panel.innerHTML = html;
+}
+
+function drawEdge(e) {
+  const fx = e.from.x + e.from.w / 2, fy = e.from.y + e.from.h;
+  const tx = e.to.x + e.to.w / 2, ty = e.to.y;
+  let color, marker, dash = '';
+
+  switch (e.type) {
+    case 'sequence': color='#3fb950'; marker='url(#a-seq)'; break;
+    case 'fork': color='#39d2c0'; marker='url(#a-fork)'; break;
+    case 'cond-true': color='#3fb950'; marker='url(#a-true)'; break;
+    case 'cond-false': color='#f85149'; marker='url(#a-false)'; break;
+    case 'join': color='#8b949e'; marker='url(#a-join)'; dash='4,3'; break;
+    case 'loop-back': color='#d29922'; marker='url(#a-loop)'; dash='6,3'; break;
+    default: color='#30363d'; marker='url(#a-seq)';
+  }
+
+  if (e.type === 'loop-back') {
+    const lx = Math.min(e.from.x, e.to.x) - 35;
+    return `<path d="M${fx},${fy} C${fx},${fy+25} ${lx},${fy+25} ${lx},${(fy+ty)/2} S${lx},${ty-25} ${tx},${ty}"
+      fill="none" stroke="${color}" stroke-width="2" stroke-dasharray="${dash}" marker-end="${marker}" opacity="0.8"/>`;
+  }
+
+  if (Math.abs(fx - tx) < 5) {
+    return `<line x1="${fx}" y1="${fy}" x2="${tx}" y2="${ty}" stroke="${color}" stroke-width="2" marker-end="${marker}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;
+  }
+
+  // Smooth curve for branching connections
+  const midY = fy + (ty - fy) * 0.4;
+  return `<path d="M${fx},${fy} C${fx},${midY} ${tx},${midY} ${tx},${ty}"
+    fill="none" stroke="${color}" stroke-width="2" marker-end="${marker}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;
+}
+
+function drawEdgeLabel(e) {
+  const fx = e.from.x + e.from.w/2, fy = e.from.y + e.from.h;
+  const tx = e.to.x + e.to.w/2, ty = e.to.y;
+  // Position label at 30% of the edge path
+  const lx = fx + (tx - fx) * 0.5;
+  const ly = fy + (ty - fy) * 0.3;
+  let cls = 'c-muted';
+  if (e.type==='cond-true') cls='c-green';
+  else if (e.type==='cond-false') cls='c-red';
+  else if (e.type==='fork') cls='c-cyan';
+  else if (e.type==='loop-back') cls='c-yellow';
+  return `<div class="edge-label ${cls}" style="left:${lx-18}px;top:${ly-7}px;">${esc(e.label)}</div>`;
+}
+
+function drawNode(item) {
+  const n = item.node;
+  const s = n.status?.toLowerCase() || '';
+
+  // Connector nodes (headers/footers for JOIN, RACE, IF, LOOP, merge)
+  if (item.isConnector) {
+    const label = n._label || n.node_type;
+    let bc;
+    switch (item.connType) {
+      case 'JOIN': bc='var(--cyan)'; break;
+      case 'RACE': bc='var(--yellow)'; break;
+      case 'IF': bc='var(--purple)'; break;
+      case 'LOOP': bc='var(--yellow)'; break;
+      default: bc='var(--muted)';
+    }
+    return `<div class="dag-node ${s}" style="left:${item.x}px;top:${item.y}px;width:${item.w}px;height:${item.h}px;display:flex;align-items:center;justify-content:center;border-style:dashed;border-color:${bc};">
+      <span style="font-size:12px;font-weight:700;color:${bc};">${esc(label)}</span></div>`;
+  }
+
+  // Regular leaf node
+  const qp = n.query ? trunc(n.query.replace(/\s+/g,' '), 90) : '';
+  let ex = '';
+  if (n.result_name) ex += `<div class="node-result-name">|=&gt; $${esc(n.result_name)}</div>`;
+  if (n.result && n.result !== '{"rows": [], "row_count": 0}') {
+    try { const r = JSON.parse(n.result); if (r.rows?.length>0) ex += `<div class="node-result">✓ ${esc(trunc(JSON.stringify(r.rows[0]),70))}</div>`; }
+    catch(e) { ex += `<div class="node-result">${esc(trunc(n.result,50))}</div>`; }
+  }
+  if (n.error) ex += `<div class="node-error">✗ ${esc(trunc(n.error,70))}</div>`;
+
+  return `<div class="dag-node ${s}" style="left:${item.x}px;top:${item.y}px;width:${item.w}px;cursor:pointer;" onclick="showNodeDetail('${item.id}')" title="Click to view full query">
+    <div class="node-header">
+      <span class="node-type ${n.node_type}">${n.node_type}</span>
+      <span><span class="badge ${s}" style="font-size:9px;padding:1px 5px;">${n.status||''}</span></span>
+    </div>
+    <div class="node-id">${item.id}</div>
+    ${qp?`<div class="node-query">${esc(qp)}</div>`:''}
+    ${ex}</div>`;
+}
+
+// ===== Human Review =====
+async function loadWaiting() {
+  waitingInstances = await fetchJSON('/api/waiting');
+  if (waitingInstances.error) waitingInstances = [];
+  document.getElementById('reviewCount').textContent = waitingInstances.length;
+  const el = document.getElementById('reviewList');
+  if (waitingInstances.length === 0) {
+    el.innerHTML = `<div class="no-waiting">
+      <div class="icon">✓</div>
+      <p>No instances awaiting human review.</p>
+      <p style="margin-top:8px;">Instances using <code>df.wait_for_signal()</code><br>will appear here when they need input.</p>
+    </div>`;
+    return;
+  }
+  el.innerHTML = waitingInstances.map(w => {
+    const hasSignal = !!w.signal_name;
+    const sigName = w.signal_name || 'human_decision';
+    const sigInfo = hasSignal
+      ? `<span class="signal-tag">⏳ ${esc(w.signal_name)}</span>${w.timeout_seconds ? `<span style="font-size:11px;color:var(--muted)">timeout: ${w.timeout_seconds}s</span>` : ''}`
+      : `<span class="signal-tag" style="background:rgba(210,153,34,0.12);color:var(--yellow)">⏳ pending</span><span style="font-size:11px;color:var(--muted)">Signal: ${esc(sigName)} (default)</span>`;
+    return `<div class="review-card" id="review-${w.instance_id}">
+      <div class="review-header" style="cursor:pointer;" onclick="selectInstance('${w.instance_id}')">
+        <span class="review-label">${esc(w.label || '(no label)')}</span>
+        <span class="badge ${w.instance_status?.toLowerCase()}">${w.instance_status}</span>
+      </div>
+      <div class="review-id" style="cursor:pointer;" onclick="selectInstance('${w.instance_id}')">${w.instance_id} <span style="font-size:10px;color:var(--accent);">▶ view graph</span></div>
+      <div class="review-meta">${sigInfo}<br>Started: ${w.created_at || 'unknown'}</div>
+      <div class="review-actions">
+        <button class="btn btn-approve" onclick="quickSignal('${w.instance_id}', '${esc(sigName)}', true)">✓ Approve</button>
+        <button class="btn btn-reject" onclick="quickSignal('${w.instance_id}', '${esc(sigName)}', false)">✗ Reject</button>
+        <button class="btn btn-custom" onclick="toggleCustomSignal('${w.instance_id}')">⚙ Custom Signal</button>
+      </div>
+      <div class="signal-form" id="custom-${w.instance_id}" style="display:none;">
+        <label>Signal Name</label>
+        <input type="text" id="signame-${w.instance_id}" value="${esc(sigName)}">
+        <label>Signal Data (JSON)</label>
+        <textarea id="sigdata-${w.instance_id}">{"approved": true, "reviewer": "dashboard-user"}</textarea>
+        <button class="btn btn-custom" onclick="sendCustomSignal('${w.instance_id}')">Send Signal</button>
+        <div id="sigresult-${w.instance_id}"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleCustomSignal(instanceId) {
+  const el = document.getElementById('custom-' + instanceId);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function quickSignal(instanceId, signalName, approved) {
+  const data = JSON.stringify({ approved, reviewer: 'dashboard-user', notes: approved ? 'Approved from dashboard' : 'Rejected from dashboard' });
+  await doSendSignal(instanceId, signalName, data);
+}
+
+async function sendCustomSignal(instanceId) {
+  const name = document.getElementById('signame-' + instanceId)?.value;
+  const data = document.getElementById('sigdata-' + instanceId)?.value;
+  if (!name) { showSignalResult(instanceId, 'Signal name required', false); return; }
+  try { JSON.parse(data); } catch(e) { showSignalResult(instanceId, 'Invalid JSON: ' + e.message, false); return; }
+  await doSendSignal(instanceId, name, data);
+}
+
+async function doSendSignal(instanceId, signalName, signalData) {
+  showSignalResult(instanceId, 'Sending signal...', true);
+  try {
+    const res = await fetch(API + '/api/signal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instance_id: instanceId, signal_name: signalName, signal_data: signalData })
+    });
+    const result = await res.json();
+    if (result.error) {
+      showSignalResult(instanceId, '✗ ' + result.error, false);
+    } else {
+      showSignalResult(instanceId, '✓ Signal sent successfully!', true);
+      setTimeout(() => { loadAll(); }, 1500);
+    }
+  } catch(e) {
+    showSignalResult(instanceId, '✗ Network error: ' + e.message, false);
+  }
+}
+
+function showSignalResult(instanceId, msg, success) {
+  const el = document.getElementById('sigresult-' + instanceId);
+  if (el) el.innerHTML = `<div class="signal-result ${success?'success':'error'}">${esc(msg)}</div>`;
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    const txt = b.textContent.toLowerCase();
+    b.classList.toggle('active',
+      (tab === 'instances' && txt.includes('instance')) ||
+      (tab === 'pipelines' && txt.includes('pipeline')) ||
+      (tab === 'review' && txt.includes('human'))
+    );
+  });
+  document.getElementById('tabInstances').classList.toggle('active', tab === 'instances');
+  document.getElementById('tabPipelines').classList.toggle('active', tab === 'pipelines');
+  document.getElementById('tabReview').classList.toggle('active', tab === 'review');
+}
+
+// ===== AI Pipelines =====
+let pipelines = [];
+let selectedPipeline = null;
+
+async function loadPipelines() {
+  pipelines = await fetchJSON('/api/pipelines');
+  if (pipelines.error) pipelines = [];
+  document.getElementById('pipelineCount').textContent = pipelines.length;
+  renderPipelineList();
+}
+
+function renderPipelineList() {
+  const el = document.getElementById('pipelineList');
+  if (!pipelines.length) {
+    el.innerHTML = `<div class="no-pipelines">
+      <div class="icon">🔗</div>
+      <p>No AI pipelines registered.</p>
+      <p style="margin-top:8px;">Create one with <code>ai.create_pipeline(...)</code></p>
+    </div>`;
+    return;
+  }
+  el.innerHTML = pipelines.map(p => {
+    const paused = p.paused === 'true' || p.paused === 't';
+    const statusBadge = p.last_run_status
+      ? `<span class="badge ${p.last_run_status.toLowerCase()}">${p.last_run_status}</span>`
+      : '<span class="badge" style="background:rgba(139,148,158,0.1);color:var(--muted);">no runs</span>';
+    return `<div class="pipeline-card ${selectedPipeline===p.name?'selected':''}" onclick="selectPipeline('${esc(p.name)}')">
+      <div class="pipe-header">
+        <span class="pipe-name">${esc(p.name)}</span>
+        <span class="pipe-trigger ${p.trigger_type}">${p.trigger_type}</span>
+      </div>
+      <div class="pipe-meta">
+        <span>📥 ${esc(p.source_table || p.source_type)}</span>
+        <span>🔧 ${p.step_count} steps</span>
+        <span>👤 ${esc(p.created_by)}</span>
+        ${paused ? '<span style="color:var(--yellow);">⏸ paused</span>' : ''}
+      </div>
+      <div class="pipe-status-row">
+        ${statusBadge}
+        <span class="pipe-stat">Processed: <strong>${p.total_processed}</strong></span>
+        ${p.last_run_at ? `<span class="pipe-stat">${p.last_run_at}</span>` : ''}
+      </div>
+      <div class="pipe-actions" onclick="event.stopPropagation()">
+        <button class="btn-pipe btn-run" onclick="pipelineAction('${esc(p.name)}','run')">▶ Run</button>
+        <button class="btn-pipe btn-pause" onclick="pipelineAction('${esc(p.name)}','${paused?'resume':'pause'}')">${paused?'▶ Resume':'⏸ Pause'}</button>
+        <button class="btn-pipe btn-backfill" onclick="pipelineAction('${esc(p.name)}','backfill')">🔄 Backfill</button>
+        <button class="btn-pipe btn-explain" onclick="showExplain('${esc(p.name)}')">📋 Explain</button>
+        ${p.last_instance_id ? `<button class="btn-pipe btn-explain" style="background:rgba(88,166,255,0.08);color:var(--accent);border-color:rgba(88,166,255,0.15);" onclick="switchTab('instances');selectInstance('${p.last_instance_id}')">🔍 View Graph</button>` : ''}
+      </div>
+      <div id="pipe-result-${p.name.replace(/[^a-zA-Z0-9]/g,'_')}"></div>
+    </div>`;
+  }).join('');
+}
+
+async function selectPipeline(name) {
+  selectedPipeline = name;
+  renderPipelineList();
+  const panel = document.getElementById('graphPanel');
+  panel.innerHTML = '<div class="loading"><div class="spinner"></div>Loading pipeline details…</div>';
+
+  const [explain, runs] = await Promise.all([
+    fetchJSON(`/api/pipeline/explain?name=${encodeURIComponent(name)}`),
+    fetchJSON(`/api/pipeline/runs?name=${encodeURIComponent(name)}`)
+  ]);
+
+  // Find the latest instance with nodes to show
+  const latestRun = (runs && runs.length) ? runs[0] : null;
+  let nodes = [];
+  if (latestRun && latestRun.instance_id) {
+    nodes = await fetchJSON(`/api/nodes?instance_id=${latestRun.instance_id}`);
+    if (nodes.error) nodes = [];
+  }
+
+  let html = `<div class="graph-header">
+    <h2>🔗 ${esc(name)}</h2>
+    <span class="instance-meta">AI Pipeline${latestRun ? ' · Last run: ' + (latestRun.status || '') : ''}</span>
+  </div>
+  <div class="pipeline-detail">`;
+
+  // ── Execution Graph (the main thing people want to see) ──
+  if (nodes.length) {
+    const leafNodes = nodes.filter(n => n.node_type !== 'THEN');
+    html += `<h3>Execution Graph <span style="font-size:12px;color:var(--muted);font-weight:400;">(${leafNodes.length} steps · instance ${latestRun.instance_id})</span></h3>`;
+    html += `<div id="pipelineDAG" style="position:relative;overflow:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg);margin-bottom:20px;"></div>`;
+  }
+
+  // ── Explain plan ──
+  if (explain.explain) {
+    html += `<h3>Execution Plan</h3>
+      <div class="pipeline-explain">${esc(explain.explain)}</div>`;
+  } else if (explain.error) {
+    html += `<div class="pipe-result error">${esc(explain.error)}</div>`;
+  }
+
+  // ── Run history ──
+  html += `<h3>Run History</h3>`;
+  if (runs.length) {
+    html += `<table class="pipeline-runs-table">
+      <thead><tr><th>Run</th><th>Instance</th><th>Status</th><th>Started</th><th>Completed</th><th>Rows</th><th>Error</th></tr></thead>
+      <tbody>`;
+    for (const r of runs) {
+      html += `<tr>
+        <td>#${r.id}</td>
+        <td>${r.instance_id ? `<span class="inst-link" onclick="switchTab('instances');selectInstance('${r.instance_id}')">${r.instance_id}</span>` : '-'}</td>
+        <td><span class="badge ${r.status?.toLowerCase()}">${r.status}</span></td>
+        <td>${r.started_at}</td>
+        <td>${r.completed_at || '-'}</td>
+        <td>${r.rows_processed}</td>
+        <td style="color:var(--red);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="${esc(r.error)}">${esc(trunc(r.error, 40))}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  } else {
+    html += `<p style="color:var(--muted);font-size:13px;">No runs yet. Click <strong>▶ Run</strong> to execute the pipeline.</p>`;
+  }
+  html += '</div>';
+  panel.innerHTML = html;
+
+  // ── Render the DAG inside the container ──
+  if (nodes.length) {
+    renderPipelineDAG(nodes, latestRun);
+  }
+}
+
+function renderPipelineDAG(nodes, run) {
+  const container = document.getElementById('pipelineDAG');
+  if (!container) return;
+
+  const { map, rootId } = buildTree(nodes);
+  _dagNodes = map;  // Store for modal lookups
+  if (!rootId) { container.innerHTML = '<div class="loading">No nodes found</div>'; return; }
+
+  const layout = layoutNode(rootId, map, PAD, PAD);
+  const cW = layout.width + PAD * 2 + 80;
+  const cH = layout.height + PAD * 2 + 60;
+
+  let html = `<div style="position:relative;width:${cW}px;height:${cH}px;min-height:200px;">`;
+
+  // SVG edges
+  html += `<svg class="dag-svg" width="${cW}" height="${cH}">`;
+  html += `<defs>
+    <marker id="a-seq" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#3fb950"/></marker>
+    <marker id="a-fork" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#39d2c0"/></marker>
+    <marker id="a-true" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#3fb950"/></marker>
+    <marker id="a-false" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#f85149"/></marker>
+    <marker id="a-join" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#8b949e"/></marker>
+    <marker id="a-loop" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#d29922"/></marker>
+  </defs>`;
+  for (const edge of layout.edges) { html += drawEdge(edge); }
+  html += '</svg>';
+
+  // Edge labels
+  for (const edge of layout.edges) {
+    if (edge.label && edge.type !== 'join' && edge.type !== 'sequence') {
+      html += drawEdgeLabel(edge);
+    }
+  }
+
+  // Nodes
+  for (const item of layout.items) { html += drawNode(item); }
+
+  html += '</div>';
+  container.innerHTML = html;
+  container.style.height = Math.min(cH + 20, 500) + 'px';
+}
+
+async function pipelineAction(name, action) {
+  const safeId = name.replace(/[^a-zA-Z0-9]/g, '_');
+  const el = document.getElementById('pipe-result-' + safeId);
+  if (el) el.innerHTML = `<div class="pipe-result success" style="color:var(--muted)">Running ${action}...</div>`;
+  try {
+    const res = await fetch(API + '/api/pipeline/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    const result = await res.json();
+    if (result.error) {
+      if (el) el.innerHTML = `<div class="pipe-result error">✗ ${esc(result.error)}</div>`;
+    } else {
+      if (el) el.innerHTML = `<div class="pipe-result success">✓ ${action}: ${esc(result.result || 'OK')}</div>`;
+      setTimeout(() => { loadAll(); }, 1500);
+    }
+  } catch(e) {
+    if (el) el.innerHTML = `<div class="pipe-result error">✗ ${e.message}</div>`;
+  }
+}
+
+async function showExplain(name) {
+  selectedPipeline = name;
+  await selectPipeline(name);
+}
+
+// ===== Node Detail Modal =====
+let _dagNodes = {};
+
+// SQL formatting: add basic indentation and keyword highlighting
+function formatSql(raw) {
+  if (!raw || raw.length < 10) return esc(raw || '');
+  // Normalize whitespace
+  let sql = raw.replace(/\s+/g, ' ').trim();
+  // Add newlines before major clauses
+  const clauses = ['SELECT','FROM','WHERE','AND','OR','JOIN','LEFT JOIN','RIGHT JOIN','INNER JOIN','CROSS JOIN',
+    'ON','GROUP BY','ORDER BY','HAVING','LIMIT','OFFSET','INSERT INTO','VALUES','UPDATE','SET',
+    'DELETE FROM','CREATE TABLE','CREATE TEMP TABLE','ALTER TABLE','DROP TABLE','WITH','AS \\(',
+    'RETURNING','ON CONFLICT','DO UPDATE','DO NOTHING','UNION','EXCEPT','INTERSECT','CASE','WHEN','THEN','ELSE','END'];
+  for (const c of clauses) {
+    const re = new RegExp('\\b(' + c + ')\\b', 'gi');
+    sql = sql.replace(re, '\n$1');
+  }
+  // Indent sub-clauses
+  const lines = sql.split('\n').filter(l => l.trim());
+  const indentKw = new Set(['AND','OR','ON','SET','VALUES','WHEN','THEN','ELSE']);
+  const formatted = lines.map(l => {
+    const trimmed = l.trim();
+    const firstWord = trimmed.split(/\s/)[0].toUpperCase();
+    return indentKw.has(firstWord) ? '    ' + trimmed : trimmed;
+  }).join('\n');
+  return highlightSql(formatted);
+}
+
+function highlightSql(sql) {
+  // Escape HTML first
+  let h = esc(sql);
+  // Highlight strings (single-quoted)
+  h = h.replace(/&#x27;([^]*?)&#x27;/g, '<span class="sql-str">&#x27;$1&#x27;</span>');
+  h = h.replace(/'([^]*?)'/g, '<span class="sql-str">\'$1\'</span>');
+  // Highlight numbers
+  h = h.replace(/\b(\d+\.?\d*)\b/g, '<span class="sql-num">$1</span>');
+  // Highlight keywords
+  const kws = 'SELECT|FROM|WHERE|AND|OR|NOT|IN|IS|NULL|AS|ON|JOIN|LEFT|RIGHT|INNER|CROSS|FULL|OUTER|GROUP BY|ORDER BY|HAVING|LIMIT|OFFSET|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|ALTER|DROP|TABLE|TEMP|IF EXISTS|IF NOT EXISTS|WITH|RETURNING|ON CONFLICT|DO UPDATE|DO NOTHING|UNION|ALL|EXCEPT|INTERSECT|CASE|WHEN|THEN|ELSE|END|EXISTS|BETWEEN|LIKE|ILIKE|DISTINCT|ASC|DESC|NULLS|FIRST|LAST|TRUE|FALSE|DEFAULT|COALESCE|CAST|FORMAT|ARRAY|PERFORM|BEGIN|DECLARE|LOOP|EXIT|RAISE EXCEPTION';
+  const kwRe = new RegExp('\\b(' + kws + ')\\b', 'gi');
+  h = h.replace(kwRe, (m) => `<span class="sql-kw">${m.toUpperCase()}</span>`);
+  // Highlight function calls
+  h = h.replace(/\b([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)\s*\(/gi, (m, fn) => `<span class="sql-fn">${fn}</span>(`);
+  return h;
+}
+
+// Render result as a proper HTML table
+function renderResultTable(resultStr) {
+  if (!resultStr) return '';
+  // Check for empty result
+  if (resultStr === '{"rows": [], "row_count": 0}') {
+    return `<div class="section-label">Result</div>
+      <div class="result-table-wrap"><div class="result-empty">Query returned no rows</div></div>`;
+  }
+
+  try {
+    const r = JSON.parse(resultStr);
+    // Plain string result (non-JSON)
+    if (typeof r === 'string') {
+      return `<div class="section-label">Result</div><pre class="result-pre">${esc(r)}</pre>`;
+    }
+    // Has rows array — render as table
+    if (r.rows && Array.isArray(r.rows)) {
+      if (r.rows.length === 0) {
+        return `<div class="section-label">Result</div>
+          <div class="result-table-wrap"><div class="result-empty">Query completed — 0 rows returned</div></div>`;
+      }
+      const cols = Object.keys(r.rows[0]);
+      let html = `<div class="section-label">Result</div>
+        <div class="result-table-wrap">
+        <div class="result-table-header"><span class="row-count">${r.row_count || r.rows.length} row${(r.row_count||r.rows.length)!==1?'s':''}</span></div>
+        <table class="result-table">
+        <thead><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+        <tbody>`;
+      for (const row of r.rows.slice(0, 50)) {
+        html += '<tr>';
+        for (const c of cols) {
+          const v = row[c];
+          if (v === null || v === undefined) {
+            html += `<td class="val-null">NULL</td>`;
+          } else if (typeof v === 'number') {
+            html += `<td class="val-num">${v}</td>`;
+          } else if (typeof v === 'boolean') {
+            html += `<td class="val-bool">${v}</td>`;
+          } else if (typeof v === 'object') {
+            html += `<td class="val-json" title="${esc(JSON.stringify(v))}">${esc(JSON.stringify(v))}</td>`;
+          } else {
+            const s = String(v);
+            html += `<td class="val-str" title="${esc(s)}">${esc(s.length > 80 ? s.substring(0,80) + '…' : s)}</td>`;
+          }
+        }
+        html += '</tr>';
+      }
+      if (r.rows.length > 50) {
+        html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--muted);font-style:italic;">… and ${r.rows.length - 50} more rows</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+      return html;
+    }
+    // Fallback: formatted JSON
+    return `<div class="section-label">Result</div><pre class="result-pre">${esc(JSON.stringify(r, null, 2))}</pre>`;
+  } catch(e) {
+    // Not JSON — show raw
+    return `<div class="section-label">Result</div><pre class="result-pre">${esc(resultStr)}</pre>`;
+  }
+}
+
+function showNodeDetail(nodeId) {
+  const n = _dagNodes[nodeId];
+  if (!n) return;
+  const modal = document.getElementById('sqlModal');
+
+  // Parse query for structured display
+  let queryRaw = n.query || '(no query)';
+  let queryExtra = '';
+  try {
+    const qObj = JSON.parse(n.query);
+    if (qObj.sql) queryRaw = qObj.sql;
+    const extras = Object.keys(qObj).filter(k => k !== 'sql');
+    if (extras.length) {
+      queryExtra = extras.map(k => `<div class="section-label">` + esc(k) + `</div><pre>` + esc(typeof qObj[k] === 'object' ? JSON.stringify(qObj[k], null, 2) : String(qObj[k])) + `</pre>`).join('');
+    }
+  } catch(e) { /* not JSON */ }
+
+  const resultHtml = renderResultTable(n.result);
+
+  let errorHtml = '';
+  if (n.error) {
+    errorHtml = `<div class="section-label">Error</div><pre class="error-pre">${esc(n.error)}</pre>`;
+  }
+
+  modal.innerHTML = `<div class="sql-modal-overlay" onclick="closeSqlModal(event)">
+    <div class="sql-modal" onclick="event.stopPropagation()">
+      <div class="sql-modal-header">
+        <h3><span class="node-type ${n.node_type}" style="font-size:11px;">${n.node_type}</span> ${esc(n.result_name ? '$' + n.result_name : nodeId)}</h3>
+        <button class="close-btn" onclick="closeSqlModal()">&times;</button>
+      </div>
+      <div class="sql-modal-meta">
+        <div class="meta-item"><span class="meta-label">Node ID:</span> ${esc(nodeId)}</div>
+        <div class="meta-item"><span class="meta-label">Type:</span> ${esc(n.node_type)}</div>
+        <div class="meta-item"><span class="meta-label">Status:</span> <span class="badge ${(n.status||'').toLowerCase()}" style="font-size:10px;padding:1px 6px;">${n.status||'unknown'}</span></div>
+        ${n.result_name ? `<div class="meta-item"><span class="meta-label">Result Name:</span> $${esc(n.result_name)}</div>` : ''}
+        ${n.left_node ? `<div class="meta-item"><span class="meta-label">Left:</span> ${esc(n.left_node)}</div>` : ''}
+        ${n.right_node ? `<div class="meta-item"><span class="meta-label">Right:</span> ${esc(n.right_node)}</div>` : ''}
+      </div>
+      <div class="sql-modal-body">
+        <div class="section-label">Query / SQL</div>
+        <pre id="sqlModalCode">${formatSql(queryRaw)}</pre>
+        ${queryExtra}
+        ${resultHtml}
+        ${errorHtml}
+      </div>
+      <div class="sql-modal-footer">
+        <button class="btn-copy" id="btnCopyQuery" onclick="copySqlQuery()">📋 Copy Query</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function closeSqlModal(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('sqlModal').innerHTML = '';
+}
+
+function copySqlQuery() {
+  const code = document.getElementById('sqlModalCode');
+  if (!code) return;
+  navigator.clipboard.writeText(code.textContent).then(() => {
+    const btn = document.getElementById('btnCopyQuery');
+    btn.textContent = '✓ Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 Copy Query'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+// Close modal on Escape
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSqlModal(); });
+
+// ===== Load & Refresh =====
+async function loadAll() {
+  await Promise.all([loadStats(), loadInstances(), loadWaiting(), loadPipelines()]);
+  if (selectedInstance) selectInstance(selectedInstance);
+  if (selectedPipeline && document.getElementById('tabPipelines').classList.contains('active')) selectPipeline(selectedPipeline);
+}
+function startAutoRefresh() { stopAutoRefresh(); if (document.getElementById('autoRefresh').checked) refreshTimer = setInterval(loadAll, 5000); }
+function stopAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
+document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
+loadAll();
+startAutoRefresh();
+</script>
+</body>
+</html>
