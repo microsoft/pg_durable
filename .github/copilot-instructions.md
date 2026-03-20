@@ -16,15 +16,12 @@ pg_durable is a **PostgreSQL extension** (pgrx/Rust) providing durable SQL funct
 |------|---------|
 | [src/lib.rs](../src/lib.rs) | Extension entry, schema/table definitions, SQL operators |
 | [src/dsl.rs](../src/dsl.rs) | DSL functions: `df.sql()`, `df.seq()`, `df.if()`, `df.loop()` |
-| [src/worker.rs](../src/worker.rs) | Background worker setup, duroxide runtime initialization |
+| [src/worker.rs](../src/worker.rs) | Background worker setup, duroxide runtime initialization, and duroxide schema migration (`ApplyAll`) |
 | [src/orchestrations/](../src/orchestrations/) | Duroxide orchestrations (⚠️ deterministic code only) |
 | [src/activities/](../src/activities/) | Duroxide activities (I/O happens here) |
 | [src/types.rs](../src/types.rs) | Core types: `Durofut`, `FunctionGraph`, `FunctionNode` |
 | [tests/e2e/sql/](../tests/e2e/sql/) | SQL-based E2E tests (numbered, run sequentially) |
 | [sql/pg_durable--0.1.1.sql](../sql/pg_durable--0.1.1.sql) | First version install SQL fixture (for upgrade testing) |
-| [sql/duroxide_upstream/](../sql/duroxide_upstream/) | Checked-in copies of duroxide-pg-opt migrations |
-| [scripts/gen-duroxide-install-sql.sh](../scripts/gen-duroxide-install-sql.sh) | Generates combined install SQL from upstream copies |
-| [scripts/verify-duroxide-migrations.sh](../scripts/verify-duroxide-migrations.sh) | Verifies upstream copies match duroxide-pg-opt |
 ## Development Commands
 
 ```bash
@@ -87,55 +84,13 @@ The new `.so` must work against **all** previous versions' schemas (same major v
 
 **Adding E2E test:** Create numbered SQL file in `tests/e2e/sql/`, follow existing pattern (see [02_sequence.sql](../tests/e2e/sql/02_sequence.sql))
 
-**Changing the extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](../docs/upgrade-testing.md)
+**Changing the `df` extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Note: duroxide schema changes do not require extension upgrade script changes — the BGW applies them automatically at startup.
 
 For Scenario A, treat the upgrade path as the contract for already-shipped versions: before release, fresh install for the new version should match what an existing customer gets by installing the previous version and applying the upgrade chain.
 
+**Updating duroxide-pg-opt dependency**: Update the submodule (`cd duroxide-pg-opt && git fetch && git checkout <new-ref>`), then rebuild. The BGW's embedded migration files update automatically via `include_dir!`. No changes to extension SQL, upgrade scripts, or any checked-in SQL copies are needed.
+
 **Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](../docs/upgrade-testing.md) for the full upgrade testing strategy.
-
-## Duroxide Migration Sync Workflow
-
-pg_durable includes the duroxide-pg-opt schema DDL as extension SQL to ensure proper PostgreSQL ownership semantics. This requires maintaining checked-in copies of upstream migrations.
-
-### Migration Files
-
-- **Upstream source**: `duroxide-pg-opt/migrations/000*.sql` (from duroxide-pg-opt submodule)
-- **Checked-in copies**: [sql/duroxide_upstream/](../sql/duroxide_upstream/) (verbatim copies of upstream)
-- **Combined install SQL**: [sql/duroxide_install.sql](../sql/duroxide_install.sql) (generated from copies)
-- **Extension integration**: [src/lib.rs](../src/lib.rs) includes via `extension_sql_file!("../sql/duroxide_install.sql")`
-
-### Scripts
-
-**Generate combined install SQL:**
-```bash
-./scripts/gen-duroxide-install-sql.sh
-# Creates sql/duroxide_install.sql from sql/duroxide_upstream/*.sql
-```
-
-**Verify migrations match upstream:**
-```bash
-# Ensure the submodule is initialized
-git submodule update --init
-./scripts/verify-duroxide-migrations.sh
-```
-
-### When to Update Migrations
-
-1. **Upgrading duroxide-pg-opt dependency**: When updating the submodule to a new commit/branch:
-   - Update the submodule: `cd duroxide-pg-opt && git fetch && git checkout <new-ref>`
-   - Copy new/updated migration files from `duroxide-pg-opt/migrations/` to `sql/duroxide_upstream/`
-   - Run `./scripts/gen-duroxide-install-sql.sh` to regenerate install SQL
-   - Run `./scripts/verify-duroxide-migrations.sh` to confirm sync
-   - Commit the submodule update, upstream copies, and generated install SQL
-
-2. **After cloning pg_durable**: Run `git submodule update --init`, CI automatically verifies migrations on every PR
-
-### Important Notes
-
-- ⚠️ **Never manually edit `sql/duroxide_install.sql`** - it's generated
-- ⚠️ **Keep `sql/duroxide_upstream/` in sync** with the duroxide-pg-opt submodule
-- ✅ **CI enforces sync** - uses `actions/checkout` with `submodules: true` and runs verification
-- ✅ **Extension owns the schema** - duroxide schema/tables are created by `CREATE EXTENSION pg_durable`
 
 ## Dependencies
 
@@ -225,9 +180,8 @@ SELECT 'TEST PASSED' AS result;
 Pull requests automatically run the CI workflow (`.github/workflows/ci.yml`):
 
 1. **Format Check**: `cargo fmt --check`
-2. **Migration Verification**: Uses submodule checkout and runs `./scripts/verify-duroxide-migrations.sh`
-3. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
-4. **Upgrade Tests**: `./scripts/test-upgrade.sh` (schema comparison + backward compat)
+2. **Clippy & Tests**: `cargo clippy`, `cargo pgrx test pg17`, and `./scripts/test-e2e-local.sh`
+3. **Upgrade Tests**: `./scripts/test-upgrade.sh` (schema comparison + backward compat)
 
 All checks must pass before a PR can be merged. Configure branch protection rules in GitHub to enforce this.
 

@@ -18,6 +18,38 @@ static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 /// Cached Duroxide client with connection pool.
 static DUROXIDE_CLIENT: OnceLock<Client> = OnceLock::new();
 
+/// Check whether the background worker has finished initializing the duroxide
+/// schema for the current binary's expected schema version.
+///
+/// Returns `false` if `duroxide._worker_ready` does not exist, has no row, or
+/// has a `schema_version` below `WORKER_SCHEMA_VERSION`. This is a fast SPI
+/// read called once per session on the first call to any `df.*` function that
+/// needs the duroxide client.
+fn is_worker_ready() -> bool {
+    // First check if the readiness table exists via the catalogue.  Querying
+    // the non-existent table directly would raise a PostgreSQL ERROR that
+    // aborts the current (sub)transaction — even if caught in Rust.
+    let table_exists = Spi::get_one::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
+         WHERE schemaname = 'duroxide' AND tablename = '_worker_ready')",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+
+    if !table_exists {
+        return false;
+    }
+
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= $1)",
+        &[crate::WORKER_SCHEMA_VERSION.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
 /// Get or create the cached tokio runtime.
 fn get_client_runtime() -> &'static Runtime {
     CLIENT_RUNTIME.get_or_init(|| {
@@ -32,6 +64,12 @@ fn get_client_runtime() -> &'static Runtime {
 fn get_duroxide_client() -> Result<&'static Client, String> {
     if let Some(client) = DUROXIDE_CLIENT.get() {
         return Ok(client);
+    }
+
+    if !is_worker_ready() {
+        return Err(
+            "pg_durable background worker not yet initialized — try again in a moment".to_string(),
+        );
     }
 
     let rt = get_client_runtime();

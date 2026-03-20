@@ -143,13 +143,15 @@ pub fn backend_provider_config() -> duroxide_pg_opt::ProviderConfig {
 
 /// Create a `ProviderConfig` for the background worker runtime.
 ///
-/// - `VerifyOnly`: never create schema/tables, reject unknown migrations
+/// - `ApplyAll`: applies pending duroxide migrations at startup; creates tables
+///   inside the extension-owned `duroxide` schema. Safe because the BGW verifies
+///   schema ownership via `pg_depend` before calling `PostgresProvider::new_with_config`.
 /// - Long-polling intentionally left enabled (default) for the BGW runtime,
 ///   unlike backend sessions where it's disabled to save resources.
 pub fn worker_provider_config() -> duroxide_pg_opt::ProviderConfig {
     let mut config = duroxide_pg_opt::ProviderConfig::default();
     config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
-    config.migration_policy = duroxide_pg_opt::MigrationPolicy::VerifyOnly;
+    config.migration_policy = duroxide_pg_opt::MigrationPolicy::ApplyAll;
     config
 }
 

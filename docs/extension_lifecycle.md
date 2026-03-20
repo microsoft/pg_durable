@@ -2,7 +2,7 @@
 
 **Status:** Implemented  
 **Last Updated:** 2026-03-01  
-**Dependencies:** duroxide-pg-opt pinodeca/initialization branch
+**Dependencies:** duroxide-pg-opt (git submodule)
 
 > **Note:** This document describes the extension lifecycle management, background worker behavior, and duroxide-pg-opt schema integration in pg_durable.
 
@@ -91,7 +91,7 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
 - May create duroxide schema before background worker does
 - No coordination with background worker lifecycle
 
-## Proposed Architecture
+## Architecture
 
 ### 1. Extension-Managed Schema *and* DDL (implemented)
 
@@ -127,15 +127,17 @@ Two variants are tempting but both lose the extension ownership model:
 
 Given those trade-offs, running the DDL as extension SQL is the clearest, most PostgreSQL-native approach.
 
-### 2. Background Worker: `MigrationPolicy::VerifyOnly` by default
+### 2. Background Worker: `MigrationPolicy::ApplyAll`
 
-duroxide-pg-opt 0.1.18 provides `MigrationPolicy::VerifyOnly` which:
-- **Never executes DDL** - no schema creation, no table creation
-- Verifies schema exists and is at expected version
-- Errors with clear messages if schema missing or version mismatch
-- Errors if schema is ahead of code (`reject_unknown_migrations`)
+duroxide-pg-opt provides `MigrationPolicy::ApplyAll` which:
+- Applies pending migrations from the embedded migration files
+- Creates the schema tables if they don't yet exist
+- Records applied migrations in `_duroxide_migrations`
+- Unconditionally rejects unknown migrations via `check_no_unknown_migrations()` (schema ahead of code — indicates a downgrade scenario)
 
-This eliminates any need for the background worker to execute DDL.
+The BGW verifies that the `duroxide` schema is owned by the `pg_durable` extension (via `pg_depend`) before calling `PostgresProvider::new_with_config`. This prevents the BGW from migrating a schema that was not created by `CREATE EXTENSION`.
+
+All backend sessions (`df.*` functions) continue to use `MigrationPolicy::VerifyOnly` — they never execute DDL.
 
 ### 3. Background Worker Lifecycle State Machine (implemented, MVP polling)
 
@@ -162,9 +164,18 @@ This eliminates any need for the background worker to execute DDL.
 │      │                     │                           │                │
 │      │                     └──── Yes ───────────┐      │                │
 │      │                                          │      │                │
-│      └──── Yes ──────────────────────────────> [INITIALIZING]          │
+│      └──── Yes ─────────────────> [CHECKING_SCHEMA_OWNERSHIP]         │
 │                                                  │                      │
-│                                     Create duroxide store               │
+│                                     Check pg_depend: is duroxide        │
+│                                     schema owned by pg_durable ext?     │
+│                                                  │                      │
+│                  Not owned ──────────────────────┤                      │
+│                  (retry after poll interval)      │                      │
+│                                                  │ Owned                │
+│                                                  ▼                      │
+│                                            [INITIALIZING]               │
+│                                                  │                      │
+│                                     Apply pending migrations (ApplyAll) │
 │                                     Create connection pool              │
 │                                     Start duroxide runtime              │
 │                                                  │                      │
@@ -196,8 +207,8 @@ This eliminates any need for the background worker to execute DDL.
 See `src/worker.rs` for the full implementation. The main loop in `run_duroxide_runtime()` drives the state machine:
 
 1. `wait_for_extension_creation()` polls `pg_extension` via a reusable `sqlx::PgPool` (max 1 connection) every 5 seconds.
-2. `initialize_duroxide_runtime()` creates a `PostgresProvider` using `worker_provider_config()` (from `src/types.rs`) which sets `VerifyOnly` + `reject_unknown_migrations`, with long-polling intentionally left enabled for work dispatch.
-3. After successful init, the BGW writes a **sentinel row** (`df._worker_epoch`) with a fresh UUID. This sentinel detects drop+recreate scenarios that pure `pg_extension` polling would miss (see below).
+2. `initialize_duroxide_runtime()` first checks that the `duroxide` schema is owned by the `pg_durable` extension (via `pg_depend`). If not, it logs a warning and retries after the poll interval. It then releases extension ownership of any duroxide objects (no-op on fresh installs; needed for upgrades from ≤0.1.1). Then it creates a `PostgresProvider` using `worker_provider_config()` (from `src/types.rs`) which sets `ApplyAll`, with long-polling intentionally left enabled for work dispatch. Unknown-migration rejection is always enforced unconditionally by the provider.
+3. After the runtime starts, the BGW writes a **readiness record** (`duroxide._worker_ready`) with the current `WORKER_SCHEMA_VERSION`, then writes an **epoch sentinel** (`df._worker_epoch`) with a fresh UUID. The readiness record signals backend sessions that the duroxide schema is fully initialized; the epoch sentinel detects drop+recreate scenarios (see below).
 4. `run_until_extension_dropped_or_shutdown()` uses `tokio::select!` to interleave shutdown checks (every 1 second, via direct volatile read) with epoch-sentinel checks (every 5 seconds via the shared polling pool).
 
 #### Epoch sentinel: detecting drop+recreate
@@ -235,7 +246,10 @@ Key design choices vs. the original sketch:
 All backend call sites (client, monitoring, explain) use `backend_provider_config()` from `src/types.rs`, which sets:
 - `VerifyOnly`: never create schema/tables
 - `long_poll.enabled = false`: avoid dedicated listener connection per backend session
-- `reject_unknown_migrations = true`: fail if schema is ahead of code
+
+Unknown-migration rejection is enforced unconditionally by the provider (not a config flag).
+
+Additionally, backend sessions check `duroxide._worker_ready` before instantiating the duroxide client. If the BGW has not yet initialized the schema for the current binary's expected version, the function raises a clear error: `"pg_durable background worker not yet initialized — try again in a moment"`.
 
 See `src/client.rs::get_duroxide_client()` for the cached-client implementation.
 
@@ -301,16 +315,16 @@ This design uses `sqlx` polling (checking `pg_extension` table every 5 seconds):
 
 1. **Background worker does minimal work until the extension exists**
     - Implementation: poll `pg_extension` (via `sqlx`) until `pg_durable` exists.
-    - Only after extension creation does the BGW initialize `PostgresProvider` + pools + duroxide runtime.
-    - Uses `VerifyOnly` so it never creates the duroxide schema/tables.
+    - Only after extension creation does the BGW verify duroxide schema ownership, then apply pending migrations via `ApplyAll`, initialize pools, and start the duroxide runtime.
 
-2. **Migrations are executed as extension SQL**
-    - `CREATE EXTENSION pg_durable;` creates the `duroxide` schema *and* all Duroxide provider objects.
-    - The schema objects are extension members (created by the extension install SQL).
+2. **Migrations are applied by the BGW**
+    - `CREATE EXTENSION pg_durable;` creates the `duroxide` schema as an extension-owned object.
+    - The BGW applies the Duroxide provider table DDL at startup via `MigrationPolicy::ApplyAll`.
+    - Poll `duroxide._worker_ready` to check that the BGW has fully initialized.
 
 3. **Strict runtime behavior (simple and conservative)**
-    - Background worker and all `df.*` functions use `MigrationPolicy::VerifyOnly`.
-    - If migrations are missing/behind/incompatible, everything fails closed:
+    - Background worker uses `MigrationPolicy::ApplyAll` to apply pending migrations; all `df.*` backend functions use `MigrationPolicy::VerifyOnly`.
+    - If migrations are missing/behind/incompatible for backend functions, everything fails closed:
       - no orchestration execution
       - no new orchestration submission
       - monitoring returns errors or empty results (depending on API)
@@ -342,7 +356,7 @@ Because the Duroxide schema DDL runs inside `CREATE EXTENSION` as extension SQL,
 - **Multi-database support**: Currently, the background worker connects to one database only. Multi-database support would require multiple background worker processes or a more complex connection pooling strategy.
 - **DROP EXTENSION while workflows are running** (currently undefined; BGW may error while writing to `df.*`).
 - **Extension upgrade scripts**: using `pg_durable--X--Y.sql` to apply incremental changes across versions.
-  - Note: the current `CREATE SCHEMA IF NOT EXISTS duroxide;` in the install SQL is safe for fresh installs but needs care in upgrade scripts — `IF NOT EXISTS` could mask situations where the schema already exists from a non-extension source.
+  - Note: the install SQL uses `CREATE SCHEMA duroxide;` (no `IF NOT EXISTS`) to prevent schema-squatting. Duroxide DDL inside the schema is applied by the BGW, not by extension SQL.
 
 ## Testing Strategy
 
@@ -360,7 +374,7 @@ Because the Duroxide schema DDL runs inside `CREATE EXTENSION` as extension SQL,
    - Verify no duroxide schema created (background worker waiting)
    - Run CREATE EXTENSION pg_durable
    - Verify duroxide schema created (owned by extension)
-    - Verify duroxide tables/functions created (by extension SQL)
+    - Verify duroxide tables/functions created (by BGW via ApplyAll)
     - Verify background worker initializes eventually
    - Verify df functions work
 
@@ -402,8 +416,7 @@ Because the Duroxide schema DDL runs inside `CREATE EXTENSION` as extension SQL,
 
 ### Where this is intentionally non-idiomatic (trade-off)
 
-- We duplicate upstream migration SQL as checked-in files and must keep them in sync with `duroxide-pg-opt/migrations`.
-    - This is enforced via `scripts/verify-duroxide-migrations.sh`.
+- Duroxide provider DDL is applied by the BGW at startup (`ApplyAll`) rather than embedded in extension SQL. This decouples the duroxide schema lifecycle from `ALTER EXTENSION UPDATE`, allowing duroxide-pg-opt upgrades without extension upgrade scripts.
 
 ### Rationale for Polling in MVP
 
@@ -415,11 +428,11 @@ While processUtility hooks are the "correct" PostgreSQL approach, polling is acc
 
 ### Trade-offs with duroxide-pg-opt
 
-We treat the Duroxide provider schema as part of pg_durable’s extension SQL:
+The duroxide schema is extension-owned but its contents are BGW-managed:
 
-- ✅ PostgreSQL-native lifecycle: install/upgrade/drop go through extension scripts.
-- ✅ Clear ownership: objects are extension members.
-- ⚠️ Sync burden: we must keep `sql/duroxide_upstream/` aligned with upstream `duroxide-pg-opt/migrations/`.
+- ✅ PostgreSQL-native lifecycle: install/upgrade/drop go through extension scripts (for `df.*` schema) and BGW-applied migrations (for `duroxide.*` schema).
+- ✅ Clear ownership: the `duroxide` schema is extension-owned; objects inside it are BGW-managed.
+- ✅ Decoupled: duroxide-pg-opt upgrades do not require changes to extension SQL or upgrade scripts.
 
 ### Known Limitations (future work)
 
@@ -450,7 +463,7 @@ We treat the Duroxide provider schema as part of pg_durable’s extension SQL:
 
 1. **duroxide schema creation timing**
     - **Current behavior:** Schema/tables created implicitly by BGW and backend calls.
-    - **New behavior:** `CREATE EXTENSION` creates the schema and all Duroxide provider objects (extension SQL).
+    - **New behavior:** `CREATE EXTENSION` creates the empty `duroxide` schema (extension-owned). The BGW populates it via `ApplyAll` at startup.
    
 2. **Background worker wait behavior**
     - **New behavior:** BGW waits for extension existence, and also stays in "waiting" when migrations are missing/behind (VerifyOnly fails).
@@ -470,7 +483,7 @@ We treat the Duroxide provider schema as part of pg_durable’s extension SQL:
    - No need for upstream changes or manual schema checks
 
 2. **How should pg_durable avoid implicit schema creation?**
-    - ✅ Use `VerifyOnly` for BGW and all `df.*` functions.
+    - ✅ Use `VerifyOnly` for all `df.*` backend functions; BGW uses `ApplyAll` after verifying schema ownership.
 
 3. **Should CREATE EXTENSION validate shared_preload_libraries and target database?**
     - ✅ **RESOLVED:** Validation implemented during extension creation

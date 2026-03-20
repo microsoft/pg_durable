@@ -334,6 +334,37 @@ setup_b2_tables() {
     run_sql_capture "DROP TABLE IF EXISTS test_upgrade_b2_log; CREATE TABLE test_upgrade_b2_log (id SERIAL PRIMARY KEY, kind TEXT, msg TEXT);" >/dev/null
 }
 
+# Polls duroxide._worker_ready until the BGW has initialized the duroxide
+# schema. Must be called after CREATE EXTENSION before any df.start() calls.
+#
+# For v0.2.0+ the BGW writes a row to duroxide._worker_ready after ApplyAll
+# completes. For schemas that predate that table (v0.1.1 and earlier), falls
+# back to polling df._worker_epoch — the BGW writes that sentinel only after
+# PostgresProvider::new_with_config() completes.
+wait_for_ready() {
+    local attempts=0
+    local has_worker_ready
+    has_worker_ready=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = 'duroxide' AND table_name = '_worker_ready')") || true
+
+    while [ $attempts -lt 60 ]; do
+        if [ "$has_worker_ready" = "t" ]; then
+            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1)") || return 1
+        else
+            # Old schemas (pre-0.2.0) don't have duroxide._worker_ready.
+            # The BGW writes a row to df._worker_epoch after ApplyAll
+            # completes, so a non-empty _worker_epoch means migrations
+            # are done.
+            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM df._worker_epoch)") || return 1
+        fi
+        [ "$result" = "t" ] && return 0
+        sleep 0.5
+        attempts=$((attempts + 1))
+    done
+    echo ""
+    echo "    Timed out waiting for duroxide._worker_ready after 30s"
+    return 1
+}
+
 # Creates the extension at a specific version by installing from that major's
 # first checked-in fixture and chaining ALTER EXTENSION UPDATE if needed.
 create_extension_at_version() {
@@ -627,6 +658,72 @@ test_b1_dsl_chain() {
     assert_sql_contains "SELECT df.sql('SELECT 1') ~> df.sql('SELECT 2');" '"node_type":"THEN"'
 }
 
+# Verify that release_extension_owned_duroxide_objects de-registered all
+# duroxide objects from the extension.  On a fresh install there are none;
+# on a v0.1.1-schema upgrade the BGW must have removed them before this runs.
+test_b1_no_extension_owned_duroxide_objects() {
+    assert_sql_equals \
+        "SELECT COUNT(*)::int = 0
+           FROM (
+             -- extension-owned tables in duroxide schema
+             SELECT 1
+               FROM pg_class c
+               JOIN pg_namespace n  ON n.oid = c.relnamespace
+               JOIN pg_depend d     ON d.objid = c.oid
+                                   AND d.classid = 'pg_class'::regclass
+                                   AND d.deptype = 'e'
+               JOIN pg_extension e  ON e.oid = d.refobjid
+                                   AND e.extname = 'pg_durable'
+              WHERE n.nspname = 'duroxide' AND c.relkind = 'r'
+             UNION ALL
+             -- extension-owned indexes in duroxide schema
+             SELECT 1
+               FROM pg_class c
+               JOIN pg_namespace n  ON n.oid = c.relnamespace
+               JOIN pg_depend d     ON d.objid = c.oid
+                                   AND d.classid = 'pg_class'::regclass
+                                   AND d.deptype = 'e'
+               JOIN pg_extension e  ON e.oid = d.refobjid
+                                   AND e.extname = 'pg_durable'
+              WHERE n.nspname = 'duroxide' AND c.relkind = 'i'
+             UNION ALL
+             -- extension-owned sequences in duroxide schema
+             SELECT 1
+               FROM pg_class c
+               JOIN pg_namespace n  ON n.oid = c.relnamespace
+               JOIN pg_depend d     ON d.objid = c.oid
+                                   AND d.classid = 'pg_class'::regclass
+                                   AND d.deptype = 'e'
+               JOIN pg_extension e  ON e.oid = d.refobjid
+                                   AND e.extname = 'pg_durable'
+              WHERE n.nspname = 'duroxide' AND c.relkind = 'S'
+             UNION ALL
+             -- extension-owned functions in duroxide schema
+             SELECT 1
+               FROM pg_proc p
+               JOIN pg_namespace n  ON n.oid = p.pronamespace
+               JOIN pg_depend d     ON d.objid = p.oid
+                                   AND d.classid = 'pg_proc'::regclass
+                                   AND d.deptype = 'e'
+               JOIN pg_extension e  ON e.oid = d.refobjid
+                                   AND e.extname = 'pg_durable'
+              WHERE n.nspname = 'duroxide'
+             UNION ALL
+             -- extension-owned triggers in duroxide schema
+             SELECT 1
+               FROM pg_trigger t
+               JOIN pg_class c      ON c.oid = t.tgrelid
+               JOIN pg_namespace n  ON n.oid = c.relnamespace
+               JOIN pg_depend d     ON d.objid = t.oid
+                                   AND d.classid = 'pg_trigger'::regclass
+                                   AND d.deptype = 'e'
+               JOIN pg_extension e  ON e.oid = d.refobjid
+                                   AND e.extname = 'pg_durable'
+              WHERE n.nspname = 'duroxide'
+           ) owned;" \
+        "t"
+}
+
 test_b1_start_and_complete() {
     B1_INSTANCE_ID=$(run_sql_capture "SELECT df.start('INSERT INTO test_upgrade_b1_log (msg) VALUES (''{test_key}'') RETURNING msg', 'b1-var-capture');") || return 1
 
@@ -675,6 +772,8 @@ else
         # Reconstruct old schema: install the target major's first version, then chain upgrades to target
         create_extension_at_version "$B1_VERSION"
         setup_b1_tables
+        run_test "B1 [v${B1_VERSION}]: Wait for BGW readiness" wait_for_ready
+        run_test "B1 [v${B1_VERSION}]: No extension-owned duroxide objects" test_b1_no_extension_owned_duroxide_objects
         B1_INSTANCE_ID=""
 
         run_test "B1 [v${B1_VERSION}]: df.setvar()" test_b1_setvar
@@ -710,6 +809,7 @@ test_b2_data_survives_upgrade() {
     # Step 1: Install previous version and create test data
     create_extension_at_version "$PREV_VERSION"
     setup_b2_tables || return 1
+    wait_for_ready || return 1
 
     assert_sql_equals "SELECT df.clearvars();" "OK" || return 1
     assert_sql_equals "SELECT df.setvar('b2_key', 'b2_value');" "OK" || return 1

@@ -18,14 +18,13 @@ END $$;
 
 -- ---------------------------------------------------------------------------
 -- Reusable helper: wait for the background worker to fully reinitialize
--- after DROP/CREATE EXTENSION. Called by tests 25, 28, 29.
+-- after DROP/CREATE EXTENSION. Called by tests 25, 28, 29 and at the end
+-- of this setup file so all tests start with the BGW fully ready.
 --
--- After CREATE EXTENSION, the new df._worker_epoch table is empty. The OLD
--- runtime (from before the drop) may still be running; its epoch sentinel
--- check (every 5s) will eventually detect the sentinel is gone, shut down,
--- and reinitialize. We wait for this cycle by:
---   1. Polling df._worker_epoch until non-empty (sentinel written).
---   2. Submitting a trivial df.sql('SELECT 1') and waiting for completion.
+-- After CREATE EXTENSION, the BGW detects the new extension, applies all
+-- duroxide migrations via ApplyAll, then writes a readiness record to
+-- duroxide._worker_ready. We poll that table directly because
+-- is_worker_ready() is an internal Rust function, not a SQL-callable API.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public._e2e_wait_for_worker_ready(
     p_timeout_secs INT DEFAULT 30
@@ -34,20 +33,31 @@ LANGUAGE plpgsql AS $$
 DECLARE
     attempts     INT := 0;
     max_attempts INT := p_timeout_secs * 10;  -- poll every 100ms
-    sentinel_exists BOOLEAN;
+    table_exists BOOLEAN;
+    is_ready     BOOLEAN;
 BEGIN
     LOOP
-        SELECT EXISTS(SELECT 1 FROM df._worker_epoch) INTO sentinel_exists;
-        EXIT WHEN sentinel_exists OR attempts >= max_attempts;
+        SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'duroxide' AND table_name = '_worker_ready'
+        ) INTO table_exists;
+
+        IF table_exists THEN
+            SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1) INTO is_ready;
+        ELSE
+            is_ready := FALSE;
+        END IF;
+
+        EXIT WHEN is_ready OR attempts >= max_attempts;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
 
-    IF NOT sentinel_exists THEN
-        RAISE EXCEPTION 'worker did not reinitialize after extension recreate (no sentinel after %s s)', p_timeout_secs;
+    IF NOT is_ready THEN
+        RAISE EXCEPTION 'Background worker did not become ready after % seconds. Check server logs.', p_timeout_secs;
     END IF;
 
-    RAISE NOTICE 'Worker epoch sentinel detected — full restart cycle complete';
+    RAISE NOTICE 'Background worker ready (all migrations applied)';
 END $$;
 
 -- ---------------------------------------------------------------------------
@@ -191,5 +201,11 @@ INSERT INTO playground.staging (data, source_id) VALUES
     ('{"product": "Gadget X", "qty": 5}', 1003);
 
 SELECT 'Playground schema setup complete' AS status;
+
+-- Wait for the background worker to finish applying migrations before any
+-- test can call df.start(). This prevents races where df.start() is rejected
+-- because the duroxide schema is not yet initialised.
+SELECT public._e2e_wait_for_worker_ready(60);
+
 SELECT 'TEST PASSED' AS result;
 

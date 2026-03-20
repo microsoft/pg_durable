@@ -173,9 +173,6 @@ jobs:
             echo "PostgreSQL ${{ matrix.pg_version }} already initialized, skipping download"
           fi
 
-      - name: Verify duroxide migrations match upstream
-        run: ./scripts/verify-duroxide-migrations.sh
-
       - name: Run clippy
         run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
 

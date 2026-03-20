@@ -75,13 +75,9 @@ pg_durable requires:
 CREATE EXTENSION pg_durable;
 ```
 
-**What happens during `CREATE EXTENSION`:**
-- pg_durable creates its own tables in the `df` schema (for tracking function graphs)
-- It creates the `duroxide` schema and all required tables (for durable execution state)
-- The background worker (started by `shared_preload_libraries`) detects the extension and initializes the runtime
-- Within a few seconds, the system is ready to execute durable functions
+After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
 
-> ⚠️ **Important**: The background worker waits for `CREATE EXTENSION` to complete before starting. If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
+> ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
 
 ### Your First Durable Function
 
@@ -1384,13 +1380,13 @@ SELECT df.result('a1b2c3d4');
 Check whether the background worker is alive and healthy:
 
 ```sql
-SELECT epoch_id, started_at, last_seen_at,
+SELECT started_at, last_seen_at,
        now() - last_seen_at AS time_since_last_heartbeat
   FROM df._worker_epoch;
 ```
 
 - `time_since_last_heartbeat < 15 seconds` → worker is alive (recent heartbeat)
-- No rows in `df._worker_epoch` or large `time_since_last_heartbeat` → worker is likely down or hasn't initialized yet
+- No rows in `df._worker_epoch` → worker hasn't initialized yet
 
 The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
 
@@ -1566,13 +1562,8 @@ Failed to connect to duroxide store: ...
 
 1. **Extension not created**: Run `CREATE EXTENSION pg_durable`
 
-2. **Schema migration mismatch**: The `duroxide` schema exists but is at an incompatible version
-   - **Solution**: Drop and recreate the extension:
-     ```sql
-     DROP EXTENSION pg_durable CASCADE;
-     CREATE EXTENSION pg_durable;
-     ```
-   
+2. **Background worker not yet ready**: After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Simply retry after a short delay — once the worker finishes, the error resolves on its own.
+
 3. **Database connection issues**: PostgreSQL is not accepting connections
    - Check PostgreSQL is running
    - Verify connection string environment variables if customized
@@ -1603,6 +1594,8 @@ pg_durable: waiting for CREATE EXTENSION pg_durable...
 - It shuts down the duroxide runtime (takes ~10 seconds)
 - Returns to waiting for extension creation
 - Any in-flight workflows are terminated
+
+> ⚠️ **`CASCADE` is always required.** The duroxide schema contains tables and functions created by the background worker that are not directly owned by the extension. `DROP EXTENSION pg_durable` (without `CASCADE`) will fail with an error. Always use `DROP EXTENSION pg_durable CASCADE`.
 
 **Solution**: Wait 15-20 seconds after `DROP EXTENSION` before recreating:
 ```sql

@@ -32,6 +32,12 @@ pub mod worker;
 // Re-export key types for tests
 pub use types::Durofut;
 
+/// Monotonically increasing schema version written to `duroxide._worker_ready`
+/// by the background worker after successful initialization. Increment whenever
+/// a new binary introduces new duroxide-pg-opt migration scripts or any other
+/// BGW-applied duroxide schema change.
+pub const WORKER_SCHEMA_VERSION: i32 = 1;
+
 ::pgrx::pg_module_magic!(name, version);
 
 // ============================================================================
@@ -275,12 +281,18 @@ END $$;
 );
 
 // ============================================================================
-// Duroxide Schema (experimental hand-over)
+// Duroxide Schema
 // ============================================================================
 
-extension_sql_file!(
-    "../sql/duroxide_install.sql",
-    name = "duroxide_migrations_install",
+extension_sql!(
+    r#"
+-- The duroxide schema is created here so the extension owns it.
+-- No IF NOT EXISTS: fails loudly if a duroxide schema already exists,
+-- preventing adoption of a potentially attacker-crafted schema.
+-- The background worker populates this schema at startup via ApplyAll.
+CREATE SCHEMA duroxide;
+"#,
+    name = "create_duroxide_schema",
     requires = ["validate_database"]
 );
 

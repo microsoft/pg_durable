@@ -15,3 +15,36 @@ SELECT nspname FROM pg_namespace WHERE nspname = 'df';
  df
 (1 row)
 
+-- Wait for the background worker to apply duroxide migrations.
+-- The BGW populates the duroxide schema asynchronously after CREATE EXTENSION;
+-- subsequent tests that call df.start() will fail if this isn't done first.
+-- We poll duroxide._worker_ready directly (is_worker_ready is internal Rust,
+-- not exposed as a SQL function).
+DO $$
+DECLARE
+    attempts     INT := 0;
+    table_exists BOOLEAN;
+    ready        BOOLEAN;
+BEGIN
+    LOOP
+        SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'duroxide' AND table_name = '_worker_ready'
+        ) INTO table_exists;
+
+        IF table_exists THEN
+            SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1) INTO ready;
+        ELSE
+            ready := FALSE;
+        END IF;
+
+        EXIT WHEN ready OR attempts >= 300;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    IF NOT ready THEN
+        RAISE EXCEPTION 'Background worker not ready after 30s';
+    END IF;
+    RAISE NOTICE 'Background worker ready';
+END $$;
+NOTICE:  Background worker ready
