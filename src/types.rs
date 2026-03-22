@@ -176,7 +176,10 @@ pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
-/// Evaluate a condition result to determine if it's truthy
+/// Evaluate a condition result to determine if it's truthy.
+/// Uses iter().next() for first-column extraction — picks an arbitrary first
+/// column, which is acceptable here because conditions are single-value
+/// queries (SELECT <bool_expr>).
 pub fn evaluate_condition(result: &str) -> Result<bool, String> {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
         if let Some(rows) = json.get("rows").and_then(|r| r.as_array()) {
@@ -233,20 +236,354 @@ pub struct SystemVars {
     pub label: Option<String>,
 }
 
+// ============================================================================
+// Result Substitution Helpers
+// ============================================================================
+
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Parse an identifier at the start of `s`: [a-zA-Z_][a-zA-Z0-9_]*
+fn parse_identifier(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !is_ident_start(bytes[0]) {
+        return "";
+    }
+    let len = bytes.iter().take_while(|&&b| is_ident_continue(b)).count();
+    &s[..len]
+}
+
+/// Validate that a result name is a safe SQL identifier: [a-zA-Z_][a-zA-Z0-9_]*
+/// Returns Ok(()) if valid, Err with message if not.
+pub fn validate_result_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("result name cannot be empty".to_string());
+    }
+    let parsed = parse_identifier(name);
+    if parsed.len() != name.len() {
+        return Err(format!(
+            "result name '{}' is not a valid identifier — must match [a-zA-Z_][a-zA-Z0-9_]*",
+            name
+        ));
+    }
+    Ok(())
+}
+
+/// Double-quote a SQL identifier, escaping any internal double-quotes.
+fn quote_identifier(name: &str) -> String {
+    let escaped = name.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+/// Format a JSON value for use in a SQL or raw context.
+fn format_value(val: &serde_json::Value, for_sql: bool) -> String {
+    match val {
+        serde_json::Value::String(s) => {
+            if for_sql {
+                let escaped = s.replace('\'', "''");
+                format!("'{escaped}'")
+            } else {
+                s.clone()
+            }
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        _ => {
+            if for_sql {
+                let s = val.to_string();
+                let escaped = s.replace('\'', "''");
+                format!("'{escaped}'")
+            } else {
+                val.to_string()
+            }
+        }
+    }
+}
+
+/// Extract first-column-first-row (bare `$name` / `$name?`).
+fn extract_first_column_value(
+    name: &str,
+    json_str: &str,
+    null_safe: bool,
+    for_sql: bool,
+) -> Result<String, String> {
+    let json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => {
+            // Not JSON — return raw value (backward compat for HTTP responses etc.)
+            return Ok(if for_sql {
+                let escaped = json_str.replace('\'', "''");
+                format!("'{escaped}'")
+            } else {
+                json_str.to_string()
+            });
+        }
+    };
+
+    if let Some(rows) = json.get("rows").and_then(|r| r.as_array()) {
+        if rows.is_empty() {
+            return if null_safe {
+                Ok("NULL".to_string())
+            } else {
+                Err(format!("${name} has no rows — query returned zero results"))
+            };
+        }
+
+        let first_row = rows[0]
+            .as_object()
+            .ok_or_else(|| format!("${name}: first row is not an object"))?;
+        let (_, val) = first_row
+            .iter()
+            .next()
+            .ok_or_else(|| format!("${name}: first row has no columns"))?;
+
+        if val.is_null() {
+            return if null_safe {
+                Ok("NULL".to_string())
+            } else {
+                Err(format!(
+                    "${name} is NULL — first column of first row is NULL"
+                ))
+            };
+        }
+
+        Ok(format_value(val, for_sql))
+    } else if for_sql {
+        let escaped = json_str.replace('\'', "''");
+        Ok(format!("'{escaped}'"))
+    } else {
+        Ok(json_str.to_string())
+    }
+}
+
+/// Extract a specific column from the first row (`$name.col` / `$name.col?`).
+/// Returns the original pattern when the column does not exist in the result.
+fn extract_column_value(
+    name: &str,
+    json_str: &str,
+    col: &str,
+    null_safe: bool,
+    for_sql: bool,
+) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|_| format!("${name}.{col}: result is not valid JSON"))?;
+
+    let rows = json
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| format!("${name}.{col}: result has no rows array"))?;
+
+    if rows.is_empty() {
+        return if null_safe {
+            Ok("NULL".to_string())
+        } else {
+            Err(format!("${name} has no rows — query returned zero results"))
+        };
+    }
+
+    let first_row = rows[0]
+        .as_object()
+        .ok_or_else(|| format!("${name}.{col}: first row is not an object"))?;
+
+    let val = match first_row.get(col) {
+        Some(v) => v,
+        None => {
+            // Missing column — leave the pattern as-is so PostgreSQL reports the error
+            let suffix = if null_safe { "?" } else { "" };
+            return Ok(format!("${name}.{col}{suffix}"));
+        }
+    };
+
+    if val.is_null() {
+        return if null_safe {
+            Ok("NULL".to_string())
+        } else {
+            Err(format!("${name}.{col} is NULL"))
+        };
+    }
+
+    Ok(format_value(val, for_sql))
+}
+
+/// Expand `$name.*` into an inline `VALUES` subquery (SQL) or JSON array (raw).
+fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("${name}.* — invalid result JSON: {e}"))?;
+
+    let rows = json
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| format!("${name}.* — invalid result format"))?;
+
+    if !for_sql {
+        return Ok(serde_json::to_string(rows).unwrap());
+    }
+
+    let quoted_name = quote_identifier(name);
+
+    if rows.is_empty() {
+        return Ok(format!("(SELECT NULL WHERE false) AS {quoted_name}"));
+    }
+
+    let first_obj = rows[0]
+        .as_object()
+        .ok_or_else(|| format!("${name}.* — row is not an object"))?;
+    let col_names: Vec<&str> = first_obj.keys().map(|k| k.as_str()).collect();
+
+    let mut value_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let obj = row
+            .as_object()
+            .ok_or_else(|| format!("${name}.* — row is not an object"))?;
+        let vals: Vec<String> = col_names
+            .iter()
+            .map(|&col| match obj.get(col) {
+                Some(serde_json::Value::String(s)) => {
+                    let escaped = s.replace('\'', "''");
+                    format!("'{escaped}'::text")
+                }
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                Some(serde_json::Value::Bool(b)) => b.to_string(),
+                Some(serde_json::Value::Null) | None => "NULL".to_string(),
+                Some(other) => {
+                    let escaped = other.to_string().replace('\'', "''");
+                    format!("'{escaped}'::text")
+                }
+            })
+            .collect();
+        value_rows.push(format!("({})", vals.join(",")));
+    }
+
+    let col_list = col_names
+        .iter()
+        .map(|c| quote_identifier(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "(VALUES {}) AS {quoted_name}({col_list})",
+        value_rows.join(", ")
+    ))
+}
+
+/// Scan-based result substitution supporting:
+///   `$name.*`    — row-set expansion
+///   `$name.col?` — null-safe dot-notation
+///   `$name.col`  — strict dot-notation
+///   `$name?`     — null-safe scalar
+///   `$name`      — strict scalar
+fn substitute_results(
+    input: &str,
+    results: &std::collections::HashMap<String, String>,
+    for_sql: bool,
+) -> Result<String, String> {
+    if results.is_empty() {
+        return Ok(input.to_string());
+    }
+
+    // Sort names longest-first to avoid partial matches
+    let mut names: Vec<&str> = results.keys().map(|s| s.as_str()).collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let input_bytes = input.as_bytes();
+
+    while i < input.len() {
+        if input_bytes[i] != b'$' {
+            let ch = input[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        let after_dollar = &input[i + 1..];
+        let mut matched = false;
+
+        for name in &names {
+            if !after_dollar.starts_with(name) {
+                continue;
+            }
+
+            let after_name = &after_dollar[name.len()..];
+            let json_str = &results[*name];
+
+            // 1. $name.* — row-set expansion
+            if after_name.starts_with(".*") {
+                let replacement = expand_row_set(name, json_str, for_sql)?;
+                out.push_str(&replacement);
+                i += 1 + name.len() + 2; // $ + name + .*
+                matched = true;
+                break;
+            }
+
+            // 2/3. $name.col? or $name.col — dot-notation
+            if let Some(after_dot) = after_name.strip_prefix('.') {
+                let col = parse_identifier(after_dot);
+                if !col.is_empty() {
+                    let after_col = &after_dot[col.len()..];
+                    let null_safe = after_col.starts_with('?');
+                    let replacement =
+                        extract_column_value(name, json_str, col, null_safe, for_sql)?;
+                    out.push_str(&replacement);
+                    i += 1 + name.len() + 1 + col.len() + if null_safe { 1 } else { 0 };
+                    matched = true;
+                    break;
+                }
+                // No valid column name after dot — fall through to bare $name
+            }
+
+            // 4. $name? — null-safe scalar
+            if after_name.starts_with('?') {
+                let replacement = extract_first_column_value(name, json_str, true, for_sql)?;
+                out.push_str(&replacement);
+                i += 1 + name.len() + 1; // $ + name + ?
+                matched = true;
+                break;
+            }
+
+            // 5. $name — strict scalar (with word-boundary check)
+            if after_name.is_empty() || !is_ident_continue(after_name.as_bytes()[0]) {
+                let replacement = extract_first_column_value(name, json_str, false, for_sql)?;
+                out.push_str(&replacement);
+                i += 1 + name.len();
+                matched = true;
+                break;
+            }
+
+            // Next char is an identifier continuation — try shorter names
+        }
+
+        if !matched {
+            out.push('$');
+            i += 1;
+        }
+    }
+
+    Ok(out)
+}
+
 /// Substitute all variable types in a query:
 /// - {name} for user vars (from FunctionInput.vars) - values are inserted as-is
 /// - {sys_instance_id}, {sys_label} for system vars - inserted as-is
-/// - $name for result naming (from |=>) - may be quoted for JSON values
+/// - $name, $name.col, $name?, $name.col?, $name.* for named results (from |=>)
 ///
 /// User vars and system vars are substituted without quoting - the user should
 /// handle SQL escaping in the original query if needed.
+///
+/// Returns `Err` if a strict (non-`?`) pattern references a result with no rows
+/// or a NULL value.
 pub fn substitute_all_with_options(
     query: &str,
     results: &std::collections::HashMap<String, String>,
     vars: &std::collections::HashMap<String, String>,
     sys_vars: &SystemVars,
     quote_results_for_sql: bool,
-) -> String {
+) -> Result<String, String> {
     let mut result = query.to_string();
 
     // 1. Substitute system vars: {sys_*} (inserted as-is)
@@ -261,55 +598,8 @@ pub fn substitute_all_with_options(
         }
     }
 
-    // 3. Substitute results: $name
-    for (name, value) in results {
-        let pattern = format!("${name}");
-        if result.contains(&pattern) {
-            let replacement = if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
-                // Check if this is a SQL result format with rows
-                if let Some(rows) = json.get("rows").and_then(|r| r.as_array()) {
-                    if let Some(first_row) = rows.first() {
-                        if let Some(obj) = first_row.as_object() {
-                            if let Some((_, val)) = obj.iter().next() {
-                                match val {
-                                    serde_json::Value::String(s) => {
-                                        if quote_results_for_sql {
-                                            let escaped = s.replace('\'', "''");
-                                            format!("'{escaped}'")
-                                        } else {
-                                            s.clone()
-                                        }
-                                    }
-                                    serde_json::Value::Number(n) => n.to_string(),
-                                    serde_json::Value::Bool(b) => b.to_string(),
-                                    _ => val.to_string(),
-                                }
-                            } else {
-                                value.clone()
-                            }
-                        } else {
-                            value.clone()
-                        }
-                    } else {
-                        value.clone()
-                    }
-                } else if quote_results_for_sql {
-                    // This is a JSON object/array (like HTTP response) - quote it for SQL
-                    // so it can be cast to jsonb: '{"key": "value"}'::jsonb
-                    let escaped = value.replace('\'', "''");
-                    format!("'{escaped}'")
-                } else {
-                    // Raw mode - no quoting for non-SQL contexts
-                    value.clone()
-                }
-            } else {
-                value.clone()
-            };
-            result = result.replace(&pattern, &replacement);
-        }
-    }
-
-    result
+    // 3. Substitute results: $name with dot-notation, null-safe, and row-set support
+    substitute_results(&result, results, quote_results_for_sql)
 }
 
 /// Substitute all variables with SQL quoting (default for SQL contexts)
@@ -318,7 +608,7 @@ pub fn substitute_all(
     results: &std::collections::HashMap<String, String>,
     vars: &std::collections::HashMap<String, String>,
     sys_vars: &SystemVars,
-) -> String {
+) -> Result<String, String> {
     substitute_all_with_options(query, results, vars, sys_vars, true)
 }
 
@@ -328,7 +618,7 @@ pub fn substitute_all_raw(
     results: &std::collections::HashMap<String, String>,
     vars: &std::collections::HashMap<String, String>,
     sys_vars: &SystemVars,
-) -> String {
+) -> Result<String, String> {
     substitute_all_with_options(query, results, vars, sys_vars, false)
 }
 
@@ -336,7 +626,7 @@ pub fn substitute_all_raw(
 pub fn substitute_variables(
     query: &str,
     results: &std::collections::HashMap<String, String>,
-) -> String {
+) -> Result<String, String> {
     substitute_all(
         query,
         results,
@@ -749,5 +1039,225 @@ mod tests {
                 "evaluate_condition raw fallback failed for: {input}"
             );
         }
+    }
+
+    // ============================================================================
+    // Substitution Engine Tests
+    // ============================================================================
+
+    fn make_results(entries: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn empty_vars() -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
+
+    fn sys_vars() -> SystemVars {
+        SystemVars {
+            instance_id: "test-id".to_string(),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn test_dot_notation_string() {
+        let results =
+            make_results(&[("doc", r#"{"rows":[{"id":1,"name":"Alice"}],"row_count":1}"#)]);
+        let out = substitute_all("SELECT $doc.name", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT 'Alice'");
+    }
+
+    #[test]
+    fn test_dot_notation_number() {
+        let results = make_results(&[(
+            "doc",
+            r#"{"rows":[{"id":42,"name":"Alice"}],"row_count":1}"#,
+        )]);
+        let out = substitute_all("SELECT $doc.id", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT 42");
+    }
+
+    #[test]
+    fn test_dot_notation_bool() {
+        let results = make_results(&[("doc", r#"{"rows":[{"active":true}],"row_count":1}"#)]);
+        let out =
+            substitute_all("SELECT $doc.active", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT true");
+    }
+
+    #[test]
+    fn test_bare_name_backward_compat() {
+        let results = make_results(&[("x", r#"{"rows":[{"num":100}],"row_count":1}"#)]);
+        let out = substitute_all("SELECT $x::text", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT 100::text");
+    }
+
+    #[test]
+    fn test_no_rows_strict_fail() {
+        let results = make_results(&[("doc", r#"{"rows":[],"row_count":0}"#)]);
+        let out = substitute_all("SELECT $doc", &results, &empty_vars(), &sys_vars());
+        assert!(out.is_err());
+        assert!(out.unwrap_err().contains("has no rows"));
+    }
+
+    #[test]
+    fn test_null_strict_fail() {
+        let results = make_results(&[("doc", r#"{"rows":[{"val":null}],"row_count":1}"#)]);
+        let out = substitute_all("SELECT $doc", &results, &empty_vars(), &sys_vars());
+        assert!(out.is_err());
+        assert!(out.unwrap_err().contains("is NULL"));
+    }
+
+    #[test]
+    fn test_null_safe_no_rows() {
+        let results = make_results(&[("doc", r#"{"rows":[],"row_count":0}"#)]);
+        let out = substitute_all("SELECT $doc?", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT NULL");
+    }
+
+    #[test]
+    fn test_null_safe_null_col() {
+        let results = make_results(&[("doc", r#"{"rows":[{"name":null}],"row_count":1}"#)]);
+        let out =
+            substitute_all("SELECT $doc.name?", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT NULL");
+    }
+
+    #[test]
+    fn test_null_safe_has_value() {
+        let results = make_results(&[("x", r#"{"rows":[{"num":42}],"row_count":1}"#)]);
+        let out = substitute_all("SELECT $x?", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT 42");
+    }
+
+    #[test]
+    fn test_dot_notation_missing_col() {
+        let results = make_results(&[("doc", r#"{"rows":[{"id":1}],"row_count":1}"#)]);
+        let out = substitute_all(
+            "SELECT $doc.nonexistent",
+            &results,
+            &empty_vars(),
+            &sys_vars(),
+        )
+        .unwrap();
+        // Missing column is left as-is
+        assert_eq!(out, "SELECT $doc.nonexistent");
+    }
+
+    #[test]
+    fn test_multiple_refs() {
+        let results = make_results(&[
+            ("a", r#"{"rows":[{"id":1}],"row_count":1}"#),
+            ("b", r#"{"rows":[{"name":"Bob"}],"row_count":1}"#),
+        ]);
+        let out = substitute_all(
+            "SELECT $a.id, $b.name",
+            &results,
+            &empty_vars(),
+            &sys_vars(),
+        )
+        .unwrap();
+        assert_eq!(out, "SELECT 1, 'Bob'");
+    }
+
+    #[test]
+    fn test_substitution_order() {
+        // Ensure $doc.id doesn't partially match as $doc first
+        let results = make_results(&[("doc", r#"{"rows":[{"id":7,"name":"X"}],"row_count":1}"#)]);
+        let out = substitute_all("SELECT $doc.id", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "SELECT 7");
+    }
+
+    #[test]
+    fn test_row_set_expansion_sql() {
+        let results = make_results(&[(
+            "batch",
+            r#"{"rows":[{"id":1,"val":"a"},{"id":2,"val":"b"}],"row_count":2}"#,
+        )]);
+        let out = substitute_all(
+            "SELECT * FROM $batch.*",
+            &results,
+            &empty_vars(),
+            &sys_vars(),
+        )
+        .unwrap();
+        assert!(out.contains("VALUES"));
+        assert!(out.contains(r#"AS "batch"("#));
+    }
+
+    #[test]
+    fn test_row_set_expansion_empty() {
+        let results = make_results(&[("batch", r#"{"rows":[],"row_count":0}"#)]);
+        let out = substitute_all(
+            "SELECT * FROM $batch.*",
+            &results,
+            &empty_vars(),
+            &sys_vars(),
+        )
+        .unwrap();
+        assert!(out.contains("SELECT NULL WHERE false"));
+    }
+
+    #[test]
+    fn test_validate_result_name_valid() {
+        assert!(validate_result_name("batch").is_ok());
+        assert!(validate_result_name("my_result").is_ok());
+        assert!(validate_result_name("_private").is_ok());
+        assert!(validate_result_name("A123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_result_name_invalid() {
+        assert!(validate_result_name("").is_err());
+        assert!(validate_result_name("123abc").is_err());
+        assert!(validate_result_name("x) UNION SELECT version()--").is_err());
+        assert!(validate_result_name("name with spaces").is_err());
+        assert!(validate_result_name("a-b").is_err());
+        assert!(validate_result_name("drop;--").is_err());
+    }
+
+    #[test]
+    fn test_expand_row_set_quoted_columns() {
+        // Column names from PostgreSQL can contain special characters
+        let json = r#"{"rows":[{"normal":1,"has space":2}],"row_count":1}"#;
+        let result = expand_row_set("tbl", json, true).unwrap();
+        assert!(result.contains(r#""normal""#));
+        assert!(result.contains(r#""has space""#));
+        assert!(result.contains(r#"AS "tbl"("#));
+    }
+
+    #[test]
+    fn test_expand_row_set_empty_quoted_name() {
+        let json = r#"{"rows":[],"row_count":0}"#;
+        let result = expand_row_set("batch", json, true).unwrap();
+        assert_eq!(result, r#"(SELECT NULL WHERE false) AS "batch""#);
+    }
+    #[test]
+    fn test_row_set_expansion_raw() {
+        let results = make_results(&[("batch", r#"{"rows":[{"id":1}],"row_count":1}"#)]);
+        let out =
+            substitute_all_raw("data: $batch.*", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, r#"data: [{"id":1}]"#);
+    }
+
+    #[test]
+    fn test_no_partial_match_longer_name() {
+        // $doc should not match inside $document
+        let results = make_results(&[("doc", r#"{"rows":[{"id":1}],"row_count":1}"#)]);
+        let out = substitute_all("SELECT $document", &results, &empty_vars(), &sys_vars()).unwrap();
+        // $document is not a known result — left as-is
+        assert_eq!(out, "SELECT $document");
+    }
+
+    #[test]
+    fn test_dot_notation_no_sql_quoting() {
+        let results = make_results(&[("doc", r#"{"rows":[{"name":"Alice"}],"row_count":1}"#)]);
+        let out =
+            substitute_all_raw("Hello $doc.name", &results, &empty_vars(), &sys_vars()).unwrap();
+        assert_eq!(out, "Hello Alice");
     }
 }

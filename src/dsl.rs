@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::client::start_durable_function;
-use crate::types::{short_id, Durofut, FunctionInput};
+use crate::types::{short_id, validate_result_name, Durofut, FunctionInput};
 
 /// Check if we're running inside a workflow context (background worker connection).
 /// The background worker sets df.in_workflow='true' on all its connections.
@@ -220,6 +220,9 @@ pub fn then_fn(a: &str, b: &str) -> String {
 /// Note: Parameter order matches the |=> operator: fut |=> name -> df.as(fut, name)
 #[pg_extern(name = "as", schema = "df")]
 pub fn as_named(fut: &str, name: &str) -> String {
+    if let Err(msg) = validate_result_name(name) {
+        pgrx::error!("df.as: {msg}");
+    }
     let mut durofut = Durofut::ensure(fut);
     durofut.result_name = Some(name.to_string());
 
@@ -349,6 +352,29 @@ pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
 
     let config = serde_json::json!({
         "condition_node": condition_fut
+    });
+
+    Durofut {
+        node_type: "IF".to_string(),
+        left_node: Some(Box::new(then_fut)),
+        right_node: Some(Box::new(else_fut)),
+        query: Some(config.to_string()),
+        ..Default::default()
+    }
+    .to_json()
+}
+
+/// Branches based on whether a named result has any rows.
+/// Unlike df.if(), the condition is not a SQL query — it checks the
+/// in-memory result JSON for row_count > 0. Zero-cost, no activity scheduled.
+#[pg_extern(name = "if_rows", schema = "df")]
+pub fn if_rows_fn(result_name: &str, then_branch: &str, else_branch: &str) -> String {
+    let then_fut = Durofut::ensure(then_branch);
+    let else_fut = Durofut::ensure(else_branch);
+
+    let config = serde_json::json!({
+        "condition_type": "result_has_rows",
+        "result_name": result_name
     });
 
     Durofut {

@@ -67,6 +67,16 @@ df.as('SELECT id FROM users LIMIT 1', 'user_id')
 'SELECT id FROM users LIMIT 1' |=> 'user_id'  -- operator form
 ```
 
+**Substitution patterns** available on named results:
+
+| Pattern | Behavior | On no rows | On NULL |
+|---------|----------|------------|---------|
+| `$name` | First column of first row | Error | Error |
+| `$name.column` | Specific column of first row | Error | Error |
+| `$name?` | Null-safe scalar | → `NULL` | → `NULL` |
+| `$name.column?` | Null-safe column | → `NULL` | → `NULL` |
+| `$name.*` | Row-set expansion (inline VALUES) | Empty relation | N/A |
+
 ---
 
 ### df.join(a, b) / `&` operator
@@ -130,6 +140,22 @@ Conditional execution.
 ```sql
 df.if('SELECT count(*) > 0 FROM q', 'SELECT ''yes''', 'SELECT ''no''')
 'SELECT true' ?> 'SELECT ''yes''' !> 'SELECT ''no'''  -- operator form
+```
+
+---
+
+### df.if_rows(result_name, then, else)
+
+Branches based on whether a named result has any rows. Unlike `df.if()`, no SQL query is executed — the check is done in-memory on the stored result.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `result_name` | TEXT | ❌ Literal | Name of a previously stored result (no `$` prefix) |
+| `then` | TEXT | ✅ Auto-wrap | Execute if result has rows |
+| `else` | TEXT | ✅ Auto-wrap | Execute if result has zero rows |
+
+```sql
+df.if_rows('data', 'SELECT $data.id', 'SELECT ''no data''')
 ```
 
 ---

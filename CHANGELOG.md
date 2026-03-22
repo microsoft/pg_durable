@@ -9,6 +9,8 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 - Fix: `is_truthy` now correctly treats "false", "no", and "f" as falsy (#57)
 - Docs: add "Debugging Failed Workflows" section to User Guide (#71)
 - New: Azure Functions integration example (#69)
+- Named result substitution now supports dot-notation for column access (`$name.col`), null-safe variants (`$name?`, `$name.col?`), and row-set expansion (`$name.*`). Referencing a named result that returned no rows or a NULL value now fails the orchestration by default; append `?` to substitute an empty string instead.
+- New DSL function `df.if_rows()`: branches on whether a named result returned any rows, without executing a SQL condition query.
 
 ## v0.1.1 (Released)
 
