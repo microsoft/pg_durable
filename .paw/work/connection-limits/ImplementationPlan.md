@@ -66,8 +66,8 @@ Key constraints:
 - **`src/types.rs`**: Add four getter helper functions following the `get_worker_role()` / `get_database()` pattern (after line 33). Each calls `.get()` on the corresponding static and provides the default fallback.
 
 - **`src/worker.rs`**: Add startup validation at the beginning of `run_duroxide_runtime()` (after poll pool creation, before the main loop at ~line 120). Validate:
-  - `max_duroxide_connections >= 2` (listener needs at least 1 slot)
-  - `max_user_connections >= 1`
+  - `max_duroxide_connections >= 2` (listener needs at least 1 slot) — if violated, log error and return early (worker refuses to start, FR-010)
+  - `max_management_connections == 1` — log warning (functional but leaves no headroom)
   - Log the effective connection budget: `management + duroxide + user`
 
 - **Tests**: Unit test (pgrx test) verifying GUC defaults are readable via the getter helpers. Verify startup validation logs appropriate warnings for edge-case values.
@@ -156,6 +156,8 @@ Key constraints:
   3. Runs the connection-limit SQL tests
   4. Restores defaults and restarts
   This script is invoked separately from the main `test-e2e-local.sh` suite. The defaults test runs as part of the regular suite (no GUC changes needed).
+
+- **`.github/workflows/ci.yml`**: Add a step to run `./scripts/test-connlimit-e2e.sh` after the existing E2E test step. This ensures connection-limit tests run in CI alongside the standard suite.
 
 - **`tests/e2e/sql/NN_connection_limit_backpressure.sql`**: Test that backpressure works. Runs under `max_user_connections = 2`. Start 3+ concurrent workflows each executing a `pg_sleep(5)` SQL node. Verify all complete successfully (backpressure queues the extras, doesn't fail them).
 
