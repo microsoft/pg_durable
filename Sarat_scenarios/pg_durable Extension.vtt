@@ -1,0 +1,2307 @@
+WEBVTT
+
+b44d7714-252d-4869-bb22-d00b8e92259e/13-0
+00:00:03.701 --> 00:00:06.894
+<v Abe Omorogbe>By the way,
+I just started recording so I can capture</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/13-1
+00:00:06.894 --> 00:00:11.802
+<v Abe Omorogbe>the notes. By the way, love the scenarios.
+What I did is I took the scenarios that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/13-2
+00:00:11.802 --> 00:00:15.469
+<v Abe Omorogbe>were written so well,
+put it in Copilot and said hey Copilot,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/13-3
+00:00:15.469 --> 00:00:19.845
+<v Abe Omorogbe>can you write it in PG durable?
+So what I want to do for like the next 10</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/13-4
+00:00:19.845 --> 00:00:22.861
+<v Abe Omorogbe>minutes,
+just kind of get your opinion on kind of.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/20-0
+00:00:22.901 --> 00:00:28.440
+<v Abe Omorogbe>Of the shape of the product in your sense,
+cuz what we have right now is we have PG</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/12-0
+00:00:25.181 --> 00:00:25.581
+<v Sarat Balijepalli>Hmm.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/20-1
+00:00:28.440 --> 00:00:31.408
+<v Abe Omorogbe>Durable,
+but the way you seem to give people</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/20-2
+00:00:31.408 --> 00:00:35.694
+<v Abe Omorogbe>advice is maybe through Azure Advisor or
+maybe even White Glove.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/20-3
+00:00:35.694 --> 00:00:39.255
+<v Abe Omorogbe>So I'm just wondering what makes sense
+for customers.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/18-0
+00:00:35.701 --> 00:00:36.021
+<v Sarat Balijepalli>No.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/20-4
+00:00:39.255 --> 00:00:42.421
+<v Abe Omorogbe>So let's say we start with scenario one,
+right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/25-0
+00:00:42.421 --> 00:00:47.127
+<v Abe Omorogbe>What we have to do is this is your
+definition of scenario one, right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/25-1
+00:00:47.127 --> 00:00:51.834
+<v Abe Omorogbe>Identify out of vacuum blockers,
+resolve blockers, run vacuum, right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/25-2
+00:00:51.834 --> 00:00:56.877
+<v Abe Omorogbe>This is what it will look like in and
+this is all just gonna go full code.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/25-3
+00:00:56.877 --> 00:00:59.701
+<v Abe Omorogbe>I took basically everything you had there.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/23-0
+00:00:56.941 --> 00:00:58.021
+<v Sarat Balijepalli>No.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/31-0
+00:01:00.101 --> 00:01:03.142
+<v Abe Omorogbe>First it it like wrote the prerequisite
+script.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/31-1
+00:01:03.142 --> 00:01:07.323
+<v Abe Omorogbe>So this is the script you had to find the
+blockers so it it runs.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/31-2
+00:01:07.323 --> 00:01:12.518
+<v Abe Omorogbe>I think you put this in the word file and
+then it checks all the sources like you</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/31-3
+00:01:12.518 --> 00:01:17.460
+<v Abe Omorogbe>mentioned and then basically the way it
+works with the auto vacuum is what PG</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/28-0
+00:01:14.101 --> 00:01:14.501
+<v Sarat Balijepalli>Yep.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/31-4
+00:01:17.460 --> 00:01:19.741
+<v Abe Omorogbe>durable does is it creates 2 tables.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/37-0
+00:01:20.021 --> 00:01:26.069
+<v Abe Omorogbe>One is a table to track all the blockers
+and another table is to do all the the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/33-0
+00:01:25.781 --> 00:01:27.741
+<v Sarat Balijepalli>Remedies.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/37-1
+00:01:26.069 --> 00:01:30.227
+<v Abe Omorogbe>remediation logs.
+And then you can see here this is PG</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/37-2
+00:01:30.227 --> 00:01:33.780
+<v Abe Omorogbe>durable.
+So like DF start basically starts the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/37-3
+00:01:33.780 --> 00:01:34.461
+<v Abe Omorogbe>pipeline.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/36-0
+00:01:35.381 --> 00:01:35.621
+<v Sarat Balijepalli>Hmm.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/40-0
+00:01:35.381 --> 00:01:38.352
+<v Abe Omorogbe>And then this squiggly thing is a
+sequence flow,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/40-1
+00:01:38.352 --> 00:01:41.141
+<v Abe Omorogbe>so like this is the first block,
+so step one.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/38-0
+00:01:39.461 --> 00:01:39.621
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/41-0
+00:01:40.381 --> 00:01:43.301
+<v Sarat Balijepalli>Yeah, that Pino explained me last time,
+yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/46-0
+00:01:42.741 --> 00:01:47.466
+<v Abe Omorogbe>OK, perfect.
+So like I'm guessing my kind of thing to</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/46-1
+00:01:47.466 --> 00:01:54.028
+<v Abe Omorogbe>you is like do you think customers would
+do this or are you saying this is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/46-2
+00:01:54.028 --> 00:01:59.541
+<v Abe Omorogbe>something we give to customers like
+define these three blocks,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/46-3
+00:01:59.541 --> 00:02:00.941
+<v Abe Omorogbe>you can see how?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/53-0
+00:01:59.901 --> 00:02:03.610
+<v Sarat Balijepalli>That is the,
+that is the that is a very good question.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/53-1
+00:02:03.610 --> 00:02:08.669
+<v Sarat Balijepalli>This is where I am stuck because some of
+these things customers may not be</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/53-2
+00:02:08.669 --> 00:02:12.918
+<v Sarat Balijepalli>comfortable doing it,
+but this is something they would like to</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/49-0
+00:02:11.101 --> 00:02:11.221
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/53-3
+00:02:12.918 --> 00:02:15.886
+<v Sarat Balijepalli>see. Hey,
+this is what it is because we are</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/50-0
+00:02:14.861 --> 00:02:15.101
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/53-4
+00:02:15.886 --> 00:02:19.461
+<v Sarat Balijepalli>ultimately for example the terminating of
+a session.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/59-0
+00:02:19.741 --> 00:02:22.640
+<v Sarat Balijepalli>Right.
+We're telling them to terminate a session</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/59-1
+00:02:22.640 --> 00:02:26.250
+<v Sarat Balijepalli>which they may not like.
+They may want to see what really is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/54-0
+00:02:23.981 --> 00:02:24.221
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/59-2
+00:02:26.250 --> 00:02:29.090
+<v Sarat Balijepalli>running and they terminate on their own,
+right.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/59-3
+00:02:29.090 --> 00:02:32.463
+<v Sarat Balijepalli>So that's a challenge that we always have
+in this space.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/56-0
+00:02:29.381 --> 00:02:29.501
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/59-4
+00:02:32.463 --> 00:02:35.777
+<v Sarat Balijepalli>Like what do we like replication slot.
+He may say, hey,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/59-5
+00:02:35.777 --> 00:02:38.381
+<v Sarat Balijepalli>I know there is a replication slot,
+but my.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/65-0
+00:02:38.381 --> 00:02:41.718
+<v Sarat Balijepalli>I'm not consuming from the slot.
+I will do it tomorrow.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/65-1
+00:02:41.718 --> 00:02:46.665
+<v Sarat Balijepalli>My application is down for example, right?
+If there is a logical replication slot,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/61-0
+00:02:43.661 --> 00:02:43.901
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/62-0
+00:02:44.981 --> 00:02:45.101
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/65-2
+00:02:46.665 --> 00:02:50.181
+<v Sarat Balijepalli>it's a very valid scenario that we have
+seen. So yeah, so.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/69-0
+00:02:50.941 --> 00:02:55.988
+<v Sarat Balijepalli>We may have to surface it in a way and
+then if they take the action then we can</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/69-1
+00:02:55.988 --> 00:03:01.225
+<v Sarat Balijepalli>go and do the vacuum analysis one way or
+we say we can perfectly do everything for</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/69-2
+00:03:01.225 --> 00:03:05.453
+<v Sarat Balijepalli>you. It's about you, you know,
+using this extension and using this</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/69-3
+00:03:05.453 --> 00:03:06.021
+<v Sarat Balijepalli>features.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/76-0
+00:03:06.981 --> 00:03:10.067
+<v Abe Omorogbe>Well, like,
+what would that shape be like in the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/76-1
+00:03:10.067 --> 00:03:12.839
+<v Abe Omorogbe>sense of like we have a few options,
+right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/71-0
+00:03:12.061 --> 00:03:12.181
+<v Sarat Balijepalli>Yep.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/76-2
+00:03:12.839 --> 00:03:16.555
+<v Abe Omorogbe>The only option we have for visualizing
+is to say VS code.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/72-0
+00:03:15.701 --> 00:03:15.861
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/76-3
+00:03:16.555 --> 00:03:20.461
+<v Abe Omorogbe>So you tell this cord of customers, hey,
+open VS code, right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/74-0
+00:03:19.661 --> 00:03:20.101
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/78-0
+00:03:21.621 --> 00:03:26.502
+<v Abe Omorogbe>Run this you would you tell them run this
+pipeline or would you say hey here's the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/78-1
+00:03:26.502 --> 00:03:29.207
+<v Abe Omorogbe>code,
+copy and paste it in and tweak what you</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/78-2
+00:03:29.207 --> 00:03:29.501
+<v Abe Omorogbe>want.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/80-0
+00:03:31.301 --> 00:03:33.341
+<v Abe Omorogbe>Like, what do you do today?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/90-0
+00:03:33.181 --> 00:03:38.110
+<v Sarat Balijepalli>We give them the scripts for them to go
+ahead and do it. If you're, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/82-0
+00:03:36.901 --> 00:03:38.221
+<v Abe Omorogbe>Oh, you give them the scripts.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/90-1
+00:03:38.110 --> 00:03:42.173
+<v Sarat Balijepalli>So if you really ask me,
+that's what we do. So we also have,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/83-0
+00:03:39.581 --> 00:03:39.701
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/90-2
+00:03:42.173 --> 00:03:45.837
+<v Sarat Balijepalli>for example,
+the troubleshooting guides that we did in</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/85-0
+00:03:42.541 --> 00:03:42.661
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/90-3
+00:03:45.837 --> 00:03:49.101
+<v Sarat Balijepalli>the portal.
+So those troubleshooting guides will</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/87-0
+00:03:46.461 --> 00:03:46.621
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/90-4
+00:03:49.101 --> 00:03:49.701
+<v Sarat Balijepalli>point to.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/92-0
+00:03:50.061 --> 00:03:52.650
+<v Sarat Balijepalli>These things,
+but there is a bunch of commentary</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/88-0
+00:03:50.941 --> 00:03:51.061
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/92-1
+00:03:52.650 --> 00:03:56.984
+<v Sarat Balijepalli>written down that saying that you need to
+do this if you find this in this in our</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/92-2
+00:03:56.984 --> 00:03:57.301
+<v Sarat Balijepalli>thing.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/95-0
+00:03:57.781 --> 00:04:02.097
+<v Abe Omorogbe>Gotcha. And it's like blocks of.
+Do you have that code?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/93-0
+00:03:58.621 --> 00:03:58.901
+<v Sarat Balijepalli>So yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/95-1
+00:04:02.097 --> 00:04:05.181
+<v Abe Omorogbe>Like is it like similar to these blocks?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/102-0
+00:04:05.381 --> 00:04:09.196
+<v Sarat Balijepalli>No, not similar to this.
+We have written it down.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/96-0
+00:04:06.301 --> 00:04:06.421
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/102-1
+00:04:09.196 --> 00:04:14.079
+<v Sarat Balijepalli>Basically it's like, hey,
+if you need to do this kind of thing,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/102-2
+00:04:14.079 --> 00:04:18.505
+<v Sarat Balijepalli>there's no blocks of code there,
+but it's more like, hey,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/99-0
+00:04:16.461 --> 00:04:16.581
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/102-3
+00:04:18.505 --> 00:04:23.541
+<v Sarat Balijepalli>you need to do like this step on that
+step, those kind of things.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/103-0
+00:04:23.941 --> 00:04:26.621
+<v Abe Omorogbe>Gotcha. Like what you wrote in the doc.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/106-0
+00:04:26.101 --> 00:04:28.261
+<v Sarat Balijepalli>Correct, correct. That's correct.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/105-0
+00:04:28.301 --> 00:04:28.421
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/110-0
+00:04:29.341 --> 00:04:35.022
+<v Pino de Candia>I have a quick quick question I I one one
+aspect that I missed in your scenarios</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/110-1
+00:04:35.022 --> 00:04:40.703
+<v Pino de Candia>and maybe pertains here is is there kind
+of like a a reporting regular reporting</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/110-2
+00:04:40.703 --> 00:04:44.421
+<v Pino de Candia>aspect that is separate from applying the
+the fixes?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/116-0
+00:04:44.461 --> 00:04:47.063
+<v Sarat Balijepalli>So yeah, I got your point Pino.
+So how do we?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/111-0
+00:04:44.861 --> 00:04:46.781
+<v Pino de Candia>But you know, actually, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/116-1
+00:04:47.063 --> 00:04:51.192
+<v Sarat Balijepalli>So it all depends on what Abbey is asking.
+How do we surface this right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/116-2
+00:04:51.192 --> 00:04:55.774
+<v Sarat Balijepalli>Do we surface them saying that you hey
+you you have these problems in the server</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/116-3
+00:04:55.774 --> 00:04:59.734
+<v Sarat Balijepalli>which we are already doing in
+troubleshooting guides today and we are</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/116-4
+00:04:59.734 --> 00:05:03.581
+<v Sarat Balijepalli>also already doing it in Azure Advisor
+today for example these are.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/120-0
+00:05:04.181 --> 00:05:09.998
+<v Sarat Balijepalli>The two places we are already doing this,
+do we surface those and or tell them that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/120-1
+00:05:09.998 --> 00:05:13.737
+<v Sarat Balijepalli>you can go here,
+see and if you still think those are</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/120-2
+00:05:13.737 --> 00:05:18.793
+<v Sarat Balijepalli>still good, we can do it for you.
+This is another way of like, you know,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/120-3
+00:05:18.793 --> 00:05:19.901
+<v Sarat Balijepalli>automating this.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/125-0
+00:05:22.101 --> 00:05:28.715
+<v Abe Omorogbe>But I'm just trying to find Azure advisor
+so so I can understand where that what it</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/123-0
+00:05:27.061 --> 00:05:27.301
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/130-0
+00:05:28.661 --> 00:05:33.040
+<v Sarat Balijepalli>Yeah, this is one. If you go here,
+there'll be another advisor. Yeah,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/125-1
+00:05:28.715 --> 00:05:29.581
+<v Abe Omorogbe>looks like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/130-1
+00:05:33.040 --> 00:05:35.980
+<v Sarat Balijepalli>if there is something here,
+it'll pop up here.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/130-2
+00:05:35.980 --> 00:05:40.234
+<v Sarat Balijepalli>Abe related to performance.
+I don't know if there is something here</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/130-3
+00:05:40.234 --> 00:05:44.301
+<v Sarat Balijepalli>for see PG audit log statement for
+example. This is one of them.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/133-0
+00:05:44.741 --> 00:05:49.023
+<v Sarat Balijepalli>So this I've not given yet,
+but there was another thing.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/129-0
+00:05:44.861 --> 00:05:44.981
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/133-1
+00:05:49.023 --> 00:05:53.305
+<v Sarat Balijepalli>Can you go back?
+I think this might be a bad one for our</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/132-0
+00:05:52.621 --> 00:05:53.021
+<v Abe Omorogbe>Oh, oops.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/133-2
+00:05:53.305 --> 00:05:53.981
+<v Sarat Balijepalli>scenario.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/135-0
+00:05:55.261 --> 00:05:56.301
+<v Abe Omorogbe>Oh, OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/138-0
+00:06:01.701 --> 00:06:08.621
+<v Abe Omorogbe>Good old Azure. Nice and slow. OK,
+let me just try that again.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/140-0
+00:06:10.141 --> 00:06:12.381
+<v Abe Omorogbe>All right, there you go.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/150-0
+00:06:16.581 --> 00:06:19.724
+<v Sarat Balijepalli>Yeah,
+what was PG audit log log file retention,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/150-1
+00:06:19.724 --> 00:06:23.718
+<v Sarat Balijepalli>restrict public access.
+I think that is the only one that is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/150-2
+00:06:23.718 --> 00:06:26.731
+<v Sarat Balijepalli>coming in your case. OK,
+you're in the first,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/150-3
+00:06:26.731 --> 00:06:30.660
+<v Sarat Balijepalli>you're in the first one,
+first one you can see for example.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/146-0
+00:06:27.821 --> 00:06:28.781
+<v Abe Omorogbe>This one.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/150-4
+00:06:30.660 --> 00:06:32.821
+<v Sarat Balijepalli>That's the first one for example.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/148-0
+00:06:32.061 --> 00:06:32.181
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/155-0
+00:06:33.101 --> 00:06:36.551
+<v Sarat Balijepalli>Again,
+this is something all the logging we can</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/155-1
+00:06:36.551 --> 00:06:41.870
+<v Sarat Balijepalli>put under one umbrella which I've not
+given yet. For example in PG audit,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/155-2
+00:06:41.870 --> 00:06:46.471
+<v Sarat Balijepalli>if someone has put everything,
+they started logging everything.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/155-3
+00:06:46.471 --> 00:06:52.221
+<v Sarat Balijepalli>So what we have seen in the past is that
+unknowingly some customers do that and</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/155-4
+00:06:52.221 --> 00:06:52.581
+<v Sarat Balijepalli>then.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/156-0
+00:06:52.861 --> 00:06:57.741
+<v Sarat Balijepalli>Additional logs create higher CPU
+utilization on the server.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/157-0
+00:06:58.501 --> 00:06:58.981
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/159-0
+00:07:00.381 --> 00:07:00.421
+<v Abe Omorogbe>Uh.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/161-0
+00:07:00.621 --> 00:07:04.621
+<v Sarat Balijepalli>So they may really don't. Yeah,
+I don't know what is happening here.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/162-0
+00:07:04.541 --> 00:07:04.821
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/164-0
+00:07:06.581 --> 00:07:09.701
+<v Abe Omorogbe>All right, let's try this again.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/169-0
+00:07:08.941 --> 00:07:13.833
+<v Sarat Balijepalli>It's slow today.
+We can also go to Scroll down there.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/165-0
+00:07:11.381 --> 00:07:11.621
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/169-1
+00:07:13.833 --> 00:07:20.990
+<v Sarat Balijepalli>So let me show one server for this one
+also for troubleshooting guides what we</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/169-2
+00:07:20.990 --> 00:07:22.621
+<v Sarat Balijepalli>have today, right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/168-0
+00:07:23.061 --> 00:07:23.221
+<v Abe Omorogbe>Help.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/171-0
+00:07:23.981 --> 00:07:26.099
+<v Sarat Balijepalli>Uh,
+troubleshooting guides that shows all</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/171-1
+00:07:26.099 --> 00:07:27.461
+<v Sarat Balijepalli>these scenarios there also.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/173-0
+00:07:28.381 --> 00:07:30.861
+<v Abe Omorogbe>Yeah, where is? Where can I find that?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/175-0
+00:07:30.461 --> 00:07:32.729
+<v Sarat Balijepalli>Uh,
+I think you would not have set up that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/175-1
+00:07:32.729 --> 00:07:36.421
+<v Sarat Balijepalli>thing or my system is saying that.
+Can you Scroll down to monitoring?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/176-0
+00:07:37.461 --> 00:07:38.781
+<v Abe Omorogbe>Wondering, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/178-0
+00:07:38.021 --> 00:07:41.104
+<v Sarat Balijepalli>Yeah yeah,
+in this go to troubleshooting guides.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/178-1
+00:07:41.104 --> 00:07:44.061
+<v Sarat Balijepalli>You may have to set up log analytics for
+this.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/182-0
+00:07:45.741 --> 00:07:51.261
+<v Sarat Balijepalli>So it'll throw a bunch of errors for you
+right now. So if you go to auto vacuum,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/182-1
+00:07:51.261 --> 00:07:56.644
+<v Sarat Balijepalli>yeah, so there are a bunch of errors.
+So all these things here are like, yeah,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/182-2
+00:07:56.644 --> 00:07:58.621
+<v Sarat Balijepalli>blockers. So if you see here.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/186-0
+00:07:59.781 --> 00:08:06.052
+<v Sarat Balijepalli>Come down. Yeah, this one. So the one,
+the query that I gave was picked from</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/186-1
+00:08:06.052 --> 00:08:11.101
+<v Sarat Balijepalli>here. Oh, I think you do have something.
+OK, come down. Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/191-0
+00:08:12.701 --> 00:08:15.810
+<v Sarat Balijepalli>Yeah,
+the query for the first query I gave us</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/191-1
+00:08:15.810 --> 00:08:19.663
+<v Sarat Balijepalli>from this one.
+So in our case the only option we had was</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/191-2
+00:08:19.663 --> 00:08:25.206
+<v Sarat Balijepalli>to give all these things to the customer
+for them to debug from the screen and do</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/189-0
+00:08:23.181 --> 00:08:23.501
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/191-3
+00:08:25.206 --> 00:08:28.181
+<v Sarat Balijepalli>it on their own if you go to the top a
+bit.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/196-0
+00:08:28.621 --> 00:08:32.360
+<v Sarat Balijepalli>It looks like this server has something
+that is holding it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/196-1
+00:08:32.360 --> 00:08:35.600
+<v Sarat Balijepalli>There is some long running transaction
+there. Yeah,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/196-2
+00:08:35.600 --> 00:08:40.336
+<v Sarat Balijepalli>this is what it comes and these are some
+of those things that basically are</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/196-3
+00:08:40.336 --> 00:08:43.701
+<v Sarat Balijepalli>flowing from the telemetry and we are
+trying to show.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/195-0
+00:08:44.221 --> 00:08:44.861
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/198-0
+00:08:45.301 --> 00:08:48.060
+<v Sarat Balijepalli>Yeah,
+looks like there's a logical replication</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/198-1
+00:08:48.060 --> 00:08:49.821
+<v Sarat Balijepalli>lag. No, I don't think so. OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/200-0
+00:08:50.661 --> 00:08:52.301
+<v Abe Omorogbe>Um, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/201-0
+00:08:53.021 --> 00:08:55.181
+<v Sarat Balijepalli>No, I don't think so. There is any, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/203-0
+00:08:55.901 --> 00:08:56.021
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/209-0
+00:08:57.301 --> 00:09:00.514
+<v Sarat Balijepalli>So this is the thing.
+So what workbooks or what these</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/209-1
+00:09:00.514 --> 00:09:05.453
+<v Sarat Balijepalli>troubleshooting guides can do is show you
+the things that are already there in the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/209-2
+00:09:05.453 --> 00:09:08.249
+<v Sarat Balijepalli>system,
+whereas for a customer to easily debug</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/205-0
+00:09:06.541 --> 00:09:06.781
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/209-3
+00:09:08.249 --> 00:09:10.927
+<v Sarat Balijepalli>and identify.
+And we are also given them the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/209-4
+00:09:10.927 --> 00:09:15.211
+<v Sarat Balijepalli>recommendation how to solve about it,
+but they have to do on their own.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/209-5
+00:09:15.211 --> 00:09:16.461
+<v Sarat Balijepalli>We don't do anything.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/213-0
+00:09:16.981 --> 00:09:21.226
+<v Sarat Balijepalli>What PG durable can do is we could take
+it a step further and start doing these</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/213-1
+00:09:21.226 --> 00:09:23.933
+<v Sarat Balijepalli>things for them.
+This is what we don't have today.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/213-2
+00:09:23.933 --> 00:09:27.170
+<v Sarat Balijepalli>We have a number of things that show the
+things to customer,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/213-3
+00:09:27.170 --> 00:09:30.301
+<v Sarat Balijepalli>but we don't have anything that could go
+and implement it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/212-0
+00:09:29.861 --> 00:09:30.141
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/221-0
+00:09:32.301 --> 00:09:35.636
+<v Abe Omorogbe>Got it. OK. So like,
+I'll give you an example,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/221-1
+00:09:35.636 --> 00:09:39.681
+<v Abe Omorogbe>like I'll just turn around with your
+thing, right? Like,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/216-0
+00:09:39.021 --> 00:09:39.141
+<v Sarat Balijepalli>Yep.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/221-2
+00:09:39.681 --> 00:09:43.016
+<v Abe Omorogbe>so I think this is auto vacuum blocked,
+right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/217-0
+00:09:41.581 --> 00:09:42.861
+<v Sarat Balijepalli>Yeah, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/221-3
+00:09:43.016 --> 00:09:47.061
+<v Abe Omorogbe>I just did the dashboard to MPG durable,
+right? So like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/219-0
+00:09:44.941 --> 00:09:45.461
+<v Sarat Balijepalli>Yep.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/227-0
+00:09:47.421 --> 00:09:53.177
+<v Abe Omorogbe>I guess it's just a pipeline where it it
+checks all the and then the user can I</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/222-0
+00:09:51.141 --> 00:09:51.341
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/227-1
+00:09:53.177 --> 00:09:58.933
+<v Abe Omorogbe>guess have this running every X days or
+if something gets hit you just run this</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/224-0
+00:09:55.781 --> 00:09:56.261
+<v Sarat Balijepalli>Good.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/226-0
+00:09:58.741 --> 00:09:59.461
+<v Sarat Balijepalli>Go.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/227-2
+00:09:58.933 --> 00:09:59.581
+<v Abe Omorogbe>pipeline.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/230-0
+00:10:00.501 --> 00:10:06.437
+<v Abe Omorogbe>But I'm just what I'm just thinking is I
+I'm just brainstorming here right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/230-1
+00:10:06.437 --> 00:10:10.421
+<v Abe Omorogbe>Like if, if, if,
+if there's a auto vacuum blocker.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/232-0
+00:10:10.661 --> 00:10:12.261
+<v Abe Omorogbe>Is the auto vacuum blocker.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/237-0
+00:10:13.341 --> 00:10:19.114
+<v Abe Omorogbe>I just don't know how the user goes from
+'cause like aren't they like admin issues</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/233-0
+00:10:18.261 --> 00:10:19.221
+<v Sarat Balijepalli>No.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/237-1
+00:10:19.114 --> 00:10:22.661
+<v Abe Omorogbe>like when you want the right user to do
+this like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/241-0
+00:10:21.581 --> 00:10:25.108
+<v Sarat Balijepalli>And I don't think mostly the the admin
+user,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/241-1
+00:10:25.108 --> 00:10:31.144
+<v Sarat Balijepalli>whoever is there there and would do it.
+So should not be a problem to do it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/241-2
+00:10:31.144 --> 00:10:37.101
+<v Sarat Balijepalli>The broader question I think maybe we'll
+get into is if we have to do this.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/243-0
+00:10:37.501 --> 00:10:40.055
+<v Sarat Balijepalli>We are going to drop their slots or kill
+their sessions.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/243-1
+00:10:40.055 --> 00:10:42.341
+<v Sarat Balijepalli>Is it something that is acceptable to
+them or not?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/245-0
+00:10:42.701 --> 00:10:44.501
+<v Abe Omorogbe>Yeah, yeah, yeah, exactly. Exactly.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/250-0
+00:10:46.541 --> 00:10:52.261
+<v Sarat Balijepalli>So in PG durable is it possible for you
+were showing me the multi step right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/250-1
+00:10:52.261 --> 00:10:58.127
+<v Sarat Balijepalli>Is it possible for us to put a manual
+trigger somewhere saying that do you want</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/247-0
+00:10:53.621 --> 00:10:53.861
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/250-2
+00:10:58.127 --> 00:11:01.501
+<v Sarat Balijepalli>to continue?
+Do you want to go and kill this?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/255-0
+00:11:00.621 --> 00:11:04.488
+<v Abe Omorogbe>Yeah, yeah, yeah.
+You can add like a like a signal and you</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/255-1
+00:11:04.488 --> 00:11:07.437
+<v Abe Omorogbe>can,
+you can have like it can be running and</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/255-2
+00:11:07.437 --> 00:11:11.304
+<v Abe Omorogbe>it'll be like, hey,
+waiting for human signal and then they</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/252-0
+00:11:09.261 --> 00:11:09.861
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/255-3
+00:11:11.304 --> 00:11:13.861
+<v Abe Omorogbe>just have to say yes or no or whatever.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/259-0
+00:11:12.461 --> 00:11:15.427
+<v Sarat Balijepalli>Yeah, yeah.
+So what we could do then is that Abe is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/259-1
+00:11:15.427 --> 00:11:19.135
+<v Sarat Balijepalli>that it'll do like first step store into
+those logs, everything.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/259-2
+00:11:19.135 --> 00:11:23.242
+<v Sarat Balijepalli>Then the user can go and see what it is
+showing. Then we can tell, hey,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/259-3
+00:11:23.242 --> 00:11:26.094
+<v Sarat Balijepalli>these are the things they can go and
+we'll check.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/259-4
+00:11:26.094 --> 00:11:30.144
+<v Sarat Balijepalli>We can point them to workbooks,
+whatever we have in our system, right.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/259-5
+00:11:30.144 --> 00:11:32.141
+<v Sarat Balijepalli>They can always go and check there.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/260-0
+00:11:32.141 --> 00:11:35.061
+<v Sarat Balijepalli>And then say, hey, now you want to do it,
+we can do it for you.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/262-0
+00:11:36.341 --> 00:11:37.421
+<v Abe Omorogbe>That makes sense.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/270-0
+00:11:38.181 --> 00:11:42.190
+<v Sarat Balijepalli>Because what my what I've seen based on
+the experience, right,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/270-1
+00:11:42.190 --> 00:11:46.135
+<v Sarat Balijepalli>they're very reluctant.
+If we tell we handle for them in this</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/264-0
+00:11:43.301 --> 00:11:43.541
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/270-2
+00:11:46.135 --> 00:11:49.635
+<v Sarat Balijepalli>kind of things,
+they want to see with their first-hand</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/266-0
+00:11:48.061 --> 00:11:48.421
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/270-3
+00:11:49.635 --> 00:11:54.981
+<v Sarat Balijepalli>experience it is not impacting something
+at their side and then they want to do it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/276-0
+00:11:55.181 --> 00:11:58.752
+<v Sarat Balijepalli>So they're perfectly,
+they're perfectly OK if we do or they</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/269-0
+00:11:55.501 --> 00:11:56.101
+<v Abe Omorogbe>Got you. OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/276-1
+00:11:58.752 --> 00:12:03.038
+<v Sarat Balijepalli>want scripts to do it that they want,
+but they don't want us to do like</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/272-0
+00:12:00.301 --> 00:12:00.661
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/276-2
+00:12:03.038 --> 00:12:07.562
+<v Sarat Balijepalli>immediately after Step 3, Step 4,
+they we are doing it without them looking</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/276-3
+00:12:07.562 --> 00:12:10.301
+<v Sarat Balijepalli>into having the control of the things,
+right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/274-0
+00:12:09.221 --> 00:12:09.461
+<v Abe Omorogbe>Gotcha.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/284-0
+00:12:10.701 --> 00:12:15.786
+<v Abe Omorogbe>That's a good one. So OK,
+so let me see if I'm just like I'm</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/284-1
+00:12:15.786 --> 00:12:21.204
+<v Abe Omorogbe>basically like let me just duplicate this.
+Basically what? Yeah,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/279-0
+00:12:19.461 --> 00:12:23.781
+<v Sarat Balijepalli>So all, yeah, so yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/284-2
+00:12:21.204 --> 00:12:27.873
+<v Abe Omorogbe>after step one you have like a please
+confirm or double check log and then say,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/284-3
+00:12:27.873 --> 00:12:29.541
+<v Abe Omorogbe>yeah, this is great.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/285-0
+00:12:30.341 --> 00:12:31.821
+<v Abe Omorogbe>We resolve lockers for them.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/281-0
+00:12:31.181 --> 00:12:31.301
+<v Pino de Candia>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/282-0
+00:12:31.501 --> 00:12:32.021
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/287-0
+00:12:33.221 --> 00:12:36.151
+<v Abe Omorogbe>OK, got it.
+And the the same pattern identifies</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/287-1
+00:12:36.151 --> 00:12:37.861
+<v Abe Omorogbe>itself after step one, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/294-0
+00:12:36.221 --> 00:12:40.186
+<v Sarat Balijepalli>Yeah, because vacuuming is a low,
+low vacuuming should not be a problem.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/294-1
+00:12:40.186 --> 00:12:43.716
+<v Sarat Balijepalli>We can tell that, hey, this is step one,
+these are the blockers.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/288-0
+00:12:41.621 --> 00:12:41.741
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/294-2
+00:12:43.716 --> 00:12:47.464
+<v Sarat Balijepalli>You tell us we can resolve for you and we
+can vacuum it so they can.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/294-3
+00:12:47.464 --> 00:12:50.669
+<v Sarat Balijepalli>It's during the business day.
+It's not impacting anything.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/294-4
+00:12:50.669 --> 00:12:54.851
+<v Sarat Balijepalli>They'll come in the evening and then
+enable it and then we'll resolve it and</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/294-5
+00:12:54.851 --> 00:12:56.101
+<v Sarat Balijepalli>do the vacuum for them.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/295-0
+00:12:56.221 --> 00:12:59.261
+<v Sarat Balijepalli>out of business also.
+That's one way of looking at it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/297-0
+00:12:59.981 --> 00:13:01.712
+<v Abe Omorogbe>Do you?
+Would you also think the customers want</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/297-1
+00:13:01.712 --> 00:13:02.181
+<v Abe Omorogbe>it scheduled?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/300-0
+00:13:04.781 --> 00:13:09.831
+<v Abe Omorogbe>Like cause if I say yes,
+would you think people want it done right</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/304-0
+00:13:08.661 --> 00:13:13.604
+<v Sarat Balijepalli>Yeah, yeah, yeah. Yes,
+that would be a real great addition, Abby,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/300-1
+00:13:09.831 --> 00:13:13.901
+<v Abe Omorogbe>away or like yes,
+but do it after business hours, OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/304-1
+00:13:13.604 --> 00:13:19.371
+<v Sarat Balijepalli>because I have worked with multiple
+customers who over the weekend or before</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/304-2
+00:13:19.371 --> 00:13:23.341
+<v Sarat Balijepalli>the start of business hours do vacuuming
+on servers.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/310-0
+00:13:23.741 --> 00:13:28.825
+<v Sarat Balijepalli>Stopping entire workload because their
+workload is like a nine to five kind of a</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/303-0
+00:13:24.741 --> 00:13:24.981
+<v Abe Omorogbe>Gotcha.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/310-1
+00:13:28.825 --> 00:13:31.900
+<v Sarat Balijepalli>workload.
+So what they do every day morning they</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/306-0
+00:13:29.221 --> 00:13:30.621
+<v Abe Omorogbe>Gotcha. Gotcha.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/310-2
+00:13:31.900 --> 00:13:35.415
+<v Sarat Balijepalli>schedule something 7 to 9 and then the
+workload starts.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/308-0
+00:13:32.741 --> 00:13:32.981
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/310-3
+00:13:35.415 --> 00:13:39.621
+<v Sarat Balijepalli>So some of them it would it would give
+them no it would give them.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/316-0
+00:13:39.741 --> 00:13:43.089
+<v Sarat Balijepalli>It would cut their time also.
+They could just schedule it and then</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/316-1
+00:13:43.089 --> 00:13:45.538
+<v Sarat Balijepalli>decide, hey,
+every day vacuum it if there are no</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/311-0
+00:13:43.101 --> 00:13:44.181
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/316-2
+00:13:45.538 --> 00:13:47.986
+<v Sarat Balijepalli>blockers. For example,
+blocker is some scenario.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/316-3
+00:13:47.986 --> 00:13:51.684
+<v Sarat Balijepalli>We are thinking what happens if there is
+no blocker in the system at all.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/316-4
+00:13:51.684 --> 00:13:55.383
+<v Sarat Balijepalli>All we are saying is we'll go and vacuum
+for them every day at this time,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/315-0
+00:13:55.181 --> 00:13:55.461
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/316-5
+00:13:55.383 --> 00:13:58.781
+<v Sarat Balijepalli>which is which is nice to have, right?
+That's the end goal anyways.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/318-0
+00:13:58.541 --> 00:14:02.684
+<v Abe Omorogbe>Wait, you can't do that.
+We don't have a a vacuum on the schedule</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/318-1
+00:14:02.684 --> 00:14:03.061
+<v Abe Omorogbe>today.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/327-0
+00:14:04.381 --> 00:14:07.970
+<v Sarat Balijepalli>They have to use PG Cron. That's why,
+yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/320-0
+00:14:06.901 --> 00:14:08.781
+<v Abe Omorogbe>Oh, they have to use PG. OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/327-1
+00:14:07.970 --> 00:14:12.374
+<v Sarat Balijepalli>So what they do Abe is we do have auto
+vacuum daemon,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/327-2
+00:14:12.374 --> 00:14:18.899
+<v Sarat Balijepalli>but in some scenarios the workload is
+such that that they would need additional</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/322-0
+00:14:13.141 --> 00:14:13.381
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/327-3
+00:14:18.899 --> 00:14:22.733
+<v Sarat Balijepalli>help.
+I have worked with many customers who do</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/324-0
+00:14:20.021 --> 00:14:20.141
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/327-4
+00:14:22.733 --> 00:14:23.141
+<v Sarat Balijepalli>that.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/326-0
+00:14:23.301 --> 00:14:23.421
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/329-0
+00:14:23.501 --> 00:14:28.080
+<v Sarat Balijepalli>Outside of vacuum vacuum will do in
+business hours. Out of business hours,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/334-0
+00:14:26.901 --> 00:14:31.408
+<v Pino de Candia>Is the challenge is the challenge partly
+to that that that you sort of you have to</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/329-1
+00:14:28.080 --> 00:14:29.301
+<v Sarat Balijepalli>manual vacuum, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/334-1
+00:14:31.408 --> 00:14:35.590
+<v Pino de Candia>maintain an open session to the to to
+Postgres while you do these things and</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/334-2
+00:14:35.590 --> 00:14:39.771
+<v Pino de Candia>Cron allows you not to do that as PG
+durable has the same ability right that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/334-3
+00:14:39.771 --> 00:14:41.781
+<v Pino de Candia>you don't have to do things you know.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/336-0
+00:14:42.181 --> 00:14:43.741
+<v Pino de Candia>With with the session open.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/335-0
+00:14:43.981 --> 00:14:44.301
+<v Sarat Balijepalli>Mm.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/337-0
+00:14:44.781 --> 00:14:48.461
+<v Pino de Candia>You submit the job and then you can walk
+away. Find out later how it went.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/343-0
+00:14:46.861 --> 00:14:49.715
+<v Sarat Balijepalli>Yeah, yeah,
+that that that would give perfect.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/343-1
+00:14:49.715 --> 00:14:54.695
+<v Sarat Balijepalli>You know, we can give tell people, hey,
+you can go and schedule it it if there is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/343-2
+00:14:54.695 --> 00:14:57.853
+<v Sarat Balijepalli>a blocker,
+what do you want to do with the blocker?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/343-3
+00:14:57.853 --> 00:15:02.226
+<v Sarat Balijepalli>If you tell and and schedule it,
+it'll kill that blocker and then it'll</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/343-4
+00:15:02.226 --> 00:15:06.781
+<v Sarat Balijepalli>vacuum for it or in a day for a
+particular day there is no blocker at all.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/349-0
+00:15:06.781 --> 00:15:10.595
+<v Sarat Balijepalli>And you want to do a vacuum,
+we'll do vacuum for it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/349-1
+00:15:10.595 --> 00:15:14.913
+<v Sarat Balijepalli>If you schedule it,
+it'll check for the blockers and do it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/349-2
+00:15:14.913 --> 00:15:20.814
+<v Sarat Balijepalli>The other third scenario that is there
+Abe related to 1 billion threshold, right,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/345-0
+00:15:17.621 --> 00:15:17.741
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/349-3
+00:15:20.814 --> 00:15:23.621
+<v Sarat Balijepalli>50% wrap around risk, wrap around risk.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/347-0
+00:15:20.861 --> 00:15:21.141
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/350-0
+00:15:23.101 --> 00:15:25.581
+<v Abe Omorogbe>Yeah, yeah, my my computer is crashing.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/355-0
+00:15:23.901 --> 00:15:27.869
+<v Sarat Balijepalli>That for example,
+yeah that for example I was in a Walmart</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/355-1
+00:15:27.869 --> 00:15:30.829
+<v Sarat Balijepalli>workshop few days back like few weeks
+back.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/355-2
+00:15:30.829 --> 00:15:36.210
+<v Sarat Balijepalli>This was what we discussed for two days
+because they had couple of servers that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/353-0
+00:15:35.221 --> 00:15:35.261
+<v Abe Omorogbe>Oh.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/355-3
+00:15:36.210 --> 00:15:38.901
+<v Sarat Balijepalli>went to wrap around because of blockers.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/356-0
+00:15:39.501 --> 00:15:39.861
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/362-0
+00:15:39.661 --> 00:15:42.968
+<v Sarat Balijepalli>And then they had to do, you know,
+they had to effectively.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/362-1
+00:15:42.968 --> 00:15:47.654
+<v Sarat Balijepalli>The server was down for X number of time.
+They were. They wanted to know what to do,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/362-2
+00:15:47.654 --> 00:15:51.458
+<v Sarat Balijepalli>how to solve those problems and all.
+Basically at a very high level.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/362-3
+00:15:51.458 --> 00:15:54.049
+<v Sarat Balijepalli>This is what we told him.
+You need to monitor.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/362-4
+00:15:54.049 --> 00:15:57.411
+<v Sarat Balijepalli>You need to see 1 billion transactions
+and all these things.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/362-5
+00:15:57.411 --> 00:15:59.341
+<v Sarat Balijepalli>Then you need to act upon yourself.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/365-0
+00:15:59.501 --> 00:16:03.131
+<v Sarat Balijepalli>Point right.
+So all we are doing here is everything</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/361-0
+00:15:59.901 --> 00:16:00.181
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/365-1
+00:16:03.131 --> 00:16:08.298
+<v Sarat Balijepalli>doing for them and if it crosses 1
+billion there is no blocker all vacuum</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/365-2
+00:16:08.298 --> 00:16:11.021
+<v Sarat Balijepalli>will run and reduce those transactions.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/366-0
+00:16:12.141 --> 00:16:12.661
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/371-0
+00:16:14.501 --> 00:16:21.497
+<v Abe Omorogbe>Check and I'm just gonna put your your
+some of your comments. That's it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/368-0
+00:16:17.501 --> 00:16:18.261
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/371-1
+00:16:21.497 --> 00:16:23.701
+<v Abe Omorogbe>I I like this. OK user.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/376-0
+00:16:24.021 --> 00:16:28.185
+<v Sarat Balijepalli>And even scheduling was a good one.
+Abhay add that one also somewhere</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/372-0
+00:16:27.301 --> 00:16:29.501
+<v Abe Omorogbe>Oh, Oh, yeah, yeah, yeah, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/376-1
+00:16:28.185 --> 00:16:31.695
+<v Sarat Balijepalli>schedule scheduling this giving that
+option to user right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/376-2
+00:16:31.695 --> 00:16:36.573
+<v Sarat Balijepalli>Either they do it then and that itself or
+they giving the option them to schedule</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/376-3
+00:16:36.573 --> 00:16:40.261
+<v Sarat Balijepalli>would be a very good one because these
+things keep coming up.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/380-0
+00:16:41.421 --> 00:16:48.872
+<v Abe Omorogbe>Yeah, so I'm just wanna let me see.
+So this is adding then it gets resolved.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/380-1
+00:16:48.872 --> 00:16:54.581
+<v Abe Omorogbe>Same thing and then this gets scheduled
+for the auto runs.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/380-2
+00:16:54.581 --> 00:16:57.581
+<v Abe Omorogbe>Are those like how do you like?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/386-0
+00:16:57.901 --> 00:17:00.674
+<v Abe Omorogbe>How do you envision customers to accept
+that?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/386-1
+00:17:00.674 --> 00:17:04.833
+<v Abe Omorogbe>Cause the first pushback you said
+customers would have is like, hey,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/382-0
+00:17:04.501 --> 00:17:04.741
+<v Sarat Balijepalli>Hmm.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/386-2
+00:17:04.833 --> 00:17:08.510
+<v Abe Omorogbe>I wanna see what happened.
+So are you saying when there's no</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/384-0
+00:17:06.781 --> 00:17:07.061
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/386-3
+00:17:08.510 --> 00:17:10.741
+<v Abe Omorogbe>blockers like I just run back in, OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/390-0
+00:17:08.781 --> 00:17:11.870
+<v Sarat Balijepalli>Yes, we could.
+That is why we could put a scheduler</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/390-1
+00:17:11.870 --> 00:17:14.603
+<v Sarat Balijepalli>there.
+That would give them the saying that I</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/387-0
+00:17:13.861 --> 00:17:14.181
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/390-2
+00:17:14.603 --> 00:17:17.277
+<v Sarat Balijepalli>don't want to run during the business
+hours,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/390-3
+00:17:17.277 --> 00:17:19.891
+<v Sarat Balijepalli>but I'll schedule every day night at
+12:00.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/390-4
+00:17:19.891 --> 00:17:22.981
+<v Sarat Balijepalli>Let let the vacuum do the do it vacuum
+for me once.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/392-0
+00:17:27.981 --> 00:17:30.661
+<v Abe Omorogbe>So specifically only schedule when there
+are no blockers.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/393-0
+00:17:30.701 --> 00:17:31.701
+<v Sarat Balijepalli>Yes, we could do that.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/395-0
+00:17:32.941 --> 00:17:34.981
+<v Abe Omorogbe>Yeah, I I just this is OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/402-0
+00:17:33.941 --> 00:17:36.563
+<v Sarat Balijepalli>Yeah,
+I think with this orchestration it would</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/402-1
+00:17:36.563 --> 00:17:40.747
+<v Sarat Balijepalli>give us that that one also, right?
+Like kind of an if else loop we can put</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/402-2
+00:17:40.747 --> 00:17:44.763
+<v Sarat Balijepalli>right in the orchestration. Yeah,
+I got your point when you asked that.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/398-0
+00:17:42.061 --> 00:17:44.661
+<v Abe Omorogbe>Yeah, yeah, exactly.
+There's they're branching.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/402-3
+00:17:44.763 --> 00:17:48.501
+<v Sarat Balijepalli>So we could do that then then that would
+be a good one to do also.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/399-0
+00:17:45.741 --> 00:17:46.621
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/406-0
+00:17:48.621 --> 00:17:51.368
+<v Pino de Candia>I'm curious to know what what is it about,
+you know,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/401-0
+00:17:49.221 --> 00:17:49.421
+<v Abe Omorogbe>And.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/406-1
+00:17:51.368 --> 00:17:55.618
+<v Pino de Candia>like what is it about PG durable that's
+better than PG or different from PG Cron?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/406-2
+00:17:55.618 --> 00:17:58.935
+<v Pino de Candia>Like what? Why? You know,
+are we talking about stuff that could</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/406-3
+00:17:58.935 --> 00:18:01.630
+<v Pino de Candia>have been done with PG Cron anyway or
+right? Maybe,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/406-4
+00:18:01.630 --> 00:18:03.341
+<v Pino de Candia>maybe this makes it easier to do.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/412-0
+00:18:03.821 --> 00:18:06.863
+<v Sarat Balijepalli>No, we are doing a bunch of steps here,
+right Pino,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/412-1
+00:18:06.863 --> 00:18:10.957
+<v Sarat Balijepalli>PG Cron we can we we have to schedule
+different jobs all we are here.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/407-0
+00:18:07.381 --> 00:18:08.181
+<v Pino de Candia>OK, OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/412-2
+00:18:10.957 --> 00:18:15.462
+<v Sarat Balijepalli>It's like an orchestration, right?
+I'm seeing for there is a blocker or not,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/412-3
+00:18:15.462 --> 00:18:18.621
+<v Sarat Balijepalli>whether I have reached 1 billion
+transactions or not.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/411-0
+00:18:16.381 --> 00:18:19.421
+<v Pino de Candia>By their conditions and yes, yes,
+absolutely.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/416-0
+00:18:19.581 --> 00:18:23.067
+<v Sarat Balijepalli>Yeah, the only thing it we can,
+we don't have to put these checks and</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/416-1
+00:18:23.067 --> 00:18:25.407
+<v Sarat Balijepalli>balances.
+The only thing is we'll get a lot of</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/416-2
+00:18:25.407 --> 00:18:28.993
+<v Sarat Balijepalli>pushback from customers saying that all
+this is good, but I want to do,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/416-3
+00:18:28.993 --> 00:18:31.981
+<v Sarat Balijepalli>I want to see everything before anything
+I give a go ahead.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/417-0
+00:18:31.821 --> 00:18:35.386
+<v Pino de Candia>Mm mhm, right.
+It has that signal like that that that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/417-1
+00:18:35.386 --> 00:18:37.301
+<v Pino de Candia>ability to get a signal from.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/422-0
+00:18:35.621 --> 00:18:40.003
+<v Sarat Balijepalli>Yeah, so we yeah. So if you tell them,
+hey, this is going to tell you,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/422-1
+00:18:40.003 --> 00:18:44.508
+<v Sarat Balijepalli>find you the things and tell you where
+the issues are, you go and check.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/422-2
+00:18:44.508 --> 00:18:47.101
+<v Sarat Balijepalli>If you are good, we can handle it for you.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/426-0
+00:18:46.861 --> 00:18:53.085
+<v Abe Omorogbe>Yeah. And then where does,
+where do you pipe in notifications, right?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/421-0
+00:18:47.421 --> 00:18:48.181
+<v Pino de Candia>Got it. OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/426-1
+00:18:53.085 --> 00:19:00.021
+<v Abe Omorogbe>Like like how would I trigger or accept
+like is where does that happen today?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/427-0
+00:19:00.141 --> 00:19:02.981
+<v Sarat Balijepalli>Uh, when a customer goes and accepts it.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/429-0
+00:19:03.421 --> 00:19:04.461
+<v Abe Omorogbe>Yeah, exactly.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/436-0
+00:19:04.981 --> 00:19:10.337
+<v Sarat Balijepalli>So what they do is that they check for
+number of tables that were vacuumed</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/436-1
+00:19:10.337 --> 00:19:14.408
+<v Sarat Balijepalli>during that period.
+Like if ultimately you're vacuuming,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/436-2
+00:19:14.408 --> 00:19:20.050
+<v Sarat Balijepalli>right? So there we go to for example,
+please stat user tables and see when the</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/432-0
+00:19:17.461 --> 00:19:17.661
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/436-3
+00:19:20.050 --> 00:19:23.621
+<v Sarat Balijepalli>last vacuum happened.
+So they vacuum just now on.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/442-0
+00:19:24.061 --> 00:19:27.420
+<v Sarat Balijepalli>That's how it is.
+The second check is whether if there was</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/435-0
+00:19:25.181 --> 00:19:25.461
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/442-1
+00:19:27.420 --> 00:19:31.519
+<v Sarat Balijepalli>a bloat on the server and that bloat went
+away like earlier it was 50%.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/438-0
+00:19:31.181 --> 00:19:31.581
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/442-2
+00:19:31.519 --> 00:19:35.049
+<v Sarat Balijepalli>Now it is like 1% or 2% whatever.
+So that's the second check.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/442-3
+00:19:35.049 --> 00:19:39.660
+<v Sarat Balijepalli>Third check is like number of transaction
+IDs come down like in the case of wrap</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/442-4
+00:19:39.660 --> 00:19:42.621
+<v Sarat Balijepalli>around right from 1 billion to whatever
+it is like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/444-0
+00:19:44.701 --> 00:19:49.410
+<v Sarat Balijepalli>Million, 200 million. Then it's like,
+yeah, we whatever vacuum did,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/444-1
+00:19:49.410 --> 00:19:51.141
+<v Sarat Balijepalli>it accomplished its goal.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/447-0
+00:19:50.701 --> 00:19:54.169
+<v Abe Omorogbe>Yeah,
+but how does the customer get that</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/447-1
+00:19:54.169 --> 00:19:58.823
+<v Abe Omorogbe>notification?
+Is do we push notifications to them? Oh,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/450-0
+00:19:55.621 --> 00:19:58.896
+<v Sarat Balijepalli>They do manually. No, they do.
+They check manually.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/447-2
+00:19:58.823 --> 00:20:00.261
+<v Abe Omorogbe>manually. OK, OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/450-1
+00:19:58.896 --> 00:20:03.620
+<v Sarat Balijepalli>So actually that's also a good point.
+Maybe at the end of this one, right,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/450-2
+00:20:03.620 --> 00:20:06.895
+<v Sarat Balijepalli>we can add that one also.
+We actually put that one.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/450-3
+00:20:06.895 --> 00:20:09.981
+<v Sarat Balijepalli>I can update this doc in fact.
+So I I know that.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/453-0
+00:20:10.941 --> 00:20:14.414
+<v Sarat Balijepalli>We have done the vacuum,
+but is it successful or not?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/453-1
+00:20:14.414 --> 00:20:19.882
+<v Sarat Balijepalli>We can give them a result saying that hey,
+this many tables were vacuumed because of</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/453-2
+00:20:19.882 --> 00:20:21.941
+<v Sarat Balijepalli>this at this time like you know.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/460-0
+00:20:22.941 --> 00:20:26.094
+<v Abe Omorogbe>Yeah,
+the reason why I'm saying that is because</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/455-0
+00:20:22.981 --> 00:20:23.021
+<v Sarat Balijepalli>Uh.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/460-1
+00:20:26.094 --> 00:20:30.692
+<v Abe Omorogbe>there are two places, right?
+Like in #2 where we say users can accept</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/460-2
+00:20:30.692 --> 00:20:34.830
+<v Abe Omorogbe>or approve changes,
+like how do we tell them? Is it an e-mail?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/457-0
+00:20:33.101 --> 00:20:34.061
+<v Sarat Balijepalli>Yeah, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/460-3
+00:20:34.830 --> 00:20:37.261
+<v Abe Omorogbe>Is it a notification on Azure portal?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/459-0
+00:20:36.461 --> 00:20:36.501
+<v Sarat Balijepalli>I.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/461-0
+00:20:38.221 --> 00:20:40.621
+<v Sarat Balijepalli>I don't know what is best.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/465-0
+00:20:39.261 --> 00:20:41.557
+<v Abe Omorogbe>There's a lot of complexity there,
+but I don't know.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/464-0
+00:20:41.261 --> 00:20:41.701
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/465-1
+00:20:41.557 --> 00:20:43.941
+<v Abe Omorogbe>I'm just I'm asking if we already had
+something today.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/468-0
+00:20:43.861 --> 00:20:47.765
+<v Sarat Balijepalli>No, we don't have anything like that.
+Maybe in the orchestration only they</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/468-1
+00:20:47.765 --> 00:20:50.316
+<v Sarat Balijepalli>could,
+we could store somewhere the results also</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/468-2
+00:20:50.316 --> 00:20:50.941
+<v Sarat Balijepalli>of that run.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/469-0
+00:20:50.701 --> 00:20:53.981
+<v Abe Omorogbe>Yeah, we can. We can. It's just,
+it's just like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/471-0
+00:20:53.021 --> 00:20:56.552
+<v Sarat Balijepalli>And we can surface it somehow,
+somewhere away that if we have some</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/471-1
+00:20:56.552 --> 00:20:59.661
+<v Sarat Balijepalli>tables somewhere,
+we can always surface it if they wanted.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/474-0
+00:20:59.901 --> 00:21:03.941
+<v Abe Omorogbe>Surfaces how like surfaces via Azure
+portal OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/481-0
+00:21:02.861 --> 00:21:06.625
+<v Sarat Balijepalli>Oh, I don't know portal.
+Not many people will have access to</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/481-1
+00:21:06.625 --> 00:21:09.340
+<v Sarat Balijepalli>portal.
+That's another problem we have with</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/476-0
+00:21:08.981 --> 00:21:09.101
+<v Abe Omorogbe>OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/481-2
+00:21:09.340 --> 00:21:13.289
+<v Sarat Balijepalli>putting too many things in the portal.
+So we may have to think,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/478-0
+00:21:10.701 --> 00:21:10.901
+<v Abe Omorogbe>I think.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/481-3
+00:21:13.289 --> 00:21:18.349
+<v Sarat Balijepalli>but having a end goal like what is the
+result of that would be a good one to add.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/480-0
+00:21:17.501 --> 00:21:18.181
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/481-4
+00:21:18.349 --> 00:21:18.781
+<v Sarat Balijepalli>I I'll.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/484-0
+00:21:18.861 --> 00:21:21.040
+<v Sarat Balijepalli>I can put give those queries to be
+offline now.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/484-1
+00:21:21.040 --> 00:21:24.808
+<v Sarat Balijepalli>There might be two or three queries every
+time you have to run and tell them, hey,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/484-2
+00:21:24.808 --> 00:21:26.261
+<v Sarat Balijepalli>this is what it is looking like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/488-0
+00:21:26.341 --> 00:21:29.445
+<v Abe Omorogbe>Yeah, yeah, no.
+Like what we're thinking is we're</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/488-1
+00:21:29.445 --> 00:21:32.550
+<v Abe Omorogbe>integrating with the VS code team.
+So in my head,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/486-0
+00:21:31.621 --> 00:21:31.861
+<v Sarat Balijepalli>Hmm.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/488-2
+00:21:32.550 --> 00:21:37.021
+<v Abe Omorogbe>I'm just thinking like if you're a DBA
+persona, right? And you have PG.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/496-0
+00:21:35.581 --> 00:21:38.997
+<v Sarat Balijepalli>Then we can give them a.
+If this is going to VS code then it is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/496-1
+00:21:38.997 --> 00:21:42.039
+<v Sarat Balijepalli>much easier that way.
+I think we can give them a screen,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/489-0
+00:21:39.581 --> 00:21:39.861
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/496-2
+00:21:42.039 --> 00:21:46.255
+<v Sarat Balijepalli>a tab somewhere that would just give the
+output of this one and something like</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/491-0
+00:21:44.141 --> 00:21:44.661
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/493-0
+00:21:46.221 --> 00:21:46.501
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/496-3
+00:21:46.255 --> 00:21:49.618
+<v Sarat Balijepalli>some time series range.
+Someone goes and puts the time series,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/496-4
+00:21:49.618 --> 00:21:52.927
+<v Sarat Balijepalli>say today what happened,
+yesterday what happened and they can</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/496-5
+00:21:52.927 --> 00:21:54.101
+<v Sarat Balijepalli>start seeing the logs.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/502-0
+00:21:54.141 --> 00:21:58.353
+<v Abe Omorogbe>Yeah, that's, yeah, something like that.
+It's like, hey, we found this,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/497-0
+00:21:54.621 --> 00:21:56.301
+<v Sarat Balijepalli>Something like that we can give them.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/502-1
+00:21:58.353 --> 00:22:01.571
+<v Abe Omorogbe>you wanna review it?
+They click it and it's like, hey,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/502-2
+00:22:01.571 --> 00:22:05.959
+<v Abe Omorogbe>you want us to run it now? Yes. OK,
+next time if we don't find any errors,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/502-3
+00:22:05.959 --> 00:22:09.821
+<v Abe Omorogbe>do you want us to auto vacuum? Sure,
+why not? And then it's like.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/500-0
+00:22:07.181 --> 00:22:07.861
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/503-0
+00:22:10.221 --> 00:22:13.569
+<v Abe Omorogbe>And then they see a screen of all the
+pipelines running. It's like, oh,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/503-1
+00:22:13.569 --> 00:22:15.941
+<v Abe Omorogbe>you have these pipelines running all the
+time, OK.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/506-0
+00:22:14.101 --> 00:22:16.730
+<v Sarat Balijepalli>Exactly, exactly.
+That would actually be good. Yeah,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/506-1
+00:22:16.730 --> 00:22:18.912
+<v Sarat Balijepalli>that would be good. Yeah.
+If it is VS code,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/506-2
+00:22:18.912 --> 00:22:22.781
+<v Sarat Balijepalli>then we have bunch of things we could do.
+I was thinking our observed portal.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/508-0
+00:22:23.181 --> 00:22:26.748
+<v Abe Omorogbe>Yeah, yeah. No, I I don't know where.
+I'm just like,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/509-0
+00:22:26.301 --> 00:22:29.561
+<v Sarat Balijepalli>We are scored.
+We are scored would be a good one to add,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/508-1
+00:22:26.748 --> 00:22:30.181
+<v Abe Omorogbe>I guess we had a discussion this morning
+with him.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/509-1
+00:22:29.561 --> 00:22:31.621
+<v Sarat Balijepalli>but as well portal we have to think.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/515-0
+00:22:32.381 --> 00:22:36.627
+<v Abe Omorogbe>Yeah, yeah, yeah. I don't know.
+What are your thoughts, Pinat? Again,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/515-1
+00:22:36.627 --> 00:22:39.661
+<v Abe Omorogbe>like I I'm,
+I don't know what the technical here.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/515-2
+00:22:39.661 --> 00:22:43.119
+<v Abe Omorogbe>I'm just like,
+I'm just brainstorming to see what we can</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/515-3
+00:22:43.119 --> 00:22:48.154
+<v Abe Omorogbe>do. Obviously there are timeline issues,
+but seems like a pretty cool use case for</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/515-4
+00:22:48.154 --> 00:22:50.581
+<v Abe Omorogbe>Dbas and it'll solve a lot of, you know.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/516-0
+00:22:50.901 --> 00:22:55.781
+<v Abe Omorogbe>Kind of ease of use issues that
+performance teams already seen.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/521-0
+00:22:55.901 --> 00:22:59.579
+<v Pino de Candia>I I I like it a lot.
+I mean I I think the VS code delivery</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/521-1
+00:22:59.579 --> 00:23:03.818
+<v Pino de Candia>mechanism is so is so easy right in terms
+of just like you develop,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/521-2
+00:23:03.818 --> 00:23:07.123
+<v Pino de Candia>we're developing the extension and VS
+code together.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/521-3
+00:23:07.123 --> 00:23:11.861
+<v Pino de Candia>It just it makes it makes things easier
+in terms of like bringing that out.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/526-0
+00:23:12.141 --> 00:23:16.991
+<v Pino de Candia>We might have to you know talk about some
+details like what is this like an extra</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/526-1
+00:23:16.991 --> 00:23:21.427
+<v Pino de Candia>extension or some or some stored
+procedures and some some whatever what is</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/523-0
+00:23:17.901 --> 00:23:18.261
+<v Abe Omorogbe>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/524-0
+00:23:20.701 --> 00:23:20.981
+<v Abe Omorogbe>Oh, I'm sorry.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/526-2
+00:23:21.427 --> 00:23:25.863
+<v Pino de Candia>the delivery of this is additional
+functionality with on top of PG durable</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/526-3
+00:23:25.863 --> 00:23:30.535
+<v Pino de Candia>but but but I like that pairing of right
+like the VS code extension could have</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/525-0
+00:23:28.501 --> 00:23:28.821
+<v Sarat Balijepalli>Yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/526-4
+00:23:30.535 --> 00:23:31.541
+<v Pino de Candia>yeah yeah I mean.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/527-0
+00:23:31.741 --> 00:23:34.741
+<v Pino de Candia>You could do the workflow entirely there.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/530-0
+00:23:37.421 --> 00:23:43.183
+<v Sarat Balijepalli>Hey Pino, So what Abe was looking right?
+Is it something that I can set up?</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/529-0
+00:23:38.221 --> 00:23:38.261
+<v Pino de Candia>Uh.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/530-1
+00:23:43.183 --> 00:23:49.401
+<v Sarat Balijepalli>Can you give me one more time that link?
+I want to set it up and see if something</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/530-2
+00:23:49.401 --> 00:23:51.221
+<v Sarat Balijepalli>I can play around a bit.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/531-0
+00:23:51.341 --> 00:23:55.933
+<v Pino de Candia>Yeah, so you have two options, Sarat.
+One is so. So first of all,</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/531-1
+00:23:55.933 --> 00:24:01.221
+<v Pino de Candia>currently we're shipping PG Dorable only
+to Horizon TV that go ahead, yeah.</v>
+
+b44d7714-252d-4869-bb22-d00b8e92259e/532-0
+00:24:02.701 --> 00:24:03.501
+<v Pino de Candia>Oh, sure, sure.</v>

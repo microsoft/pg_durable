@@ -1,38 +1,47 @@
 # AI Scenarios for pg_durable
 
-**4 Production-Ready Patterns for AI/ML Workloads**
+**3 Production-Ready AI Pipeline Patterns**
 
-This guide provides detailed, copy-paste ready code samples for common AI orchestration patterns using pg_durable.
+Declarative AI pipelines that run entirely inside PostgreSQL — no external orchestrators needed.
 
-> 📖 **Prerequisites:** See [Getting Started](../SCENARIOS.md#scenario-1-getting-started) if you're new to pg_durable.
+> 📖 **Prerequisites:**
+> - `CREATE EXTENSION pg_durable;`
+> - `CREATE EXTENSION vector;` (pgvector)
+> - `CREATE EXTENSION azure_ai;` (for embedding/LLM calls)
+> - Load pipeline functions: `\i sql/ai/ai_pipeline_functions.sql`
 
-### Key Syntax Patterns
+### AI Pipeline API Reference
 
-When working with pg_durable variables, follow these patterns for reliable execution:
+| Function | Purpose |
+|----------|---------|
+| `ai.create_pipeline()` | Define a pipeline with source, steps, sink, and trigger |
+| `ai.run()` | Manually trigger a pipeline run |
+| `ai.status()` | Check current pipeline status and latest run |
+| `ai.explain()` | Show the execution plan |
+| `ai.wait_for_completion()` | Block until the current run finishes |
+| `ai.backfill()` | Reprocess all data from scratch |
+| `ai.pause()` / `ai.resume()` | Pause/resume a pipeline |
+| `ai.drop()` | Remove a pipeline entirely |
+| `ai.list_pipelines()` | List all registered pipelines |
 
-| Pattern | Example | Use When |
-|---------|---------|----------|
-| **Parentheses around `\|=>`** | `('SELECT id FROM t' \|=> 'row_id')` | Always wrap variable capture |
-| **Single-column selection** | `SELECT id FROM ...` then `$row_id::int` | Prefer over multi-column JSON |
-| **Subqueries for data** | `(SELECT col FROM t WHERE id = $row_id::int)` | Fetching related data |
-| **DB checks in conditionals** | `'SELECT score >= 0.9 FROM t WHERE id = $id::int'` | Conditions inside `df.if()` |
-| **jsonb_build_object()** | `jsonb_build_object('key', $var)` | Wrapping variables in JSON |
+### Step Types
 
-**⚠️ Important:** Avoid `$var::jsonb` casts on pg_durable variables. Variable results are stored internally with wrapper JSON. Instead:
-- Use `jsonb_build_object('key', $var)` to build JSON objects
-- Store values first, then read from database for complex JSON operations
-- Use subqueries: `(SELECT col FROM t WHERE id = $var::int)` to fetch data
-
-**Why?** Multi-column results require JSON parsing (`$var::jsonb->>'field'`), which can fail if the result isn't properly formatted. Single-column results with subqueries are more reliable.
+| Step | Purpose | Key Parameters |
+|------|---------|----------------|
+| `ai.chunk()` | Split text into overlapping segments | `input_column`, `chunk_size`, `overlap` |
+| `ai.embed()` | Generate vector embeddings | `model`, `input_column`, `dimensions` |
+| `ai.extract()` | Extract structured fields via LLM | `model`, `input_column`, `data` |
+| `ai.generate()` | Generate text via LLM | `model`, `prompt_template`, `input_column` |
+| `ai.rank()` | Score/rank documents | `model`, `query_column`, `doc_column` |
+| `ai.request_approval()` | Pause for human review | `content`, `notify`, `timeout` |
 
 ---
 
 ## Table of Contents
 
-- [Scenario 1: Data Ingestion — Chunking & Embedding](#scenario-1-data-ingestion--chunking--embedding)
-- [Scenario 2: Query Processing — Pre/Post LLM Orchestration](#scenario-2-query-processing--prepost-llm-orchestration)
-- [Scenario 3: Evaluation Loop with Human Review](#scenario-3-evaluation-loop-with-human-review)
-- [Scenario 4: AI Output Governance — Versioned & Governed Results](#scenario-4-ai-output-governance--versioned--governed-results)
+- [Scenario 1: RAG Pipeline — Chunking & Embedding](#scenario-1-rag-pipeline--chunking--embedding)
+- [Scenario 2: Feature Enrichment — Embedding & Extraction](#scenario-2-feature-enrichment--embedding--extraction)
+- [Scenario 3: Human Approval — Triage with Review Gate](#scenario-3-human-approval--triage-with-review-gate)
 
 ---
 
