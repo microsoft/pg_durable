@@ -76,8 +76,8 @@ Acceptance Scenarios:
 
 - FR-001: A GUC `pg_durable.max_management_connections` controls the size of the consolidated management pool (merged polling + activity pools). Default preserves current combined capacity (6). (Stories: P1)
 - FR-002: A GUC `pg_durable.max_duroxide_connections` controls the size of the duroxide provider pool (which internally includes the listener connection). Default preserves current capacity (10). (Stories: P1)
-- FR-003: A GUC `pg_durable.max_user_connections` controls the maximum number of concurrent user-execution connections (connections created by `connect_as_user` for SQL node execution). (Stories: P1, P2)
-- FR-004: A GUC `pg_durable.execution_acquire_timeout` controls how long (in seconds) a SQL node execution will wait for an available user-execution connection slot before failing. (Stories: P2)
+- FR-003: A GUC `pg_durable.max_user_connections` controls the maximum number of concurrent user-execution connections (connections created by `connect_as_user` for SQL node execution). Default: 10. (Stories: P1, P2)
+- FR-004: A GUC `pg_durable.execution_acquire_timeout` controls how long (in seconds) a SQL node execution will wait for an available user-execution connection slot before failing. Default: 30 (consistent with sqlx's internal pool acquire timeout). (Stories: P2)
 - FR-005: The background worker consolidates the existing polling pool (1 connection) and activity pool (5 connections) into a single management pool sized by `pg_durable.max_management_connections`. The `df.in_workflow` `after_connect` hook is dropped (unnecessary — `connect_as_user()` sets it independently). (Stories: P1)
 - FR-006: The duroxide provider pool size is set to `pg_durable.max_duroxide_connections` via the `DUROXIDE_PG_POOL_MAX` mechanism or provider config. (Stories: P1)
 - FR-007: When the user-execution connection limit is reached, new SQL node executions queue (backpressure) until a slot frees up or the acquire timeout expires. (Stories: P2)
@@ -117,7 +117,7 @@ Acceptance Scenarios:
 - **Backend operations are lightweight**: `df.start()`, `df.cancel()`, and `df.signal()` are short-lived queue inserts taking <1ms each. A single-connection pool is sufficient because concurrent calls from the same backend session will serialize, and the serialization latency is negligible.
 - **Single background worker**: There is exactly one background worker process. The connection limits apply to that single worker. Multiple-worker scenarios are out of scope.
 - **Passwordless auth continues**: The `connect_as_user` function will continue to use passwordless (trust/peer) authentication. Connection pooling for user-execution connections is out of scope because each connection has a unique user identity.
-- **GUC defaults preserve current behavior**: Default values for the new GUCs match current pool sizes (management=6, duroxide=10, user=unbounded→reasonable default) so existing deployments are not broken by upgrade.
+- **GUC defaults preserve current behavior**: Default values for the new GUCs match current pool sizes (management=6, duroxide=10) or provide reasonable initial limits (user=10, acquire_timeout=30s) so existing deployments are not broken by upgrade.
 
 ## Scope
 
@@ -149,7 +149,7 @@ Out of Scope:
 - **Duroxide submodule changes needed**: If the duroxide provider pool size cannot be controlled purely from pg_durable (e.g., `DUROXIDE_PG_POOL_MAX` doesn't work as expected), the submodule may need modification. Mitigation: Research confirms the env var exists at `provider.rs:146-149`. Verify during implementation.
 - **Duroxide pool too small for listener**: The listener consumes one connection from the duroxide pool. If `max_duroxide_connections` is set to 1, the listener takes it and orchestration queries may stall. Mitigation: Validate at startup that `max_duroxide_connections ≥ 2` (1 listener + 1 orchestration minimum).
 - **Backend performance with 1-connection pool**: Reducing from 10 to 1 could theoretically slow concurrent operations from the same backend. Mitigation: Backend operations are fire-and-forget queue inserts taking <1ms each. Serialization on 1 connection is negligible. Verify with benchmarks during implementation.
-- **Default user-connection limit**: The current behavior is unbounded user-execution connections. Choosing a default for `max_user_connections` that doesn't break existing workloads while still providing protection requires care. Mitigation: Choose a generous default (e.g., 10-20) and document clearly.
+- **Default user-connection limit**: The current behavior is unbounded user-execution connections. The default of 10 for `max_user_connections` is generous enough for typical workloads but may need tuning for high-concurrency deployments. Mitigation: Document clearly in the User Guide and recommend DBAs review after upgrading.
 
 ## Upgrade & Migration
 
