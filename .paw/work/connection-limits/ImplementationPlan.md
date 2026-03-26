@@ -95,9 +95,9 @@ Key constraints:
 
 - **`src/worker.rs`** — `initialize_duroxide_runtime()`: Remove the activity pool creation block (`worker.rs:428-450`). Instead, receive the management pool as a parameter and pass it to `create_activity_registry()`. This means the management pool is created once in the outer loop and reused across init retries.
 
-- **`src/worker.rs`** — `initialize_duroxide_runtime()`: Before creating `PostgresProvider`, set the `DUROXIDE_PG_POOL_MAX` env var to the `max_duroxide_connections` GUC value using `std::env::set_var()`. Note: in Rust 2024 edition this is `unsafe` — wrap in an `unsafe` block with a safety comment explaining the BGW is single-threaded.
+- **`src/worker.rs`** — `initialize_duroxide_runtime()`: Before creating `PostgresProvider`, set the `DUROXIDE_PG_POOL_MAX` env var to the `max_duroxide_connections` GUC value using `std::env::set_var()`. This is safe in Rust 2021 edition (current); add a code comment noting it becomes `unsafe` in edition 2024. The BGW is single-threaded, so there are no concurrent readers.
 
-- **`src/client.rs`** — `get_duroxide_client()`: Before creating the backend `PostgresProvider` (`client.rs:79-80`), set `DUROXIDE_PG_POOL_MAX` to `"1"`. The backend runtime is also single-threaded (`new_current_thread` at `client.rs:57`), so the same safety argument applies.
+- **`src/client.rs`** — `get_duroxide_client()`: Before creating the backend `PostgresProvider` (`client.rs:79-80`), set `DUROXIDE_PG_POOL_MAX` to `"1"`. The backend runtime is also single-threaded (`new_current_thread` at `client.rs:57`); same edition 2024 note applies.
 
 - **`src/registry.rs`** — `create_activity_registry()`: No signature change needed yet — the `Arc<PgPool>` parameter now receives the management pool instead of the activity pool.
 
@@ -150,25 +150,32 @@ Key constraints:
 
 ### Changes Required:
 
-- **`tests/e2e/sql/NN_connection_limit_backpressure.sql`**: Test that backpressure works. Set `max_user_connections = 2` (via postgresql.conf or GUC), start 3+ concurrent workflows each executing a `pg_sleep(5)` SQL node. Verify all complete successfully (backpressure queues the extras, doesn't fail them).
+- **Test harness**: Connection-limit E2E tests require non-default Postmaster GUCs, so they need a dedicated test script (`scripts/test-connlimit-e2e.sh`) that:
+  1. Writes specific GUC values to `postgresql.conf`
+  2. Restarts the PG server
+  3. Runs the connection-limit SQL tests
+  4. Restores defaults and restarts
+  This script is invoked separately from the main `test-e2e-local.sh` suite. The defaults test runs as part of the regular suite (no GUC changes needed).
 
-- **`tests/e2e/sql/NN_connection_limit_timeout.sql`**: Test the timeout path. Set `max_user_connections = 1` and `execution_acquire_timeout = 2`. Start two workflows — one with `pg_sleep(10)` and one with a short SQL. Verify the second workflow's SQL node fails with the expected timeout error in its status.
+- **`tests/e2e/sql/NN_connection_limit_backpressure.sql`**: Test that backpressure works. Runs under `max_user_connections = 2`. Start 3+ concurrent workflows each executing a `pg_sleep(5)` SQL node. Verify all complete successfully (backpressure queues the extras, doesn't fail them).
 
-- **`tests/e2e/sql/NN_connection_limit_defaults.sql`**: Verify default GUC values are sane — run several concurrent workflows under defaults and confirm they all succeed without hitting limits.
+- **`tests/e2e/sql/NN_connection_limit_timeout.sql`**: Test the timeout path. Runs under `max_user_connections = 1` and `execution_acquire_timeout = 2`. Start two workflows — one with `pg_sleep(10)` and one with a short SQL. Verify the second workflow's SQL node fails with the expected timeout error in its status.
 
-- **`scripts/test-e2e-local.sh`**: Add the new tests to the superuser override list if they require GUC changes (Postmaster GUCs require server restart, so the tests may need custom postgresql.conf setup). Consider whether these tests need a special test harness that starts the server with specific GUC values.
+- **`tests/e2e/sql/NN_connection_limit_defaults.sql`**: Verify default GUC values by running several concurrent workflows under defaults and confirming they all succeed. This test runs in the standard `test-e2e-local.sh` suite (no custom GUCs needed).
+
+- **`tests/e2e/sql/NN_connection_limit_startup_validation.sql`**: Runs under `max_duroxide_connections = 1` (below minimum 2). Verify via `df.is_ready()` that the worker never reaches ready state, confirming startup validation rejects invalid GUC values (FR-010).
 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `./scripts/test-e2e-local.sh NN_connection_limit_backpressure` passes
-- [ ] `./scripts/test-e2e-local.sh NN_connection_limit_timeout` passes
+- [ ] `./scripts/test-connlimit-e2e.sh` passes (backpressure, timeout, startup validation tests)
 - [ ] `./scripts/test-e2e-local.sh NN_connection_limit_defaults` passes
 - [ ] `./scripts/test-e2e-local.sh` full suite passes (regression)
 
 #### Manual Verification:
 - [ ] Backpressure test shows queued executions completing after earlier ones finish
 - [ ] Timeout test shows clear error message in failed workflow status
+- [ ] Startup validation test confirms worker rejects invalid GUC values (FR-010)
 
 ---
 
