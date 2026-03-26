@@ -72,7 +72,7 @@ fi
 
 if [ "$BUILD_MODE" != "skip" ]; then
     echo -e "\033[0;33mBuilding and installing extension...\033[0m"
-    cargo pgrx install --pg-config "$PG_CONFIG" 2>&1 | grep -v "^warning:" || true
+    cargo pgrx install --pg-config "$PG_CONFIG" --features http-allow-test-domains 2>&1 | grep -v "^warning:" || true
 fi
 
 echo -e "\033[0;33mPreparing PostgreSQL data directory...\033[0m"

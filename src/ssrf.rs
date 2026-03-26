@@ -1,19 +1,75 @@
-//! SSRF protection for df.http() — dataplane IP blocklist
+//! SSRF protection for df.http() — dataplane IP blocklist + endpoint allow-list
 //!
-//! SSRF protection is **enabled by default**.  To disable it (e.g. for local
-//! development), compile with the `no-ssrf-protection` Cargo feature.
+//! Three Cargo features control outbound HTTP access (from most to least
+//! restrictive):
 //!
-//! When active, all HTTP requests are validated against a blocklist of
-//! private/reserved IP ranges, preventing users from reaching internal network
-//! services, cloud metadata endpoints, or localhost from within the PostgreSQL
-//! background worker.
+//! | Feature | Behaviour |
+//! |---------|-----------|
+//! | *(none)* | **All** outbound HTTP is blocked — at DSL time and at execution time. |
+//! | `http-allow-azure-domains` | SSRF IP blocklist active, bare IPs blocked, redirects blocked, only Azure suffixes allowed. |
+//! | `http-allow-test-domains` | Same as `http-allow-azure-domains` **plus** `api.github.com` and `httpbingo.org` (for E2E tests). Implies `http-allow-azure-domains`. |
+//! | `http-allow-all` | All SSRF protections disabled — any URL is allowed (development only). |
 //!
-//! The blocklist is hardcoded and cannot be bypassed by any database user,
-//! including superusers.  See docs/spec-ssrf-protection.md for the full spec.
+//! The blocklist and allow-list are hardcoded and cannot be bypassed by any
+//! database user, including superusers.  See docs/http-security.md for details.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// Check if an IP address is in a blocked (private/reserved) range.
+// ---------------------------------------------------------------------------
+// Endpoint allow-list — compile-time constant
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when *any* HTTP feature is enabled (azure, test, or all).
+pub const fn http_enabled() -> bool {
+    cfg!(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all"
+    ))
+}
+
+/// Hard-coded Azure endpoint allow-list (data-plane only).
+///
+/// Populated when `http-allow-azure-domains` (or `http-allow-test-domains`,
+/// which implies it) is enabled.  When `http-allow-all` is set the allow-list
+/// is bypassed entirely so its contents don't matter.
+///
+/// Each entry starts with `.` so that a simple `ends_with` check naturally
+/// requires at least one subdomain label (the apex domain itself never matches).
+#[cfg(any(
+    feature = "http-allow-azure-domains",
+    feature = "http-allow-test-domains"
+))]
+pub(crate) const AZURE_DOMAIN_SUFFIXES: &[&str] = &[
+    ".blob.core.windows.net",
+    ".blob.storage.azure.net",
+    ".queue.core.windows.net",
+    ".table.core.windows.net",
+    ".file.core.windows.net",
+    ".azurewebsites.net",
+    ".azure-api.net",
+    ".documents.azure.com",
+    ".servicebus.windows.net",
+    ".openai.azure.com",
+    ".cognitiveservices.azure.com",
+    ".vault.azure.net",
+    ".redis.cache.windows.net",
+    ".database.windows.net",
+    ".kusto.windows.net",
+    ".azurefd.net",
+    ".azureedge.net",
+    ".azure-devices.net",
+    ".trafficmanager.net",
+    ".cloudapp.azure.com",
+];
+
+/// Fully-qualified test domains (exact match, not suffix).
+#[cfg(feature = "http-allow-test-domains")]
+pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["api.github.com", "httpbin.org", "httpbingo.org"];
+
+// ---------------------------------------------------------------------------
+// IP blocklist
+// ---------------------------------------------------------------------------
 /// Returns `Some(reason)` if blocked, `None` if allowed.
 ///
 /// When compiled with the `no-ssrf-protection` feature, always returns `None`.
@@ -34,12 +90,12 @@ pub fn check_blocked_ip(ip: IpAddr) -> Option<&'static str> {
 }
 
 fn check_blocked_ipv4(ip: Ipv4Addr) -> Option<&'static str> {
-    #[cfg(feature = "no-ssrf-protection")]
+    #[cfg(feature = "http-allow-all")]
     {
         let _ = ip;
         None
     }
-    #[cfg(not(feature = "no-ssrf-protection"))]
+    #[cfg(not(feature = "http-allow-all"))]
     {
         let octets = ip.octets();
         match octets {
@@ -55,12 +111,12 @@ fn check_blocked_ipv4(ip: Ipv4Addr) -> Option<&'static str> {
 }
 
 fn check_blocked_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
-    #[cfg(feature = "no-ssrf-protection")]
+    #[cfg(feature = "http-allow-all")]
     {
         let _ = ip;
         None
     }
-    #[cfg(not(feature = "no-ssrf-protection"))]
+    #[cfg(not(feature = "http-allow-all"))]
     {
         if ip.is_unspecified() {
             return Some("unspecified (::)");
@@ -100,14 +156,132 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
 ///
 /// Returns `Ok(())` if the host is a hostname (will be checked by the resolver)
 /// or a non-blocked IP.  Returns `Err` if the IP is in a blocked range.
+///
+/// Under `http-allow-all` this function always returns `Ok(())`.
 pub fn validate_url_host(url: &str) -> Result<(), String> {
+    #[cfg(feature = "http-allow-all")]
+    {
+        let _ = url;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "http-allow-all"))]
+    {
+        let host = match extract_host(url) {
+            Some(h) => h,
+            None => return Ok(()), // malformed, let reqwest handle it
+        };
+
+        // Try to parse as IP address.  If it's a hostname, return Ok — the
+        // SsrfSafeResolver will check it after DNS resolution.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if check_blocked_ip(ip).is_some() {
+                return Err(format!(
+                    "Blocked: the resolved IP address for '{}' is in a restricted \
+                     range. df.http() cannot access private or internal network addresses.",
+                    host
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint allow-list validation
+// ---------------------------------------------------------------------------
+
+/// Validate a URL against the endpoint allow-list.
+///
+/// Behaviour depends on Cargo features (most to least restrictive):
+///
+/// * *(none)* — all requests blocked, regardless of domain.
+/// * `http-allow-azure-domains` — bare IPs blocked; only Azure suffixes allowed.
+/// * `http-allow-test-domains` — same as above **plus** `api.github.com` and
+///   `httpbingo.org` (for E2E tests).
+/// * `http-allow-all` — allow-list check is skipped entirely; all domains pass.
+pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
+    // http-allow-all: skip all domain checks (IP checks still run in validate_url_host
+    // and the DNS resolver, but those are also bypassed under http-allow-all).
+    #[cfg(feature = "http-allow-all")]
+    {
+        let _ = url;
+        Ok(())
+    }
+
+    // No http feature at all — block everything.
+    #[cfg(not(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    )))]
+    {
+        let _ = url;
+        Err("Blocked: outbound HTTP requests are disabled. \
+             Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them."
+            .to_string())
+    }
+
+    // http-allow-azure-domains or http-allow-test-domains: enforce allow-list.
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+    ))]
+    {
+        let host = extract_host(url)
+            .ok_or_else(|| "Blocked: unable to extract hostname from URL.".to_string())?;
+
+        let host_lower = host.to_ascii_lowercase();
+
+        // Block ALL bare IP addresses (IPv4 and IPv6).
+        if host_lower.parse::<IpAddr>().is_ok() {
+            return Err("Blocked: requests to bare IP addresses are not permitted. \
+                 Use an approved Azure service hostname instead."
+                .to_string());
+        }
+
+        // Check Azure suffixes (always present when either azure or test feature is on).
+        for suffix in AZURE_DOMAIN_SUFFIXES {
+            if host_lower.ends_with(suffix) {
+                return Ok(());
+            }
+        }
+
+        // Additional test domains (only with http-allow-test-domains).
+        #[cfg(feature = "http-allow-test-domains")]
+        for exact in TEST_EXACT_DOMAINS {
+            if host_lower == *exact {
+                return Ok(());
+            }
+        }
+
+        Err(format!(
+            "Blocked: '{}' is not in the allowed endpoint list. \
+             Only requests to approved Azure service domains are permitted.",
+            host
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host extraction helper
+// ---------------------------------------------------------------------------
+
+/// Extract the hostname (without port or brackets) from a URL.
+///
+/// Returns `None` for malformed URLs or URLs without a `://` scheme separator.
+#[cfg(not(feature = "http-allow-all"))]
+fn extract_host(url: &str) -> Option<String> {
     // Strip scheme
-    let after_scheme = match url.find("://") {
-        Some(i) => &url[i + 3..],
-        None => return Ok(()),
-    };
-    // Strip path/query — isolate authority (host + optional port)
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let after_scheme = url.find("://").map(|i| &url[i + 3..])?;
+    // Strip path, query, and fragment — isolate authority (host + optional port).
+    // Per RFC 3986 / WHATWG URL, the authority is terminated by '/', '?', or '#'.
+    // Splitting only on '/' would let an attacker embed '?' or '#' to smuggle a
+    // fake suffix past our allowlist while reqwest connects to the real host.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
     // Strip userinfo (user:pass@)
     let host_port = match authority.rfind('@') {
         Some(i) => &authority[i + 1..],
@@ -116,10 +290,8 @@ pub fn validate_url_host(url: &str) -> Result<(), String> {
     // Extract host, handling bracketed IPv6 like [::1]:8080
     let host = if host_port.starts_with('[') {
         // IPv6 literal in brackets
-        match host_port.find(']') {
-            Some(i) => &host_port[1..i],
-            None => return Ok(()), // malformed, let reqwest handle it
-        }
+        let end = host_port.find(']')?;
+        &host_port[1..end]
     } else {
         // IPv4 or hostname — strip port
         match host_port.rfind(':') {
@@ -128,18 +300,11 @@ pub fn validate_url_host(url: &str) -> Result<(), String> {
         }
     };
 
-    // Try to parse as IP address.  If it's a hostname, return Ok — the
-    // SsrfSafeResolver will check it after DNS resolution.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if check_blocked_ip(ip).is_some() {
-            return Err(format!(
-                "Blocked: the resolved IP address for '{}' is in a restricted \
-                 range. df.http() cannot access private or internal network addresses.",
-                host
-            ));
-        }
+    if host.is_empty() {
+        return None;
     }
-    Ok(())
+
+    Some(host.to_string())
 }
 
 // Keep this marker in sync with the error message in SsrfSafeResolver::resolve().
@@ -391,7 +556,9 @@ mod tests {
     }
 
     // --- URL host (IP literal) validation ---
+    // Under http-allow-all these would all pass; the tests below run only without it.
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn host_blocks_ipv4_literals() {
         assert!(validate_url_host("http://169.254.169.254/metadata").is_err());
@@ -401,6 +568,7 @@ mod tests {
         assert!(validate_url_host("http://172.16.0.1:443/").is_err());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn host_blocks_ipv6_literals() {
         assert!(validate_url_host("http://[::1]/path").is_err());
@@ -422,5 +590,265 @@ mod tests {
         // Hostnames are not checked here — the resolver handles them
         assert!(validate_url_host("http://example.com/path").is_ok());
         assert!(validate_url_host("https://internal.corp:8443/api").is_ok());
+    }
+
+    // --- extract_host helper ---
+
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn extract_host_basic() {
+        assert_eq!(
+            extract_host("http://example.com/path"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            extract_host("https://foo.blob.core.windows.net/c"),
+            Some("foo.blob.core.windows.net".into())
+        );
+        assert_eq!(extract_host("http://host:8080/p"), Some("host".into()));
+        assert_eq!(extract_host("http://[::1]:80/p"), Some("::1".into()));
+        assert_eq!(extract_host("http://user:pass@host/p"), Some("host".into()));
+    }
+
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn extract_host_query_and_fragment() {
+        // Query-only URL (no path slash after authority)
+        assert_eq!(
+            extract_host("https://myaccount.blob.core.windows.net?comp=list"),
+            Some("myaccount.blob.core.windows.net".into())
+        );
+        // Fragment-only URL
+        assert_eq!(
+            extract_host("https://example.com#section"),
+            Some("example.com".into())
+        );
+        // Query before path — authority must stop at '?'
+        assert_eq!(
+            extract_host("https://evil.com?.blob.core.windows.net/exfil"),
+            Some("evil.com".into())
+        );
+        // Fragment before path
+        assert_eq!(
+            extract_host("https://evil.com#.blob.core.windows.net"),
+            Some("evil.com".into())
+        );
+        // Userinfo confusion via query — '@' is in the query, not the authority
+        assert_eq!(
+            extract_host("https://evil.com?@myaccount.blob.core.windows.net"),
+            Some("evil.com".into())
+        );
+    }
+
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn extract_host_none_cases() {
+        assert_eq!(extract_host("no-scheme"), None);
+        assert_eq!(extract_host(""), None);
+    }
+
+    // --- Endpoint allow-list validation ---
+
+    // These "blocks_*" tests are only meaningful when some http feature is
+    // enabled (otherwise the no-feature path blocks everything anyway).
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_bare_ipv4() {
+        assert!(validate_url_allowlist("http://8.8.8.8/path").is_err());
+        assert!(validate_url_allowlist("https://93.184.216.34/page").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_bare_ipv6() {
+        assert!(validate_url_allowlist("http://[2001:4860:4860::8888]/dns").is_err());
+        assert!(validate_url_allowlist("http://[::1]/path").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_private_ips() {
+        assert!(validate_url_allowlist("http://127.0.0.1/path").is_err());
+        assert!(validate_url_allowlist("http://169.254.169.254/meta").is_err());
+        assert!(validate_url_allowlist("http://10.0.0.1/admin").is_err());
+    }
+
+    // Non-Azure domains blocked when only azure-domains (not test-domains) is enabled.
+    #[cfg(all(
+        feature = "http-allow-azure-domains",
+        not(feature = "http-allow-test-domains"),
+        not(feature = "http-allow-all"),
+    ))]
+    #[test]
+    fn allowlist_blocks_non_azure_domains() {
+        assert!(validate_url_allowlist("https://example.com/path").is_err());
+        assert!(validate_url_allowlist("https://httpbingo.org/get").is_err());
+        assert!(validate_url_allowlist("https://api.github.com/repos").is_err());
+        assert!(validate_url_allowlist("https://evil.com/steal").is_err());
+        assert!(validate_url_allowlist("https://management.azure.com/sub").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_apex_domains() {
+        // Apex domains (exact suffix without subdomain) must be rejected
+        assert!(validate_url_allowlist("https://blob.core.windows.net/test").is_err());
+        assert!(validate_url_allowlist("https://azurewebsites.net/app").is_err());
+        assert!(validate_url_allowlist("https://vault.azure.net/secrets").is_err());
+        assert!(validate_url_allowlist("https://openai.azure.com/api").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_allows_azure_blob_storage() {
+        assert!(
+            validate_url_allowlist("https://myaccount.blob.core.windows.net/container/blob")
+                .is_ok()
+        );
+        assert!(validate_url_allowlist("https://myaccount.z1.blob.storage.azure.net/c").is_ok());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_allows_azure_services() {
+        assert!(validate_url_allowlist("https://myqueue.queue.core.windows.net/q").is_ok());
+        assert!(validate_url_allowlist("https://mytable.table.core.windows.net/t").is_ok());
+        assert!(validate_url_allowlist("https://myshare.file.core.windows.net/s").is_ok());
+        assert!(validate_url_allowlist("https://myapp.azurewebsites.net/api").is_ok());
+        assert!(validate_url_allowlist("https://myapi.azure-api.net/v1").is_ok());
+        assert!(validate_url_allowlist("https://mydb.documents.azure.com/dbs").is_ok());
+        assert!(validate_url_allowlist("https://mybus.servicebus.windows.net/topic").is_ok());
+        assert!(validate_url_allowlist("https://myoai.openai.azure.com/v1/chat").is_ok());
+        assert!(validate_url_allowlist("https://mycog.cognitiveservices.azure.com/v1").is_ok());
+        assert!(validate_url_allowlist("https://myvault.vault.azure.net/secrets/s").is_ok());
+        assert!(validate_url_allowlist("https://myredis.redis.cache.windows.net/").is_ok());
+        assert!(validate_url_allowlist("https://mydb.database.windows.net/db").is_ok());
+        assert!(validate_url_allowlist("https://mycluster.kusto.windows.net/q").is_ok());
+        assert!(validate_url_allowlist("https://myfd.azurefd.net/path").is_ok());
+        assert!(validate_url_allowlist("https://mycdn.azureedge.net/asset").is_ok());
+        assert!(validate_url_allowlist("https://myhub.azure-devices.net/d").is_ok());
+        assert!(validate_url_allowlist("https://myapp.trafficmanager.net/h").is_ok());
+        assert!(validate_url_allowlist("https://myapp.cloudapp.azure.com/api").is_ok());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_allows_deep_subdomains() {
+        // Multiple subdomain labels should still match
+        assert!(validate_url_allowlist("https://a.b.c.blob.core.windows.net/x").is_ok());
+        assert!(validate_url_allowlist("https://my.app.region.azurewebsites.net/").is_ok());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_case_insensitive() {
+        assert!(validate_url_allowlist("https://MY.BLOB.CORE.WINDOWS.NET/c").is_ok());
+        assert!(validate_url_allowlist("https://MyVault.Vault.Azure.Net/s").is_ok());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_suffix_lookalikes() {
+        // Domains that contain the suffix but as part of a different TLD
+        assert!(validate_url_allowlist("https://blob.core.windows.net.evil.com/x").is_err());
+        assert!(
+            validate_url_allowlist("https://evil-blob.core.windows.net.attacker.io/x").is_err()
+        );
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_malformed_urls() {
+        assert!(validate_url_allowlist("").is_err());
+        assert!(validate_url_allowlist("not-a-url").is_err());
+    }
+
+    // --- Query/fragment allowlist bypass vectors (Finding 1 regression tests) ---
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_query_bypass() {
+        // Attacker tries to smuggle a suffix via '?' so reqwest connects to evil.com
+        assert!(validate_url_allowlist("https://evil.com?.blob.core.windows.net/exfil").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_fragment_bypass() {
+        assert!(validate_url_allowlist("https://evil.com#.blob.core.windows.net").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_userinfo_query_bypass() {
+        // '@' appears after '?' so it's in the query, not userinfo
+        assert!(validate_url_allowlist("https://evil.com?@acct.blob.core.windows.net").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_allows_azure_query_only_url() {
+        // Legitimate Azure URL with query but no path slash
+        assert!(
+            validate_url_allowlist("https://myaccount.blob.core.windows.net?comp=list").is_ok()
+        );
+    }
+
+    // --- Test domains (only with http-allow-test-domains) ---
+
+    #[cfg(feature = "http-allow-test-domains")]
+    #[test]
+    fn allowlist_allows_test_domains() {
+        assert!(validate_url_allowlist("https://api.github.com/repos").is_ok());
+        assert!(validate_url_allowlist("https://httpbingo.org/get").is_ok());
+    }
+
+    #[cfg(feature = "http-allow-test-domains")]
+    #[test]
+    fn allowlist_still_blocks_arbitrary_domains() {
+        assert!(validate_url_allowlist("https://example.com/path").is_err());
+        assert!(validate_url_allowlist("https://evil.com/steal").is_err());
     }
 }

@@ -14,6 +14,8 @@
 #   --connlimit-backpressure  Run only the connection limit backpressure phase
 #   --connlimit-timeout       Run only the connection limit timeout phase
 #   --connlimit-startup       Run only the connection limit startup-validation phase
+#   --http-disabled           Run only the HTTP-disabled (no http Cargo feature) phase
+#   --http-allow-all          Run only the http-allow-all Cargo feature phase
 #   --help, -h                Show this help
 #
 # Examples:
@@ -24,6 +26,8 @@
 #   ./scripts/test-e2e-local.sh --clean --pg-version 18
 #   ./scripts/test-e2e-local.sh --no-preload
 #   ./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout
+#   ./scripts/test-e2e-local.sh --http-disabled
+#   ./scripts/test-e2e-local.sh --http-allow-all
 # END_USAGE
 
 set -euo pipefail
@@ -42,6 +46,7 @@ EXPLICIT_PHASES=false
 SETUP_PLAYGROUND_APPLIED=false
 E2E_ROLE_ENSURED=false
 VERSION_SHOWN=false
+CURRENT_FEATURES=""  # tracks what Cargo features the installed .so was built with
 
 declare -a REQUESTED_PHASES=()
 declare -a MATCHED_TESTS=()
@@ -53,6 +58,8 @@ ALL_PHASES=(
     "connlimit-backpressure"
     "connlimit-timeout"
     "connlimit-startup"
+    "http-disabled"
+    "http-allow-all"
 )
 
 PGRX_HOME="$HOME/.pgrx"
@@ -116,6 +123,12 @@ phase_label() {
         connlimit-startup)
             echo "connection limit startup validation"
             ;;
+        http-disabled)
+            echo "HTTP disabled (no http Cargo feature)"
+            ;;
+        http-allow-all)
+            echo "HTTP allow-all (http-allow-all Cargo feature)"
+            ;;
         *)
             echo "$1"
             ;;
@@ -135,6 +148,12 @@ phase_for_test() {
             ;;
         46_connection_limit_startup_validation)
             echo "connlimit-startup"
+            ;;
+        47_http_dsl_disabled)
+            echo "http-disabled"
+            ;;
+        48_http_allow_all)
+            echo "http-allow-all"
             ;;
         *)
             echo "standard"
@@ -198,6 +217,16 @@ while [[ $# -gt 0 ]]; do
         --connlimit-startup)
             EXPLICIT_PHASES=true
             add_requested_phase "connlimit-startup"
+            shift
+            ;;
+        --http-disabled)
+            EXPLICIT_PHASES=true
+            add_requested_phase "http-disabled"
+            shift
+            ;;
+        --http-allow-all)
+            EXPLICIT_PHASES=true
+            add_requested_phase "http-allow-all"
             shift
             ;;
         --help|-h)
@@ -315,7 +344,22 @@ restart_server() {
 build_extension() {
     echo "Building and installing extension..."
     cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
+    cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains >/dev/null 2>&1
+    CURRENT_FEATURES="http-allow-test-domains"
+}
+
+build_extension_no_http() {
+    echo "Building extension (no http features)..."
+    cd "$PROJECT_DIR"
+    cargo pgrx install --pg-config="$PG_CONFIG" --no-default-features >/dev/null 2>&1
+    CURRENT_FEATURES="none"
+}
+
+build_extension_http_allow_all() {
+    echo "Building extension (http-allow-all feature)..."
+    cd "$PROJECT_DIR"
+    cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-all >/dev/null 2>&1
+    CURRENT_FEATURES="http-allow-all"
 }
 
 show_version_once() {
@@ -370,8 +414,16 @@ wait_for_worker_ready() {
 }
 
 recreate_extension() {
-    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
-    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
+    # Run DROP and CREATE in one transaction so the BGW's migration runner
+    # cannot race between them. The migration runner creates
+    # "CREATE SCHEMA IF NOT EXISTS duroxide" independently, which would cause
+    # CREATE EXTENSION to fail with "schema already exists" if there is any gap.
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" <<'SQL' >/dev/null 2>&1
+BEGIN;
+DROP EXTENSION IF EXISTS pg_durable CASCADE;
+CREATE EXTENSION pg_durable;
+COMMIT;
+SQL
 }
 
 configure_phase() {
@@ -409,13 +461,50 @@ configure_phase() {
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.max_duroxide_connections" "1"
             ;;
+        http-disabled)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            ;;
+        http-allow-all)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            ;;
     esac
 }
 
 prepare_phase() {
     local phase="$1"
 
+    # Phases that need a different Cargo feature build must rebuild before
+    # the server restarts so the new .so is already in place.
+    case "$phase" in
+        http-disabled)
+            build_extension_no_http
+            ;;
+        http-allow-all)
+            build_extension_http_allow_all
+            ;;
+        no-preload|standard|connlimit-backpressure|connlimit-timeout|connlimit-startup)
+            # Rebuild if previous phase changed the Cargo features
+            if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
+                build_extension
+            fi
+            ;;
+    esac
+
     configure_phase "$phase"
+
+    # Drop the extension (and its owned duroxide schema) *before* restarting so
+    # the BGW cannot find a pre-existing pg_durable extension on the next boot
+    # and race past its "waiting for CREATE EXTENSION" poll loop before
+    # recreate_extension runs.  The || true makes this a no-op when the server
+    # is not yet running (e.g. first phase on a clean data dir).
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+        -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" \
+        >/dev/null 2>&1 || true
+
     restart_server
 
     if [ "$phase" = "no-preload" ]; then
@@ -442,6 +531,10 @@ prepare_phase() {
             wait_for_worker_ready
             ;;
         connlimit-startup)
+            ;;
+        http-disabled|http-allow-all)
+            ensure_e2e_role
+            wait_for_worker_ready
             ;;
     esac
 }

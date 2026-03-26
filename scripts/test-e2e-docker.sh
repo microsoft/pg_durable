@@ -24,10 +24,14 @@ CONTAINER_NAME="pg_durable_e2e"
 IMAGE_NAME="pg_durable:latest"
 
 # Tests that require a PostgreSQL mode Docker does not manage in this script
-NO_PRELOAD_TEST="00_requires_shared_preload"
-CONNLIMIT_BACKPRESSURE_TEST="44_connection_limit_backpressure"
-CONNLIMIT_TIMEOUT_TEST="45_connection_limit_timeout"
-CONNLIMIT_STARTUP_TEST="46_connection_limit_startup_validation"
+SKIP_TESTS=(
+    "00_requires_shared_preload"
+    "44_connection_limit_backpressure"
+    "45_connection_limit_timeout"
+    "46_connection_limit_startup_validation"
+    "47_http_dsl_disabled"
+    "48_http_allow_all"
+)
 
 # Defaults
 KEEP_RUNNING=false
@@ -198,12 +202,14 @@ for run in $(seq 1 $REPEAT_COUNT); do
 
         # Skip tests that require a different PostgreSQL startup mode or
         # restart-sensitive connection-limit GUC changes.
-        if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]] \
-           || [[ "$test_name" == "$CONNLIMIT_BACKPRESSURE_TEST" ]] \
-           || [[ "$test_name" == "$CONNLIMIT_TIMEOUT_TEST" ]] \
-           || [[ "$test_name" == "$CONNLIMIT_STARTUP_TEST" ]]; then
-            continue
-        fi
+        skip=false
+        for skip_test in "${SKIP_TESTS[@]}"; do
+            if [[ "$test_name" == "$skip_test" ]]; then
+                skip=true
+                break
+            fi
+        done
+        [[ "$skip" == true ]] && continue
 
         echo -n "  $test_name ... "
         

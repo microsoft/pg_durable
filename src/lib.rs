@@ -991,9 +991,14 @@ mod tests {
     }
 
     // ========================================================================
-    // Unit Tests - HTTP Node Creation
+    // Unit Tests - HTTP Node Creation (require an http feature to be enabled)
     // ========================================================================
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_creates_valid_node() {
         let json = crate::dsl::http("https://example.com/api", "GET", None, None, 30);
@@ -1002,6 +1007,11 @@ mod tests {
         assert!(fut.query.is_some());
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_post_with_body() {
         let json = crate::dsl::http(
@@ -1020,6 +1030,11 @@ mod tests {
         assert_eq!(config["body"], r#"{"key": "value"}"#);
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_with_headers() {
         let headers = pgrx::JsonB(serde_json::json!({
@@ -1041,6 +1056,11 @@ mod tests {
         assert_eq!(config["timeout_seconds"], 60);
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_config_parsing() {
         use crate::types::HttpConfig;
@@ -1061,6 +1081,11 @@ mod tests {
         assert_eq!(config.timeout_seconds, 45);
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_via_sql() {
         let result = Spi::get_one::<String>("SELECT df.http('https://example.com', 'GET')")
@@ -1070,6 +1095,11 @@ mod tests {
         assert_eq!(fut.node_type, "HTTP");
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_in_sequence() {
         let http_node = crate::dsl::http("https://api.example.com/data", "GET", None, None, 30);
@@ -1081,6 +1111,11 @@ mod tests {
         assert!(fut.right_node.is_some());
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_with_name() {
         let http_node = crate::dsl::http("https://api.example.com", "GET", None, None, 30);
@@ -1089,6 +1124,11 @@ mod tests {
         assert_eq!(fut.result_name, Some("api_response".to_string()));
     }
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all",
+    ))]
     #[pg_test]
     fn test_http_methods() {
         // Test all supported methods

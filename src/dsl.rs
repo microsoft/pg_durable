@@ -468,6 +468,27 @@ pub fn http(
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
 ) -> String {
+    // Fail early when no http feature is compiled in — df.nodes can be inserted
+    // by hand, so we also enforce this at execution time, but blocking at DSL
+    // construction time gives a clearer error to developers.
+    if !crate::ssrf::http_enabled() {
+        pgrx::error!(
+            "df.http() is disabled. Rebuild with the 'http-allow-azure-domains' \
+             Cargo feature to enable outbound HTTP requests."
+        );
+    }
+
+    // Validate URL scheme at DSL time for early error feedback.
+    // Execution-time validation in execute_http also runs, but catching this
+    // here surfaces the error before df.start() is ever called.
+    // Skip the check when the URL contains variable placeholders ({...}) —
+    // substitution happens at execution time so the scheme is not yet known.
+    if !url.contains('{') {
+        if let Err(e) = crate::ssrf::validate_url_scheme(url) {
+            pgrx::error!("{}", e);
+        }
+    }
+
     // Validate method
     let method_upper = method.to_uppercase();
     if !["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&method_upper.as_str()) {

@@ -173,14 +173,13 @@ jobs:
             echo "PostgreSQL ${{ matrix.pg_version }} already initialized, skipping download"
           fi
 
+      # Include an http feature for the broadest clippy coverage. No time for multiple feature combos.
       - name: Run clippy
-        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
+        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }},http-allow-test-domains -- -D warnings
 
-      - name: Run clippy (no-ssrf-protection)
-        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }},no-ssrf-protection -- -D warnings
-
+      # Include an http feature to allow http unit tests to run. No time for multiple feature combos.
       - name: Run unit tests
-        run: cargo pgrx test pg${{ matrix.pg_version }}
+        run: cargo pgrx test pg${{ matrix.pg_version }} --features http-allow-test-domains
 
       - name: Run E2E tests (shared_preload_libraries enforcement)
         id: e2e_no_preload

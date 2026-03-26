@@ -17,12 +17,17 @@ cd "$(dirname "$0")/.."
 
 PG_VERSION="17"
 TEST_FILTER=""
+FEATURES=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --pg-version)
             PG_VERSION="$2"
+            shift 2
+            ;;
+        --features)
+            FEATURES="$2"
             shift 2
             ;;
         *)
@@ -34,13 +39,21 @@ done
 
 echo "================================================"
 echo "pg_durable Unit Tests (pgrx) — PG${PG_VERSION}"
+if [ -n "$FEATURES" ]; then
+    echo "Features: $FEATURES"
+fi
 echo "================================================"
 echo ""
 
+FEATURES_ARG=""
+if [ -n "$FEATURES" ]; then
+    FEATURES_ARG="--features $FEATURES"
+fi
+
 if [ -n "$TEST_FILTER" ]; then
     echo "Filter: $TEST_FILTER"
-    cargo pgrx test "pg${PG_VERSION}" -- "$TEST_FILTER"
+    cargo pgrx test "pg${PG_VERSION}" $FEATURES_ARG -- "$TEST_FILTER"
 else
-    cargo pgrx test "pg${PG_VERSION}"
+    cargo pgrx test "pg${PG_VERSION}" $FEATURES_ARG
 fi
 

@@ -15,7 +15,9 @@ path = "./src/bin/pgrx_embed.rs"
 
 [features]
 default = ["pg17"]
-no-ssrf-protection = []
+http-allow-all = []
+http-allow-azure-domains = []
+http-allow-test-domains = ["http-allow-azure-domains"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15" ]

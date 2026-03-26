@@ -195,7 +195,7 @@ trap cleanup EXIT
 # Build and install the current version
 echo -e "${YELLOW}Building and installing extension (v${CURRENT_VERSION})...${NC}"
 cd "$PROJECT_DIR"
-cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
+cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains >/dev/null 2>&1
 
 # Copy checked-in install SQL fixtures to the extension directory so older
 # schemas from previous majors can be reconstructed during upgrade tests.

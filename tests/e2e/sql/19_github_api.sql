@@ -21,7 +21,7 @@ CREATE TABLE github_commits (
 -- ============================================================================
 
 SELECT df.clearvars();
-SELECT df.setvar('github_url', 'https://api.github.com/repos/affandar/duroxide/commits?per_page=5');
+SELECT df.setvar('github_url', 'https://api.github.com/repos/microsoft/duroxide/commits?per_page=5');
 
 -- ============================================================================
 -- Test: Scheduled GitHub Commit Fetcher (Loop Pattern)

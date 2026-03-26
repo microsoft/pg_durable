@@ -1,7 +1,12 @@
 //! ExecuteHTTP activity - makes HTTP requests
 //!
-//! SSRF protection is enabled by default.  To disable it, compile with the
-//! `no-ssrf-protection` Cargo feature.  See src/ssrf.rs.
+//! Cargo features control what outbound HTTP(S) is allowed:
+//! - `http-allow-azure-domains`: Azure endpoints only (+ IP blocklist, no redirects).
+//! - `http-allow-test-domains`: same + api.github.com / httpbingo.org.
+//! - `http-allow-all`: no restrictions (development only).
+//! - *(none)*: all HTTP calls fail at execution time.
+//!
+//! See docs/http-security.md for the full security model.
 
 use duroxide::ActivityContext;
 use std::time::Duration;
@@ -22,6 +27,8 @@ fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none());
 
+    // Inject the SSRF-safe DNS resolver unless http-allow-all removes all guards.
+    #[cfg(not(feature = "http-allow-all"))]
     let builder = {
         use crate::ssrf::{SsrfSafeResolver, SystemResolver};
         use std::sync::Arc;
@@ -46,6 +53,14 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
     crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (scheme) url={} submitted_by={audit_user}",
+            config.url
+        ));
+    })?;
+
+    // --- Azure endpoint allow-list (blocks bare IPs + non-Azure domains) ---
+    crate::ssrf::validate_url_allowlist(&config.url).inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP BLOCKED (allowlist) url={} submitted_by={audit_user}",
             config.url
         ));
     })?;

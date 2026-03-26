@@ -45,7 +45,7 @@ pg-clean:
 
 # Install extension locally (renamed to avoid PGXS conflict)
 pg-install:
-	cargo pgrx install
+	cargo pgrx install --features http-allow-test-domains
 
 # Run pg_regress tests (convenience target)
 # Override version: make test-regress PG_VERSION=pg16

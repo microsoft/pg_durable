@@ -45,7 +45,7 @@ COPY pg_durable.control ./
 COPY sql ./sql
 
 # Build the extension
-RUN cargo pgrx package --pg-config /usr/lib/postgresql/17/bin/pg_config
+RUN cargo pgrx package --features http-allow-test-domains --pg-config /usr/lib/postgresql/17/bin/pg_config
 
 # Stage 2: Runtime image with PostgreSQL
 FROM postgres:17-bookworm
