@@ -32,6 +32,26 @@ pub fn get_database() -> String {
         .unwrap_or_else(|| "postgres".to_string())
 }
 
+/// Get the maximum number of management pool connections.
+pub fn get_max_management_connections() -> u32 {
+    crate::MAX_MANAGEMENT_CONNECTIONS.get() as u32
+}
+
+/// Get the maximum number of duroxide provider pool connections.
+pub fn get_max_duroxide_connections() -> u32 {
+    crate::MAX_DUROXIDE_CONNECTIONS.get() as u32
+}
+
+/// Get the maximum number of concurrent user-execution connections.
+pub fn get_max_user_connections() -> u32 {
+    crate::MAX_USER_CONNECTIONS.get() as u32
+}
+
+/// Get the execution acquire timeout as a Duration.
+pub fn get_execution_acquire_timeout() -> Duration {
+    Duration::from_secs(crate::EXECUTION_ACQUIRE_TIMEOUT.get() as u64)
+}
+
 /// Generate a short 8-character instance ID from a UUID
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();

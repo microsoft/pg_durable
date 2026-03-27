@@ -14,7 +14,10 @@ use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
 use crate::registry::{create_activity_registry, create_orchestration_registry};
-use crate::types::{postgres_connection_string, worker_provider_config, DUROXIDE_SCHEMA};
+use crate::types::{
+    get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
+    postgres_connection_string, worker_provider_config, DUROXIDE_SCHEMA,
+};
 
 /// Initialize tracing subscriber for duroxide logs.
 /// Must be called before Runtime::start_with_store() to capture all logs.
@@ -90,6 +93,34 @@ async fn run_duroxide_runtime() {
         "pg_durable: background worker connected to PostgreSQL at {} (schema: {})",
         pg_conn_str,
         DUROXIDE_SCHEMA
+    );
+
+    // Validate connection limit GUCs at startup
+    let mgmt_conns = get_max_management_connections();
+    let duroxide_conns = get_max_duroxide_connections();
+    let user_conns = get_max_user_connections();
+
+    if duroxide_conns < 2 {
+        log!(
+            "pg_durable: FATAL — max_duroxide_connections={} is below minimum 2 \
+             (listener requires at least 1 slot). Worker refusing to start.",
+            duroxide_conns
+        );
+        return;
+    }
+
+    if mgmt_conns == 1 {
+        log!(
+            "pg_durable: WARNING — max_management_connections=1 leaves no headroom; \
+             consider increasing to at least 2"
+        );
+    }
+
+    log!(
+        "pg_durable: connection budget — management={}, duroxide={}, user={}",
+        mgmt_conns,
+        duroxide_conns,
+        user_conns
     );
 
     // Single-connection pool reused for all extension-existence polling, avoiding

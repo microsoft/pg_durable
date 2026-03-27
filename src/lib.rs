@@ -17,6 +17,11 @@ pub static WORKER_ROLE: GucSetting<Option<CString>> =
 pub static DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
 
+pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
+pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
+pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
+pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -66,6 +71,50 @@ pub extern "C-unwind" fn _PG_init() {
         c"PostgreSQL database used by the pg_durable background worker",
         c"",
         &DATABASE,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.max_management_connections",
+        c"Maximum number of connections in the background worker management pool (polling + activity)",
+        c"",
+        &MAX_MANAGEMENT_CONNECTIONS,
+        1,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.max_duroxide_connections",
+        c"Maximum number of connections in the duroxide provider pool (orchestration state + listener)",
+        c"",
+        &MAX_DUROXIDE_CONNECTIONS,
+        2,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.max_user_connections",
+        c"Maximum number of concurrent user-execution connections for SQL node execution",
+        c"",
+        &MAX_USER_CONNECTIONS,
+        1,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.execution_acquire_timeout",
+        c"Seconds to wait for an available execution slot before failing a SQL node",
+        c"",
+        &EXECUTION_ACQUIRE_TIMEOUT,
+        1,
+        3600,
         GucContext::Postmaster,
         GucFlags::default(),
     );
