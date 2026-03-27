@@ -76,6 +76,11 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
     let pg_conn_str = postgres_connection_string();
 
     rt.block_on(async {
+        // Limit backend provider to 1 connection — backends need minimal duroxide
+        // access (start/cancel/signal only). The runtime is single-threaded
+        // (new_current_thread). Note: std::env::set_var becomes unsafe in Rust 2024 edition.
+        std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
+
         let store = Arc::new(
             PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
                 .await

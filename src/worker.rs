@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use duroxide::runtime;
 use duroxide_pg_opt::PostgresProvider;
-use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
 use crate::registry::{create_activity_registry, create_orchestration_registry};
@@ -123,24 +122,25 @@ async fn run_duroxide_runtime() {
         user_conns
     );
 
-    // Single-connection pool reused for all extension-existence polling, avoiding
-    // the overhead of opening/closing a TCP connection on every check.
+    // Management pool: consolidates former polling and activity pools into one.
+    // Used for extension-existence polling, epoch sentinels, worker-ready writes,
+    // graph loading, and status updates. Sized by the max_management_connections GUC.
     // Retry in a loop so the worker survives the target database not yet existing
     // (e.g. pg_regress creates `contrib_regression` after PostgreSQL starts).
-    let poll_pool = loop {
+    let mgmt_pool = loop {
         if is_shutdown_requested() {
-            log!("pg_durable: shutdown requested before poll pool created, exiting");
+            log!("pg_durable: shutdown requested before management pool created, exiting");
             return;
         }
         match sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(mgmt_conns)
             .connect(&pg_conn_str)
             .await
         {
             Ok(pool) => break pool,
             Err(e) => {
                 log!(
-                    "pg_durable: failed to create polling pool (will retry in 5s): {}",
+                    "pg_durable: failed to create management pool (will retry in 5s): {}",
                     e
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -154,12 +154,12 @@ async fn run_duroxide_runtime() {
             break;
         }
 
-        if !wait_for_extension_creation(&poll_pool, WAIT_FOR_EXTENSION_POLL_INTERVAL).await {
+        if !wait_for_extension_creation(&mgmt_pool, WAIT_FOR_EXTENSION_POLL_INTERVAL).await {
             break;
         }
 
         let Some(duroxide_runtime) =
-            initialize_duroxide_runtime(&pg_conn_str, INIT_RETRY_INTERVAL, &poll_pool).await
+            initialize_duroxide_runtime(&pg_conn_str, INIT_RETRY_INTERVAL, &mgmt_pool).await
         else {
             // Shutdown requested or extension dropped while initializing.
             continue;
@@ -168,13 +168,13 @@ async fn run_duroxide_runtime() {
         // Write the worker readiness record so backend sessions know the
         // duroxide schema is fully initialized for this schema version.
         // Skipped if the row already has the current WORKER_SCHEMA_VERSION.
-        if let Err(e) = write_worker_ready(&poll_pool).await {
+        if let Err(e) = write_worker_ready(&mgmt_pool).await {
             log!("pg_durable: failed to write worker readiness record: {}", e);
         }
 
         // Write a sentinel so we can detect drop+recreate even if the
         // extension is always present in pg_extension between polls.
-        let epoch_id = match write_epoch_sentinel(&poll_pool).await {
+        let epoch_id = match write_epoch_sentinel(&mgmt_pool).await {
             Ok(id) => {
                 log!("pg_durable: epoch sentinel written ({})", id);
                 Some(id)
@@ -186,7 +186,7 @@ async fn run_duroxide_runtime() {
         };
 
         run_until_extension_dropped_or_shutdown(
-            &poll_pool,
+            &mgmt_pool,
             duroxide_runtime,
             EXTENSION_DROP_POLL_INTERVAL,
             SHUTDOWN_CHECK_INTERVAL,
@@ -195,7 +195,7 @@ async fn run_duroxide_runtime() {
         .await;
     }
 
-    poll_pool.close().await;
+    mgmt_pool.close().await;
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
@@ -402,7 +402,7 @@ async fn has_extension_owned_duroxide_objects(pool: &sqlx::PgPool) -> bool {
 async fn initialize_duroxide_runtime(
     pg_conn_str: &str,
     retry_interval: Duration,
-    poll_pool: &sqlx::PgPool,
+    mgmt_pool: &sqlx::PgPool,
 ) -> Option<Arc<runtime::Runtime>> {
     log!("pg_durable: initializing duroxide runtime...");
 
@@ -412,12 +412,12 @@ async fn initialize_duroxide_runtime(
             return None;
         }
 
-        if !check_extension_exists(poll_pool).await {
+        if !check_extension_exists(mgmt_pool).await {
             log!("pg_durable: extension no longer exists; returning to wait state");
             return None;
         }
 
-        if !check_duroxide_schema_owned(poll_pool).await {
+        if !check_duroxide_schema_owned(mgmt_pool).await {
             log!(
                 "pg_durable: duroxide schema missing or not extension-owned \
                  (CREATE EXTENSION may still be in progress) — will retry"
@@ -432,8 +432,8 @@ async fn initialize_duroxide_runtime(
         // embedded DDL from the extension before ApplyAll runs.
         // The existence check avoids executing the five-loop DO block on every
         // clean restart once the upgrade has already been applied.
-        if has_extension_owned_duroxide_objects(poll_pool).await {
-            if let Err(e) = release_extension_owned_duroxide_objects(poll_pool).await {
+        if has_extension_owned_duroxide_objects(mgmt_pool).await {
+            if let Err(e) = release_extension_owned_duroxide_objects(mgmt_pool).await {
                 log!(
                     "pg_durable: failed to release extension-owned duroxide objects (will retry): {}",
                     e
@@ -442,6 +442,14 @@ async fn initialize_duroxide_runtime(
                 continue;
             }
         }
+
+        // Control duroxide provider pool size via env var (the only mechanism
+        // without modifying duroxide-pg-opt). BGW is single-threaded so no
+        // concurrent readers. Note: std::env::set_var becomes unsafe in Rust 2024 edition.
+        std::env::set_var(
+            "DUROXIDE_PG_POOL_MAX",
+            get_max_duroxide_connections().to_string(),
+        );
 
         let store =
             match PostgresProvider::new_with_config(pg_conn_str, worker_provider_config()).await {
@@ -456,31 +464,10 @@ async fn initialize_duroxide_runtime(
                 }
             };
 
-        let pg_pool = match PgPoolOptions::new()
-            .max_connections(5)
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query("SET df.in_workflow = 'true'")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(pg_conn_str)
-            .await
-        {
-            Ok(pool) => Arc::new(pool),
-            Err(e) => {
-                log!(
-                    "pg_durable: failed to create PostgreSQL pool (will retry): {}",
-                    e
-                );
-                tokio::time::sleep(retry_interval).await;
-                continue;
-            }
-        };
-
-        let activities = create_activity_registry(pg_pool);
+        // Reuse the management pool for activities (graph loading, status updates).
+        // The former dedicated activity pool with its df.in_workflow hook is no
+        // longer needed — connect_as_user() sets that flag independently.
+        let activities = create_activity_registry(Arc::new(mgmt_pool.clone()));
         let orchestrations = create_orchestration_registry();
 
         let duroxide_runtime =

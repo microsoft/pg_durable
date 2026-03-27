@@ -40,7 +40,7 @@ Key constraints:
 
 ## Phase Status
 - [x] **Phase 1: GUC Infrastructure** - Declare, register, and validate four new connection limit GUCs
-- [ ] **Phase 2: Pool Consolidation & Sizing** - Merge polling+activity pools; control duroxide and backend pool sizes via GUCs
+- [x] **Phase 2: Pool Consolidation & Sizing** - Merge polling+activity pools; control duroxide and backend pool sizes via GUCs
 - [ ] **Phase 3: User-Execution Backpressure** - Add semaphore-based connection limiting with timeout to execute_sql activity
 - [ ] **Phase 4: E2E Tests** - Verify connection limits, backpressure, and startup validation
 - [ ] **Phase 5: Documentation** - User Guide updates, Docs.md
@@ -75,15 +75,15 @@ Key constraints:
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `cargo build --features pg17` compiles without warnings
-- [ ] `cargo clippy --features pg17` passes
-- [ ] `./scripts/test-unit.sh` passes
-- [ ] `./scripts/test-e2e-local.sh` passes (regression — GUC defaults preserve behavior)
+- [x] `cargo build --features pg17` compiles without warnings
+- [x] `cargo clippy --features pg17` passes
+- [x] `./scripts/test-unit.sh` passes
+- [x] `./scripts/test-e2e-local.sh` passes (regression — GUC defaults preserve behavior)
 
 #### Manual Verification:
-- [ ] `SHOW pg_durable.max_management_connections` returns 6 in psql
-- [ ] `SHOW pg_durable.max_user_connections` returns 10 in psql
-- [ ] Attempting `SET pg_durable.max_management_connections = 3` fails (Postmaster context)
+- [x] `SHOW pg_durable.max_management_connections` returns 6 in psql
+- [x] `SHOW pg_durable.max_user_connections` returns 10 in psql
+- [x] Attempting `SET pg_durable.max_management_connections = 3` fails (Postmaster context)
 
 ---
 
@@ -104,16 +104,16 @@ Key constraints:
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `cargo build --features pg17` compiles without warnings
-- [ ] `cargo clippy --features pg17` passes
-- [ ] `./scripts/test-unit.sh` passes
-- [ ] `./scripts/test-e2e-local.sh` passes (all existing tests — validates consolidation is correct)
-- [ ] `./scripts/test-upgrade.sh` passes (backward compat — no schema changes)
+- [x] `cargo build --features pg17` compiles without warnings
+- [x] `cargo clippy --features pg17` passes
+- [x] `./scripts/test-unit.sh` passes
+- [x] `./scripts/test-e2e-local.sh` passes (all existing tests — validates consolidation is correct)
+- [x] `./scripts/test-upgrade.sh` passes (backward compat — no schema changes)
 
 #### Manual Verification:
-- [ ] Worker log shows management pool creation with configured size (not separate polling + activity)
-- [ ] `pg_stat_activity` shows expected connection counts: management pool connections + duroxide pool connections (no extra polling/activity pools)
-- [ ] Backend `df.start()` creates only 1 provider connection (not 10)
+- [x] Worker log shows management pool creation with configured size (not separate polling + activity)
+- [x] `pg_stat_activity` shows expected connection counts: management pool connections + duroxide pool connections (no extra polling/activity pools)
+- [x] Backend `df.start()` creates only 1 provider connection (not 10)
 
 ---
 
