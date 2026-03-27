@@ -41,7 +41,7 @@ Key constraints:
 ## Phase Status
 - [x] **Phase 1: GUC Infrastructure** - Declare, register, and validate four new connection limit GUCs
 - [x] **Phase 2: Pool Consolidation & Sizing** - Merge polling+activity pools; control duroxide and backend pool sizes via GUCs
-- [ ] **Phase 3: User-Execution Backpressure** - Add semaphore-based connection limiting with timeout to execute_sql activity
+- [x] **Phase 3: User-Execution Backpressure** - Add semaphore-based connection limiting with timeout to execute_sql activity
 - [ ] **Phase 4: E2E Tests** - Verify connection limits, backpressure, and startup validation
 - [ ] **Phase 5: Documentation** - User Guide updates, Docs.md
 
@@ -134,10 +134,10 @@ Key constraints:
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `cargo build --features pg17` compiles without warnings
-- [ ] `cargo clippy --features pg17` passes
-- [ ] `./scripts/test-unit.sh` passes
-- [ ] `./scripts/test-e2e-local.sh` passes (existing tests work within default limits)
+- [x] `cargo build --features pg17` compiles without warnings
+- [x] `cargo clippy --features pg17` passes
+- [x] `./scripts/test-unit.sh` passes
+- [x] `./scripts/test-e2e-local.sh` passes (existing tests work within default limits)
 
 #### Manual Verification:
 - [ ] With `max_user_connections = 1`, two concurrent long-running SQL nodes serialize (second waits for first)

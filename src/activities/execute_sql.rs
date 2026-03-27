@@ -1,14 +1,16 @@
 //! ExecuteSQL activity - runs SQL queries against PostgreSQL
 //!
 //! Connects as the submitting user's login_role and SET ROLE to submitted_by
-//! for proper privilege isolation.
+//! for proper privilege isolation. Connection count is gated by a semaphore
+//! sized from the pg_durable.max_user_connections GUC.
 
 use duroxide::ActivityContext;
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, PgPool, Row};
+use sqlx::{Column, Row};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
-use crate::types::connect_as_user;
+use crate::types::{connect_as_user, get_execution_acquire_timeout, get_max_user_connections};
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-sql";
@@ -27,7 +29,7 @@ pub struct ExecuteSqlInput {
 /// Execute a SQL query as the submitting user and return results as JSON
 pub async fn execute(
     ctx: ActivityContext,
-    _pool: Arc<PgPool>,
+    semaphore: Arc<Semaphore>,
     input_json: String,
 ) -> Result<String, String> {
     let input: ExecuteSqlInput =
@@ -44,6 +46,27 @@ pub async fn execute(
             .unwrap_or_default(),
         input.query
     ));
+
+    // Acquire a permit from the user-connection semaphore. The permit is held
+    // for the entire SQL execution and released automatically when dropped.
+    let timeout = get_execution_acquire_timeout();
+    let limit = get_max_user_connections();
+    let _permit = match tokio::time::timeout(timeout, semaphore.acquire()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            return Err(format!(
+                "pg_durable: connection limit reached (max_user_connections={limit}). \
+                 Semaphore closed unexpectedly."
+            ));
+        }
+        Err(_) => {
+            return Err(format!(
+                "pg_durable: connection limit reached (max_user_connections={limit}). \
+                 Timed out after {}s waiting for an available execution slot.",
+                timeout.as_secs()
+            ));
+        }
+    };
 
     // Create a single connection as login_role, SET ROLE to submitted_by
     let mut conn = connect_as_user(

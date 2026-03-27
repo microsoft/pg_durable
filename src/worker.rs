@@ -467,7 +467,10 @@ async fn initialize_duroxide_runtime(
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
         // longer needed — connect_as_user() sets that flag independently.
-        let activities = create_activity_registry(Arc::new(mgmt_pool.clone()));
+        let user_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            get_max_user_connections() as usize,
+        ));
+        let activities = create_activity_registry(Arc::new(mgmt_pool.clone()), user_semaphore);
         let orchestrations = create_orchestration_registry();
 
         let duroxide_runtime =
