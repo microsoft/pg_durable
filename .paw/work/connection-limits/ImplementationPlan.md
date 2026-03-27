@@ -42,7 +42,7 @@ Key constraints:
 - [x] **Phase 1: GUC Infrastructure** - Declare, register, and validate four new connection limit GUCs
 - [x] **Phase 2: Pool Consolidation & Sizing** - Merge polling+activity pools; control duroxide and backend pool sizes via GUCs
 - [x] **Phase 3: User-Execution Backpressure** - Add semaphore-based connection limiting with timeout to execute_sql activity
-- [ ] **Phase 4: E2E Tests** - Verify connection limits, backpressure, and startup validation
+- [x] **Phase 4: E2E Tests** - Verify connection limits, backpressure, and startup validation
 - [ ] **Phase 5: Documentation** - User Guide updates, Docs.md
 
 ## Phase Candidates
@@ -170,14 +170,14 @@ Key constraints:
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `./scripts/test-connlimit-e2e.sh` passes (backpressure, timeout, startup validation tests)
-- [ ] `./scripts/test-e2e-local.sh NN_connection_limit_defaults` passes
-- [ ] `./scripts/test-e2e-local.sh` full suite passes (regression)
+- [x] `./scripts/test-connlimit-e2e.sh` passes (backpressure, timeout, startup validation tests)
+- [x] `./scripts/test-e2e-local.sh NN_connection_limit_defaults` passes
+- [x] `./scripts/test-e2e-local.sh` full suite passes (regression)
 
 #### Manual Verification:
-- [ ] Backpressure test shows queued executions completing after earlier ones finish
-- [ ] Timeout test shows clear error message in failed workflow status
-- [ ] Startup validation test confirms worker rejects invalid GUC values (FR-010)
+- [x] Backpressure test shows queued executions completing after earlier ones finish
+- [x] Timeout test shows clear error message in failed workflow status
+- [x] Startup validation test confirms worker rejects invalid GUC values (FR-010)
 
 ---
 

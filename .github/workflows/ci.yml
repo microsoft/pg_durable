@@ -190,6 +190,10 @@ jobs:
         id: e2e_tests
         run: ./scripts/test-e2e-local.sh --clean --pg-version ${{ matrix.pg_version }}
 
+      - name: Run connection limit E2E tests
+        id: connlimit_tests
+        run: ./scripts/test-connlimit-e2e.sh
+
       - name: Run upgrade tests
         id: upgrade_tests
         run: ./scripts/test-upgrade.sh --pg-version ${{ matrix.pg_version }}

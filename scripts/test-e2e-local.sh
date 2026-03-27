@@ -291,8 +291,14 @@ for run in $(seq 1 $REPEAT_COUNT); do
         # In normal mode, skip tests that have specific requirements:
         # - shared_preload_libraries enforcement test (requires server without preload)
         # - setup_playground (already run explicitly as shared setup)
+        # - connection limit tests 44-46 (require custom Postmaster GUCs;
+        #   run separately via scripts/test-connlimit-e2e.sh)
         if [ "$NO_PRELOAD" = false ]; then
-            if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]] || [[ "$test_name" == "00_setup_playground" ]]; then
+            if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]] \
+               || [[ "$test_name" == "00_setup_playground" ]] \
+               || [[ "$test_name" == 44_connection_limit_* ]] \
+               || [[ "$test_name" == 45_connection_limit_* ]] \
+               || [[ "$test_name" == 46_connection_limit_* ]]; then
                 continue
             fi
         fi
