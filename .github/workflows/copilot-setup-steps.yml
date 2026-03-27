@@ -112,6 +112,3 @@ jobs:
       - name: Prefetch Rust dependencies
         run: |
           cargo fetch
-
-      - name: Verify duroxide migrations match upstream
-        run: ./scripts/verify-duroxide-migrations.sh

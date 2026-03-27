@@ -93,39 +93,19 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
 
 ## Architecture
 
-### 1. Extension-Managed Schema *and* DDL (implemented)
+### 1. Extension-Managed Schema, BGW-Managed DDL (implemented)
 
-**Change:** pg_durable ships the Duroxide provider schema DDL as extension SQL, executed directly by PostgreSQL during `CREATE EXTENSION pg_durable`.
+`CREATE EXTENSION pg_durable` creates the `df` schema (tables, functions, operators, RLS policies) and an empty `duroxide` schema — both as extension-owned objects. The `duroxide` schema is intentionally created without `IF NOT EXISTS`: if a `duroxide` schema already exists, installation fails immediately, preventing schema-squatting.
 
-This is the PostgreSQL best-practice approach for extension-owned objects:
+The duroxide provider tables, functions, indexes, and triggers are **not** created by extension SQL. Instead, the background worker (BGW) populates the `duroxide` schema at startup via `MigrationPolicy::ApplyAll` (see section 2). This decouples the duroxide engine schema from the extension lifecycle:
 
-- Objects created by the extension SQL scripts are registered as **extension members** (dependency type `e`).
-- `DROP EXTENSION pg_durable` reliably removes the schema + objects (subject to Postgres semantics; `CASCADE` may be required because the schema is non-empty).
-- `pg_dump`/`pg_restore` behavior is more predictable because the DDL is part of the extension lifecycle rather than “out-of-band”.
+- Duroxide-pg-opt upgrades require no changes to extension SQL or upgrade scripts — the BGW applies new migrations automatically.
+- The duroxide schema can evolve independently of pg_durable releases.
+- Swapping the duroxide provider only requires changes to BGW initialization code, not extension DDL.
 
-#### How we do it (the “migration SQL hand-over”)
+Because the BGW creates duroxide objects outside the extension transaction, they are not registered as extension members. The `duroxide` schema itself remains extension-owned. This means `DROP EXTENSION pg_durable CASCADE` is always required — `CASCADE` drops the extension-owned schema, which cascades to the non-owned objects inside it.
 
-We keep an audited, ordered copy of the upstream migration SQL inside this repo:
-
-- `sql/duroxide_upstream/0001_*.sql` … `0005_*.sql` (verbatim copies)
-- `scripts/gen-duroxide-install-sql.sh` generates a combined `sql/duroxide_install.sql`
-- `scripts/verify-duroxide-migrations.sh` checks that:
-  - our copies match `duroxide-pg-opt/migrations/`
-  - the generated combined install SQL matches what’s checked in
-
-The generated install SQL sets `search_path` to `duroxide` for the migration DDL, then resets it to `@extschema@` at the end so that subsequent extension SQL blocks (operators, etc.) resolve to the correct schema.
-
-We include `sql/duroxide_install.sql` as part of the extension install SQL via `extension_sql_file!`.
-
-#### Why we avoid “out-of-band” DDL
-
-We previously considered (and prototyped) applying the schema DDL via Rust code.
-Two variants are tempting but both lose the extension ownership model:
-
-1. **Separate-session migrations** (opening a new SQL connection and running DDL) create objects that are not extension members.
-2. **SPI from a UDF during `CREATE EXTENSION`** can create the objects, but they still are not reliably registered as extension members.
-
-Given those trade-offs, running the DDL as extension SQL is the clearest, most PostgreSQL-native approach.
+See [bgw-applies-migrations.md](bgw-applies-migrations.md) for the full design.
 
 ### 2. Background Worker: `MigrationPolicy::ApplyAll`
 
