@@ -11,6 +11,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 - New: Azure Functions integration example (#69)
 - Named result substitution now supports dot-notation for column access (`$name.col`), null-safe variants (`$name?`, `$name.col?`), and row-set expansion (`$name.*`). Referencing a named result that returned no rows or a NULL value now fails the orchestration by default; append `?` to substitute an empty string instead.
 - New DSL function `df.if_rows()`: branches on whether a named result returned any rows, without executing a SQL condition query.
+- New: Connection limits — four Postmaster-context GUCs (`max_management_connections`, `max_duroxide_connections`, `max_user_connections`, `execution_acquire_timeout`) control the background worker's connection budget. User-execution connections are gated by a semaphore with configurable backpressure timeout. The former polling and activity pools are consolidated into a single management pool. Backend provider pools reduced to 1 connection.
 
 ## v0.1.1 (Released)
 

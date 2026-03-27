@@ -22,9 +22,10 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 12. [Visualizing Functions](#visualizing-functions)
 13. [Monitoring](#monitoring)
 14. [User Isolation & Privileges](#user-isolation--privileges)
-15. [Troubleshooting](#troubleshooting)
-16. [Quick Reference Card](#quick-reference-card)
-17. [Appendix: Test Data Setup](#appendix-test-data-setup)
+15. [Connection Limits](#connection-limits)
+16. [Troubleshooting](#troubleshooting)
+17. [Quick Reference Card](#quick-reference-card)
+18. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -1585,6 +1586,122 @@ GRANT UPDATE (status, updated_at) ON df.instances TO app_role;
 GRANT SELECT, INSERT ON df.nodes TO app_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
 ```
+
+---
+
+## Connection Limits
+
+pg_durable uses multiple PostgreSQL connections for different purposes. Four GUCs let you control the connection budget to match your deployment's resources.
+
+### Connection Architecture
+
+The background worker maintains three categories of connections:
+
+| Category | Purpose | GUC | Default |
+|----------|---------|-----|---------|
+| **Management pool** | Extension lifecycle checks, graph loading, status updates | `pg_durable.max_management_connections` | 6 |
+| **Duroxide pool** | Orchestration state, LISTEN/NOTIFY for work dispatch | `pg_durable.max_duroxide_connections` | 10 |
+| **User-execution** | Per-SQL-node connections authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
+
+Each PG backend session (user calling `df.start()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
+
+### GUC Reference
+
+All connection-limit GUCs are **Postmaster-context** — set them in `postgresql.conf` and restart PostgreSQL.
+
+```ini
+# postgresql.conf
+
+# Management pool: graph loading, status updates, lifecycle polling
+# Minimum: 1 (warning logged). Increase for high-concurrency workloads.
+pg_durable.max_management_connections = 6
+
+# Duroxide provider pool: orchestration state + LISTEN/NOTIFY
+# Minimum: 2 (1 reserved for listener). Worker refuses to start if < 2.
+pg_durable.max_duroxide_connections = 10
+
+# Maximum concurrent SQL node executions (user connections)
+# Additional executions queue until a slot frees up or timeout expires.
+pg_durable.max_user_connections = 10
+
+# How long (seconds) a SQL node waits for a user-execution slot
+# before failing with an error.
+pg_durable.execution_acquire_timeout = 30
+```
+
+### Connection Budget Formula
+
+To calculate the total connections pg_durable will use:
+
+```
+Total = max_management_connections
+      + max_duroxide_connections
+      + max_user_connections
+      + (active_backend_sessions × 1)
+```
+
+With defaults and 5 connected users: `6 + 10 + 10 + 5 = 31 connections`.
+
+> **Tip**: Ensure PostgreSQL's `max_connections` is large enough to accommodate pg_durable's budget plus your application's direct connections.
+
+### Backpressure Behavior
+
+When all user-execution slots are occupied, additional SQL node executions **queue** (they don't fail immediately). The semaphore-based backpressure ensures:
+
+- Queued executions proceed as slots free up
+- If the wait exceeds `execution_acquire_timeout`, the SQL node fails with:
+  ```
+  pg_durable: connection limit reached (max_user_connections=10).
+  Timed out after 30s waiting for an available execution slot.
+  ```
+- The failed node causes the workflow to enter `failed` status
+- Other nodes in the same workflow that have already acquired slots continue normally
+
+### Startup Validation
+
+The background worker validates GUC values at startup:
+
+- `max_duroxide_connections < 2` → worker **refuses to start** (FATAL log message)
+- `max_management_connections = 1` → worker starts but logs a **warning**
+- Invalid values are caught before any connections are created
+
+### Interaction with PostgreSQL CONNECTION LIMIT
+
+PostgreSQL's per-role `CONNECTION LIMIT` (set via `ALTER ROLE ... CONNECTION LIMIT n`) counts against the **authenticating role** (the role in the connection string), not the role set via `SET ROLE`.
+
+For pg_durable, this means:
+- **Management and duroxide pools** authenticate as `pg_durable.worker_role` — all pool connections count against that role's limit
+- **User-execution connections** authenticate as the submitting user's `login_role` — these count against *that* role's limit
+- **Backend connections** authenticate as whatever role the application uses
+
+If you use per-role connection limits, ensure each role's limit accounts for pg_durable's usage.
+
+### Example Configurations
+
+**Small deployment** (single app, few concurrent workflows):
+```ini
+pg_durable.max_management_connections = 3
+pg_durable.max_duroxide_connections = 5
+pg_durable.max_user_connections = 5
+# Budget: 3 + 5 + 5 + backends ≈ 15 connections
+```
+
+**Medium deployment** (defaults — suitable for most workloads):
+```ini
+# Use defaults: 6 + 10 + 10 + backends ≈ 28 connections
+```
+
+**Large deployment** (high concurrency, many parallel workflows):
+```ini
+pg_durable.max_management_connections = 10
+pg_durable.max_duroxide_connections = 15
+pg_durable.max_user_connections = 50
+pg_durable.execution_acquire_timeout = 60
+# Budget: 10 + 15 + 50 + backends ≈ 80 connections
+```
+
+---
+
 ## Troubleshooting
 
 ### Extension Exists But Workflows Don't Start

@@ -43,7 +43,7 @@ Key constraints:
 - [x] **Phase 2: Pool Consolidation & Sizing** - Merge polling+activity pools; control duroxide and backend pool sizes via GUCs
 - [x] **Phase 3: User-Execution Backpressure** - Add semaphore-based connection limiting with timeout to execute_sql activity
 - [x] **Phase 4: E2E Tests** - Verify connection limits, backpressure, and startup validation
-- [ ] **Phase 5: Documentation** - User Guide updates, Docs.md
+- [x] **Phase 5: Documentation** - User Guide updates, Docs.md
 
 ## Phase Candidates
 <!-- None — all phases are required for the feature -->
@@ -193,9 +193,9 @@ Key constraints:
 - **`CHANGELOG.md`**: Add entry for the new feature
 
 ### Success Criteria:
-- [ ] Content accurate and consistent with implementation
-- [ ] Style consistent with existing USER_GUIDE.md sections
-- [ ] Connection budget formula matches actual behavior
+- [x] Content accurate and consistent with implementation
+- [x] Style consistent with existing USER_GUIDE.md sections
+- [x] Connection budget formula matches actual behavior
 
 ---
 
