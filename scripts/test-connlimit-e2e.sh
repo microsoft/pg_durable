@@ -111,6 +111,9 @@ run_test() {
     fi
 }
 
+# Restore defaults on any exit (including set -e failures)
+trap restore_defaults EXIT
+
 # Ensure extension is installed and server is running
 echo -e "${CYAN}=== Connection Limit E2E Tests ===${NC}"
 echo ""
