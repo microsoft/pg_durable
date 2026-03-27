@@ -39,7 +39,7 @@ Key constraints:
 - Connection pooling for user-execution connections
 
 ## Phase Status
-- [ ] **Phase 1: GUC Infrastructure** - Declare, register, and validate four new connection limit GUCs
+- [x] **Phase 1: GUC Infrastructure** - Declare, register, and validate four new connection limit GUCs
 - [ ] **Phase 2: Pool Consolidation & Sizing** - Merge polling+activity pools; control duroxide and backend pool sizes via GUCs
 - [ ] **Phase 3: User-Execution Backpressure** - Add semaphore-based connection limiting with timeout to execute_sql activity
 - [ ] **Phase 4: E2E Tests** - Verify connection limits, backpressure, and startup validation
