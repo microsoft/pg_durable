@@ -101,7 +101,7 @@ async fn run_duroxide_runtime() {
 
     if duroxide_conns < 2 {
         log!(
-            "pg_durable: FATAL — max_duroxide_connections={} is below minimum 2 \
+            "pg_durable: max_duroxide_connections={} is below minimum 2 \
              (listener requires at least 1 slot). Worker refusing to start.",
             duroxide_conns
         );
@@ -406,6 +406,20 @@ async fn initialize_duroxide_runtime(
 ) -> Option<Arc<runtime::Runtime>> {
     log!("pg_durable: initializing duroxide runtime...");
 
+    // Control duroxide provider pool size via env var (the only mechanism
+    // without modifying duroxide-pg-opt). BGW is single-threaded so no
+    // concurrent readers. Note: std::env::set_var becomes unsafe in Rust 2024 edition.
+    std::env::set_var(
+        "DUROXIDE_PG_POOL_MAX",
+        get_max_duroxide_connections().to_string(),
+    );
+
+    // Create the user-execution semaphore once — the GUC is Postmaster-context
+    // so the value never changes within a worker lifetime.
+    let user_semaphore = Arc::new(tokio::sync::Semaphore::new(
+        get_max_user_connections() as usize,
+    ));
+
     loop {
         if is_shutdown_requested() {
             log!("pg_durable: shutdown requested during initialization");
@@ -443,14 +457,6 @@ async fn initialize_duroxide_runtime(
             }
         }
 
-        // Control duroxide provider pool size via env var (the only mechanism
-        // without modifying duroxide-pg-opt). BGW is single-threaded so no
-        // concurrent readers. Note: std::env::set_var becomes unsafe in Rust 2024 edition.
-        std::env::set_var(
-            "DUROXIDE_PG_POOL_MAX",
-            get_max_duroxide_connections().to_string(),
-        );
-
         let store =
             match PostgresProvider::new_with_config(pg_conn_str, worker_provider_config()).await {
                 Ok(s) => Arc::new(s),
@@ -467,10 +473,8 @@ async fn initialize_duroxide_runtime(
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
         // longer needed — connect_as_user() sets that flag independently.
-        let user_semaphore = Arc::new(tokio::sync::Semaphore::new(
-            get_max_user_connections() as usize,
-        ));
-        let activities = create_activity_registry(Arc::new(mgmt_pool.clone()), user_semaphore);
+        let activities =
+            create_activity_registry(Arc::new(mgmt_pool.clone()), user_semaphore.clone());
         let orchestrations = create_orchestration_registry();
 
         let duroxide_runtime =

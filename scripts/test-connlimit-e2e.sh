@@ -4,7 +4,7 @@
 # These tests require Postmaster-level GUC changes (server restart).
 # Runs separately from test-e2e-local.sh.
 #
-# Usage: ./scripts/test-connlimit-e2e.sh [--verbose]
+# Usage: ./scripts/test-connlimit-e2e.sh [--verbose] [--pg-version N]
 
 set -e
 
@@ -13,9 +13,28 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 
 VERBOSE=false
-if [[ "$1" == "--verbose" || "$1" == "-v" ]]; then
-    VERBOSE=true
-fi
+PG_VERSION="17"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --verbose|-v)
+            VERBOSE=true
+            shift
+            ;;
+        --pg-version)
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --pg-version requires a numeric argument, got: $2"
+                exit 1
+            fi
+            PG_VERSION="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
 
 # Colors
 RED='\033[0;31m'
@@ -26,7 +45,6 @@ NC='\033[0m'
 
 # pgrx settings
 PGRX_HOME="$HOME/.pgrx"
-PG_VERSION="17"
 PG_PORT="$((28800 + PG_VERSION))"
 PG_USER="postgres"
 PG_DB="postgres"
@@ -131,6 +149,21 @@ fi
 
 # Ensure extension exists
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null 2>&1
+
+# Ensure the E2E test user exists with required privileges
+# (normally created by 00_setup_playground.sql, but this script must be self-contained)
+"$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB <<'SETUP_EOF' >/dev/null 2>&1
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
+        CREATE ROLE df_e2e_user LOGIN;
+    END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO df_e2e_user;
+GRANT CREATE ON SCHEMA public TO df_e2e_user;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO df_e2e_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO df_e2e_user;
+SETUP_EOF
 
 # --- Test 1: Backpressure (max_user_connections=2) ---
 echo -e "\n${YELLOW}[1/3] Backpressure test (max_user_connections=2)${NC}"

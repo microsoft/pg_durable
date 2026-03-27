@@ -1661,7 +1661,7 @@ When all user-execution slots are occupied, additional SQL node executions **que
 
 The background worker validates GUC values at startup:
 
-- `max_duroxide_connections < 2` → worker **refuses to start** (FATAL log message)
+- `max_duroxide_connections < 2` → worker **refuses to start** (logs error and exits)
 - `max_management_connections = 1` → worker starts but logs a **warning**
 - Invalid values are caught before any connections are created
 

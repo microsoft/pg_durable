@@ -228,3 +228,9 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario A considerations:** Fresh install picks up `df.if_rows` automatically from pgrx-generated SQL. The upgrade path required an explicit `CREATE FUNCTION` in the upgrade script to match.
 - **Scenario B1 considerations:** No backward compatibility concern. `df.if_rows` is a new function that doesn't exist in v0.1.1 schemas — it simply won't be callable until the customer runs `ALTER EXTENSION UPDATE`. The `.so` symbol exists but is never invoked from old schemas. All other changes (substitution engine rewrite, `Result` return type) are internal to orchestration code and don't touch any SQL queries or table schemas.
 - **Scenario B2 considerations:** No data migration needed. The change is purely additive (new function) with no table or column changes.
+
+#### Connection Limits — GUC-controlled pool sizing and backpressure
+- **DDL change:** None. All changes are runtime-only (pool consolidation, semaphore backpressure, new GUCs).
+- **Scenario A considerations:** No schema changes — the `df` schema equivalence contract is unchanged.
+- **Scenario B1 considerations:** The new `.so` defaults match previous hard-coded values (management=6 covers the former polling=1 + activity=5, duroxide=10, backend=10→1 is internal). The new `.so` works against all previous schemas without any GUC configuration.
+- **Scenario B2 considerations:** No data migration needed. Existing instances, nodes, and graphs are unaffected. The four new GUCs (`max_management_connections`, `max_duroxide_connections`, `max_user_connections`, `execution_acquire_timeout`) are Postmaster-context and default to values preserving previous behavior.

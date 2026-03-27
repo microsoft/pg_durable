@@ -77,7 +77,7 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.max_management_connections",
-        c"Maximum number of connections in the background worker management pool (polling + activity)",
+        c"Maximum number of connections in the background worker management pool (lifecycle, graph loading, status updates)",
         c"",
         &MAX_MANAGEMENT_CONNECTIONS,
         1,
@@ -91,7 +91,7 @@ pub extern "C-unwind" fn _PG_init() {
         c"Maximum number of connections in the duroxide provider pool (orchestration state + listener)",
         c"",
         &MAX_DUROXIDE_CONNECTIONS,
-        2,
+        1,
         1000,
         GucContext::Postmaster,
         GucFlags::default(),
@@ -2045,6 +2045,22 @@ mod tests {
         assert!(
             durofut.validate_recursive().is_ok(),
             "Valid IF graph should pass validation"
+        );
+    }
+
+    #[pg_test]
+    fn test_connection_limit_guc_defaults() {
+        use crate::types::{
+            get_execution_acquire_timeout, get_max_duroxide_connections,
+            get_max_management_connections, get_max_user_connections,
+        };
+
+        assert_eq!(get_max_management_connections(), 6);
+        assert_eq!(get_max_duroxide_connections(), 10);
+        assert_eq!(get_max_user_connections(), 10);
+        assert_eq!(
+            get_execution_acquire_timeout(),
+            std::time::Duration::from_secs(30)
         );
     }
 }
