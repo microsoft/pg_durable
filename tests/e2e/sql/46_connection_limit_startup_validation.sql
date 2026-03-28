@@ -4,15 +4,26 @@
 -- connections are below the required minimum for the LISTEN/NOTIFY slot.
 
 -- The worker should have logged the error message and exited.
--- df.is_ready() should never return true.
+-- The duroxide._worker_ready table should never appear (or have a valid row).
 DO $$
 DECLARE
-    ready BOOLEAN;
-    attempts INT := 0;
+    ready        BOOLEAN;
+    table_exists BOOLEAN;
+    attempts     INT := 0;
 BEGIN
-    -- Poll df.is_ready() for up to 15 seconds — the worker should never become ready.
+    -- Poll duroxide._worker_ready for up to 15 seconds — the worker should never become ready.
     LOOP
-        SELECT df.is_ready() INTO ready;
+        SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'duroxide' AND table_name = '_worker_ready'
+        ) INTO table_exists;
+
+        IF table_exists THEN
+            SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1) INTO ready;
+        ELSE
+            ready := FALSE;
+        END IF;
+
         EXIT WHEN ready OR attempts >= 30;
         PERFORM pg_sleep(0.5);
         attempts := attempts + 1;

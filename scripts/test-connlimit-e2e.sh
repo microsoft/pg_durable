@@ -173,9 +173,10 @@ apply_gucs "pg_durable.max_user_connections = 2"
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
 
-# Wait for worker readiness
+# Wait for worker readiness (poll duroxide._worker_ready directly)
 for i in $(seq 1 30); do
-    ready=$("$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c "SELECT df.is_ready();" 2>/dev/null | tr -d ' \n')
+    ready=$("$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c \
+        "SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1);" 2>/dev/null | tr -d ' \n')
     [ "$ready" = "t" ] && break
     sleep 1
 done
@@ -190,7 +191,8 @@ apply_gucs "pg_durable.max_user_connections = 1" "pg_durable.execution_acquire_t
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
 
 for i in $(seq 1 30); do
-    ready=$("$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c "SELECT df.is_ready();" 2>/dev/null | tr -d ' \n')
+    ready=$("$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c \
+        "SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1);" 2>/dev/null | tr -d ' \n')
     [ "$ready" = "t" ] && break
     sleep 1
 done
