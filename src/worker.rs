@@ -417,7 +417,7 @@ async fn initialize_duroxide_runtime(
     // Create the user-execution semaphore once — the GUC is Postmaster-context
     // so the value never changes within a worker lifetime.
     let user_semaphore = Arc::new(tokio::sync::Semaphore::new(
-        get_max_user_connections() as usize,
+        get_max_user_connections() as usize
     ));
 
     loop {
