@@ -149,7 +149,7 @@ CREATE POLICY nodes_user_isolation ON df.nodes
 
 An earlier draft of this document stated that DSL functions like `df.sql()` insert rows into `df.nodes` with `submitted_by = NULL`. This is **incorrect**.
 
-DSL functions (`df.sql()`, `df.seq()`, `df.sleep()`, etc.) do NOT insert rows into `df.nodes`. They build an in-memory JSON tree (the `Durofut` struct). All node rows are inserted inside `df.start()` via its internal `insert_nodes()` function, which sets `instance_id`, `submitted_by`, and `login_role` on every node from the very start.
+DSL functions (`df.sql()`, `df.seq()`, `df.sleep()`, etc.) do NOT insert rows into `df.nodes`. They build an in-memory JSON tree (the `Durofut` struct). All node rows are inserted inside `df.start()` via its internal `insert_nodes()` function, which sets `instance_id` and `submitted_by` on every node from the very start.
 
 There are no "unlinked" or "orphan" nodes with `submitted_by = NULL`. Every row in `df.nodes` has `submitted_by` set at INSERT time.
 
@@ -263,7 +263,7 @@ GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
 GRANT SELECT, INSERT ON df.nodes TO PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
 ```
-Column-level UPDATE on `(status, updated_at)` allows `df.cancel()` to set status while preventing users from tampering with identity columns (`submitted_by`, `login_role`) or structural columns (`root_node`). RLS ensures users can only update their own rows. No DELETE on instances/nodes.
+Column-level UPDATE on `(status, updated_at)` allows `df.cancel()` to set status while preventing users from tampering with identity columns (`submitted_by`) or structural columns (`root_node`). RLS ensures users can only update their own rows. No DELETE on instances/nodes.
 
 **(C) Require manual grants** (current state): Admin explicitly grants after `CREATE EXTENSION`.
 
@@ -274,7 +274,7 @@ Column-level UPDATE on `(status, updated_at)` allows `df.cancel()` to set status
 
 **Decision**: Option B — auto-grant with SELECT+INSERT on instances/nodes, column-level `UPDATE (status, updated_at)` on instances, no DELETE. ✅ Decided.
 
-> **Why column-level UPDATE instead of full UPDATE?** `df.cancel()` needs to set `status='cancelled'` via SPI (running as the calling user). A full UPDATE grant would let users tamper with identity columns (`submitted_by`, `login_role`), structural columns (`root_node`), or other metadata. Column-level `GRANT UPDATE (status, updated_at)` allows only the columns needed for cancellation while RLS restricts updates to the user's own rows. All other status/result changes (completion, failure) flow through the background worker's activities via the superuser sqlx pool.
+> **Why column-level UPDATE instead of full UPDATE?** `df.cancel()` needs to set `status='cancelled'` via SPI (running as the calling user). A full UPDATE grant would let users tamper with identity columns (`submitted_by`), structural columns (`root_node`), or other metadata. Column-level `GRANT UPDATE (status, updated_at)` allows only the columns needed for cancellation while RLS restricts updates to the user's own rows. All other status/result changes (completion, failure) flow through the background worker's activities via the superuser sqlx pool.
 
 ---
 

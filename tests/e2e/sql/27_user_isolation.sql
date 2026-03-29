@@ -161,8 +161,11 @@ END $$;
 DROP TABLE _test_state_4;
 
 -- ============================================================================
--- Test 5: SET ROLE with a group role (no LOGIN)
+-- Test 5: SET ROLE with a NOLOGIN group role → df.start() rejects
 -- ============================================================================
+-- In the simplified model, current_user must have LOGIN. After SET ROLE to
+-- a NOLOGIN group role, current_user = that group role, which lacks LOGIN.
+-- df.start() should raise an immediate error.
 DO $group_setup$
 BEGIN
     BEGIN DROP OWNED BY iso_analysts; EXCEPTION WHEN undefined_object THEN NULL; END;
@@ -179,12 +182,32 @@ GRANT iso_analysts TO iso_alice;
 -- df schema, functions, and table DML are auto-granted to PUBLIC by CREATE EXTENSION.
 GRANT TEMPORARY ON DATABASE postgres TO iso_analysts;
 
+-- Test 5a: SET ROLE to NOLOGIN role → df.start() should error
 SET SESSION AUTHORIZATION iso_alice;
 SET ROLE iso_analysts;
--- session_user = iso_alice, current_user (outer) = iso_analysts
-CREATE TEMP TABLE _test_state_5 (instance_id TEXT);
-INSERT INTO _test_state_5
-SELECT df.start(df.sql('SELECT value FROM iso_analyst_data LIMIT 1'), 'iso-set-role');
+DO $$
+BEGIN
+    PERFORM df.start(df.sql('SELECT value FROM iso_analyst_data LIMIT 1'), 'iso-set-role-nologin');
+    RAISE EXCEPTION 'TEST FAILED (Test 5a): df.start() should have rejected NOLOGIN role';
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLERRM LIKE '%LOGIN%' THEN
+            RAISE NOTICE 'Test 5a PASSED: df.start() rejects NOLOGIN group role with LOGIN error';
+        ELSE
+            RAISE EXCEPTION 'TEST FAILED (Test 5a): unexpected error: %', SQLERRM;
+        END IF;
+END $$;
+RESET ROLE;
+RESET SESSION AUTHORIZATION;
+
+-- Test 5b: Grant LOGIN to group role → df.start() should succeed
+ALTER ROLE iso_analysts LOGIN;
+
+SET SESSION AUTHORIZATION iso_alice;
+SET ROLE iso_analysts;
+CREATE TEMP TABLE _test_state_5b (instance_id TEXT);
+INSERT INTO _test_state_5b
+SELECT df.start(df.sql('SELECT value FROM iso_analyst_data LIMIT 1'), 'iso-set-role-login');
 RESET ROLE;
 RESET SESSION AUTHORIZATION;
 
@@ -193,44 +216,43 @@ DECLARE
     inst_id TEXT;
     final_status TEXT;
     result TEXT;
-    inst_login TEXT;
     inst_submitted TEXT;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_state_5;
+    SELECT instance_id INTO inst_id FROM _test_state_5b;
 
     SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 5 - SET ROLE): expected completed, got %', final_status;
+        RAISE EXCEPTION 'TEST FAILED (Test 5b - SET ROLE with LOGIN): expected completed, got %', final_status;
     END IF;
 
     SELECT r INTO result FROM df.result(inst_id) r;
     IF result IS NULL OR result NOT LIKE '%analyst report%' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 5): expected analyst report, got %', result;
+        RAISE EXCEPTION 'TEST FAILED (Test 5b): expected analyst report, got %', result;
     END IF;
 
-    -- Verify identity columns on the instance
-    SELECT submitted_by::text, login_role::text INTO inst_submitted, inst_login
+    -- Verify identity column on the instance
+    SELECT submitted_by::text INTO inst_submitted
       FROM df.instances WHERE id = inst_id;
 
-    IF inst_login != 'iso_alice' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 5): expected login_role=iso_alice, got %', inst_login;
-    END IF;
     IF inst_submitted != 'iso_analysts' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 5): expected submitted_by=iso_analysts, got %', inst_submitted;
+        RAISE EXCEPTION 'TEST FAILED (Test 5b): expected submitted_by=iso_analysts, got %', inst_submitted;
     END IF;
 
-    RAISE NOTICE 'Test 5 PASSED: SET ROLE group role works (login=iso_alice, effective=iso_analysts)';
+    RAISE NOTICE 'Test 5b PASSED: SET ROLE with LOGIN group role works (submitted_by=iso_analysts)';
 END $$;
 
-DROP TABLE _test_state_5;
+DROP TABLE _test_state_5b;
+
+-- Revert LOGIN for cleanup
+ALTER ROLE iso_analysts NOLOGIN;
 
 -- ============================================================================
--- Test 6: SECURITY DEFINER function - captures caller, not definer
+-- Test 6: SECURITY DEFINER function - captures definer identity
 -- ============================================================================
--- This verifies that GetOuterUserId() correctly identifies the caller's
--- identity, not the function owner's identity, when df.start() is called
--- inside a SECURITY DEFINER function.
+-- In the simplified model, GetUserId() captures current_user, which inside
+-- a SECURITY DEFINER function is the function *owner* (definer), not the
+-- caller. SQL therefore runs with definer privileges.
 
 -- Create a superuser-only table (alice has no access)
 CREATE TABLE IF NOT EXISTS iso_superuser_secrets (id SERIAL PRIMARY KEY, value TEXT);
@@ -247,8 +269,8 @@ $$;
 -- Grant alice permission to execute the wrapper
 GRANT EXECUTE ON FUNCTION iso_submit_as_definer TO iso_alice;
 
--- Test 6a: Alice calls SECURITY DEFINER function to query her own table
--- Expected: succeeds because the function runs as alice (caller), not superuser (definer)
+-- Test 6a: Alice calls SECURITY DEFINER to query her own table
+-- Expected: succeeds because function runs as superuser (definer), who can access all tables
 SET SESSION AUTHORIZATION iso_alice;
 CREATE TEMP TABLE _test_state_6a (instance_id TEXT);
 INSERT INTO _test_state_6a
@@ -260,15 +282,13 @@ DECLARE
     inst_id TEXT;
     final_status TEXT;
     result TEXT;
-    inst_submitted TEXT;
-    inst_login TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_6a;
 
     SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 6a - SECURITY DEFINER caller access): expected completed, got %', final_status;
+        RAISE EXCEPTION 'TEST FAILED (Test 6a - SECURITY DEFINER access alice table): expected completed, got %', final_status;
     END IF;
 
     SELECT r INTO result FROM df.result(inst_id) r;
@@ -276,25 +296,14 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED (Test 6a): expected alice secret, got %', result;
     END IF;
 
-    -- Verify identity columns show alice (caller), not superuser (definer)
-    SELECT submitted_by::text, login_role::text INTO inst_submitted, inst_login
-      FROM df.instances WHERE id = inst_id;
-
-    IF inst_submitted != 'iso_alice' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 6a): expected submitted_by=iso_alice (caller), got % (would be superuser if definer was captured)', inst_submitted;
-    END IF;
-    IF inst_login != 'iso_alice' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 6a): expected login_role=iso_alice, got %', inst_login;
-    END IF;
-
-    RAISE NOTICE 'Test 6a PASSED: SECURITY DEFINER captures caller (alice), not definer (superuser)';
+    RAISE NOTICE 'Test 6a PASSED: SECURITY DEFINER runs as definer, can access alice table';
 END $$;
 
 DROP TABLE _test_state_6a;
 
--- Test 6b: Alice calls SECURITY DEFINER function to query superuser table
--- Expected: FAILS because the function runs as alice (caller), not superuser (definer)
--- This proves GetOuterUserId() captured the caller's identity correctly
+-- Test 6b: Alice calls SECURITY DEFINER to query superuser-only table
+-- Expected: SUCCEEDS because function runs as superuser (definer)
+-- This is the correct behavior in the simplified model.
 SET SESSION AUTHORIZATION iso_alice;
 CREATE TEMP TABLE _test_state_6b (instance_id TEXT);
 INSERT INTO _test_state_6b
@@ -305,16 +314,22 @@ DO $$
 DECLARE
     inst_id TEXT;
     final_status TEXT;
+    result TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_6b;
 
     SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
 
-    IF final_status != 'failed' THEN
-        RAISE EXCEPTION 'TEST FAILED (Test 6b - SECURITY DEFINER unauthorized): expected failed, got % (if completed, function incorrectly ran as definer instead of caller)', final_status;
+    IF final_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6b - SECURITY DEFINER access superuser table): expected completed (runs as definer), got %', final_status;
     END IF;
 
-    RAISE NOTICE 'Test 6b PASSED: SECURITY DEFINER function runs as caller, cannot access superuser table';
+    SELECT r INTO result FROM df.result(inst_id) r;
+    IF result IS NULL OR result NOT LIKE '%classified%' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6b): expected classified, got %', result;
+    END IF;
+
+    RAISE NOTICE 'Test 6b PASSED: SECURITY DEFINER runs as definer, CAN access superuser table (expected in simplified model)';
 END $$;
 
 DROP TABLE _test_state_6b;

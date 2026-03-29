@@ -119,7 +119,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
 **Key points:**
 - The background worker role (`pg_durable.worker_role` GUC, default: `azuresu`) **must be a superuser** — it bypasses RLS to manage all users' instances
 - Users get `SELECT` + `INSERT` on `df.instances` / `df.nodes`, column-level `UPDATE (status, updated_at)` on instances for `df.cancel()`
-- Identity columns (`submitted_by`, `login_role`) cannot be modified by users
+- Identity column (`submitted_by`) cannot be modified by users
 - **`df.vars` uses per-user scoping** — each user has their own variable namespace via an `owner` column and RLS. Superusers bypass RLS but DSL functions still scope to the calling user via explicit filters. Avoid storing secrets in plain text
 
 ## Continuous Integration

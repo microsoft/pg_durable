@@ -149,16 +149,13 @@ CREATE TABLE IF NOT EXISTS df.nodes (
     result JSONB,
     error TEXT,
     submitted_by REGROLE,
-    login_role   REGROLE,
     database TEXT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 COMMENT ON COLUMN df.nodes.submitted_by IS
-    'Effective role (outer user) for privilege isolation. Set by df.start() when node is linked to an instance.';
-COMMENT ON COLUMN df.nodes.login_role IS
-    'Authenticated role (session user) for connection authentication. Set by df.start() when node is linked to an instance.';
+    'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
 -- Table to store function instances
 CREATE TABLE IF NOT EXISTS df.instances (
@@ -167,7 +164,6 @@ CREATE TABLE IF NOT EXISTS df.instances (
     root_node VARCHAR(8) NOT NULL,
     status TEXT DEFAULT 'pending',
     submitted_by REGROLE NOT NULL,
-    login_role   REGROLE NOT NULL,
     database TEXT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
@@ -175,9 +171,7 @@ CREATE TABLE IF NOT EXISTS df.instances (
 );
 
 COMMENT ON COLUMN df.instances.submitted_by IS
-    'Effective role (outer user) when df.start() was called - used for SET ROLE during execution';
-COMMENT ON COLUMN df.instances.login_role IS
-    'Authenticated role (session user) when df.start() was called - used for connection authentication';
+    'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
 -- Index for finding pending instances
 CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);
@@ -213,15 +207,13 @@ ALTER TABLE df.instances
         CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT VALID,
     -- Supports the composite FK from df.nodes that ties node identity to the instance row.
     ADD CONSTRAINT instances_identity_key
-        UNIQUE (id, submitted_by, login_role);
+        UNIQUE (id, submitted_by);
 
 ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_instance_id_present_chk
         CHECK (instance_id IS NOT NULL) NOT VALID,
     ADD CONSTRAINT nodes_submitted_by_present_chk
         CHECK (submitted_by IS NOT NULL) NOT VALID,
-    ADD CONSTRAINT nodes_login_role_present_chk
-        CHECK (login_role IS NOT NULL) NOT VALID,
     ADD CONSTRAINT nodes_id_format_chk
         CHECK (id ~ '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_instance_id_format_chk
@@ -261,8 +253,8 @@ ALTER TABLE df.nodes
 
 ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_instance_identity_fkey
-        FOREIGN KEY (instance_id, submitted_by, login_role)
-        REFERENCES df.instances (id, submitted_by, login_role)
+        FOREIGN KEY (instance_id, submitted_by)
+        REFERENCES df.instances (id, submitted_by)
         DEFERRABLE INITIALLY DEFERRED NOT VALID,
     ADD CONSTRAINT nodes_left_node_same_instance_fkey
         FOREIGN KEY (instance_id, left_node)
@@ -295,10 +287,7 @@ ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
 CREATE POLICY instances_user_isolation ON df.instances
     FOR ALL
     USING (submitted_by = current_user::regrole)
-    WITH CHECK (
-        submitted_by = current_user::regrole
-        AND login_role = session_user::regrole
-    );
+    WITH CHECK (submitted_by = current_user::regrole);
 
 -- Enable RLS on df.nodes
 ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
@@ -306,10 +295,7 @@ ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY nodes_user_isolation ON df.nodes
     FOR ALL
     USING (submitted_by = current_user::regrole)
-    WITH CHECK (
-        submitted_by = current_user::regrole
-        AND login_role = session_user::regrole
-    );
+    WITH CHECK (submitted_by = current_user::regrole);
 
 -- Enable RLS on df.vars (per-user variable isolation)
 ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
@@ -324,13 +310,13 @@ GRANT USAGE ON SCHEMA df TO PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
 -- Users need INSERT for df.start(), SELECT for df.status()/result()
 -- Column-level UPDATE on instances: only status + updated_at (for df.cancel())
--- No UPDATE on identity columns (submitted_by, login_role) or structural columns (root_node)
+-- No UPDATE on identity columns (submitted_by) or structural columns (root_node)
 -- No DELETE — instance/node deletion should happen via admin API or TTL
 GRANT SELECT ON df.instances TO PUBLIC;
 GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
 GRANT SELECT ON df.nodes TO PUBLIC;
-GRANT INSERT (id, label, root_node, submitted_by, login_role, database) ON df.instances TO PUBLIC;
-GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database) ON df.nodes TO PUBLIC;
+GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO PUBLIC;
+GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
 
 -- Validate that the worker role is a superuser.

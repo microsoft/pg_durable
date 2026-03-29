@@ -347,7 +347,7 @@ BEGIN
 END $$;
 
 -- ============================================================================
--- Test 9: User cannot UPDATE identity columns (submitted_by, login_role)
+-- Test 9: User cannot UPDATE identity columns (submitted_by)
 -- ============================================================================
 DO $$
 DECLARE
@@ -356,15 +356,6 @@ BEGIN
     SELECT instance_id INTO alice_id FROM _rls_alice_state;
 
     SET SESSION AUTHORIZATION rls_alice;
-
-    -- login_role is not in the column-level UPDATE grant
-    BEGIN
-        UPDATE df.instances SET login_role = 'postgres'::regrole WHERE id = alice_id;
-        RAISE EXCEPTION 'TEST 9 FAILED: Alice was able to tamper with login_role';
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            NULL; -- expected
-    END;
 
     -- submitted_by is not in the column-level UPDATE grant
     BEGIN
@@ -388,8 +379,8 @@ BEGIN
     SET SESSION AUTHORIZATION rls_alice;
 
     BEGIN
-        INSERT INTO df.instances (id, root_node, status, submitted_by, login_role)
-        VALUES ('deadbeef', 'cafebabe', 'completed', current_user::regrole, session_user::regrole);
+        INSERT INTO df.instances (id, root_node, status, submitted_by)
+        VALUES ('deadbeef', 'cafebabe', 'completed', current_user::regrole);
         RAISE EXCEPTION 'TEST 10 FAILED: Alice was able to INSERT status into df.instances';
     EXCEPTION
         WHEN insufficient_privilege THEN
@@ -397,18 +388,9 @@ BEGIN
     END;
 
     BEGIN
-        INSERT INTO df.nodes (id, instance_id, node_type, query, status, submitted_by, login_role)
-        VALUES ('deadbeef', 'cafebabe', 'SQL', 'SELECT 1', 'completed', current_user::regrole, session_user::regrole);
+        INSERT INTO df.nodes (id, instance_id, node_type, query, status, submitted_by)
+        VALUES ('deadbeef', 'cafebabe', 'SQL', 'SELECT 1', 'completed', current_user::regrole);
         RAISE EXCEPTION 'TEST 10 FAILED: Alice was able to INSERT status into df.nodes';
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            NULL; -- expected
-    END;
-
-    BEGIN
-        INSERT INTO df.instances (id, root_node, submitted_by, login_role)
-        VALUES ('deadbeef', 'cafebabe', current_user::regrole, 'postgres'::regrole);
-        RAISE EXCEPTION 'TEST 10 FAILED: Alice was able to spoof login_role on df.instances';
     EXCEPTION
         WHEN insufficient_privilege THEN
             NULL; -- expected
@@ -427,8 +409,8 @@ BEGIN
     SET SESSION AUTHORIZATION rls_alice;
 
     BEGIN
-        INSERT INTO df.instances (id, root_node, submitted_by, login_role)
-        VALUES ('not_hex!', 'cafebabe', current_user::regrole, session_user::regrole);
+        INSERT INTO df.instances (id, root_node, submitted_by)
+        VALUES ('not_hex!', 'cafebabe', current_user::regrole);
         RAISE EXCEPTION 'TEST 11 FAILED: Alice was able to INSERT malformed instance metadata';
     EXCEPTION
         WHEN check_violation THEN
@@ -436,8 +418,8 @@ BEGIN
     END;
 
     BEGIN
-        INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, submitted_by, login_role)
-        VALUES ('deadbeef', 'cafebabe', 'SQL', 'SELECT 1', 'bad-name', current_user::regrole, session_user::regrole);
+        INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, submitted_by)
+        VALUES ('deadbeef', 'cafebabe', 'SQL', 'SELECT 1', 'bad-name', current_user::regrole);
         RAISE EXCEPTION 'TEST 11 FAILED: Alice was able to INSERT malformed node metadata';
     EXCEPTION
         WHEN check_violation THEN

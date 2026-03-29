@@ -268,7 +268,6 @@ async fn execute_sql_node(
     let input = serde_json::json!({
         "query": final_query,
         "submitted_by": node.submitted_by,
-        "login_role": node.login_role,
         "database": node.database,
     });
 
@@ -783,7 +782,6 @@ async fn execute_http_node(
 
     // Inject audit context from the function node
     config["submitted_by"] = serde_json::Value::String(node.submitted_by.clone());
-    config["login_role"] = serde_json::Value::String(node.login_role.clone());
 
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");

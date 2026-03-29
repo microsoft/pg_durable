@@ -398,15 +398,19 @@ create_extension_at_version() {
 # ============================================================================
 
 # Captures the df schema structure in a deterministic, comparable format
+# Note: ordinal_position is renumbered with ROW_NUMBER() so that columns
+# dropped via ALTER TABLE DROP COLUMN (which leave gaps in the raw
+# ordinal_position) don't cause spurious diffs between the upgrade and
+# fresh-install snapshots.
 SCHEMA_QUERY="
--- Tables and columns
+-- Tables and columns (ordinal_position renumbered to avoid dropped-column gaps)
 SELECT 'column' AS obj_type,
        c.table_name,
        c.column_name,
        c.data_type,
        c.column_default,
        c.is_nullable,
-       c.ordinal_position::text
+       ROW_NUMBER() OVER (PARTITION BY c.table_name ORDER BY c.ordinal_position)::text AS ordinal_position
 FROM information_schema.columns c
 WHERE c.table_schema = 'df'
 ORDER BY c.table_name, c.ordinal_position;

@@ -55,12 +55,13 @@ pub async fn execute(
         }
     };
 
-    let nodes_query = r#"SELECT id, node_type, query, result_name,
-           left_node, right_node,
-           submitted_by::text AS submitted_by,
-           login_role::text AS login_role,
-           database
-        FROM df.nodes WHERE instance_id = $1"#;
+    let nodes_query = r#"SELECT n.id, n.node_type, n.query, n.result_name,
+           n.left_node, n.right_node,
+           COALESCE(r.rolname, n.submitted_by::oid::text) AS submitted_by,
+           n.database
+        FROM df.nodes n
+        LEFT JOIN pg_catalog.pg_roles r ON r.oid = n.submitted_by::oid
+        WHERE n.instance_id = $1"#;
 
     let rows = match sqlx::query(nodes_query)
         .bind(&instance_id)
@@ -82,7 +83,6 @@ pub async fn execute(
             left_node: row.get("left_node"),
             right_node: row.get("right_node"),
             submitted_by: row.get::<String, _>("submitted_by"),
-            login_role: row.get::<String, _>("login_role"),
             database: row.get("database"),
         };
         nodes.insert(id, node);
