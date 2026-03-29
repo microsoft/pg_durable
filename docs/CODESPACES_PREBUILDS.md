@@ -19,10 +19,37 @@ Pre-builds must be enabled by a repository administrator:
    - **Reduce prebuild available to specific regions**: Optional
 4. Click **Create**
 
-Once enabled, GitHub will automatically create prebuilt images when:
-- Changes are pushed to the main branch
-- The devcontainer configuration changes
-- Dependencies (Cargo.toml/Cargo.lock) are updated
+### Private Submodule Access
+
+The `duroxide-pg-opt` submodule is a **private repository**. Two mechanisms provide access:
+
+**1. Interactive Codespaces** — `devcontainer.json` grants the built-in Codespace token read access:
+
+```json
+"codespaces": {
+  "repositories": {
+    "microsoft/duroxide-pg-opt": {
+      "permissions": { "contents": "read" }
+    }
+  }
+}
+```
+
+This works when users open a Codespace directly.
+
+**2. Prebuild phase** — The Codespace token permissions are **not effective during prebuilds**. A GitHub PAT stored as a Codespace secret is required:
+
+1. Create a **fine-grained PAT** with **read-only** access to `microsoft/duroxide-pg-opt` (Contents: Read)
+2. Go to repository **Settings** → **Secrets and variables** → **Codespaces**
+3. Click **New repository secret**
+4. Name: `GH_PAT`, Value: the PAT from step 1
+5. Click **Add secret**
+
+**Security notes:**
+- `onCreateCommand.sh` uses a temporary `git config insteadOf` rewrite with the PAT, then **immediately scrubs** all traces (git config, credential cache) before the prebuild image is snapshotted.
+- The prebuild image is a **filesystem snapshot** — environment variables from secrets are NOT persisted.
+- Users who open a Codespace from the prebuild get the submodule files already present, without needing any PAT themselves.
+- Use a fine-grained PAT scoped to only `duroxide-pg-opt` with read-only access to minimize exposure.
 
 ## How It Works
 
@@ -33,12 +60,14 @@ Codespaces has two distinct phases:
 1. **Pre-build Phase** (runs in GitHub Actions, cached for all users)
    - Triggered by: `.github/workflows/prebuild.yml`
    - Executes: `onCreateCommand` in `devcontainer.json`
-   - Duration: ~10 minutes (but only runs once per configuration change)
+   - Duration: ~15 minutes (but only runs once per configuration change)
    - Installs:
      - System dependencies (libssl, clang, bison, etc.)
      - cargo-pgrx 0.16.1
      - PostgreSQL 17 (downloaded and compiled via pgrx)
-   - Result: Docker image with all dependencies baked in
+     - `duroxide-pg-opt` submodule (via `GH_PAT` Codespace secret)
+     - Pre-builds pg_durable (`cargo build --features pg17`)
+   - Result: Docker image with all dependencies and build artifacts baked in
 
 2. **Post-Create Phase** (runs when user opens a Codespace)
    - Executes: `postCreateCommand` in `devcontainer.json`

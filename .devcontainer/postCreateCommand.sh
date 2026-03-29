@@ -25,7 +25,25 @@ else
     echo "⚠️  pgrx not initialized - running initialization..."
     cargo pgrx init --pg17 download
 fi
+# Check if submodule is initialized
+echo "Checking submodule status..."
+if [ -f "duroxide-pg-opt/Cargo.toml" ]; then
+    echo "✓ duroxide-pg-opt submodule is initialized"
+else
+    echo "⚠️  duroxide-pg-opt submodule not initialized"
+    echo "   Run: git submodule update --init --recursive"
+fi
 
+# Check if pg_durable is already built
+echo "Checking build status..."
+if [ -n "$(find target/debug -name 'libpg_durable*' -print -quit 2>/dev/null)" ]; then
+    echo "✓ pg_durable is already built"
+elif [ -f "duroxide-pg-opt/Cargo.toml" ]; then
+    echo "Building pg_durable (submodule present but build artifacts missing)..."
+    cargo build --features pg17
+else
+    echo "⚠️  pg_durable not built (submodule needed first)"
+fi
 echo ""
 echo "========================================="
 echo "✅ Development environment ready!"
