@@ -35,6 +35,22 @@ cargo install cargo-pgrx --version 0.16.1 --locked
 echo "Initializing pgrx with PostgreSQL 17..."
 cargo pgrx init --pg17 download
 
+# ── Initialize private submodule (duroxide-pg-opt) ──────────────────
+# In Codespaces, devcontainer.json grants the built-in GITHUB_TOKEN read
+# access to microsoft/duroxide-pg-opt via customizations.codespaces.
+# repositories.  The Codespace credential helper handles authentication
+# automatically — no PAT needed.
+#
+# Outside Codespaces (e.g. local Dev Container), the user must have
+# their own credentials configured for the private repo.
+echo "Initializing submodule (duroxide-pg-opt)..."
+if git submodule update --init --recursive; then
+    echo "✅ Submodule initialized successfully"
+else
+    echo "⚠️  Submodule initialization failed — skipping"
+    echo "   If running outside Codespaces, ensure you have access to microsoft/duroxide-pg-opt"
+fi
+
 echo ""
 echo "========================================="
 echo "✅ Prebuild setup complete!"
