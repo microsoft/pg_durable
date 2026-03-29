@@ -20,27 +20,31 @@ pub async fn execute(
     let status = input["status"].as_str().ok_or("Missing status")?;
     let result = input.get("result").and_then(|r| r.as_str());
 
-    let update_query = if let Some(res) = result {
-        // The result column is JSONB, so we need valid JSON.
-        // If the result is already valid JSON, use it directly.
-        // If not (e.g., error strings), wrap it as a JSON string.
-        let json_result = if serde_json::from_str::<serde_json::Value>(res).is_ok() {
-            res.to_string()
-        } else {
-            // Wrap as JSON string - serde_json::to_string handles escaping
-            serde_json::to_string(res).unwrap_or_else(|_| "null".to_string())
-        };
-        // Use dollar-quoting to avoid SQL escaping issues with JSON
-        format!(
-            "UPDATE df.nodes SET status = '{status}', result = $json${json_result}$json$::jsonb, updated_at = now() WHERE id = '{node_id}'"
+    let query = if let Some(res) = result {
+        // The result column is JSONB, so normalize invalid JSON payloads into
+        // a JSON string before binding.
+        let json_result = serde_json::from_str::<serde_json::Value>(res)
+            .unwrap_or_else(|_| serde_json::Value::String(res.to_string()));
+
+        sqlx::query(
+            "UPDATE df.nodes
+             SET status = $1, result = $2::jsonb, updated_at = now()
+             WHERE id = $3",
         )
+        .bind(status)
+        .bind(json_result)
+        .bind(node_id)
     } else {
-        format!(
-            "UPDATE df.nodes SET status = '{status}', updated_at = now() WHERE id = '{node_id}'"
+        sqlx::query(
+            "UPDATE df.nodes
+             SET status = $1, updated_at = now()
+             WHERE id = $2",
         )
+        .bind(status)
+        .bind(node_id)
     };
 
-    match sqlx::query(&update_query).execute(pool.as_ref()).await {
+    match query.execute(pool.as_ref()).await {
         Ok(_) => Ok("Node status updated".to_string()),
         Err(e) => {
             let err_msg = format!("Failed to update node status: {e}");

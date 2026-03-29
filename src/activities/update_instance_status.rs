@@ -23,17 +23,25 @@ pub async fn execute(
         "Updating instance {instance_id} status to {status}"
     ));
 
-    let update_query = if status == "completed" {
-        format!(
-            "UPDATE df.instances SET status = 'completed', completed_at = now(), updated_at = now() WHERE id = '{instance_id}'"
+    let query = if status == "completed" {
+        sqlx::query(
+            "UPDATE df.instances
+             SET status = $1, completed_at = now(), updated_at = now()
+             WHERE id = $2",
         )
+        .bind(status)
+        .bind(instance_id)
     } else {
-        format!(
-            "UPDATE df.instances SET status = '{status}', updated_at = now() WHERE id = '{instance_id}'"
+        sqlx::query(
+            "UPDATE df.instances
+             SET status = $1, updated_at = now()
+             WHERE id = $2",
         )
+        .bind(status)
+        .bind(instance_id)
     };
 
-    match sqlx::query(&update_query).execute(pool.as_ref()).await {
+    match query.execute(pool.as_ref()).await {
         Ok(_) => {
             ctx.trace_info(format!("Instance {instance_id} status updated to {status}"));
             Ok(format!("Status updated to {status}"))
