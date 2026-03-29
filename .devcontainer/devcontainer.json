@@ -19,6 +19,15 @@
         "rust-analyzer.check.command": "clippy",
         "rust-analyzer.check.extraArgs": ["--features", "pg17"]
       }
+    },
+    "codespaces": {
+      "repositories": {
+        "microsoft/duroxide-pg-opt": {
+          "permissions": {
+            "contents": "read"
+          }
+        }
+      }
     }
   },
 
