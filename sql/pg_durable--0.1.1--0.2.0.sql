@@ -26,6 +26,90 @@ ALTER TABLE df.vars ADD COLUMN owner REGROLE NOT NULL DEFAULT current_user::regr
 ALTER TABLE df.vars DROP CONSTRAINT vars_pkey;
 ALTER TABLE df.vars ADD PRIMARY KEY (owner, name);
 
+-- Keep direct INSERT on df.instances/df.nodes, but limit it to the columns
+-- df.start() writes. Runtime-owned columns remain protected from direct INSERT.
+REVOKE INSERT ON df.instances FROM PUBLIC;
+REVOKE INSERT ON df.nodes FROM PUBLIC;
+GRANT INSERT (id, label, root_node, submitted_by, login_role, database) ON df.instances TO PUBLIC;
+GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database) ON df.nodes TO PUBLIC;
+
+-- Enforce a df.start-shaped graph for new direct writes without blocking
+-- upgrades on legacy malformed rows that may already exist.
+ALTER TABLE df.instances
+    ADD CONSTRAINT instances_id_format_chk
+        CHECK (id ~ '^[0-9a-f]{8}$') NOT VALID,
+    ADD CONSTRAINT instances_root_node_format_chk
+        CHECK (root_node ~ '^[0-9a-f]{8}$') NOT VALID,
+    ADD CONSTRAINT instances_status_chk
+        CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT VALID,
+    -- Supports the composite FK from df.nodes that ties node identity to the instance row.
+    ADD CONSTRAINT instances_identity_key
+        UNIQUE (id, submitted_by, login_role);
+
+ALTER TABLE df.nodes
+    ADD CONSTRAINT nodes_instance_id_present_chk
+        CHECK (instance_id IS NOT NULL) NOT VALID,
+    ADD CONSTRAINT nodes_submitted_by_present_chk
+        CHECK (submitted_by IS NOT NULL) NOT VALID,
+    ADD CONSTRAINT nodes_login_role_present_chk
+        CHECK (login_role IS NOT NULL) NOT VALID,
+    ADD CONSTRAINT nodes_id_format_chk
+        CHECK (id ~ '^[0-9a-f]{8}$') NOT VALID,
+    ADD CONSTRAINT nodes_instance_id_format_chk
+        CHECK (instance_id ~ '^[0-9a-f]{8}$') NOT VALID,
+    ADD CONSTRAINT nodes_left_node_format_chk
+        CHECK (left_node IS NULL OR left_node ~ '^[0-9a-f]{8}$') NOT VALID,
+    ADD CONSTRAINT nodes_right_node_format_chk
+        CHECK (right_node IS NULL OR right_node ~ '^[0-9a-f]{8}$') NOT VALID,
+    ADD CONSTRAINT nodes_node_type_chk
+        CHECK (node_type IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL')) NOT VALID,
+    ADD CONSTRAINT nodes_result_name_chk
+        CHECK (result_name IS NULL OR result_name ~ '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
+    ADD CONSTRAINT nodes_status_chk
+        CHECK (status IN ('pending', 'running', 'completed', 'failed')) NOT VALID,
+    ADD CONSTRAINT nodes_result_status_chk
+        CHECK (result IS NULL OR status IN ('completed', 'failed')) NOT VALID,
+    ADD CONSTRAINT nodes_structure_chk
+        CHECK (
+            CASE
+                WHEN node_type IN ('SQL', 'SLEEP', 'WAIT_SCHEDULE', 'BREAK', 'HTTP', 'SIGNAL')
+                    THEN left_node IS NULL AND right_node IS NULL AND query IS NOT NULL
+                WHEN node_type = 'THEN'
+                    THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NULL
+                WHEN node_type = 'IF'
+                    THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NOT NULL
+                WHEN node_type = 'LOOP'
+                    THEN left_node IS NOT NULL AND right_node IS NULL
+                WHEN node_type = 'JOIN'
+                    THEN left_node IS NOT NULL AND right_node IS NOT NULL
+                WHEN node_type = 'RACE'
+                    THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NULL
+                ELSE FALSE
+            END
+        ) NOT VALID,
+    ADD CONSTRAINT nodes_instance_node_key
+        UNIQUE (instance_id, id);
+
+ALTER TABLE df.nodes
+    ADD CONSTRAINT nodes_instance_identity_fkey
+        FOREIGN KEY (instance_id, submitted_by, login_role)
+        REFERENCES df.instances (id, submitted_by, login_role)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID,
+    ADD CONSTRAINT nodes_left_node_same_instance_fkey
+        FOREIGN KEY (instance_id, left_node)
+        REFERENCES df.nodes (instance_id, id)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID,
+    ADD CONSTRAINT nodes_right_node_same_instance_fkey
+        FOREIGN KEY (instance_id, right_node)
+        REFERENCES df.nodes (instance_id, id)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID;
+
+ALTER TABLE df.instances
+    ADD CONSTRAINT instances_root_node_same_instance_fkey
+        FOREIGN KEY (id, root_node)
+        REFERENCES df.nodes (instance_id, id)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID;
+
 -- ============================================================================
 -- 2. Enable RLS on df.vars
 -- ============================================================================
@@ -36,6 +120,24 @@ CREATE POLICY vars_user_isolation ON df.vars
     FOR ALL
     USING (owner = current_user::regrole)
     WITH CHECK (owner = current_user::regrole);
+
+DROP POLICY instances_user_isolation ON df.instances;
+CREATE POLICY instances_user_isolation ON df.instances
+    FOR ALL
+    USING (submitted_by = current_user::regrole)
+    WITH CHECK (
+        submitted_by = current_user::regrole
+        AND login_role = session_user::regrole
+    );
+
+DROP POLICY nodes_user_isolation ON df.nodes;
+CREATE POLICY nodes_user_isolation ON df.nodes
+    FOR ALL
+    USING (submitted_by = current_user::regrole)
+    WITH CHECK (
+        submitted_by = current_user::regrole
+        AND login_role = session_user::regrole
+    );
 
 -- ============================================================================
 -- 3. Harden PL/pgSQL and SQL helper functions with SET search_path

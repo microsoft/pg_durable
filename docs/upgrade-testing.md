@@ -202,6 +202,12 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario B2 considerations:** The upgrade script assigns all pre-existing `df.vars` rows to the role running `ALTER EXTENSION` via the `DEFAULT current_user::regrole` backfill. Upgrade tests verify that existing vars remain readable after upgrade for the role that performed the upgrade, that the migrated row is re-homed to that upgrade-running role, and that new post-upgrade writes/executions use owner-scoped semantics. This migration does not preserve per-user ownership for legacy rows; it intentionally re-homes them to the upgrade runner.
 - **Current status on this branch:** `scripts/test-upgrade.sh` now passes all Scenario A, B1, and B2 checks for this change.
 
+#### Metadata table hardening for direct INSERT + RLS
+- **DDL change:** `df.instances` and `df.nodes` add structural `CHECK` constraints, same-instance foreign keys, and supporting unique constraints. Table-wide `INSERT` grants are narrowed to column-level `INSERT` grants that match the columns `df.start()` writes, while preserving direct user `INSERT` under RLS.
+- **Scenario A considerations:** Schema comparison must include the new constraints, foreign keys, and narrowed grants on `df.instances` and `df.nodes`.
+- **Scenario B1 considerations:** The `.so` remains backward compatible with older schemas because the hardening is schema-only and does not introduce new columns or change Rust query shapes.
+- **Scenario B2 considerations:** The upgrade script adds the new `CHECK` and foreign-key constraints as `NOT VALID` so malformed legacy metadata rows do not block `ALTER EXTENSION UPDATE`, while all new writes are still enforced immediately after the upgrade.
+
 #### BGW applies duroxide migrations (replaces extension-SQL approach)
 - **DDL change (df schema):** No new SQL functions added for readiness. The internal Rust `is_worker_ready()` check (not SQL-callable) gates `df.*` functions until the BGW writes a row to `duroxide._worker_ready`.
 - **DDL change (duroxide schema):** None required in the upgrade script. Fresh v0.2.0 installs create `CREATE SCHEMA duroxide` via extension SQL (extension-owned). The BGW's `ApplyAll` policy applies duroxide table DDL at runtime. For customers upgrading from v0.1.1, the duroxide schema and its objects already exist (extension-owned from the earlier SQL-hand-over approach); the BGW will verify they are up-to-date and continue normally.

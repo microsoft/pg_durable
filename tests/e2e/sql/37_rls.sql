@@ -381,6 +381,75 @@ BEGIN
 END $$;
 
 -- ============================================================================
+-- Test 10: User cannot INSERT runtime-owned columns directly
+-- ============================================================================
+DO $$
+BEGIN
+    SET SESSION AUTHORIZATION rls_alice;
+
+    BEGIN
+        INSERT INTO df.instances (id, root_node, status, submitted_by, login_role)
+        VALUES ('deadbeef', 'cafebabe', 'completed', current_user::regrole, session_user::regrole);
+        RAISE EXCEPTION 'TEST 10 FAILED: Alice was able to INSERT status into df.instances';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            NULL; -- expected
+    END;
+
+    BEGIN
+        INSERT INTO df.nodes (id, instance_id, node_type, query, status, submitted_by, login_role)
+        VALUES ('deadbeef', 'cafebabe', 'SQL', 'SELECT 1', 'completed', current_user::regrole, session_user::regrole);
+        RAISE EXCEPTION 'TEST 10 FAILED: Alice was able to INSERT status into df.nodes';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            NULL; -- expected
+    END;
+
+    BEGIN
+        INSERT INTO df.instances (id, root_node, submitted_by, login_role)
+        VALUES ('deadbeef', 'cafebabe', current_user::regrole, 'postgres'::regrole);
+        RAISE EXCEPTION 'TEST 10 FAILED: Alice was able to spoof login_role on df.instances';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            NULL; -- expected
+    END;
+
+    RESET SESSION AUTHORIZATION;
+
+    RAISE NOTICE 'Test 10 PASSED: INSERT is limited to df.start()-shaped columns';
+END $$;
+
+-- ============================================================================
+-- Test 11: Direct INSERT still respects shape constraints
+-- ============================================================================
+DO $$
+BEGIN
+    SET SESSION AUTHORIZATION rls_alice;
+
+    BEGIN
+        INSERT INTO df.instances (id, root_node, submitted_by, login_role)
+        VALUES ('not_hex!', 'cafebabe', current_user::regrole, session_user::regrole);
+        RAISE EXCEPTION 'TEST 11 FAILED: Alice was able to INSERT malformed instance metadata';
+    EXCEPTION
+        WHEN check_violation THEN
+            NULL; -- expected
+    END;
+
+    BEGIN
+        INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, submitted_by, login_role)
+        VALUES ('deadbeef', 'cafebabe', 'SQL', 'SELECT 1', 'bad-name', current_user::regrole, session_user::regrole);
+        RAISE EXCEPTION 'TEST 11 FAILED: Alice was able to INSERT malformed node metadata';
+    EXCEPTION
+        WHEN check_violation THEN
+            NULL; -- expected
+    END;
+
+    RESET SESSION AUTHORIZATION;
+
+    RAISE NOTICE 'Test 11 PASSED: Direct INSERT must satisfy metadata shape constraints';
+END $$;
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
 DROP TABLE IF EXISTS _rls_alice_state;

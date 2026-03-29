@@ -721,7 +721,7 @@ pub fn start(
 
     // Create instance record with root node ID
     if let Err(e) = Spi::run_with_args(
-        "INSERT INTO df.instances (id, label, root_node, status, submitted_by, login_role, database) VALUES ($1, $2, $3, 'pending', $4::oid::regrole, $5::oid::regrole, $6)",
+        "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database) VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)",
         &[
             instance_id.as_str().into(),
             label_arg,
