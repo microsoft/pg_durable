@@ -33,9 +33,6 @@
 
   // onCreateCommand runs during Codespaces prebuild (heavy setup)
   "onCreateCommand": "bash .devcontainer/onCreateCommand.sh",
-  
-  // postCreateCommand runs when user opens the Codespace (quick verification)
-  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
-  
+
   "remoteUser": "vscode"
 }

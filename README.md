@@ -33,38 +33,59 @@ SELECT df.start(
 - PostgreSQL 17
 - Rust (nightly)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- Access to `microsoft/duroxide-pg-opt` (private submodule; handled automatically in Codespaces)
 
-### GitHub Access (Required)
+## Development Installation
 
-This project includes `microsoft/duroxide-pg-opt` as a git submodule. You need access to this private repository.
+### GitHub Codespace
 
-1. **Create a GitHub PAT** with `repo` scope: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
-2. **Authorize SSO** for the Microsoft organization on the PAT
-3. **Configure git** to use the PAT for GitHub HTTPS URLs:
+The main branch prebuild installs PostgreSQL 17, builds `pg_durable`, and prepares a local cluster under `~/.pgrx` with the extension ready. PostgreSQL is not left running, so start it when you begin working.
+
+```bash
+# Start PostgreSQL
+./scripts/pg-start.sh
+
+# Connect
+~/.pgrx/17.*/pgrx-install/bin/psql -h localhost -p 28817 -d postgres
+```
+
+On a branch without a ready prebuild, initialize the submodule first, then run `pg-start.sh` — it will build and install the extension on first run (expect a few minutes):
+
+```bash
+git submodule update --init --recursive
+./scripts/pg-start.sh
+```
+
+### Other environments
+
+#### Submodule Access (Prerequisite)
+
+This project requires access to `microsoft/duroxide-pg-opt`, a private submodule:
+
+1. **Create a fine-grained GitHub PAT** with read-only `Contents` and `Metadata` access scoped to `microsoft/duroxide-pg-opt`: [GitHub docs](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+2. **Configure git** and initialize the submodule:
 
 ```bash
 git config --global url."https://<YOUR_PAT>@github.com/".insteadOf "https://github.com/"
-```
 
-4. **Initialize the submodule** after cloning:
+git submodule update --init --recursive
+```
+#### Local and Dev Container
+
+A VS Code Dev Container (`.devcontainer/`) provides Rust, cargo-pgrx, and PostgreSQL 17 pre-installed. For a bare local machine, install the toolchain first by following the steps in `.devcontainer/onCreateCommand.sh`.
 
 ```bash
-git submodule update --init
+# Build, initialize PostgreSQL, and install the extension
+# This takes a while - go do something else
+./scripts/pg-start.sh
+
+# Connect to the local pgrx PostgreSQL instance
+~/.pgrx/17.*/pgrx-install/bin/psql -h localhost -p 28817 -d postgres
 ```
 
-## Installation
+`pg-start.sh` bootstraps new local data directories with a `postgres` superuser and also creates a matching superuser role for the current OS user, so default local `psql` usage continues to work. Use `-U postgres` if you want to force the canonical bootstrap role explicitly.
 
-### Local Development
-
-```bash
-# Build and install the extension
-cargo pgrx install --release --pg-config $(cargo pgrx info pg-config pg17)
-
-# In PostgreSQL
-CREATE EXTENSION pg_durable;
-```
-
-### Docker
+#### Docker
 
 ```bash
 # Build and test
@@ -74,7 +95,7 @@ CREATE EXTENSION pg_durable;
 ./scripts/deploy-acr.sh
 ```
 
-### Multi-User Setup
+## Multi-User Setup
 
 `CREATE EXTENSION pg_durable` automatically grants permissions to `PUBLIC`, so any database role can use the `df.*` functions immediately. Row-level security (RLS) ensures each user can only see and manage their own durable function instances and nodes.
 

@@ -9,9 +9,11 @@ on:
     branches: [main]
     paths:
       - '.devcontainer/**'
+      - 'scripts/pg-common.sh'
   pull_request:
     paths:
       - '.devcontainer/**'
+      - 'scripts/pg-common.sh'
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -39,11 +41,6 @@ jobs:
             exit 1
           fi
           
-          if [ ! -f .devcontainer/postCreateCommand.sh ]; then
-            echo "❌ postCreateCommand.sh not found"
-            exit 1
-          fi
-          
           echo "✅ All required files exist"
           
           # Check that onCreateCommand is configured properly
@@ -55,13 +52,6 @@ jobs:
             echo "Expected: \"onCreateCommand\": \"bash .devcontainer/onCreateCommand.sh\""
           fi
           
-          # Check that postCreateCommand is configured
-          if grep -E '"postCreateCommand"\s*:\s*".*postCreateCommand\.sh"' .devcontainer/devcontainer.json > /dev/null; then
-            echo "✅ postCreateCommand is configured"
-          else
-            echo "⚠️  postCreateCommand not found"
-          fi
-          
           echo ""
           echo "✅ Devcontainer configuration is valid"
           echo ""
@@ -69,3 +59,23 @@ jobs:
           echo "1. Go to repository Settings > Codespaces"
           echo "2. Click 'Set up prebuild'"
           echo "3. Configure prebuild for the main branch"
+
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Smoke test devcontainer scripts
+        run: |
+          set -euo pipefail
+
+          # Exercise script entrypoints without running heavy setup.
+          export SKIP_APT_UPDATE=1
+          export PG_DURABLE_SMOKE=1
+          export GH_PAT="smoke-test-token"
+
+          bash .devcontainer/onCreateCommand.sh

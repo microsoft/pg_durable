@@ -53,7 +53,7 @@ test-regress:
 	@echo "Resetting PostgreSQL..."
 	./scripts/pg-reset.sh $(subst pg,,$(PG_VERSION))
 	@echo "Starting PostgreSQL with PGDATABASE=contrib_regression..."
-	PGDATABASE=contrib_regression ./scripts/pg-start.sh $(subst pg,,$(PG_VERSION))
+	PGDATABASE=contrib_regression ./scripts/pg-start.sh --pg-version $(subst pg,,$(PG_VERSION))
 	@echo "Running pg_regress tests..."
 	PGHOST=$(HOME)/.pgrx PGUSER=postgres PG_CONFIG=$$(cargo pgrx info pg-config $(PG_VERSION)) $(MAKE) -e installcheck
 
