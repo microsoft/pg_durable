@@ -25,7 +25,6 @@ SAMPLE_INTERVAL=1        # sample every 1 second
 PGRX_HOME="$HOME/.pgrx"
 PG_VERSION="17"
 PG_PORT="28817"
-PG_USER="$USER"
 PG_DB="postgres"
 
 # Find pgrx binaries
@@ -67,7 +66,7 @@ echo ""
 
 # Create measurement tables
 echo -e "${YELLOW}Setting up measurement tables...${NC}"
-"$PSQL" -h localhost -p $PG_PORT -d $PG_DB -q <<'EOF'
+"$PSQL" -h localhost -p $PG_PORT -U postgres -d $PG_DB -q <<'EOF'
 -- Cleanup from previous runs
 DROP TABLE IF EXISTS measure_instances CASCADE;
 DROP TABLE IF EXISTS measure_work_log CASCADE;

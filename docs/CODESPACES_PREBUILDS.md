@@ -4,7 +4,7 @@ This document explains how Codespaces pre-builds are configured for the pg_durab
 
 ## Overview
 
-GitHub Codespaces pre-builds dramatically reduce startup time by pre-building the development environment. Without pre-builds, starting a new Codespace takes ~10 minutes due to PostgreSQL compilation. With pre-builds, startup time is reduced to ~30 seconds.
+GitHub Codespaces pre-builds reduce startup time by pre-building the development environment. Without a prebuild, first-time setup is noticeably slower because PostgreSQL, pgrx, and the extension toolchain all need to be prepared. With a healthy prebuild, opening a new Codespace is much faster because the expensive setup has already been done.
 
 ## Enabling Pre-builds (One-Time Setup)
 
@@ -21,9 +21,21 @@ Pre-builds must be enabled by a repository administrator:
 
 ### Private Submodule Access
 
-The `duroxide-pg-opt` submodule is a **private repository**. Two mechanisms provide access:
+The `duroxide-pg-opt` submodule is a **private repository**. There are two relevant access paths:
 
-**1. Interactive Codespaces** — `devcontainer.json` grants the built-in Codespace token read access:
+**1. Prebuild phase** — A GitHub PAT stored as a Codespaces secret is used during `onCreateCommand.sh`:
+
+1. Create a **fine-grained PAT** with **read-only** access to `microsoft/duroxide-pg-opt`:
+   - Repository access: only `microsoft/duroxide-pg-opt`
+   - Permissions: `Contents: Read`, `Metadata: Read`
+2. Go to repository **Settings** → **Secrets and variables** → **Codespaces**
+3. Click **New repository secret**
+4. Name: `GH_PAT`, Value: the PAT from step 1
+5. Click **Add secret**
+
+`onCreateCommand.sh` uses that PAT via a git `insteadOf` rewrite so `git submodule update --init --recursive` can fetch the private submodule during prebuild.
+
+**2. Interactive Codespaces** — `devcontainer.json` also grants the built-in Codespaces token read access:
 
 ```json
 "codespaces": {
@@ -35,21 +47,14 @@ The `duroxide-pg-opt` submodule is a **private repository**. Two mechanisms prov
 }
 ```
 
-This works when users open a Codespace directly.
-
-**2. Prebuild phase** — The Codespace token permissions are **not effective during prebuilds**. A GitHub PAT stored as a Codespace secret is required:
-
-1. Create a **fine-grained PAT** with **read-only** access to `microsoft/duroxide-pg-opt` (Contents: Read)
-2. Go to repository **Settings** → **Secrets and variables** → **Codespaces**
-3. Click **New repository secret**
-4. Name: `GH_PAT`, Value: the PAT from step 1
-5. Click **Add secret**
+This is still useful when users open a Codespace directly, especially on branches without a warm prebuild, because the built-in Codespaces token can satisfy normal repository access without depending on PAT-based git configuration.
 
 **Security notes:**
-- `onCreateCommand.sh` uses a temporary `git config insteadOf` rewrite with the PAT, then **immediately scrubs** all traces (git config, credential cache) before the prebuild image is snapshotted.
-- The prebuild image is a **filesystem snapshot** — environment variables from secrets are NOT persisted.
-- Users who open a Codespace from the prebuild get the submodule files already present, without needing any PAT themselves.
-- Use a fine-grained PAT scoped to only `duroxide-pg-opt` with read-only access to minimize exposure.
+- The `GH_PAT` Codespaces secret is exposed as an environment variable to Codespaces, including existing Codespaces after a reload. Because of that, removing temporary git config entries during `onCreateCommand.sh` does not meaningfully hide the token from the user environment.
+- `onCreateCommand.sh` still removes the temporary PAT-based `insteadOf` rewrite after submodule initialization. This avoids forcing PAT-based URL rewriting for later interactive git usage, so post-start interactions can rely on `devcontainer.json` repository permissions and the default Codespaces credential helper.
+- The prebuild image is still a **filesystem snapshot**. The secret itself is not baked into the image just because it was present in the environment during prebuild.
+- Users who open a Codespace from the prebuild get the submodule files already present, and the same `GH_PAT` secret is available in their environment if the repository is configured with it.
+- Use a fine-grained PAT scoped only to `duroxide-pg-opt` with read-only `Contents` and `Metadata` permissions to minimize exposure.
 
 ## How It Works
 
@@ -60,28 +65,25 @@ Codespaces has two distinct phases:
 1. **Pre-build Phase** (runs in GitHub Actions, cached for all users)
    - Triggered by: `.github/workflows/prebuild.yml`
    - Executes: `onCreateCommand` in `devcontainer.json`
-   - Duration: ~15 minutes (but only runs once per configuration change)
+  - Duration: depends on cache state and network conditions; it is the slow phase and runs only when the prebuild needs to be refreshed
    - Installs:
      - System dependencies (libssl, clang, bison, etc.)
      - cargo-pgrx 0.16.1
      - PostgreSQL 17 (downloaded and compiled via pgrx)
      - `duroxide-pg-opt` submodule (via `GH_PAT` Codespace secret)
-     - Pre-builds pg_durable (`cargo build --features pg17`)
-   - Result: Docker image with all dependencies and build artifacts baked in
+    - Builds and installs pg_durable
+    - Recreates the local `~/.pgrx/data-17` cluster with `initdb -U postgres`
+    - Pre-creates the `pg_durable` extension and verifies it
+  - Result: a prebuilt environment with dependencies, build artifacts, and a ready-to-start local PostgreSQL cluster
 
-2. **Post-Create Phase** (runs when user opens a Codespace)
-   - Executes: `postCreateCommand` in `devcontainer.json`
-   - Duration: ~5-10 seconds
-   - Verifies dependencies are present
-   - Falls back to full installation if prebuild wasn't available
+2. **Post-Create Phase** — no `postCreateCommand` is configured. When the Codespace opens the prebuild environment is ready; run `./scripts/pg-start.sh` to start PostgreSQL and begin working.
 
 ### Configuration Files
 
 ```
 .devcontainer/
 ├── devcontainer.json          # Main configuration with onCreateCommand
-├── onCreateCommand.sh         # Heavy setup (runs during prebuild)
-└── postCreateCommand.sh       # Quick verification (runs on open)
+└── onCreateCommand.sh         # Heavy setup (runs during prebuild)
 
 .github/workflows/
 └── prebuild.yml               # Validates devcontainer configuration
@@ -120,7 +122,7 @@ When you need to update system dependencies or pgrx version:
 
 1. **Update `onCreateCommand.sh`** with the new dependencies
 2. **Commit and push to main** (or create a PR)
-3. **Wait for prebuild to complete** (~10-15 minutes)
+3. **Wait for the prebuild to complete**
 4. **Test in a new Codespace** to verify the changes work
 
 Example: Updating pgrx version
@@ -154,17 +156,24 @@ Possible causes:
 
 ### User Gets "cargo-pgrx not found" Error
 
-This means the prebuild didn't run or failed. The `postCreateCommand.sh` has a fallback:
-- It detects missing dependencies
-- Automatically runs the full installation
-- Takes ~10 minutes but ensures the environment works
+This means the prebuild did not run or failed. There is no automatic fallback — open a terminal and run `./scripts/pg-start.sh` to trigger a full build and install.
 
 **Solution**: Investigate why the prebuild isn't working and fix it for future users
 
+### User Can See `GH_PAT` In Their Codespace Environment
+
+This is expected for a repository-level Codespaces secret.
+
+- Repository Codespaces secrets are made available to Codespaces as environment variables.
+- That includes existing Codespaces after a reload.
+- Because the PAT is already present in the user environment, removing temporary git config entries during prebuild does not materially change visibility.
+
+The mitigation here is scope, not concealment: keep `GH_PAT` fine-grained, repository-scoped to `microsoft/duroxide-pg-opt`, and read-only.
+
 ## Cost Considerations
 
-Pre-builds use GitHub Actions compute time (~10 minutes per prebuild). However:
-- They save ~10 minutes per user per Codespace start
+Pre-builds use GitHub Actions compute time. However:
+- They save users from repeating the expensive environment setup on every fresh Codespace
 - Break-even after 1-2 Codespace opens
 - Well worth it for active repositories
 - Storage costs apply for prebuild images (typically negligible)
@@ -184,11 +193,11 @@ To manage costs:
 
 ## Architecture Decision Records
 
-### Why separate onCreateCommand and postCreateCommand?
+### Why only onCreateCommand and no postCreateCommand?
 
-- `onCreateCommand` runs during prebuild (slow operations)
-- `postCreateCommand` runs on every Codespace open (fast verification)
-- This separation maximizes the benefit of pre-builds while providing fallback
+- `onCreateCommand` runs during prebuild and does all the heavy setup once.
+- When the Codespace opens the environment is already ready; there is nothing useful a `postCreateCommand` can do that the user cannot trigger themselves with `./scripts/pg-start.sh`.
+- Omitting `postCreateCommand` avoids running a script whose output is not visible to most users.
 
 ### Why use scripts instead of inline commands?
 

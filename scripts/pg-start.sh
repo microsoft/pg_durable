@@ -1,76 +1,89 @@
 #!/bin/bash
 # pg-start.sh - Start local PostgreSQL with pg_durable extension
 #
-# Usage: ./scripts/pg-start.sh [pg_major_version]
+# Usage: ./scripts/pg-start.sh [options]
 #
-# Arguments:
-#   pg_major_version  PostgreSQL major version number (default: 17)
+# Options:
+#   --build            Force build/install even if an existing install is detected
+#   --pg-version VER   PostgreSQL major version number (default: 17)
 
 set -e
 
-PG_MAJOR="${1:-17}"
+PG_MAJOR="${PG_MAJOR:-17}"
+BUILD_MODE="auto"
+
+usage() {
+    echo "Usage: ./scripts/pg-start.sh [--build] [--pg-version VER]"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --build)
+            BUILD_MODE="force"
+            shift
+            ;;
+        --pg-version)
+            if ! [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                echo "Error: --pg-version requires a numeric argument, got: ${2:-<missing>}"
+                usage
+                exit 1
+            fi
+            PG_MAJOR="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --*)
+            echo "Error: Unknown option: $1"
+            usage
+            exit 1
+            ;;
+        *)
+            echo "Error: Unexpected argument: $1"
+            echo "Use --pg-version VER to select PostgreSQL major version."
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="$HOME/.pgrx/data-$PG_MAJOR"
-PG_CONF="$DATA_DIR/postgresql.conf"
 
-# Resolve binaries from pgrx config (avoids hardcoding a patch version).
-PGRX_CONFIG="$HOME/.pgrx/config.toml"
-if [ ! -f "$PGRX_CONFIG" ]; then
-    echo "pgrx config not found at $PGRX_CONFIG"
-    exit 1
-fi
+# shellcheck source=./pg-common.sh
+. "$SCRIPT_DIR/pg-common.sh"
 
-PG_CONFIG=$(grep -E "^pg${PG_MAJOR}\s*=\s*\"" "$PGRX_CONFIG" | head -1 | cut -d'"' -f2)
-if [ -z "$PG_CONFIG" ]; then
-    echo "pg${PG_MAJOR} not configured in $PGRX_CONFIG"
-    exit 1
-fi
-
-PGRX_BIN_DIR="$(dirname "$PG_CONFIG")"
+resolve_pgrx_environment "$PG_MAJOR"
 
 cd "$PROJECT_DIR"
 
-echo -e "\033[0;33mBuilding and installing extension...\033[0m"
-cargo pgrx install --pg-config "$PG_CONFIG" 2>&1 | grep -v "^warning:" || true
-
-# Initialize data directory if it doesn't exist
-if [ ! -d "$DATA_DIR" ]; then
-    echo -e "\033[0;33mInitializing PostgreSQL data directory...\033[0m"
-    "$PGRX_BIN_DIR/initdb" -D "$DATA_DIR" -U postgres 2>/dev/null || true
-fi
-
-# Configure shared_preload_libraries and pg_durable GUCs
-if [ -f "$PG_CONF" ]; then
-    if ! grep -q "shared_preload_libraries.*pg_durable" "$PG_CONF"; then
-        echo -e "\033[0;33mConfiguring shared_preload_libraries...\033[0m"
-        echo "shared_preload_libraries = 'pg_durable'" >> "$PG_CONF"
-    fi
-    if ! grep -q "^pg_durable.worker_role" "$PG_CONF"; then
-        echo -e "\033[0;33mConfiguring pg_durable.worker_role...\033[0m"
-        echo "pg_durable.worker_role = 'postgres'" >> "$PG_CONF"
-    fi
-    if ! grep -q "^pg_durable.database" "$PG_CONF"; then
-        echo -e "\033[0;33mConfiguring pg_durable.database...\033[0m"
-        echo "pg_durable.database = '${PGDATABASE:-postgres}'" >> "$PG_CONF"
+if [ "$BUILD_MODE" = "auto" ]; then
+    PKGLIBDIR=$("$PG_CONFIG" --pkglibdir)
+    SHAREDIR=$("$PG_CONFIG" --sharedir)
+    if [ -f "$PKGLIBDIR/pg_durable.so" ] && [ -f "$SHAREDIR/extension/pg_durable.control" ]; then
+        BUILD_MODE="skip"
+        echo -e "\033[0;33mExisting pg_durable install detected for PG${PG_MAJOR}; skipping build/install. Use --build to force.\033[0m"
+    else
+        BUILD_MODE="force"
     fi
 fi
+
+if [ "$BUILD_MODE" != "skip" ]; then
+    echo -e "\033[0;33mBuilding and installing extension...\033[0m"
+    cargo pgrx install --pg-config "$PG_CONFIG" 2>&1 | grep -v "^warning:" || true
+fi
+
+echo -e "\033[0;33mPreparing PostgreSQL data directory...\033[0m"
+ensure_local_cluster_config
 
 echo -e "\033[0;33mStarting PostgreSQL...\033[0m"
-cargo pgrx start "pg${PG_MAJOR}" 2>/dev/null || true
+start_local_postgres
+ensure_compatible_roles
+ensure_pg_durable_extension
 
-# Wait for PostgreSQL to be ready
-PG_PORT="$((28800 + PG_MAJOR))"
-for i in {1..30}; do
-    if "$PGRX_BIN_DIR/pg_isready" -h localhost -p $PG_PORT -U postgres -q 2>/dev/null; then
-        break
-    fi
-    sleep 0.2
-done
-
-# Show version
-VERSION=$("$PGRX_BIN_DIR/psql" -h localhost -p $PG_PORT -U postgres -d postgres -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n')
+VERSION=$(pg_durable_version)
 echo -e "\033[0;32mPostgreSQL started with pg_durable $VERSION\033[0m"
 
 echo ""
