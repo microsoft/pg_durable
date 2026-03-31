@@ -231,3 +231,56 @@ AS 'MODULE_PATHNAME', 'if_rows_fn_wrapper';
 -- discarded — the new .so no longer reads or writes login_role.
 ALTER TABLE df.instances DROP COLUMN IF EXISTS login_role;
 ALTER TABLE df.nodes DROP COLUMN IF EXISTS login_role;
+
+-- ============================================================================
+-- 6. Add df.grant_usage() and df.revoke_usage() helpers for role privilege management
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = pg_catalog, df, pg_temp
+AS $fn$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+        RAISE EXCEPTION 'role "%" does not exist', p_role;
+    END IF;
+
+    EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role);
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO %I', p_role);
+    -- Exclude grant_usage and revoke_usage — only superusers should call them.
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT) FROM %I', p_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM %I', p_role);
+    EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role);
+    EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role);
+    EXECUTE format('GRANT SELECT ON df.nodes TO %I', p_role);
+    EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role);
+    EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role);
+
+    RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
+END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION df.revoke_usage(p_role TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = pg_catalog, df, pg_temp
+AS $fn$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+        RAISE EXCEPTION 'role "%" does not exist', p_role;
+    END IF;
+
+    EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I', p_role);
+    EXECUTE format('REVOKE INSERT ON df.nodes FROM %I', p_role);
+    EXECUTE format('REVOKE SELECT ON df.nodes FROM %I', p_role);
+    EXECUTE format('REVOKE INSERT ON df.instances FROM %I', p_role);
+    EXECUTE format('REVOKE UPDATE ON df.instances FROM %I', p_role);
+    EXECUTE format('REVOKE SELECT ON df.instances FROM %I', p_role);
+    EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA df FROM %I', p_role);
+    EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I', p_role);
+
+    RAISE NOTICE 'pg_durable: revoked df usage privileges from "%"', p_role;
+END;
+$fn$;

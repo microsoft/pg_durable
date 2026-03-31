@@ -305,19 +305,70 @@ CREATE POLICY vars_user_isolation ON df.vars
     USING (owner = current_user::regrole)
     WITH CHECK (owner = current_user::regrole);
 
--- Auto-grant permissions to PUBLIC (safe with RLS enabled)
-GRANT USAGE ON SCHEMA df TO PUBLIC;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
--- Users need INSERT for df.start(), SELECT for df.status()/result()
--- Column-level UPDATE on instances: only status + updated_at (for df.cancel())
--- No UPDATE on identity columns (submitted_by) or structural columns (root_node)
--- No DELETE — instance/node deletion should happen via admin API or TTL
-GRANT SELECT ON df.instances TO PUBLIC;
-GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
-GRANT SELECT ON df.nodes TO PUBLIC;
-GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO PUBLIC;
-GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
+-- No automatic PUBLIC grants. Admins must explicitly grant privileges
+-- to application roles after CREATE EXTENSION.
+-- Use df.grant_usage('role_name') (recommended) or see USER_GUIDE.md
+-- "Privilege Grants" for the equivalent manual GRANT statements.
+
+-- Helper: grant all required df privileges to a role in one call.
+-- Must be called by a superuser or the extension owner.
+-- Safety: format(%I) quotes identifiers to prevent SQL injection. Additionally,
+-- this is SECURITY INVOKER so it cannot escalate beyond the caller's privileges.
+CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = pg_catalog, df, pg_temp
+AS $fn$
+BEGIN
+    -- Validate the role exists
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+        RAISE EXCEPTION 'role "%" does not exist', p_role;
+    END IF;
+
+    EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role);
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO %I', p_role);
+    -- Exclude grant_usage and revoke_usage — only superusers should call them.
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT) FROM %I', p_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM %I', p_role);
+    EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role);
+    EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role);
+    EXECUTE format('GRANT SELECT ON df.nodes TO %I', p_role);
+    EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role);
+    EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role);
+
+    RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
+END;
+$fn$;
+
+-- Revoke all df privileges previously granted by df.grant_usage().
+-- Must be called by a superuser or the extension owner.
+-- Useful for hardening upgraded installs or removing a role's access.
+-- Safety: format(%I) quotes identifiers to prevent SQL injection. Additionally,
+-- this is SECURITY INVOKER so it cannot escalate beyond the caller's privileges.
+CREATE OR REPLACE FUNCTION df.revoke_usage(p_role TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = pg_catalog, df, pg_temp
+AS $fn$
+BEGIN
+    -- Validate the role exists
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+        RAISE EXCEPTION 'role "%" does not exist', p_role;
+    END IF;
+
+    EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I', p_role);
+    EXECUTE format('REVOKE INSERT ON df.nodes FROM %I', p_role);
+    EXECUTE format('REVOKE SELECT ON df.nodes FROM %I', p_role);
+    EXECUTE format('REVOKE INSERT ON df.instances FROM %I', p_role);
+    EXECUTE format('REVOKE UPDATE ON df.instances FROM %I', p_role);
+    EXECUTE format('REVOKE SELECT ON df.instances FROM %I', p_role);
+    EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA df FROM %I', p_role);
+    EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I', p_role);
+
+    RAISE NOTICE 'pg_durable: revoked df usage privileges from "%"', p_role;
+END;
+$fn$;
 
 -- Validate that the worker role is a superuser.
 -- The background worker must bypass RLS to manage all users' instances/nodes.

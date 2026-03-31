@@ -37,9 +37,12 @@ INSERT INTO _test_state SELECT df.start(
 -- Test 3: Empty result set expansion — should not error
 -- ============================================================================
 
+DROP TABLE IF EXISTS test_rowset_empty;
+CREATE TABLE test_rowset_empty (id SERIAL, total_rows INT);
+
 INSERT INTO _test_state SELECT df.start(
     $$SELECT id FROM test_rowset_source WHERE false$$ |=> 'none'
-    ~> $$INSERT INTO test_rowset_results (total_rows) SELECT count(*) FROM $none.*$$,
+    ~> $$INSERT INTO test_rowset_empty (total_rows) SELECT count(*) FROM $none.*$$,
     'test-rowset-empty'
 ), 'empty';
 
@@ -60,7 +63,7 @@ BEGIN
 
         IF rec.variant = 'empty' THEN
             -- Empty expansion: count(*) from empty subquery = 0
-            SELECT total_rows INTO int_val FROM test_rowset_results ORDER BY id DESC LIMIT 1;
+            SELECT total_rows INTO int_val FROM test_rowset_empty ORDER BY id DESC LIMIT 1;
             IF int_val != 0 THEN
                 RAISE EXCEPTION 'TEST FAILED [empty]: expected 0 rows, got %', int_val;
             END IF;
@@ -88,6 +91,7 @@ END $$;
 
 DROP TABLE _test_state;
 DROP TABLE test_rowset_results;
+DROP TABLE test_rowset_empty;
 DROP TABLE test_rowset_filtered;
 DROP TABLE test_rowset_source;
 SELECT 'TEST PASSED' AS result;

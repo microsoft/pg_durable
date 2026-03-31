@@ -30,7 +30,11 @@ END $setup$;
 CREATE ROLE rls_alice LOGIN;
 CREATE ROLE rls_bob   LOGIN;
 
--- Only grant TEMPORARY for temp tables; df permissions are auto-granted to PUBLIC
+-- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
+SELECT public._e2e_grant_df_privileges('rls_alice');
+SELECT public._e2e_grant_df_privileges('rls_bob');
+
+-- Grant TEMPORARY for temp tables
 GRANT TEMPORARY ON DATABASE postgres TO rls_alice, rls_bob;
 
 -- ============================================================================

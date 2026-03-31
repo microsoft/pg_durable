@@ -97,24 +97,29 @@ A VS Code Dev Container (`.devcontainer/`) provides Rust, cargo-pgrx, and Postgr
 
 ## Multi-User Setup
 
-`CREATE EXTENSION pg_durable` automatically grants permissions to `PUBLIC`, so any database role can use the `df.*` functions immediately. Row-level security (RLS) ensures each user can only see and manage their own durable function instances and nodes.
+`CREATE EXTENSION pg_durable` does **not** grant any privileges to `PUBLIC`. After installing the extension, the admin must explicitly grant access to application roles. Row-level security (RLS) ensures each user can only see and manage their own durable function instances and nodes.
 
-**No manual grants needed.** If you want to restrict access to specific roles instead of all users:
+**Grant privileges to an application role:**
 
 ```sql
--- Revoke the default PUBLIC grants
-REVOKE ALL ON SCHEMA df FROM PUBLIC;
-REVOKE ALL ON ALL TABLES IN SCHEMA df FROM PUBLIC;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA df FROM PUBLIC;
-
--- Grant to specific roles only
-GRANT USAGE ON SCHEMA df TO app_role;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO app_role;
-GRANT SELECT, INSERT ON df.instances TO app_role;
-GRANT UPDATE (status, updated_at) ON df.instances TO app_role;
-GRANT SELECT, INSERT ON df.nodes TO app_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
+-- Grant to specific roles after CREATE EXTENSION
+SELECT df.grant_usage('app_role');
 ```
+
+Alternatively, create an indirection role and grant membership to application roles:
+
+```sql
+-- Create a shared role for pg_durable access
+CREATE ROLE pg_durable_user NOLOGIN;
+SELECT df.grant_usage('pg_durable_user');
+
+-- Grant membership to application roles
+GRANT pg_durable_user TO app_backend, etl_service;
+```
+
+> See the [User Guide — Privilege Grants](USER_GUIDE.md#privilege-grants) section for the full list of individual grants, revoking access, and hardening upgraded installs.
+
+> **Note:** `GRANT EXECUTE ON ALL FUNCTIONS` only applies to functions that exist when the grant runs. After upgrading pg_durable with `ALTER EXTENSION pg_durable UPDATE`, re-run `df.grant_usage('role')` (or re-issue the manual grants) so new functions are accessible.
 
 **Key points:**
 - The background worker role (`pg_durable.worker_role` GUC, default: `azuresu`) **must be a superuser** — it bypasses RLS to manage all users' instances

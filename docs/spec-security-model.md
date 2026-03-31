@@ -671,7 +671,7 @@ SELECT df.start(
 
 **Status**: Implemented
 
-RLS on `df.instances` and `df.nodes` enforces per-user data isolation. The extension auto-grants appropriate permissions to PUBLIC (SELECT+INSERT on both tables, column-level UPDATE on instances, no DELETE). The background worker bypasses RLS as a superuser.
+RLS on `df.instances` and `df.nodes` enforces per-user data isolation. The extension does not grant privileges to PUBLIC — admins must explicitly grant appropriate permissions (schema usage, function execution, table DML) to application roles. The background worker bypasses RLS as a superuser.
 
 See [rls.md](rls.md) for the full design including:
 - RLS policy definitions and rationale
@@ -963,22 +963,18 @@ ORDER BY submitted_at DESC;
 ### 9.2 Administrator Workflow
 
 ```sql
--- Table grants are auto-applied by CREATE EXTENSION (with RLS enforced).
--- Admins only need to grant function access:
+-- After CREATE EXTENSION, admins must grant privileges to application roles.
+-- Table and schema grants are NOT auto-applied.
 
 -- 1. Grant basic df access to a role
-GRANT EXECUTE ON FUNCTION df.start TO app_backend;
-GRANT EXECUTE ON FUNCTION df.sql TO app_backend;
-GRANT EXECUTE ON FUNCTION df.status TO app_backend;
+-- (see USER_GUIDE.md "Privilege Grants" for the full list of individual grants)
+SELECT df.grant_usage('app_backend');
 
--- 2. Optionally enable HTTP for specific roles
-GRANT EXECUTE ON FUNCTION df.http TO etl_service;
-
--- 3. Configure HTTP allowlist
+-- 2. Configure HTTP allowlist
 ALTER SYSTEM SET df.http_allowed_hosts = '*.company.com, api.stripe.com';
 SELECT pg_reload_conf();
 
--- 4. View all instances (superuser bypasses RLS)
+-- 3. View all instances (superuser bypasses RLS)
 SELECT submitted_by, count(*) 
 FROM df.instances 
 GROUP BY submitted_by;

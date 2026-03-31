@@ -34,6 +34,9 @@ END $$;
 -- 2) Create extension and run a simple workflow
 CREATE EXTENSION pg_durable;
 
+-- Re-grant df privileges to the E2E user (no longer auto-granted to PUBLIC)
+SELECT public._e2e_grant_df_privileges('df_e2e_user');
+
 -- Wait for the background worker to initialize
 SELECT public._e2e_wait_for_worker_ready();
 
@@ -83,6 +86,9 @@ END $$;
 
 -- 4) Re-create extension and run another workflow
 CREATE EXTENSION pg_durable;
+
+-- Re-grant df privileges to the E2E user (no longer auto-granted to PUBLIC)
+SELECT public._e2e_grant_df_privileges('df_e2e_user');
 
 -- Wait for the background worker to fully reinitialize
 SELECT public._e2e_wait_for_worker_ready();

@@ -602,8 +602,17 @@ test_schema_upgrade() {
     "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
         -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
 
-    # Compare
-    if diff -u "$tmpdir/fresh.txt" "$tmpdir/upgraded.txt" > "$tmpdir/diff.txt" 2>&1; then
+    # Filter out PUBLIC grant rows (grant_table, grant_routine, grant_schema)
+    # from both snapshots before comparison. Grants to PUBLIC intentionally
+    # differ between fresh installs (no PUBLIC grants) and upgrades (legacy
+    # PUBLIC grants preserved because no REVOKE is added to upgrade scripts).
+    # Non-PUBLIC grants are still compared to catch regressions.
+    # See docs/upgrade-testing.md.
+    grep -v '^grant_.*|PUBLIC|' "$tmpdir/fresh.txt"    > "$tmpdir/fresh_no_grants.txt"    || true
+    grep -v '^grant_.*|PUBLIC|' "$tmpdir/upgraded.txt" > "$tmpdir/upgraded_no_grants.txt" || true
+
+    # Compare (excluding PUBLIC grants)
+    if diff -u "$tmpdir/fresh_no_grants.txt" "$tmpdir/upgraded_no_grants.txt" > "$tmpdir/diff.txt" 2>&1; then
         rm -rf "$tmpdir"
         return 0
     else
