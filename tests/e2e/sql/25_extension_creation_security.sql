@@ -84,6 +84,40 @@ DROP SCHEMA IF EXISTS df CASCADE;
 -- Recreate the extension properly for other tests to continue
 CREATE EXTENSION pg_durable;
 
+-- ============================================================================
+-- Test 3: Ungranted role cannot call df.sql() / df.start()
+-- ============================================================================
+
+-- At this point the extension exists but no explicit grants have been applied
+-- to df_e2e_user. Verify that the role cannot use the df API.
+SET ROLE df_e2e_user;
+
+DO $$
+BEGIN
+    -- df.sql() should be blocked for an ungranted role
+    BEGIN
+        PERFORM df.sql('SELECT 1');
+        RAISE EXCEPTION 'SECURITY FAILURE: ungranted role was able to call df.sql()';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 3a PASSED: df.sql() blocked for ungranted role (insufficient privilege)';
+    END;
+
+    -- df.start() should also be blocked
+    BEGIN
+        PERFORM df.start(df.sql('SELECT 1'), 'ungranted-role-test');
+        RAISE EXCEPTION 'SECURITY FAILURE: ungranted role was able to call df.start()';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 3b PASSED: df.start() blocked for ungranted role (insufficient privilege)';
+    END;
+END $$;
+
+RESET ROLE;
+
+-- Re-grant df privileges to the E2E user (no longer auto-granted to PUBLIC)
+SELECT public._e2e_grant_df_privileges('df_e2e_user');
+
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
 SELECT public._e2e_wait_for_worker_ready();
 

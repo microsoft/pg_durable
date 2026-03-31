@@ -339,8 +339,8 @@ for run in $(seq 1 $REPEAT_COUNT); do
         # In verbose mode, show output as it happens
         if [ "$VERBOSE" = true ]; then
             echo ""  # Newline before verbose output
-            "$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"
-            exit_code=$?
+            "$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file" || true
+            exit_code=${PIPESTATUS[0]:-$?}
 
             if [ $exit_code -eq 0 ]; then
                 echo -e "  ${GREEN}PASS${NC}"
@@ -351,8 +351,8 @@ for run in $(seq 1 $REPEAT_COUNT); do
             fi
         else
             # Non-verbose mode: capture output and show summary
-            output=$("$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -f "$test_file" 2>&1)
-            exit_code=$?
+            output=$( "$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -f "$test_file" 2>&1 ) || true
+            exit_code=${PIPESTATUS[0]:-$?}
             
             if [ $exit_code -eq 0 ]; then
                 if echo "$output" | grep -q "TEST PASSED"; then

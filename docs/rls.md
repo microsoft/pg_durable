@@ -237,44 +237,18 @@ This leverages RLS: the SELECT returns false if the row exists but belongs to an
 
 Should `CREATE EXTENSION pg_durable` automatically GRANT the right permissions to `PUBLIC` (or a specific role), or require manual GRANTs?
 
-**Current state**: No automatic grants. The E2E test setup does manual grants.
+**Current state**: No automatic grants. Admins must explicitly grant privileges to application roles after `CREATE EXTENSION`. See README.md for details.
 
-**Options**:
-**(A) Extension sets default grants in `extension_sql!`**:
-```sql
--- Part of CREATE EXTENSION
-GRANT USAGE ON SCHEMA df TO PUBLIC;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.instances TO PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.nodes TO PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
-```
-With RLS enabled, these broad grants are safe — users can only see/modify their own rows.
+**Options** (historical — decision has been revised):
+**(A) Extension sets default grants in `extension_sql!`**: (not used)
+**(B) Extension grants to PUBLIC with minimal privileges**: (was used in v0.1.1, reverted for security)
+**(C) Require manual grants** (current approach): Admin explicitly grants after `CREATE EXTENSION`.
 
-**(B) Extension grants to PUBLIC with minimal privileges**:
-```sql
-GRANT USAGE ON SCHEMA df TO PUBLIC;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
--- Users need INSERT for df.start(), SELECT for df.status()/result()
--- Column-level UPDATE on status/updated_at for df.cancel() — identity columns are protected
--- No DELETE — instance/node deletion should happen via admin API or TTL
-GRANT SELECT, INSERT ON df.instances TO PUBLIC;
-GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
-GRANT SELECT, INSERT ON df.nodes TO PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
-```
-Column-level UPDATE on `(status, updated_at)` allows `df.cancel()` to set status while preventing users from tampering with identity columns (`submitted_by`) or structural columns (`root_node`). RLS ensures users can only update their own rows. No DELETE on instances/nodes.
+**Decision**: Option C — no automatic grants. Admins must explicitly grant privileges to each application role. ✅ Revised.
 
-**(C) Require manual grants** (current state): Admin explicitly grants after `CREATE EXTENSION`.
-
-**Analysis**:
-- Option A/B with RLS enabled provides good UX — "install extension and it works"
-- Option C requires every admin to run a grant script — easy to forget, leads to support issues
-- Option B is safer (column-level UPDATE, no DELETE) and matches the expected access pattern
-
-**Decision**: Option B — auto-grant with SELECT+INSERT on instances/nodes, column-level `UPDATE (status, updated_at)` on instances, no DELETE. ✅ Decided.
-
-> **Why column-level UPDATE instead of full UPDATE?** `df.cancel()` needs to set `status='cancelled'` via SPI (running as the calling user). A full UPDATE grant would let users tamper with identity columns (`submitted_by`), structural columns (`root_node`), or other metadata. Column-level `GRANT UPDATE (status, updated_at)` allows only the columns needed for cancellation while RLS restricts updates to the user's own rows. All other status/result changes (completion, failure) flow through the background worker's activities via the superuser sqlx pool.
+> **Why the change?** While RLS mitigates the most obvious risks of broad PUBLIC grants, granting schema usage, function execution, and table DML to every database role by default is not desirable for production/security-sensitive environments. Requiring explicit grants follows the principle of least privilege.
+>
+> **Backward compatibility:** Existing installs that upgraded from v0.1.1 retain their PUBLIC grants. No REVOKE statements are added to upgrade scripts. Only fresh installs use the locked-down default.
 
 ---
 
@@ -358,9 +332,9 @@ ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
 2. **Add ownership checks** to `df.cancel()` and `df.signal()` (Decision 7)
    - SELECT from `df.instances` (goes through RLS) before calling duroxide client
 
-3. **Add automatic GRANTs** in `extension_sql!` (Decision 8)
-   - GRANT appropriate permissions to PUBLIC
-   - RLS makes broad grants safe
+3. **No automatic GRANTs** — admins grant explicitly after `CREATE EXTENSION`
+    - No GRANTs to PUBLIC in `extension_sql!`
+    - Document the required grant set in README.md and USER_GUIDE.md
 
 4. **Rework monitoring functions** for per-user visibility
    - `df.list_instances()`: Query `df.instances` via SPI first (RLS-filtered to calling user's rows), then use only those instance IDs when calling the duroxide client
@@ -395,7 +369,7 @@ All decisions have been resolved. No open questions remain.
 - **Decision 5 (vars scoping)**: Option A implemented — per-user scoping with `owner` column + RLS. ✅ Implemented in v0.2.0.
 - **Decision 6 (worker bypass)**: Worker role must be a superuser → bypasses RLS automatically. ✅
 - **Decision 7 (cancel/signal ownership)**: Explicit ownership check before duroxide client call. ✅
-- **Decision 8 (auto-grants)**: GRANT to PUBLIC in `CREATE EXTENSION` with column-level UPDATE on `(status, updated_at)` for instances, no DELETE on instances/nodes. ✅
+- **Decision 8 (auto-grants)**: No automatic grants to PUBLIC. Admins must explicitly grant privileges to application roles after `CREATE EXTENSION`. ✅ Revised (was auto-grant to PUBLIC in v0.1.1).
 - **Monitoring functions**: Rework `df.list_instances()`, `df.instance_info()`, `df.instance_executions()`, and `df.instance_nodes()` to only show the calling user's own instances. Currently these functions fetch instance IDs from the duroxide client (which returns ALL instances via the worker's connection), then join with `df.instances` for labels. With RLS, the SPI label query is already filtered — but the duroxide client still returns other users' instance IDs, causing a mismatch. Fix: query `df.instances` via SPI first (RLS-filtered), then use only those IDs when calling the duroxide client. ✅
 - **`df.metrics()`**: OK for any user — returns aggregate system-wide counts with no per-instance data. No RLS consideration needed. ✅
 

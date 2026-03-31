@@ -74,6 +74,9 @@ pg_durable requires:
 
 ```sql
 CREATE EXTENSION pg_durable;
+
+-- Grant usage to application roles
+SELECT df.grant_usage('app_role');
 ```
 
 After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
@@ -1552,39 +1555,74 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 
 ### Privilege Grants
 
-`CREATE EXTENSION pg_durable` automatically grants permissions to `PUBLIC`. No manual grants are required for basic usage — any database role can use `df.*` functions immediately, and RLS ensures per-user isolation.
+`CREATE EXTENSION pg_durable` does **not** grant privileges to `PUBLIC`. After installing the extension, the admin must explicitly grant access to each application role. RLS ensures per-user isolation even when multiple roles share the same grants.
 
-The automatic grants are:
+**Recommended — use the built-in helper:**
 
 ```sql
--- Granted automatically by CREATE EXTENSION:
-GRANT USAGE ON SCHEMA df TO PUBLIC;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC;
-GRANT SELECT, INSERT ON df.instances TO PUBLIC;
-GRANT UPDATE (status, updated_at) ON df.instances TO PUBLIC;
-GRANT SELECT, INSERT ON df.nodes TO PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
+-- Grant all required df privileges to a role (must be run by a superuser)
+SELECT df.grant_usage('app_role');
 ```
+
+`df.grant_usage()` issues every GRANT a role needs to call DSL functions, submit workflows, and read results. Only superusers can execute it (EXECUTE is revoked from PUBLIC). **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
+
+<details>
+<summary>Equivalent manual grants (for reference)</summary>
+
+```sql
+GRANT USAGE ON SCHEMA df TO app_role;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO app_role;
+REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT) FROM app_role;   -- admin-only
+REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM app_role;  -- admin-only
+GRANT SELECT ON df.instances TO app_role;
+GRANT UPDATE (status, updated_at) ON df.instances TO app_role;
+GRANT SELECT ON df.nodes TO app_role;
+GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO app_role;
+GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO app_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
+```
+
+</details>
+
+Alternatively, create an indirection role and grant membership to application roles:
+
+```sql
+-- Create a shared role for pg_durable access
+CREATE ROLE pg_durable_user NOLOGIN;
+SELECT df.grant_usage('pg_durable_user');
+
+-- Grant membership to application roles
+GRANT pg_durable_user TO app_backend, etl_service;
+```
+
+> **Security note:** If a user/role has INSERT privilege on `df.nodes`, they can construct function graphs with any available node type (including powerful types like HTTP). Granular restrictions on node types are deferred to future work.
+
+> **Note:** `GRANT EXECUTE ON ALL FUNCTIONS` only applies to functions that exist when the grant runs. After upgrading pg_durable with `ALTER EXTENSION pg_durable UPDATE`, re-run `df.grant_usage('role')` (or re-issue the manual grants) so new functions are accessible.
 
 Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — the identity column (`submitted_by`) and structural columns are protected.
 
 > **Note:** `df.vars` uses per-user scoping via an `owner` column and RLS — each user can only read and write their own variables. Superusers bypass RLS but the DSL functions (`df.setvar()`, `df.getvar()`, etc.) still scope to the calling user via explicit filters. Avoid storing secrets in plain text.
 
-To restrict access to specific roles instead of all users:
+### Revoking Privileges
+
+To remove a role's access to pg_durable:
 
 ```sql
--- Revoke the default PUBLIC grants
-REVOKE ALL ON SCHEMA df FROM PUBLIC;
-REVOKE ALL ON ALL TABLES IN SCHEMA df FROM PUBLIC;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA df FROM PUBLIC;
+SELECT df.revoke_usage('app_role');
+```
 
--- Grant to specific roles only
-GRANT USAGE ON SCHEMA df TO app_role;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO app_role;
-GRANT SELECT, INSERT ON df.instances TO app_role;
-GRANT UPDATE (status, updated_at) ON df.instances TO app_role;
-GRANT SELECT, INSERT ON df.nodes TO app_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
+This revokes all privileges previously granted by `df.grant_usage()`.
+
+### Hardening Upgraded Installs
+
+Installs upgraded from v0.1.1 retain legacy PUBLIC grants. To lock down an upgraded install to match the fresh-install security posture:
+
+```sql
+-- Revoke legacy PUBLIC grants
+SELECT df.revoke_usage('PUBLIC');
+
+-- Then grant to specific roles
+SELECT df.grant_usage('app_role');
 ```
 
 ---

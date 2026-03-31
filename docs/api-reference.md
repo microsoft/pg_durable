@@ -411,4 +411,32 @@ SELECT df.clearvars();
 
 **Rule of thumb:** If a parameter expects a "node" (something that executes), it supports auto-wrap. If it expects a configuration value (name, URL, timeout), it's a literal.
 
+---
+
+## Administration Functions
+
+### df.grant_usage(role_name)
+
+Grants all privileges a role needs to use pg_durable (schema usage, function execution, table access). Must be called by a superuser.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `role_name` | TEXT | The role to grant privileges to |
+
+```sql
+SELECT df.grant_usage('app_role');
+```
+
+### df.revoke_usage(role_name)
+
+Revokes all privileges previously granted by `df.grant_usage()`. Must be called by a superuser. Also useful for revoking legacy PUBLIC grants on upgraded installs.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `role_name` | TEXT | The role to revoke privileges from |
+
+```sql
+SELECT df.revoke_usage('app_role');
+```
+
 

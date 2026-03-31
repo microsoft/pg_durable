@@ -67,6 +67,11 @@ LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 PASSED=0
 FAILED=0
 
+grant_df_privileges() {
+    "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB \
+        -c "SELECT df.grant_usage('$E2E_USER');" >/dev/null 2>&1
+}
+
 stop_server() {
     if "$PG_ISREADY" -h localhost -p $PG_PORT -U postgres &>/dev/null; then
         "$PG_CTL" -D "$DATA_DIR" stop -m fast 2>/dev/null || true
@@ -141,6 +146,14 @@ echo "Building and installing extension..."
 cd "$PROJECT_DIR"
 cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
 
+# Ensure pg_durable.database points to the test database
+if ! grep -q "^pg_durable.database = 'postgres'" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+    sed -i.bak '/^#*pg_durable\.database/d' "$DATA_DIR/postgresql.conf"
+    echo "pg_durable.database = 'postgres'" >> "$DATA_DIR/postgresql.conf"
+    # Restart if running so the new GUC takes effect
+    stop_server
+fi
+
 # Ensure server is running with default config first
 if ! "$PG_ISREADY" -h localhost -p $PG_PORT -U postgres &>/dev/null; then
     "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
@@ -165,6 +178,8 @@ GRANT ALL ON ALL TABLES IN SCHEMA public TO df_e2e_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO df_e2e_user;
 SETUP_EOF
 
+grant_df_privileges
+
 # --- Test 1: Backpressure (max_user_connections=2) ---
 echo -e "\n${YELLOW}[1/3] Backpressure test (max_user_connections=2)${NC}"
 apply_gucs "pg_durable.max_user_connections = 2"
@@ -172,6 +187,7 @@ apply_gucs "pg_durable.max_user_connections = 2"
 # Recreate extension after restart
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
+grant_df_privileges
 
 # Wait for worker readiness (poll duroxide._worker_ready directly)
 for i in $(seq 1 30); do
@@ -189,6 +205,7 @@ apply_gucs "pg_durable.max_user_connections = 1" "pg_durable.execution_acquire_t
 
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
 "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
+grant_df_privileges
 
 for i in $(seq 1 30); do
     ready=$("$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c \
