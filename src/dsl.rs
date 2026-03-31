@@ -105,6 +105,13 @@ fn owner_scoped_vars_enabled() -> bool {
     ext_semver >= (0, 2, 0)
 }
 
+/// Returns true when the installed schema still has the legacy `login_role`
+/// column (v0.1.x).  The new .so must set this column on INSERT to satisfy
+/// the NOT NULL constraint until the customer runs ALTER EXTENSION UPDATE.
+fn legacy_login_role_schema() -> bool {
+    !owner_scoped_vars_enabled()
+}
+
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -618,37 +625,81 @@ pub fn start(
     }
 
     // Capture user identity for privilege isolation
-    let session_user_oid = unsafe { pgrx::pg_sys::GetSessionUserId() };
-    let outer_user_oid = unsafe { pgrx::pg_sys::GetOuterUserId() };
+    let current_user_oid = unsafe { pgrx::pg_sys::GetUserId() };
+
+    // Validate current_user has LOGIN privilege
+    let has_login: bool = match Spi::get_one_with_args(
+        "SELECT rolcanlogin FROM pg_roles WHERE oid = $1",
+        &[current_user_oid.into()],
+    ) {
+        Ok(Some(has_login)) => has_login,
+        Ok(None) => {
+            pgrx::error!(
+                "failed to check LOGIN privilege for current_user oid {}: query returned NULL",
+                current_user_oid
+            )
+        }
+        Err(e) => {
+            pgrx::error!(
+                "failed to check LOGIN privilege for current_user oid {}: {}",
+                current_user_oid,
+                e
+            )
+        }
+    };
+    if !has_login {
+        let username = unsafe {
+            let name_ptr = pgrx::pg_sys::GetUserNameFromId(current_user_oid, false);
+            std::ffi::CStr::from_ptr(name_ptr)
+                .to_string_lossy()
+                .into_owned()
+        };
+        pgrx::error!(
+            "current_user \"{}\" does not have LOGIN privilege. \
+             The background worker must connect as this role to execute SQL. \
+             Grant LOGIN to this role or call df.start() as a role with LOGIN.",
+            username
+        );
+    }
 
     // Insert all nodes from the nested graph into df.nodes, returning root node ID
     fn insert_nodes(
         node: &Durofut,
         instance_id: &str,
-        outer_user_oid: pgrx::pg_sys::Oid,
-        session_user_oid: pgrx::pg_sys::Oid,
+        current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
+        legacy_login_role: bool,
     ) -> String {
         let node_id = short_id();
 
         // Recursively insert children FIRST to get their IDs
-        let left_id = node
-            .left_node
-            .as_ref()
-            .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid, database));
-        let right_id = node
-            .right_node
-            .as_ref()
-            .map(|n| insert_nodes(n, instance_id, outer_user_oid, session_user_oid, database));
+        let left_id = node.left_node.as_ref().map(|n| {
+            insert_nodes(
+                n,
+                instance_id,
+                current_user_oid,
+                database,
+                legacy_login_role,
+            )
+        });
+        let right_id = node.right_node.as_ref().map(|n| {
+            insert_nodes(
+                n,
+                instance_id,
+                current_user_oid,
+                database,
+                legacy_login_role,
+            )
+        });
 
         // Process config JSON to recursively insert embedded nodes and get their IDs
         let query_val: Option<String> = match node.transform_config_children(|child| {
             Ok(insert_nodes(
                 child,
                 instance_id,
-                outer_user_oid,
-                session_user_oid,
+                current_user_oid,
                 database,
+                legacy_login_role,
             ))
         }) {
             Ok(updated_query) => updated_query,
@@ -678,22 +729,43 @@ pub fn start(
         };
 
         // Insert this node with parameterized query
-        if let Err(e) = Spi::run_with_args(
-            "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)",
-            &[
-                node_id.as_str().into(),
-                instance_id.into(),
-                node.node_type.as_str().into(),
-                query_arg,
-                result_name_arg,
-                left_node_arg,
-                right_node_arg,
-                outer_user_oid.into(),
-                session_user_oid.into(),
-                database_arg,
-            ],
-        ) {
+        // B1 backward compat: v0.1.x schema has login_role NOT NULL on
+        // df.nodes; include it (= submitted_by) so the INSERT succeeds.
+        let (node_sql, node_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
+            (
+                "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)",
+                vec![
+                    node_id.as_str().into(),
+                    instance_id.into(),
+                    node.node_type.as_str().into(),
+                    query_arg,
+                    result_name_arg,
+                    left_node_arg,
+                    right_node_arg,
+                    current_user_oid.into(),
+                    current_user_oid.into(), // login_role = submitted_by
+                    database_arg,
+                ],
+            )
+        } else {
+            (
+                "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)",
+                vec![
+                    node_id.as_str().into(),
+                    instance_id.into(),
+                    node.node_type.as_str().into(),
+                    query_arg,
+                    result_name_arg,
+                    left_node_arg,
+                    right_node_arg,
+                    current_user_oid.into(),
+                    database_arg,
+                ],
+            )
+        };
+        if let Err(e) = Spi::run_with_args(node_sql, &node_args) {
             pgrx::error!("Failed to insert node {}: {:?}", node_id, e);
         }
 
@@ -701,12 +773,13 @@ pub fn start(
         node_id
     }
 
+    let legacy_login_role = legacy_login_role_schema();
     let root_node_id = insert_nodes(
         &durofut,
         &instance_id,
-        outer_user_oid,
-        session_user_oid,
+        current_user_oid,
         database,
+        legacy_login_role,
     );
 
     // Build parameterized args for the instance INSERT
@@ -720,17 +793,33 @@ pub fn start(
     };
 
     // Create instance record with root node ID
-    if let Err(e) = Spi::run_with_args(
-        "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database) VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)",
-        &[
-            instance_id.as_str().into(),
-            label_arg,
-            root_node_id.as_str().into(),
-            outer_user_oid.into(),
-            session_user_oid.into(),
-            database_arg,
-        ],
-    ) {
+    // B1 backward compat: v0.1.x schema has login_role NOT NULL on
+    // df.instances; include it (= submitted_by) so the INSERT succeeds.
+    let (inst_sql, inst_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
+        (
+            "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database) VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)",
+            vec![
+                instance_id.as_str().into(),
+                label_arg,
+                root_node_id.as_str().into(),
+                current_user_oid.into(),
+                current_user_oid.into(), // login_role = submitted_by
+                database_arg,
+            ],
+        )
+    } else {
+        (
+            "INSERT INTO df.instances (id, label, root_node, submitted_by, database) VALUES ($1, $2, $3, $4::oid::regrole, $5)",
+            vec![
+                instance_id.as_str().into(),
+                label_arg,
+                root_node_id.as_str().into(),
+                current_user_oid.into(),
+                database_arg,
+            ],
+        )
+    };
+    if let Err(e) = Spi::run_with_args(inst_sql, &inst_args) {
         pgrx::error!("Failed to create instance: {:?}", e);
     }
 

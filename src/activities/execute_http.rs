@@ -41,12 +41,11 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
 
     // Audit context
     let audit_user = config.submitted_by.as_deref().unwrap_or("unknown");
-    let audit_login = config.login_role.as_deref().unwrap_or("unknown");
 
     // --- Scheme validation (always enforced, regardless of feature flag) ---
     crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (scheme) url={} submitted_by={audit_user} login_role={audit_login}",
+            "HTTP BLOCKED (scheme) url={} submitted_by={audit_user}",
             config.url
         ));
     })?;
@@ -55,14 +54,14 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
     //     skips DNS resolution and our resolver never runs) ---
     crate::ssrf::validate_url_host(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (ip) url={} submitted_by={audit_user} login_role={audit_login}",
+            "HTTP BLOCKED (ip) url={} submitted_by={audit_user}",
             config.url
         ));
     })?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
-        "HTTP {} {} submitted_by={audit_user} login_role={audit_login}",
+        "HTTP {} {} submitted_by={audit_user}",
         config.method, config.url
     ));
 
@@ -103,7 +102,7 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
         // a structured audit log (mirrors the scheme-block log above).
         if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (ip) url={} submitted_by={audit_user} login_role={audit_login}",
+                "HTTP BLOCKED (ip) url={} submitted_by={audit_user}",
                 config.url
             ));
             return err_string;

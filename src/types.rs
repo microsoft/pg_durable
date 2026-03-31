@@ -5,6 +5,7 @@ use pgrx::pg_extern;
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::ffi::CString;
 use std::str::FromStr;
 use std::time::Duration;
@@ -92,20 +93,62 @@ pub fn target_database() -> String {
     get_database()
 }
 
-/// Create a single PostgreSQL connection authenticated as `login_role`,
-/// then SET ROLE to `effective_role`.
+fn normalize_role_name_for_connection(user: &str) -> Result<Cow<'_, str>, String> {
+    if !user.starts_with('"') {
+        if user.ends_with('"') {
+            return Err(format!(
+                "Invalid role name '{}': unexpected trailing double quote in connection username",
+                user
+            ));
+        }
+        return Ok(Cow::Borrowed(user));
+    }
+
+    if !user.ends_with('"') || user.len() < 2 {
+        return Err(format!(
+            "Invalid role name '{}': unterminated quoted identifier in connection username",
+            user
+        ));
+    }
+
+    let inner = &user[1..user.len() - 1];
+    let mut normalized = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '"' {
+            normalized.push(ch);
+            continue;
+        }
+
+        if chars.peek() == Some(&'"') {
+            normalized.push('"');
+            chars.next();
+            continue;
+        }
+
+        return Err(format!(
+            "Invalid quoted role name '{}': expected doubled double quotes inside identifier",
+            user
+        ));
+    }
+
+    Ok(Cow::Owned(normalized))
+}
+
+/// Create a single PostgreSQL connection authenticated as `user`.
 pub async fn connect_as_user(
-    login_role: &str,
-    effective_role: &str,
+    user: &str,
     database: Option<&str>,
 ) -> Result<sqlx::postgres::PgConnection, String> {
     use sqlx::postgres::PgConnectOptions;
     use sqlx::Connection;
 
+    let normalized_user = normalize_role_name_for_connection(user)?;
     let default_db = target_database();
     let db = database.unwrap_or(&default_db);
     let mut options = PgConnectOptions::new()
-        .username(login_role)
+        .username(normalized_user.as_ref())
         .database(db)
         .port(get_port());
 
@@ -118,21 +161,12 @@ pub async fn connect_as_user(
         .await
         .map_err(|e| {
             format!(
-                "Failed to connect to database '{}' as '{}' (for effective role '{}'). Error: {}",
-                db, login_role, effective_role, e
+                "Failed to connect to database '{}' as '{}'. Error: {}",
+                db,
+                normalized_user.as_ref(),
+                e
             )
         })?;
-
-    // Switch to effective role if different from login role
-    if login_role != effective_role {
-        sqlx::query(&format!(
-            "SET ROLE \"{}\"",
-            effective_role.replace('"', "\"\"")
-        ))
-        .execute(&mut conn)
-        .await
-        .map_err(|e| format!("SET ROLE {} failed: {}", effective_role, e))?;
-    }
 
     // Mark this connection as running inside a workflow.
     // Currently used to prevent variable mutations (setvar/unsetvar/clearvars)
@@ -671,10 +705,8 @@ pub struct FunctionNode {
     pub result_name: Option<String>,
     pub left_node: Option<String>,
     pub right_node: Option<String>,
-    /// Effective role (outer user) for privilege isolation
+    /// Effective role (current_user) for privilege isolation and connection authentication
     pub submitted_by: String,
-    /// Authenticated role (session user) for connection authentication
-    pub login_role: String,
     /// Target database for SQL execution (None = extension database)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
@@ -713,9 +745,6 @@ pub struct HttpConfig {
     /// Role that called df.start() (audit trail)
     #[serde(default)]
     pub submitted_by: Option<String>,
-    /// Authenticated connection role (audit trail)
-    #[serde(default)]
-    pub login_role: Option<String>,
 }
 
 fn default_http_timeout() -> u64 {
@@ -1059,6 +1088,30 @@ mod tests {
                 "evaluate_condition raw fallback failed for: {input}"
             );
         }
+    }
+
+    #[test]
+    fn normalize_role_name_keeps_raw_rolname() {
+        let normalized = normalize_role_name_for_connection("plain_role").unwrap();
+        assert_eq!(normalized.as_ref(), "plain_role");
+    }
+
+    #[test]
+    fn normalize_role_name_unquotes_regrole_text_output() {
+        let normalized = normalize_role_name_for_connection("\"Role Name\"").unwrap();
+        assert_eq!(normalized.as_ref(), "Role Name");
+    }
+
+    #[test]
+    fn normalize_role_name_unescapes_embedded_quotes() {
+        let normalized = normalize_role_name_for_connection("\"Role \"\"Name\"\"\"").unwrap();
+        assert_eq!(normalized.as_ref(), "Role \"Name\"");
+    }
+
+    #[test]
+    fn normalize_role_name_rejects_malformed_quoted_identifier() {
+        let err = normalize_role_name_for_connection("\"bad\"name\"").unwrap_err();
+        assert!(err.contains("Invalid quoted role name"));
     }
 
     // ============================================================================

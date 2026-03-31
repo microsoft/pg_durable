@@ -94,11 +94,11 @@ Add a `database` column:
 ALTER TABLE df.nodes ADD COLUMN database TEXT;
 ```
 
-Like `submitted_by` and `login_role`, this is denormalized from the instance for convenience—the `execute_sql` activity reads from `df.nodes` and should not need to join with `df.instances` to determine the target database. NULL means "the extension database," same as on `df.instances`.
+Like `submitted_by`, this is denormalized from the instance for convenience—the `execute_sql` activity reads from `df.nodes` and should not need to join with `df.instances` to determine the target database. NULL means "the extension database," same as on `df.instances`.
 
 ### No Changes to DSL / `Durofut`
 
-The `Durofut` struct (and by extension `df.sql()`, operators, etc.) does not need a database field. The database is an *instance-level* property, set once at `df.start()` and stamped onto all nodes at insertion time—exactly like `submitted_by` and `login_role` today.
+The `Durofut` struct (and by extension `df.sql()`, operators, etc.) does not need a database field. The database is an *instance-level* property, set once at `df.start()` and stamped onto all nodes at insertion time—exactly like `submitted_by` today.
 
 ## Implementation Changes
 
@@ -152,13 +152,13 @@ SELECT 1 FROM pg_database WHERE datname = $1
 
 If the database doesn't exist, raise an error immediately rather than letting the background worker fail later with a confusing connection error.
 
-**Role validation:** We do *not* need to validate that `login_role` can connect to the target database at `df.start()` time. The existing behavior already defers connection errors to activity execution time, which is appropriate for durable functions (the role/database might be created between `df.start()` and actual execution).
+**Role validation:** We do *not* need to validate that `submitted_by` can connect to the target database at `df.start()` time. The existing behavior already defers connection errors to activity execution time, which is appropriate for durable functions (the role/database might be created between `df.start()` and actual execution).
 
 ## Security Considerations
 
-- **Role isolation is preserved.** The existing `login_role` / `submitted_by` / `SET ROLE` mechanism works identically regardless of target database. The user who calls `df.start()` determines the execution role, not the target database.
-- **`pg_hba.conf` applies.** The background worker's `login_role` connection to a different database is subject to the same `pg_hba.conf` rules as any other connection. If the role can't connect to that database, the activity fails with a clear error.
-- **No privilege escalation.** Targeting a different database doesn't grant additional privileges. The `SET ROLE` still constrains execution to the `submitted_by` role's permissions *in that database*.
+- **Role isolation is preserved.** The background worker connects directly as `submitted_by` (the `current_user` captured at `df.start()` time). The user who calls `df.start()` determines the execution role, not the target database.
+- **`pg_hba.conf` applies.** The background worker's `submitted_by` connection to a different database is subject to the same `pg_hba.conf` rules as any other connection. If the role can't connect to that database, the activity fails with a clear error.
+- **No privilege escalation.** Targeting a different database doesn't grant additional privileges. SQL executes with `submitted_by`'s permissions *in that database*.
 
 ## Observability
 
@@ -230,7 +230,7 @@ If the database doesn't exist, raise an error immediately rather than letting th
   - `df.start()` with `database =>` parameter works
   - SQL executes in the target database, not the extension database
   - Role isolation: function runs as `df_e2e_user`, not the background worker's superuser
-  - `login_role` can connect to the target database (requires `GRANT CONNECT`)
+  - `submitted_by` can connect to the target database (requires `GRANT CONNECT`)
 
 - **Invalid database:** Verify `df.start(..., database => 'nonexistent')` raises an immediate error (not a deferred background worker failure).
 

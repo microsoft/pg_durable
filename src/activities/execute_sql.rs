@@ -1,8 +1,8 @@
 //! ExecuteSQL activity - runs SQL queries against PostgreSQL
 //!
-//! Connects as the submitting user's login_role and SET ROLE to submitted_by
-//! for proper privilege isolation. Connection count is gated by a semaphore
-//! sized from the pg_durable.max_user_connections GUC.
+//! Connects as the submitting user (submitted_by) for proper privilege isolation.
+//! Connection count is gated by a semaphore sized from the
+//! pg_durable.max_user_connections GUC.
 
 use duroxide::ActivityContext;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,6 @@ pub const NAME: &str = "pg_durable::activity::execute-sql";
 pub struct ExecuteSqlInput {
     pub query: String,
     pub submitted_by: String,
-    pub login_role: String,
     /// Target database (None = extension database)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
@@ -36,9 +35,8 @@ pub async fn execute(
         serde_json::from_str(&input_json).map_err(|e| format!("Invalid execute_sql input: {e}"))?;
 
     ctx.trace_info(format!(
-        "Executing SQL as '{}' (connected as '{}'){}: {}",
+        "Executing SQL as '{}'{}: {}",
         input.submitted_by,
-        input.login_role,
         input
             .database
             .as_ref()
@@ -68,13 +66,7 @@ pub async fn execute(
         }
     };
 
-    // Create a single connection as login_role, SET ROLE to submitted_by
-    let mut conn = connect_as_user(
-        &input.login_role,
-        &input.submitted_by,
-        input.database.as_deref(),
-    )
-    .await?;
+    let mut conn = connect_as_user(&input.submitted_by, input.database.as_deref()).await?;
 
     match sqlx::query(&input.query).fetch_all(&mut conn).await {
         Ok(rows) => {

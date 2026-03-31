@@ -86,7 +86,7 @@ A successful SSRF attack from within the PG dataplane can:
 | D6 | No DNS domain allowlist at this layer | Allowlists are a customer-level concern. The dataplane layer only blocks; it never allows based on domain. |
 | D7 | Rate limiting: deferred | Deferred. |
 | D8 | Response size limits: deferred | Deferred. |
-| D9 | Log `submitted_by` and `login_role` for HTTP requests | Audit trail for who initiated the request. |
+| D9 | Log `submitted_by` for HTTP requests | Audit trail for who initiated the request. |
 
 ---
 
@@ -213,13 +213,12 @@ Do **not** include the resolved IP in the error message — this would leak infr
 
 All HTTP requests (both allowed and blocked) must be logged with:
 
-- `submitted_by`: the role that called `df.start()`
-- `login_role`: the authenticated connection role
+- `submitted_by`: the role that called `df.start()` (`current_user` at that time)
 - `url`: the requested URL
 - `blocked`: whether the request was blocked by SSRF protection
 - `reason`: if blocked, the reason (scheme/IP range)
 
-These fields are already available on `FunctionNode` (`submitted_by`, `login_role`) and must be threaded through to the HTTP activity.
+These fields are already available on `FunctionNode` (`submitted_by`) and must be threaded through to the HTTP activity.
 
 ---
 
@@ -322,7 +321,7 @@ The activity gains three changes:
 
 1. **Scheme check** before building the client (always, regardless of feature flag).
 2. **SSRF-safe resolver** injected into the `reqwest::Client::builder()` (when feature enabled).
-3. **Audit log fields** (`submitted_by`, `login_role`) passed through from `FunctionNode` and logged.
+3. **Audit log fields** (`submitted_by`) passed through from `FunctionNode` and logged.
 
 ### 6.4 Changes to `HttpConfig`
 
@@ -337,7 +336,6 @@ pub struct HttpConfig {
     pub timeout_seconds: u64,
     // Audit context (populated from FunctionNode)
     pub submitted_by: Option<String>,
-    pub login_role: Option<String>,
 }
 ```
 

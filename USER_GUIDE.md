@@ -1566,7 +1566,7 @@ GRANT SELECT, INSERT ON df.nodes TO PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO PUBLIC;
 ```
 
-Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — identity columns (`submitted_by`, `login_role`) and structural columns are protected.
+Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — the identity column (`submitted_by`) and structural columns are protected.
 
 > **Note:** `df.vars` uses per-user scoping via an `owner` column and RLS — each user can only read and write their own variables. Superusers bypass RLS but the DSL functions (`df.setvar()`, `df.getvar()`, etc.) still scope to the calling user via explicit filters. Avoid storing secrets in plain text.
 
@@ -1671,7 +1671,7 @@ PostgreSQL's per-role `CONNECTION LIMIT` (set via `ALTER ROLE ... CONNECTION LIM
 
 For pg_durable, this means:
 - **Management and duroxide pools** authenticate as `pg_durable.worker_role` — all pool connections count against that role's limit
-- **User-execution connections** authenticate as the submitting user's `login_role` — these count against *that* role's limit
+- **User-execution connections** authenticate as the submitting user (`submitted_by`) — these count against *that* role's limit
 - **Backend connections** authenticate as whatever role the application uses
 
 If you use per-role connection limits, ensure each role's limit accounts for pg_durable's usage.

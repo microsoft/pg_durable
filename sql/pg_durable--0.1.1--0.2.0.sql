@@ -30,8 +30,8 @@ ALTER TABLE df.vars ADD PRIMARY KEY (owner, name);
 -- df.start() writes. Runtime-owned columns remain protected from direct INSERT.
 REVOKE INSERT ON df.instances FROM PUBLIC;
 REVOKE INSERT ON df.nodes FROM PUBLIC;
-GRANT INSERT (id, label, root_node, submitted_by, login_role, database) ON df.instances TO PUBLIC;
-GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database) ON df.nodes TO PUBLIC;
+GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO PUBLIC;
+GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO PUBLIC;
 
 -- Enforce a df.start-shaped graph for new direct writes without blocking
 -- upgrades on legacy malformed rows that may already exist.
@@ -44,15 +44,13 @@ ALTER TABLE df.instances
         CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT VALID,
     -- Supports the composite FK from df.nodes that ties node identity to the instance row.
     ADD CONSTRAINT instances_identity_key
-        UNIQUE (id, submitted_by, login_role);
+        UNIQUE (id, submitted_by);
 
 ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_instance_id_present_chk
         CHECK (instance_id IS NOT NULL) NOT VALID,
     ADD CONSTRAINT nodes_submitted_by_present_chk
         CHECK (submitted_by IS NOT NULL) NOT VALID,
-    ADD CONSTRAINT nodes_login_role_present_chk
-        CHECK (login_role IS NOT NULL) NOT VALID,
     ADD CONSTRAINT nodes_id_format_chk
         CHECK (id ~ '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_instance_id_format_chk
@@ -92,8 +90,8 @@ ALTER TABLE df.nodes
 
 ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_instance_identity_fkey
-        FOREIGN KEY (instance_id, submitted_by, login_role)
-        REFERENCES df.instances (id, submitted_by, login_role)
+        FOREIGN KEY (instance_id, submitted_by)
+        REFERENCES df.instances (id, submitted_by)
         DEFERRABLE INITIALLY DEFERRED NOT VALID,
     ADD CONSTRAINT nodes_left_node_same_instance_fkey
         FOREIGN KEY (instance_id, left_node)
@@ -125,19 +123,13 @@ DROP POLICY instances_user_isolation ON df.instances;
 CREATE POLICY instances_user_isolation ON df.instances
     FOR ALL
     USING (submitted_by = current_user::regrole)
-    WITH CHECK (
-        submitted_by = current_user::regrole
-        AND login_role = session_user::regrole
-    );
+    WITH CHECK (submitted_by = current_user::regrole);
 
 DROP POLICY nodes_user_isolation ON df.nodes;
 CREATE POLICY nodes_user_isolation ON df.nodes
     FOR ALL
     USING (submitted_by = current_user::regrole)
-    WITH CHECK (
-        submitted_by = current_user::regrole
-        AND login_role = session_user::regrole
-    );
+    WITH CHECK (submitted_by = current_user::regrole);
 
 -- ============================================================================
 -- 3. Harden PL/pgSQL and SQL helper functions with SET search_path
@@ -223,3 +215,19 @@ CREATE FUNCTION df."if_rows"(
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'if_rows_fn_wrapper';
+
+-- ============================================================================
+-- 5. Drop login_role column (user-isolation simplification)
+--    See docs/user-isolation.md for design.
+--    login_role existed in v0.1.1 on both df.instances (NOT NULL) and df.nodes
+--    (nullable). The new model uses only submitted_by.
+--
+--    We also need to update the column-level INSERT grants since they were
+--    set above with the old column list. The REVOKE/GRANT will be re-issued
+--    below to reflect the final column set.
+-- ============================================================================
+
+-- Drop the login_role columns. Existing data (if any) in these columns is
+-- discarded — the new .so no longer reads or writes login_role.
+ALTER TABLE df.instances DROP COLUMN IF EXISTS login_role;
+ALTER TABLE df.nodes DROP COLUMN IF EXISTS login_role;
