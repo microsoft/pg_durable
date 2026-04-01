@@ -1,58 +1,158 @@
--- Test: Extension creation security
--- Tests that:
--- 1. Non-superuser cannot create the extension
--- 2. Extension creation fails if 'df' schema is pre-created
--- Expected: Both security conditions are enforced
+-- Merged from: 28_bgw_lifecycle, 25_extension_creation_security
+-- Tests: BGW lifecycle (pre-extension wait, post-CREATE, post-DROP, post-recreate),
+--        extension creation security (non-superuser blocked, pre-existing df schema blocked,
+--        ungranted role blocked, grant_usage/revoke_usage restricted)
+-- Runs as postgres throughout (requires superuser for DROP/CREATE EXTENSION)
+-- Note: 28 runs before 25 so the extension is in a known state when 25 starts
 
--- Note: This test drops and recreates the extension to test installation security
--- Any running instances will be lost, but E2E tests are self-contained
+-- === Test: 28_bgw_lifecycle ===
+
+-- Ensure a clean starting point
 SELECT public._e2e_drop_extension_safe();
 
--- ============================================================================
--- Test 1: Non-superuser cannot create extension
--- ============================================================================
+-- 1) Verify BGW does not create duroxide schema pre-extension
+DO $$
+DECLARE
+    exists_before BOOLEAN;
+    exists_after BOOLEAN;
+BEGIN
+    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'duroxide') INTO exists_before;
+    IF exists_before THEN
+        RAISE EXCEPTION 'TEST FAILED: duroxide schema exists before CREATE EXTENSION';
+    END IF;
 
--- Create a non-superuser role for testing
+    PERFORM pg_sleep(6);
+
+    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'duroxide') INTO exists_after;
+    IF exists_after THEN
+        RAISE EXCEPTION 'TEST FAILED: duroxide schema was created before CREATE EXTENSION';
+    END IF;
+
+    RAISE NOTICE 'PASSED: BGW did not create duroxide schema pre-extension';
+END $$;
+
+-- 2) Create extension and run a simple workflow
+CREATE EXTENSION pg_durable;
+
+-- Re-grant df privileges to the E2E user
+SELECT df.grant_usage('df_e2e_user');
+
+-- Wait for the background worker to initialize
+SELECT public._e2e_wait_for_worker_ready();
+
+CREATE TEMP TABLE _test_state (instance_id TEXT);
+INSERT INTO _test_state
+SELECT df.start('SELECT 42 as answer', 'test-bgw-lifecycle-1');
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected completed, got %', status;
+    END IF;
+
+    SELECT r INTO result FROM df.result(inst_id) r;
+    IF result NOT LIKE '%42%' THEN
+        RAISE EXCEPTION 'TEST FAILED: result should contain 42, got %', result;
+    END IF;
+
+    RAISE NOTICE 'PASSED: workflow completed after CREATE EXTENSION';
+END $$;
+
+DROP TABLE _test_state;
+
+-- 3) Drop extension and verify schema removed
+SELECT public._e2e_drop_extension_safe();
+
+DO $$
+DECLARE
+    schema_exists BOOLEAN;
+BEGIN
+    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'duroxide') INTO schema_exists;
+    IF schema_exists THEN
+        RAISE EXCEPTION 'TEST FAILED: duroxide schema still exists after DROP EXTENSION';
+    END IF;
+
+    RAISE NOTICE 'PASSED: DROP EXTENSION removed duroxide schema';
+END $$;
+
+-- 4) Re-create extension and run another workflow
+CREATE EXTENSION pg_durable;
+
+SELECT df.grant_usage('df_e2e_user');
+
+SELECT public._e2e_wait_for_worker_ready();
+
+CREATE TEMP TABLE _test_state2 (instance_id TEXT);
+INSERT INTO _test_state2
+SELECT df.start('SELECT 43 as answer', 'test-bgw-lifecycle-2');
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state2;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected completed after recreate, got %', status;
+    END IF;
+
+    SELECT r INTO result FROM df.result(inst_id) r;
+    IF result NOT LIKE '%43%' THEN
+        RAISE EXCEPTION 'TEST FAILED: result should contain 43, got %', result;
+    END IF;
+
+    RAISE NOTICE 'PASSED: workflow completed after re-create';
+END $$;
+
+DROP TABLE _test_state2;
+
+-- === Test: 25_extension_creation_security ===
+
+-- Drop and recreate the extension to test installation security
+SELECT public._e2e_drop_extension_safe();
+
+-- Test 1: Non-superuser cannot create extension
 DROP USER IF EXISTS test_nonsuperuser;
 CREATE USER test_nonsuperuser;
 
--- Attempt to create extension as non-superuser (should fail)
 SET ROLE test_nonsuperuser;
 DO $$
 BEGIN
-    -- This should fail with permission denied
     EXECUTE 'CREATE EXTENSION pg_durable';
     RAISE EXCEPTION 'SECURITY FAILURE: Non-superuser was able to create pg_durable extension!';
 EXCEPTION
     WHEN insufficient_privilege THEN
-        -- Expected: permission denied
         RAISE NOTICE 'TEST 1 PASSED: Non-superuser correctly denied extension creation';
     WHEN OTHERS THEN
         IF SQLERRM ILIKE '%permission%' OR SQLERRM ILIKE '%superuser%' THEN
-            RAISE NOTICE 'TEST 1 PASSED: Non-superuser correctly denied extension creation (%)' , SQLERRM;
+            RAISE NOTICE 'TEST 1 PASSED: Non-superuser correctly denied extension creation (%)', SQLERRM;
         ELSE
             RAISE EXCEPTION 'TEST 1 FAILED: Unexpected error: %', SQLERRM;
         END IF;
 END $$;
 RESET ROLE;
 
--- Cleanup test user
 DROP USER test_nonsuperuser;
 
--- ============================================================================
 -- Test 2: Extension creation fails if 'df' schema pre-exists
--- ============================================================================
-
--- Create the 'df' schema before attempting extension creation
--- This simulates an attacker trying to pre-create the schema
 CREATE SCHEMA IF NOT EXISTS df;
 
--- Attempt to create extension with pre-existing df schema (should fail)
 DO $$
 DECLARE
     extension_created BOOLEAN := FALSE;
 BEGIN
-    -- This should fail because the schema already exists
     BEGIN
         CREATE EXTENSION pg_durable;
         extension_created := TRUE;
@@ -60,41 +160,29 @@ BEGIN
         WHEN duplicate_schema THEN
             RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema';
         WHEN OTHERS THEN
-            -- The extension might also fail with other errors related to schema conflicts
             IF SQLERRM ILIKE '%schema%' OR SQLERRM ILIKE '%already exists%' OR SQLERRM ILIKE '%df%' THEN
-                RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema (%)' , SQLERRM;
+                RAISE NOTICE 'TEST 2 PASSED: Extension creation correctly prevented with pre-existing df schema (%)', SQLERRM;
             ELSE
                 RAISE EXCEPTION 'TEST 2 FAILED: Unexpected error during extension creation: %', SQLERRM;
             END IF;
     END;
     
-    -- If we get here and extension was created, that's a security failure
     IF extension_created THEN
         RAISE EXCEPTION 'SECURITY FAILURE: Extension created successfully even with pre-existing df schema!';
     END IF;
 END $$;
 
--- Clean up the pre-created schema
 DROP SCHEMA IF EXISTS df CASCADE;
 
--- ============================================================================
--- Restore extension for remaining tests
--- ============================================================================
-
--- Recreate the extension properly for other tests to continue
+-- Recreate the extension properly for remaining tests
 CREATE EXTENSION pg_durable;
 
--- ============================================================================
 -- Test 3: Ungranted role cannot call df.sql() / df.start()
--- ============================================================================
-
--- At this point the extension exists but no explicit grants have been applied
--- to df_e2e_user. Verify that the role cannot use the df API.
+-- (At this point extension exists but df_e2e_user has no explicit grants yet)
 SET ROLE df_e2e_user;
 
 DO $$
 BEGIN
-    -- df.sql() should be blocked for an ungranted role
     BEGIN
         PERFORM df.sql('SELECT 1');
         RAISE EXCEPTION 'SECURITY FAILURE: ungranted role was able to call df.sql()';
@@ -103,7 +191,6 @@ BEGIN
             RAISE NOTICE 'TEST 3a PASSED: df.sql() blocked for ungranted role (insufficient privilege)';
     END;
 
-    -- df.start() should also be blocked
     BEGIN
         PERFORM df.start(df.sql('SELECT 1'), 'ungranted-role-test');
         RAISE EXCEPTION 'SECURITY FAILURE: ungranted role was able to call df.start()';
@@ -115,18 +202,14 @@ END $$;
 
 RESET ROLE;
 
--- Re-grant df privileges to the E2E user (no longer auto-granted to PUBLIC)
+-- Re-grant df privileges to the E2E user
 SELECT df.grant_usage('df_e2e_user');
 
--- ============================================================================
 -- Test 4: Non-superuser cannot call df.grant_usage() or df.revoke_usage()
--- ============================================================================
-
 SET ROLE df_e2e_user;
 
 DO $$
 BEGIN
-    -- df.grant_usage() should be blocked for non-superuser
     BEGIN
         PERFORM df.grant_usage('df_e2e_user');
         RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.grant_usage()';
@@ -139,7 +222,6 @@ BEGIN
             END IF;
     END;
 
-    -- df.revoke_usage() should be blocked for non-superuser
     BEGIN
         PERFORM df.revoke_usage('df_e2e_user');
         RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.revoke_usage()';
@@ -158,10 +240,7 @@ RESET ROLE;
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
 SELECT public._e2e_wait_for_worker_ready();
 
--- Verify the worker is actually processing functions by submitting a
--- trivial function and waiting for completion.
--- NOTE: df.start() must be outside the DO block so the transaction commits
--- and the background worker can see the instance.
+-- Verify the worker is actually processing functions
 CREATE TEMP TABLE _test_state_25 (instance_id TEXT);
 INSERT INTO _test_state_25 SELECT df.start(df.sql('SELECT 1'), 'verify-worker-ready');
 
@@ -188,12 +267,10 @@ DECLARE
     schema_exists BOOLEAN;
     extension_exists BOOLEAN;
 BEGIN
-    -- Check that df schema exists
     SELECT EXISTS(
         SELECT 1 FROM pg_namespace WHERE nspname = 'df'
     ) INTO schema_exists;
     
-    -- Check that extension exists
     SELECT EXISTS(
         SELECT 1 FROM pg_extension WHERE extname = 'pg_durable'
     ) INTO extension_exists;

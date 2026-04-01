@@ -1,39 +1,66 @@
--- Test: User Isolation - SQL executed with submitter's privileges
---
--- This test must run as SUPERUSER because it creates/drops roles.
--- It validates that durable functions execute SQL as the submitting user,
--- not as the background worker's superuser.
+-- Merged from: 26_superuser_scenarios, 27_user_isolation
+-- Tests: superuser durable SQL (pg_authid access), per-user table isolation,
+--        NOLOGIN group role rejection, SECURITY DEFINER semantics, dropped role handling
+-- Runs as postgres throughout (creates/drops roles and user-owned tables)
 
--- ============================================================================
+-- === Test: 26_superuser_scenarios ===
+
+CREATE TEMP TABLE _test_state (instance_id TEXT);
+
+INSERT INTO _test_state
+SELECT df.start(
+    df.sql('SELECT (SELECT rolname FROM pg_authid LIMIT 1) AS any_role'),
+    'test-superuser-pg_authid'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected completed, got %', status;
+    END IF;
+
+    SELECT r INTO result FROM df.result(inst_id) r;
+    IF result NOT LIKE '%any_role%' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected result to contain any_role, got %', result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: superuser durable sql (pg_authid)';
+END $$;
+
+DROP TABLE _test_state;
+
+-- === Test: 27_user_isolation ===
+
 -- Setup: Create two test users with separate tables
--- ============================================================================
 DO $setup$
 BEGIN
-    -- Clean up from any previous run
     PERFORM pg_terminate_backend(pid)
       FROM pg_stat_activity
       WHERE usename IN ('iso_alice', 'iso_bob')
         AND pid <> pg_backend_pid();
 
-    -- Drop roles if they exist (CASCADE owned objects first)
     BEGIN DROP OWNED BY iso_alice; EXCEPTION WHEN undefined_object THEN NULL; END;
     BEGIN DROP OWNED BY iso_bob;   EXCEPTION WHEN undefined_object THEN NULL; END;
     BEGIN DROP ROLE iso_alice;     EXCEPTION WHEN undefined_object THEN NULL; END;
     BEGIN DROP ROLE iso_bob;       EXCEPTION WHEN undefined_object THEN NULL; END;
 END $setup$;
 
--- Create users
 CREATE ROLE iso_alice LOGIN;
 CREATE ROLE iso_bob   LOGIN;
 
--- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
 SELECT df.grant_usage('iso_alice');
 SELECT df.grant_usage('iso_bob');
 
--- Grant non-auto privileges needed by these tests.
 GRANT TEMPORARY ON DATABASE postgres TO iso_alice, iso_bob;
 
--- Create per-user tables
 CREATE TABLE IF NOT EXISTS iso_alice_data (id SERIAL PRIMARY KEY, value TEXT);
 ALTER TABLE iso_alice_data OWNER TO iso_alice;
 INSERT INTO iso_alice_data (value) VALUES ('alice secret') ON CONFLICT DO NOTHING;
@@ -42,10 +69,7 @@ CREATE TABLE IF NOT EXISTS iso_bob_data (id SERIAL PRIMARY KEY, value TEXT);
 ALTER TABLE iso_bob_data OWNER TO iso_bob;
 INSERT INTO iso_bob_data (value) VALUES ('bob secret') ON CONFLICT DO NOTHING;
 
--- ============================================================================
 -- Test 1: Alice can access her own table via durable function
--- ============================================================================
--- Create temp table INSIDE SET SESSION AUTHORIZATION so iso_alice owns it
 SET SESSION AUTHORIZATION iso_alice;
 CREATE TEMP TABLE _test_state_1 (instance_id TEXT);
 INSERT INTO _test_state_1
@@ -76,9 +100,7 @@ END $$;
 
 DROP TABLE _test_state_1;
 
--- ============================================================================
 -- Test 2: Alice CANNOT access Bob's table via durable function
--- ============================================================================
 SET SESSION AUTHORIZATION iso_alice;
 CREATE TEMP TABLE _test_state_2 (instance_id TEXT);
 INSERT INTO _test_state_2
@@ -103,9 +125,7 @@ END $$;
 
 DROP TABLE _test_state_2;
 
--- ============================================================================
 -- Test 3: Bob can access his own table via durable function
--- ============================================================================
 SET SESSION AUTHORIZATION iso_bob;
 CREATE TEMP TABLE _test_state_3 (instance_id TEXT);
 INSERT INTO _test_state_3
@@ -136,9 +156,7 @@ END $$;
 
 DROP TABLE _test_state_3;
 
--- ============================================================================
 -- Test 4: Bob CANNOT access Alice's table via durable function
--- ============================================================================
 SET SESSION AUTHORIZATION iso_bob;
 CREATE TEMP TABLE _test_state_4 (instance_id TEXT);
 INSERT INTO _test_state_4
@@ -163,12 +181,7 @@ END $$;
 
 DROP TABLE _test_state_4;
 
--- ============================================================================
 -- Test 5: SET ROLE with a NOLOGIN group role → df.start() rejects
--- ============================================================================
--- In the simplified model, current_user must have LOGIN. After SET ROLE to
--- a NOLOGIN group role, current_user = that group role, which lacks LOGIN.
--- df.start() should raise an immediate error.
 DO $group_setup$
 BEGIN
     BEGIN DROP OWNED BY iso_analysts; EXCEPTION WHEN undefined_object THEN NULL; END;
@@ -180,13 +193,10 @@ CREATE TABLE IF NOT EXISTS iso_analyst_data (id SERIAL PRIMARY KEY, value TEXT);
 ALTER TABLE iso_analyst_data OWNER TO iso_analysts;
 INSERT INTO iso_analyst_data (value) VALUES ('analyst report') ON CONFLICT DO NOTHING;
 
--- Grant iso_analysts to alice and grant df permissions to the group role
 GRANT iso_analysts TO iso_alice;
--- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
 SELECT df.grant_usage('iso_analysts');
 GRANT TEMPORARY ON DATABASE postgres TO iso_analysts;
 
--- Test 5a: SET ROLE to NOLOGIN role → df.start() should error
 SET SESSION AUTHORIZATION iso_alice;
 SET ROLE iso_analysts;
 DO $$
@@ -235,7 +245,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED (Test 5b): expected analyst report, got %', result;
     END IF;
 
-    -- Verify identity column on the instance
     SELECT submitted_by::text INTO inst_submitted
       FROM df.instances WHERE id = inst_id;
 
@@ -248,33 +257,21 @@ END $$;
 
 DROP TABLE _test_state_5b;
 
--- Revert LOGIN for cleanup
 ALTER ROLE iso_analysts NOLOGIN;
 
--- ============================================================================
 -- Test 6: SECURITY DEFINER function - captures definer identity
--- ============================================================================
--- In the simplified model, GetUserId() captures current_user, which inside
--- a SECURITY DEFINER function is the function *owner* (definer), not the
--- caller. SQL therefore runs with definer privileges.
-
--- Create a superuser-only table (alice has no access)
 CREATE TABLE IF NOT EXISTS iso_superuser_secrets (id SERIAL PRIMARY KEY, value TEXT);
 INSERT INTO iso_superuser_secrets (value) VALUES ('classified') ON CONFLICT DO NOTHING;
--- Do NOT grant alice any access to this table
 
--- Create a SECURITY DEFINER wrapper function owned by superuser
 CREATE OR REPLACE FUNCTION iso_submit_as_definer(q TEXT) RETURNS TEXT
 LANGUAGE SQL SECURITY DEFINER
 AS $$
     SELECT df.start(df.sql(q), 'secdef-test');
 $$;
 
--- Grant alice permission to execute the wrapper
 GRANT EXECUTE ON FUNCTION iso_submit_as_definer TO iso_alice;
 
 -- Test 6a: Alice calls SECURITY DEFINER to query her own table
--- Expected: succeeds because function runs as superuser (definer), who can access all tables
 SET SESSION AUTHORIZATION iso_alice;
 CREATE TEMP TABLE _test_state_6a (instance_id TEXT);
 INSERT INTO _test_state_6a
@@ -306,8 +303,6 @@ END $$;
 DROP TABLE _test_state_6a;
 
 -- Test 6b: Alice calls SECURITY DEFINER to query superuser-only table
--- Expected: SUCCEEDS because function runs as superuser (definer)
--- This is the correct behavior in the simplified model.
 SET SESSION AUTHORIZATION iso_alice;
 CREATE TEMP TABLE _test_state_6b (instance_id TEXT);
 INSERT INTO _test_state_6b
@@ -338,17 +333,10 @@ END $$;
 
 DROP TABLE _test_state_6b;
 
--- Cleanup Test 6 resources
 DROP FUNCTION IF EXISTS iso_submit_as_definer(TEXT);
 DROP TABLE IF EXISTS iso_superuser_secrets CASCADE;
 
--- ============================================================================
 -- Test 7: Dropped role during execution
--- ============================================================================
--- This verifies that clear error messages are produced when the submitting
--- role is dropped between node executions in a multi-step function.
-
--- Create ephemeral user and table
 DO $test7_setup$
 BEGIN
     BEGIN DROP OWNED BY iso_ephemeral; EXCEPTION WHEN undefined_object THEN NULL; END;
@@ -356,15 +344,9 @@ BEGIN
 END $test7_setup$;
 
 CREATE ROLE iso_ephemeral LOGIN;
--- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
 SELECT df.grant_usage('iso_ephemeral');
 GRANT TEMPORARY ON DATABASE postgres TO iso_ephemeral;
 
--- Submit a sequence: df.sleep(3) followed by df.sql('SELECT 1')
--- We'll drop the role after the sleep starts but before the SQL executes.
--- This tests the realistic scenario: role dropped between nodes in a multi-node graph.
-
--- Use a regular table (not temp) so we can access it after session switch
 DROP TABLE IF EXISTS _test_state_7_persistent;
 CREATE TABLE _test_state_7_persistent (instance_id TEXT);
 GRANT INSERT ON _test_state_7_persistent TO iso_ephemeral;
@@ -373,7 +355,6 @@ SET SESSION AUTHORIZATION iso_ephemeral;
 INSERT INTO _test_state_7_persistent SELECT df.start(df.sleep(3) ~> df.sql('SELECT 1'), 'ephemeral-test');
 RESET SESSION AUTHORIZATION;
 
--- Wait for the sleep node to start, then drop the role
 DO $$
 DECLARE
     inst_id TEXT;
@@ -382,7 +363,6 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_7_persistent;
     
-    -- Wait until at least one node has started (status != 'pending')
     LOOP
         SELECT COUNT(*) INTO node_count
           FROM df.nodes
@@ -400,14 +380,12 @@ BEGIN
     
     RAISE NOTICE 'Test 7: Sleep node started, now dropping role iso_ephemeral';
     
-    -- Drop the user and their objects (no need to terminate backends)
     DROP OWNED BY iso_ephemeral;
     DROP ROLE iso_ephemeral;
     
     RAISE NOTICE 'Test 7: Dropped role iso_ephemeral, SQL node should fail when it tries to execute';
 END $$;
 
--- Wait for execution and verify it fails with clear error
 DO $$
 DECLARE
     inst_id TEXT;
@@ -416,7 +394,6 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_7_persistent;
     
-    -- Wait for the instance to complete (should fail when trying to execute SQL node)
     LOOP
         SELECT status INTO final_status FROM df.instances WHERE id = inst_id;
         EXIT WHEN lower(final_status) IN ('failed', 'completed') OR attempts > 100;
@@ -432,18 +409,12 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED (Test 7 - dropped role): expected failed, got %', final_status;
     END IF;
     
-    -- The error should mention connection failure for the dropped role
-    -- We're not checking the exact error text since it comes from libpq/sqlx,
-    -- but we verified the instance transitioned to failed status
-    
     RAISE NOTICE 'Test 7 PASSED: Dropped role causes clear failure (status=failed)';
 END $$;
 
 DROP TABLE _test_state_7_persistent;
 
--- ============================================================================
 -- Cleanup
--- ============================================================================
 DROP TABLE IF EXISTS iso_alice_data CASCADE;
 DROP TABLE IF EXISTS iso_bob_data CASCADE;
 DROP TABLE IF EXISTS iso_analyst_data CASCADE;

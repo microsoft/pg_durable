@@ -1,11 +1,349 @@
--- E2E Test: SSRF Protection for df.http()
--- Tests that HTTP requests to private/reserved IP ranges are blocked.
--- Spec: docs/http-security.md
+-- Merged from: 18_http, 19_github_api, 36_ssrf_protection
+-- Tests: HTTP GET/POST/headers/sequence/parallel/4xx/delay/vars,
+--        GitHub API with loop and vars, SSRF protection for all blocked/allowed cases
+-- Requires: pg_durable built with --features http (standard phase uses http-allow-test-domains)
+SET SESSION AUTHORIZATION df_e2e_user;
 
--- ============================================================================
+-- === Test: 18_http ===
+
+-- Test 1: Simple GET request
+CREATE TEMP TABLE _test_http_get (instance_id TEXT);
+
+INSERT INTO _test_http_get SELECT df.start(
+    df.http('https://httpbingo.org/get', 'GET') |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as success',
+    'test-http-get'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_get;
+    RAISE NOTICE 'Testing HTTP GET: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP GET status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_get';
+END $$;
+
+DROP TABLE _test_http_get;
+
+-- Test 2: POST request with JSON body
+CREATE TEMP TABLE _test_http_post (instance_id TEXT);
+
+INSERT INTO _test_http_post SELECT df.start(
+    df.http(
+        'https://httpbingo.org/post',
+        'POST',
+        '{"message": "hello from pg_durable", "value": 42}'
+    ) |=> 'response'
+    ~> 'SELECT 
+            ($response::jsonb->>''ok'')::boolean as ok,
+            ($response::jsonb->>''status'')::int as status_code',
+    'test-http-post'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_post;
+    RAISE NOTICE 'Testing HTTP POST: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP POST status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_post';
+END $$;
+
+DROP TABLE _test_http_post;
+
+-- Test 3: HTTP with custom headers
+CREATE TEMP TABLE _test_http_headers (instance_id TEXT);
+
+INSERT INTO _test_http_headers SELECT df.start(
+    df.http(
+        'https://httpbingo.org/headers',
+        'GET',
+        NULL,
+        '{"X-Custom-Header": "pg_durable_test", "Accept": "application/json"}'::jsonb
+    ) |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as ok',
+    'test-http-headers'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_headers;
+    RAISE NOTICE 'Testing HTTP with headers: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP headers status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_headers';
+END $$;
+
+DROP TABLE _test_http_headers;
+
+-- Test 4: HTTP in a sequence (fetch data, then use it)
+CREATE TEMP TABLE _test_http_sequence (instance_id TEXT);
+
+INSERT INTO _test_http_sequence SELECT df.start(
+    (df.http('https://httpbingo.org/uuid', 'GET') |=> 'uuid_response')
+    ~> (df.http(
+        'https://httpbingo.org/post',
+        'POST',
+        '{"received_uuid": "will_be_substituted"}'
+    ) |=> 'echo_response')
+    ~> 'SELECT 
+            ($uuid_response::jsonb->>''ok'')::boolean as uuid_ok,
+            ($echo_response::jsonb->>''ok'')::boolean as echo_ok',
+    'test-http-sequence'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_sequence;
+    RAISE NOTICE 'Testing HTTP sequence: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP sequence status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_sequence';
+END $$;
+
+DROP TABLE _test_http_sequence;
+
+-- Test 5: Parallel HTTP requests
+CREATE TEMP TABLE _test_http_parallel (instance_id TEXT);
+
+INSERT INTO _test_http_parallel SELECT df.start(
+    df.join(
+        df.http('https://httpbingo.org/get?branch=1', 'GET'),
+        df.http('https://httpbingo.org/get?branch=2', 'GET')
+    ) |=> 'parallel_results'
+    ~> 'SELECT json_array_length($parallel_results::json) as result_count',
+    'test-http-parallel'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_parallel;
+    RAISE NOTICE 'Testing HTTP parallel: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP parallel status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_parallel';
+END $$;
+
+DROP TABLE _test_http_parallel;
+
+-- Test 6: HTTP 4xx error handling (should NOT fail, returns response)
+CREATE TEMP TABLE _test_http_404 (instance_id TEXT);
+
+INSERT INTO _test_http_404 SELECT df.start(
+    df.http('https://httpbingo.org/status/404', 'GET') |=> 'response'
+    ~> df.if(
+        'SELECT ($response::jsonb->>''status'')::int = 404',
+        'SELECT ''handled_404_correctly''',
+        'SELECT ''unexpected_status'''
+    ),
+    'test-http-404'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_404;
+    RAISE NOTICE 'Testing HTTP 404 handling: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP 404 should complete (user handles), got status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_404_handling';
+END $$;
+
+DROP TABLE _test_http_404;
+
+-- Test 7: HTTP delay (tests timeout handling)
+CREATE TEMP TABLE _test_http_delay (instance_id TEXT);
+
+INSERT INTO _test_http_delay SELECT df.start(
+    df.http('https://httpbingo.org/delay/1', 'GET') |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as ok',
+    'test-http-delay'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_delay;
+    RAISE NOTICE 'Testing HTTP delay: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP delay status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_delay';
+END $$;
+
+DROP TABLE _test_http_delay;
+
+-- Test 8: HTTP with workflow variables
+SELECT df.clearvars();
+SELECT df.setvar('base_url', 'https://httpbingo.org');
+SELECT df.setvar('test_endpoint', '/get');
+
+CREATE TEMP TABLE _test_http_vars (instance_id TEXT);
+
+INSERT INTO _test_http_vars SELECT df.start(
+    df.http('{base_url}{test_endpoint}', 'GET') |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as success',
+    'test-http-vars'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_vars;
+    RAISE NOTICE 'Testing HTTP with vars: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP vars status = %', status;
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: http_vars';
+END $$;
+
+DROP TABLE _test_http_vars;
+SELECT df.clearvars();
+
+-- === Test: 19_github_api ===
+
+DROP TABLE IF EXISTS github_commits;
+CREATE TABLE github_commits (
+    id SERIAL PRIMARY KEY,
+    sha TEXT UNIQUE,
+    author TEXT,
+    message TEXT,
+    committed_at TIMESTAMPTZ,
+    fetched_at TIMESTAMPTZ DEFAULT now()
+);
+
+SELECT df.clearvars();
+SELECT df.setvar('github_url', 'https://api.github.com/repos/microsoft/duroxide/commits?per_page=5');
+
+CREATE TEMP TABLE _test_github (instance_id TEXT);
+
+INSERT INTO _test_github SELECT df.start(
+    @> (
+        (df.http(
+            '{github_url}',
+            'GET',
+            NULL,
+            '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable-test"}'::jsonb
+        ) |=> 'response')
+        ~> 'INSERT INTO github_commits (sha, author, message, committed_at)
+            SELECT 
+                c->>''sha'',
+                c->''commit''->''author''->>''name'',
+                c->''commit''->>''message'',
+                (c->''commit''->''author''->>''date'')::timestamptz
+            FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS c
+            ON CONFLICT (sha) DO UPDATE SET
+                fetched_at = now()
+            RETURNING sha'
+        ~> df.wait_for_schedule('*/30 * * * *')
+    ),
+    'github-commit-sync'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    commit_count INT;
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_github;
+    RAISE NOTICE 'Testing GitHub API with vars and loop: %', inst_id;
+    
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        SELECT COUNT(*) INTO commit_count FROM github_commits;
+        EXIT WHEN commit_count > 0 OR lower(status) = 'failed' OR attempts > 300;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    
+    IF lower(status) = 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: GitHub API fetch status = %', status;
+    END IF;
+    
+    SELECT COUNT(*) INTO commit_count FROM github_commits;
+    RAISE NOTICE 'Fetched % commits from GitHub', commit_count;
+    
+    IF commit_count = 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: No commits fetched from GitHub API';
+    END IF;
+    
+    PERFORM df.cancel(inst_id, 'Test completed - cancelling scheduled loop');
+    RAISE NOTICE 'Cancelled scheduled loop after successful first iteration';
+    
+    RAISE NOTICE 'TEST PASSED: github_api_with_vars_and_loop';
+END $$;
+
+SELECT sha, author, committed_at, LEFT(message, 50) AS message FROM github_commits ORDER BY committed_at DESC;
+
+DROP TABLE _test_github;
+DROP TABLE github_commits;
+SELECT df.clearvars();
+
+-- === Test: 36_ssrf_protection ===
+
 -- Test 1: Block cloud metadata endpoint (link-local 169.254.169.254)
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf1 (instance_id TEXT);
 
 INSERT INTO _test_ssrf1 SELECT df.start(
@@ -28,7 +366,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: SSRF metadata request should have failed, got status = %', status;
     END IF;
 
-    -- Verify the error mentions bare IP (allow-list blocks all IPs first)
     SELECT result::text INTO node_result
     FROM df.nodes
     WHERE instance_id = inst_id AND node_type = 'HTTP';
@@ -42,10 +379,7 @@ END $$;
 
 DROP TABLE _test_ssrf1;
 
--- ============================================================================
 -- Test 2: Block localhost (127.0.0.1)
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf2 (instance_id TEXT);
 
 INSERT INTO _test_ssrf2 SELECT df.start(
@@ -81,14 +415,7 @@ END $$;
 
 DROP TABLE _test_ssrf2;
 
--- ============================================================================
 -- Test 3: Block unsupported URL scheme (file://) — DSL time and execution time
---
--- df.http() validates the scheme at DSL construction time, so the error is
--- raised before df.start() is ever called.  Test 12 (below) covers the
--- execution-time path via a hand-crafted raw JSON bypass.
--- ============================================================================
-
 DO $$
 DECLARE
     caught BOOLEAN := false;
@@ -110,10 +437,7 @@ BEGIN
     RAISE NOTICE 'TEST PASSED: ssrf_block_file_scheme';
 END $$;
 
--- ============================================================================
 -- Test 4: Non-Azure domain is blocked by allow-list (example.com)
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf4 (instance_id TEXT);
 
 INSERT INTO _test_ssrf4 SELECT df.start(
@@ -149,10 +473,7 @@ END $$;
 
 DROP TABLE _test_ssrf4;
 
--- ============================================================================
 -- Test 5: Azure Blob domain passes allow-list (DNS/network may fail, not allow-list)
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf5 (instance_id TEXT);
 
 INSERT INTO _test_ssrf5 SELECT df.start(
@@ -170,7 +491,6 @@ BEGIN
 
     PERFORM df.wait_for_completion(inst_id);
 
-    -- May fail at DNS/network level, but must NOT fail due to allow-list
     SELECT result::text INTO node_result
     FROM df.nodes
     WHERE instance_id = inst_id AND node_type = 'HTTP';
@@ -184,10 +504,7 @@ END $$;
 
 DROP TABLE _test_ssrf5;
 
--- ============================================================================
 -- Test 6: Bare public IP address is blocked
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf6 (instance_id TEXT);
 
 INSERT INTO _test_ssrf6 SELECT df.start(
@@ -223,11 +540,7 @@ END $$;
 
 DROP TABLE _test_ssrf6;
 
--- ============================================================================
 -- Test 7: management.azure.com is intentionally absent from allow-list
--- (Azure control-plane — must not be callable from workflows)
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf7 (instance_id TEXT);
 
 INSERT INTO _test_ssrf7 SELECT df.start(
@@ -263,13 +576,7 @@ END $$;
 
 DROP TABLE _test_ssrf7;
 
--- ============================================================================
--- Test 8: Redirects are not followed (response returned as-is, no bypass)
--- httpbingo.org/status/302 always returns 302 with a Location header.
--- With Policy::none() the client returns that response directly; if redirects
--- were followed we would get a 2xx from the final destination instead.
--- ============================================================================
-
+-- Test 8: Redirects are not followed
 CREATE TEMP TABLE _test_ssrf8 (instance_id TEXT);
 
 INSERT INTO _test_ssrf8 SELECT df.start(
@@ -294,7 +601,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: redirect request should complete (return 3xx), got status = %', status;
     END IF;
 
-    -- The HTTP node result must contain a 3xx status (redirect not followed)
     SELECT result::text INTO node_result
     FROM df.nodes
     WHERE instance_id = inst_id AND node_type = 'HTTP';
@@ -310,15 +616,7 @@ END $$;
 
 DROP TABLE _test_ssrf8;
 
--- ============================================================================
 -- Test 9: All Azure domain suffixes pass the allow-list
--- (DNS/network failures are acceptable; allow-list rejections are not)
---
--- Mirrors AZURE_DOMAIN_SUFFIXES in src/ssrf.rs exactly (20 entries).
--- df.start() calls must be top-level committed statements so the BGW can see the
--- inserted nodes. Using INSERT...SELECT from unnest() commits all 20 starts at once.
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf9 (instance_id TEXT, suffix TEXT);
 
 INSERT INTO _test_ssrf9
@@ -373,10 +671,7 @@ END $$;
 
 DROP TABLE _test_ssrf9;
 
--- ============================================================================
 -- Test 10: Allow legitimate test-domain HTTPS (sanity check)
--- ============================================================================
-
 CREATE TEMP TABLE _test_ssrf10 (instance_id TEXT);
 
 INSERT INTO _test_ssrf10 SELECT df.start(
@@ -403,12 +698,7 @@ END $$;
 
 DROP TABLE _test_ssrf10;
 
--- ============================================================================
--- Test 11: Crafting an HTTP node with a bad scheme via raw JSON to df.start()
--- bypasses the DSL check but is still blocked at execution time.
--- (DSL-time scheme rejection is already covered by Test 3 above.)
--- ============================================================================
-
+-- Test 11: Crafting an HTTP node with a bad scheme via raw JSON — blocked at execution time
 CREATE TEMP TABLE _test_ssrf11 (instance_id TEXT);
 
 INSERT INTO _test_ssrf11
@@ -447,4 +737,5 @@ END $$;
 
 DROP TABLE _test_ssrf11;
 
+RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

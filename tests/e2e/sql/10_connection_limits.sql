@@ -1,10 +1,8 @@
--- Test: Connection limit defaults
--- Verify that default GUC values allow concurrent workflows to succeed.
--- This test runs in the standard test-e2e-local.sh suite (no custom GUCs).
-
--- Start 5 concurrent workflows, each executing a short SQL statement.
--- With max_user_connections=10 (default), all should complete without
--- hitting backpressure limits.
+-- From: 43_connection_limit_defaults
+-- Tests: default GUC values allow concurrent workflows to succeed (standard phase)
+-- Runs as postgres; no special user context needed for this test
+-- Note: phase-specific connection limit tests (backpressure, timeout, startup) remain
+--       in separate files (44, 45, 46) that require different GUC configurations
 
 DROP TABLE IF EXISTS test_connlimit_log;
 CREATE TABLE test_connlimit_log (id SERIAL, wf TEXT, ts TIMESTAMP DEFAULT now());
