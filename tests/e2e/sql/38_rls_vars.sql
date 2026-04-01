@@ -30,8 +30,8 @@ CREATE ROLE vars_alice LOGIN;
 CREATE ROLE vars_bob   LOGIN;
 
 -- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('vars_alice');
-SELECT public._e2e_grant_df_privileges('vars_bob');
+SELECT df.grant_usage('vars_alice');
+SELECT df.grant_usage('vars_bob');
 
 GRANT TEMPORARY ON DATABASE postgres TO vars_alice, vars_bob;
 

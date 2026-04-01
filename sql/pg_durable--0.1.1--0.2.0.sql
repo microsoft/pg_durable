@@ -242,6 +242,10 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, df, pg_temp
 AS $fn$
 BEGIN
+    IF NOT current_setting('is_superuser')::bool THEN
+        RAISE EXCEPTION 'df.grant_usage() requires superuser';
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
         RAISE EXCEPTION 'role "%" does not exist', p_role;
     END IF;
@@ -268,6 +272,10 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, df, pg_temp
 AS $fn$
 BEGIN
+    IF NOT current_setting('is_superuser')::bool THEN
+        RAISE EXCEPTION 'df.revoke_usage() requires superuser';
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
         RAISE EXCEPTION 'role "%" does not exist', p_role;
     END IF;
