@@ -23,8 +23,11 @@ SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 CONTAINER_NAME="pg_durable_e2e"
 IMAGE_NAME="pg_durable:latest"
 
-# Test that requires --no-preload mode and must be skipped when running with shared_preload_libraries
+# Tests that require a PostgreSQL mode Docker does not manage in this script
 NO_PRELOAD_TEST="00_requires_shared_preload"
+CONNLIMIT_BACKPRESSURE_TEST="44_connection_limit_backpressure"
+CONNLIMIT_TIMEOUT_TEST="45_connection_limit_timeout"
+CONNLIMIT_STARTUP_TEST="46_connection_limit_startup_validation"
 
 # Defaults
 KEEP_RUNNING=false
@@ -193,10 +196,12 @@ for run in $(seq 1 $REPEAT_COUNT); do
             continue
         fi
 
-        # Skip the shared_preload_libraries enforcement test: Docker always runs with
-        # shared_preload_libraries=pg_durable configured, so this test cannot be run
-        # in a Docker container (it requires a server WITHOUT the preload configured).
-        if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]]; then
+        # Skip tests that require a different PostgreSQL startup mode or
+        # restart-sensitive connection-limit GUC changes.
+        if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]] \
+           || [[ "$test_name" == "$CONNLIMIT_BACKPRESSURE_TEST" ]] \
+           || [[ "$test_name" == "$CONNLIMIT_TIMEOUT_TEST" ]] \
+           || [[ "$test_name" == "$CONNLIMIT_STARTUP_TEST" ]]; then
             continue
         fi
 
