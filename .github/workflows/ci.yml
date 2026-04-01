@@ -186,13 +186,13 @@ jobs:
         id: e2e_no_preload
         run: ./scripts/test-e2e-local.sh --clean --no-preload --pg-version ${{ matrix.pg_version }}
 
-      - name: Run E2E tests
+      - name: Run E2E tests (standard suite)
         id: e2e_tests
-        run: ./scripts/test-e2e-local.sh --clean --pg-version ${{ matrix.pg_version }}
+        run: ./scripts/test-e2e-local.sh --clean --standard --pg-version ${{ matrix.pg_version }}
 
       - name: Run connection limit E2E tests
         id: connlimit_tests
-        run: ./scripts/test-connlimit-e2e.sh --pg-version ${{ matrix.pg_version }}
+        run: ./scripts/test-e2e-local.sh --clean --connlimit-backpressure --connlimit-timeout --connlimit-startup --pg-version ${{ matrix.pg_version }}
 
       - name: Run upgrade tests
         id: upgrade_tests

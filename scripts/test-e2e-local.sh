@@ -1,46 +1,160 @@
 #!/bin/bash
-# test-e2e-local.sh - Run E2E tests locally using pgrx PostgreSQL
+# BEGIN_USAGE
+# test-e2e-local.sh - Run local E2E tests across all required PostgreSQL modes.
 #
 # Usage: ./scripts/test-e2e-local.sh [options] [test_filter] [repeat_count]
 #
 # Options:
-#   --keep            Leave PostgreSQL running after tests for investigation
-#   --clean           Start with fresh database (wipes all data)
-#   --verbose         Show all NOTICE messages and full error output
-#   -v                Same as --verbose
-#   --pg-version VER  PostgreSQL major version to use (default: 17)
-#   --no-preload      Start PostgreSQL WITHOUT shared_preload_libraries=pg_durable
-#                     (runs only 00_requires_shared_preload test)
+#   --keep                    Leave PostgreSQL running after tests for investigation
+#   --clean                   Start with a fresh database cluster
+#   --verbose, -v             Show NOTICE messages and full test output
+#   --pg-version VER          PostgreSQL major version to use (default: 17)
+#   --no-preload              Run only the shared_preload_libraries enforcement phase
+#   --standard                Run only the standard preload-enabled phase
+#   --connlimit-backpressure  Run only the connection limit backpressure phase
+#   --connlimit-timeout       Run only the connection limit timeout phase
+#   --connlimit-startup       Run only the connection limit startup-validation phase
+#   --help, -h                Show this help
 #
 # Examples:
-#   ./scripts/test-e2e-local.sh                         # Run all tests, stop server after
-#   ./scripts/test-e2e-local.sh --keep                  # Run all tests, keep server running
-#   ./scripts/test-e2e-local.sh --verbose               # Run all tests with NOTICE messages
-#   ./scripts/test-e2e-local.sh 04_parallel             # Run matching test
-#   ./scripts/test-e2e-local.sh 04_parallel 5           # Run 5 times
-#   ./scripts/test-e2e-local.sh --keep 04_parallel      # Run test, keep server
-#   ./scripts/test-e2e-local.sh -v 27_database_guc      # Run test with verbose output
-#   ./scripts/test-e2e-local.sh --pg-version 18         # Run all tests against PG18
-#   ./scripts/test-e2e-local.sh --no-preload            # Test shared_preload_libraries enforcement
+#   ./scripts/test-e2e-local.sh
+#   ./scripts/test-e2e-local.sh 04_parallel
+#   ./scripts/test-e2e-local.sh 04_parallel 5
+#   ./scripts/test-e2e-local.sh --keep
+#   ./scripts/test-e2e-local.sh --clean --pg-version 18
+#   ./scripts/test-e2e-local.sh --no-preload
+#   ./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout
+# END_USAGE
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 
-# Defaults
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
-NO_PRELOAD=false
 TEST_FILTER=""
 REPEAT_COUNT=1
 PG_VERSION="17"
+EXPLICIT_PHASES=false
+SETUP_PLAYGROUND_APPLIED=false
+E2E_ROLE_ENSURED=false
+VERSION_SHOWN=false
 
-# Parse arguments
+declare -a REQUESTED_PHASES=()
+declare -a MATCHED_TESTS=()
+declare -a ACTIVE_PHASES=()
+
+ALL_PHASES=(
+    "no-preload"
+    "standard"
+    "connlimit-backpressure"
+    "connlimit-timeout"
+    "connlimit-startup"
+)
+
+PGRX_HOME="$HOME/.pgrx"
+PG_USER="postgres"
+PG_DB="postgres"
+E2E_USER="df_e2e_user"
+NO_PRELOAD_TEST="00_requires_shared_preload"
+SETUP_TEST="00_setup_playground"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+print_usage() {
+    sed -n '/^# BEGIN_USAGE/,/^# END_USAGE/{ /^# BEGIN_USAGE/d; /^# END_USAGE/d; s/^# \{0,1\}//; p }' "$0"
+}
+
+contains_value() {
+    local wanted="$1"
+    shift || true
+    local value
+
+    for value in "$@"; do
+        if [ "$value" = "$wanted" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+add_requested_phase() {
+    local phase="$1"
+
+    if ! contains_value "$phase" "${ALL_PHASES[@]}"; then
+        echo "Error: unsupported phase '$phase'"
+        exit 1
+    fi
+
+    if ! contains_value "$phase" "${REQUESTED_PHASES[@]}"; then
+        REQUESTED_PHASES+=("$phase")
+    fi
+}
+
+phase_label() {
+    case "$1" in
+        no-preload)
+            echo "shared_preload_libraries enforcement"
+            ;;
+        standard)
+            echo "standard suite"
+            ;;
+        connlimit-backpressure)
+            echo "connection limit backpressure"
+            ;;
+        connlimit-timeout)
+            echo "connection limit timeout"
+            ;;
+        connlimit-startup)
+            echo "connection limit startup validation"
+            ;;
+        *)
+            echo "$1"
+            ;;
+    esac
+}
+
+phase_for_test() {
+    case "$1" in
+        "$NO_PRELOAD_TEST")
+            echo "no-preload"
+            ;;
+        44_connection_limit_backpressure)
+            echo "connlimit-backpressure"
+            ;;
+        45_connection_limit_timeout)
+            echo "connlimit-timeout"
+            ;;
+        46_connection_limit_startup_validation)
+            echo "connlimit-startup"
+            ;;
+        *)
+            echo "standard"
+            ;;
+    esac
+}
+
+test_user_for() {
+    case "$1" in
+        00_requires_shared_preload|22_cross_connection|23_transactions|25_extension_creation_security|26_superuser_*|27_user_isolation|28_bgw_lifecycle|29_database_validation|34_multi_database|35_heartbeat_liveness|37_rls|38_rls_vars)
+            echo "$PG_USER"
+            ;;
+        *)
+            echo "$E2E_USER"
+            ;;
+    esac
+}
+
 while [[ $# -gt 0 ]]; do
-    case $1 in
+    case "$1" in
         --keep)
             KEEP_RUNNING=true
             shift
@@ -54,61 +168,446 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --pg-version)
-            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo "Error: --pg-version requires a numeric argument, got: $2"
+            if [ $# -lt 2 ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --pg-version requires a numeric argument"
                 exit 1
             fi
             PG_VERSION="$2"
             shift 2
             ;;
         --no-preload)
-            NO_PRELOAD=true
+            EXPLICIT_PHASES=true
+            add_requested_phase "no-preload"
             shift
+            ;;
+        --standard)
+            EXPLICIT_PHASES=true
+            add_requested_phase "standard"
+            shift
+            ;;
+        --connlimit-backpressure)
+            EXPLICIT_PHASES=true
+            add_requested_phase "connlimit-backpressure"
+            shift
+            ;;
+        --connlimit-timeout)
+            EXPLICIT_PHASES=true
+            add_requested_phase "connlimit-timeout"
+            shift
+            ;;
+        --connlimit-startup)
+            EXPLICIT_PHASES=true
+            add_requested_phase "connlimit-startup"
+            shift
+            ;;
+        --help|-h)
+            print_usage
+            exit 0
+            ;;
+        --*)
+            echo "Error: unknown option '$1'"
+            exit 1
             ;;
         *)
             if [ -z "$TEST_FILTER" ]; then
                 TEST_FILTER="$1"
-            else
+            elif [ "$REPEAT_COUNT" = "1" ]; then
                 REPEAT_COUNT="$1"
+            else
+                echo "Error: unexpected argument '$1'"
+                exit 1
             fi
             shift
             ;;
     esac
 done
 
-# pgrx settings
-PGRX_HOME="$HOME/.pgrx"
+if ! [[ "$REPEAT_COUNT" =~ ^[0-9]+$ ]] || [ "$REPEAT_COUNT" -lt 1 ]; then
+    echo "Error: repeat_count must be a positive integer"
+    exit 1
+fi
+
 PG_PORT="$((28800 + PG_VERSION))"
-PG_USER="postgres"
-PG_DB="postgres"
+DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
+LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
+CONF_FILE="$DATA_DIR/postgresql.conf"
 
-# Default non-privileged role for E2E tests (created by 00_setup_playground.sql)
-E2E_USER="df_e2e_user"
-
-# Find pgrx binaries
-PGRX_BIN=$(ls -d $PGRX_HOME/$PG_VERSION.*/pgrx-install/bin 2>/dev/null | head -1)
-if [ -z "$PGRX_BIN" ]; then
+shopt -s nullglob
+PGRX_CANDIDATES=("$PGRX_HOME"/"$PG_VERSION".*/pgrx-install/bin)
+shopt -u nullglob
+if [ "${#PGRX_CANDIDATES[@]}" -eq 0 ]; then
     echo "Error: pgrx PostgreSQL $PG_VERSION not installed"
     echo "Run: cargo pgrx init"
     exit 1
 fi
 
+PGRX_BIN="${PGRX_CANDIDATES[0]}"
 PSQL="$PGRX_BIN/psql"
 PG_CTL="$PGRX_BIN/pg_ctl"
 PG_ISREADY="$PGRX_BIN/pg_isready"
 PG_CONFIG="$PGRX_BIN/pg_config"
-DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
-LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 
-# Test that requires --no-preload mode (no shared_preload_libraries)
-NO_PRELOAD_TEST="00_requires_shared_preload"
+stop_server() {
+    if [ -d "$DATA_DIR" ] && "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+        echo -e "${YELLOW}Stopping PostgreSQL...${NC}"
+        "$PG_CTL" -D "$DATA_DIR" stop -m fast >/dev/null 2>&1 || true
+        sleep 1
+    fi
+}
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+cleanup() {
+    if [ "$KEEP_RUNNING" = false ]; then
+        stop_server
+        return
+    fi
+
+    echo ""
+    echo -e "${GREEN}PostgreSQL left running on port $PG_PORT${NC}"
+    echo "Connect: $PSQL -h localhost -p $PG_PORT -d $PG_DB"
+    echo "Logs:    tail -f $LOG_FILE"
+    echo "Stop:    ./scripts/pg-stop.sh"
+}
+
+trap cleanup EXIT
+
+remove_conf_key() {
+    local key="$1"
+    local escaped_key="${key//./\\.}"
+    sed -i.bak "/^[#[:space:]]*${escaped_key}[[:space:]]*=/d" "$CONF_FILE"
+}
+
+set_conf_line() {
+    remove_conf_key "$1"
+    echo "$1 = $2" >> "$CONF_FILE"
+}
+
+clear_connlimit_gucs() {
+    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d' "$CONF_FILE"
+}
+
+ensure_data_dir() {
+    if [ ! -d "$DATA_DIR" ]; then
+        echo "Initializing database..."
+        "$PGRX_BIN/initdb" -D "$DATA_DIR" -U postgres --no-locale -E UTF8 >/dev/null 2>&1
+    fi
+}
+
+wait_for_server() {
+    local attempts=0
+
+    until "$PG_ISREADY" -h localhost -p "$PG_PORT" -U "$PG_USER" -q >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 60 ]; then
+            echo "PostgreSQL did not become ready on port $PG_PORT"
+            exit 1
+        fi
+        sleep 0.5
+    done
+}
+
+restart_server() {
+    stop_server
+    echo -e "${YELLOW}Starting PostgreSQL...${NC}"
+    "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    wait_for_server
+}
+
+build_extension() {
+    echo "Building and installing extension..."
+    cd "$PROJECT_DIR"
+    cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
+}
+
+show_version_once() {
+    if [ "$VERSION_SHOWN" = false ]; then
+        echo -n "pg_durable version: "
+        "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
+        echo ""
+        VERSION_SHOWN=true
+    fi
+}
+
+grant_e2e_df_usage() {
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+        -c "SELECT df.grant_usage('$E2E_USER');" >/dev/null 2>&1
+}
+
+ensure_e2e_role() {
+    if [ "$E2E_ROLE_ENSURED" = false ]; then
+        "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" <<'SQL' >/dev/null
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
+        CREATE ROLE df_e2e_user LOGIN;
+    END IF;
+END $$;
+GRANT USAGE, CREATE ON SCHEMA public TO df_e2e_user;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO df_e2e_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO df_e2e_user;
+SQL
+
+        E2E_ROLE_ENSURED=true
+    fi
+
+    grant_e2e_df_usage
+}
+
+wait_for_worker_ready() {
+    local ready="f"
+    local attempts=0
+
+    while [ "$attempts" -lt 120 ]; do
+        ready=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'duroxide' AND table_name = '_worker_ready') THEN EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1) ELSE FALSE END;" 2>/dev/null | tr -d ' \n' || true)
+        if [ "$ready" = "t" ]; then
+            return
+        fi
+        sleep 0.5
+        attempts=$((attempts + 1))
+    done
+
+    echo "Background worker did not become ready. Check server logs."
+    exit 1
+}
+
+recreate_extension() {
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
+}
+
+configure_phase() {
+    local phase="$1"
+
+    ensure_data_dir
+    set_conf_line "port" "$PG_PORT"
+    clear_connlimit_gucs
+
+    case "$phase" in
+        no-preload)
+            remove_conf_key "shared_preload_libraries"
+            ;;
+        standard)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            ;;
+        connlimit-backpressure)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.max_user_connections" "2"
+            ;;
+        connlimit-timeout)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.max_user_connections" "1"
+            set_conf_line "pg_durable.execution_acquire_timeout" "2"
+            ;;
+        connlimit-startup)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.max_duroxide_connections" "1"
+            ;;
+    esac
+}
+
+prepare_phase() {
+    local phase="$1"
+
+    configure_phase "$phase"
+    restart_server
+
+    if [ "$phase" = "no-preload" ]; then
+        "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+        return
+    fi
+
+    recreate_extension
+    show_version_once
+
+    case "$phase" in
+        standard)
+            if [ "$SETUP_PLAYGROUND_APPLIED" = false ]; then
+                "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -f "$SQL_DIR/$SETUP_TEST.sql" >/dev/null
+                SETUP_PLAYGROUND_APPLIED=true
+                E2E_ROLE_ENSURED=true
+            else
+                ensure_e2e_role
+                wait_for_worker_ready
+            fi
+            ;;
+        connlimit-backpressure|connlimit-timeout)
+            ensure_e2e_role
+            wait_for_worker_ready
+            ;;
+        connlimit-startup)
+            ;;
+    esac
+}
+
+collect_matched_tests() {
+    local test_file
+    local test_name
+
+    MATCHED_TESTS=()
+
+    for test_file in "$SQL_DIR"/*.sql; do
+        [ -f "$test_file" ] || continue
+        test_name=$(basename "$test_file" .sql)
+
+        if [ "$test_name" = "$SETUP_TEST" ]; then
+            continue
+        fi
+
+        if [ -n "$TEST_FILTER" ] && [[ "$test_name" != *"$TEST_FILTER"* ]]; then
+            continue
+        fi
+
+        MATCHED_TESTS+=("$test_file")
+    done
+
+    if [ "${#MATCHED_TESTS[@]}" -eq 0 ]; then
+        echo "Error: no E2E tests matched the current selection"
+        exit 1
+    fi
+}
+
+phase_has_tests() {
+    local phase="$1"
+    local test_file
+    local test_name
+
+    for test_file in "${MATCHED_TESTS[@]}"; do
+        test_name=$(basename "$test_file" .sql)
+        if [ "$(phase_for_test "$test_name")" = "$phase" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+select_active_phases() {
+    local phase
+
+    ACTIVE_PHASES=()
+
+    for phase in "${ALL_PHASES[@]}"; do
+        if [ "$EXPLICIT_PHASES" = true ]; then
+            if contains_value "$phase" "${REQUESTED_PHASES[@]}" && phase_has_tests "$phase"; then
+                ACTIVE_PHASES+=("$phase")
+            fi
+        else
+            if phase_has_tests "$phase"; then
+                ACTIVE_PHASES+=("$phase")
+            fi
+        fi
+    done
+
+    if [ "${#ACTIVE_PHASES[@]}" -eq 0 ]; then
+        echo "Error: selected phases contain no matching tests"
+        exit 1
+    fi
+}
+
+print_failure_excerpt() {
+    local output="$1"
+    local excerpt
+
+    excerpt=$(printf '%s\n' "$output" | grep -E "(NOTICE|ERROR|TEST FAILED)" | tail -15 || true)
+    if [ -n "$excerpt" ]; then
+        printf '%s\n' "$excerpt"
+    else
+        printf '%s\n' "$output" | tail -15
+    fi
+}
+
+run_test_file() {
+    local test_file="$1"
+    local test_name
+    local psql_user
+    local output
+
+    test_name=$(basename "$test_file" .sql)
+    psql_user=$(test_user_for "$test_name")
+
+    printf "  %-45s ... " "$test_name"
+
+    if [ "$VERBOSE" = true ]; then
+        echo ""
+        if "$PSQL" -h localhost -p "$PG_PORT" -U "$psql_user" -d "$PG_DB" -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"; then
+            echo -e "  ${GREEN}PASS${NC}"
+            return 0
+        fi
+
+        echo -e "  ${RED}FAIL${NC}"
+        return 1
+    fi
+
+    if output=$("$PSQL" -h localhost -p "$PG_PORT" -U "$psql_user" -d "$PG_DB" -v ON_ERROR_STOP=1 -f "$test_file" 2>&1); then
+        if printf '%s\n' "$output" | grep -q "TEST FAILED"; then
+            echo -e "${RED}FAIL${NC}"
+            print_failure_excerpt "$output"
+            return 1
+        fi
+
+        echo -e "${GREEN}PASS${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}FAIL${NC}"
+    print_failure_excerpt "$output"
+    return 1
+}
+
+run_phase() {
+    local phase="$1"
+    local phase_passed=0
+    local phase_failed=0
+    local test_file
+    local test_name
+    local phase_tests=()
+
+    for test_file in "${MATCHED_TESTS[@]}"; do
+        test_name=$(basename "$test_file" .sql)
+        if [ "$(phase_for_test "$test_name")" = "$phase" ]; then
+            phase_tests+=("$test_file")
+        fi
+    done
+
+    if [ "${#phase_tests[@]}" -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}=== $(phase_label "$phase") ===${NC}"
+    prepare_phase "$phase"
+
+    for test_file in "${phase_tests[@]}"; do
+        if run_test_file "$test_file"; then
+            phase_passed=$((phase_passed + 1))
+        else
+            phase_failed=$((phase_failed + 1))
+        fi
+    done
+
+    TOTAL_PASSED=$((TOTAL_PASSED + phase_passed))
+    TOTAL_FAILED=$((TOTAL_FAILED + phase_failed))
+
+    echo -e "  Phase result: ${GREEN}${phase_passed} passed${NC}, ${RED}${phase_failed} failed${NC}"
+}
+
+restore_keep_running_state() {
+    if [ "$KEEP_RUNNING" = true ] && [ "${#ACTIVE_PHASES[@]}" -gt 1 ]; then
+        echo ""
+        echo -e "${YELLOW}Restoring standard PostgreSQL state for investigation...${NC}"
+        prepare_phase "standard"
+    fi
+}
+
+collect_matched_tests
+select_active_phases
 
 echo "================================================"
 echo "pg_durable E2E Tests (Local)"
@@ -119,275 +618,44 @@ fi
 if [ "$REPEAT_COUNT" -gt 1 ]; then
     echo -e "Repeat: ${CYAN}$REPEAT_COUNT times${NC}"
 fi
+echo -e "Phases: ${CYAN}${ACTIVE_PHASES[*]}${NC}"
 if [ "$KEEP_RUNNING" = true ]; then
     echo -e "Mode: ${YELLOW}Keep server running after tests${NC}"
 fi
 if [ "$VERBOSE" = true ]; then
-    echo -e "Mode: ${YELLOW}Verbose output (show NOTICE messages)${NC}"
-fi
-if [ "$NO_PRELOAD" = true ]; then
-    echo -e "Mode: ${YELLOW}No-preload (testing shared_preload_libraries enforcement)${NC}"
+    echo -e "Mode: ${YELLOW}Verbose output${NC}"
 fi
 echo "================================================"
 echo ""
 
-# Function to stop server
-stop_server() {
-    if "$PG_ISREADY" -h localhost -p $PG_PORT -U postgres &>/dev/null; then
-        echo -e "${YELLOW}Stopping PostgreSQL...${NC}"
-        "$PG_CTL" -D "$DATA_DIR" stop -m fast 2>/dev/null || true
-    fi
-}
-
-# Function to ensure shared_preload_libraries is configured
-ensure_config() {
-    if [ -d "$DATA_DIR" ]; then
-        # Check if shared_preload_libraries is correctly set
-        if ! grep -q "^shared_preload_libraries.*pg_durable" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
-            echo "Configuring shared_preload_libraries..."
-            # Remove any existing shared_preload_libraries lines (commented or not)
-            sed -i.bak '/^#*shared_preload_libraries/d' "$DATA_DIR/postgresql.conf"
-            echo "shared_preload_libraries = 'pg_durable'" >> "$DATA_DIR/postgresql.conf"
-        fi
-        # Ensure worker_role is set
-        if ! grep -q "^pg_durable.worker_role" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
-            echo "Configuring pg_durable.worker_role..."
-            echo "pg_durable.worker_role = 'postgres'" >> "$DATA_DIR/postgresql.conf"
-        fi
-        # Ensure database is set to 'postgres' (pg_regress may have changed it to contrib_regression)
-        if ! grep -q "^pg_durable.database = 'postgres'" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
-            echo "Configuring pg_durable.database..."
-            sed -i.bak '/^#*pg_durable.database/d' "$DATA_DIR/postgresql.conf"
-            echo "pg_durable.database = 'postgres'" >> "$DATA_DIR/postgresql.conf"
-        fi
-        # Ensure port is set
-        if ! grep -q "^port = $PG_PORT" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
-            sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
-            echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
-        fi
-    fi
-}
-
-# Function to configure PostgreSQL WITHOUT shared_preload_libraries (for --no-preload mode)
-ensure_config_no_preload() {
-    if [ -d "$DATA_DIR" ]; then
-        # Remove shared_preload_libraries so pg_durable is NOT preloaded
-        sed -i.bak '/^#*shared_preload_libraries/d' "$DATA_DIR/postgresql.conf"
-        # Ensure port is set
-        if ! grep -q "^port = $PG_PORT" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
-            sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
-            echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
-        fi
-    fi
-}
-
-# Function to start server
-start_server() {
-    # Clean start if requested
-    if [ "$CLEAN_START" = true ] && [ -d "$DATA_DIR" ]; then
-        stop_server
-        echo "Removing old data directory..."
-        rm -rf "$DATA_DIR"
-    fi
-    
-    # Build and install extension first (before starting server)
-    echo "Building and installing extension..."
-    cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
-    
-    # Initialize if needed
-    if [ ! -d "$DATA_DIR" ]; then
-        echo "Initializing database..."
-        "$PGRX_BIN/initdb" -D "$DATA_DIR" -U postgres --no-locale -E UTF8 >/dev/null 2>&1
-    fi
-    
-    # Ensure config is correct (with or without preload)
-    if [ "$NO_PRELOAD" = true ]; then
-        ensure_config_no_preload
-    else
-        ensure_config
-    fi
-    
-    # If server is running, we need to:
-    # 1. Drop extension + duroxide schema (to clear any stale schema from previous duroxide-pg-opt version)
-    # 2. Restart server (so background worker reconnects with fresh cached plans)
-    if "$PG_ISREADY" -h localhost -p $PG_PORT -U postgres &>/dev/null; then
-        # Drop extension (CASCADE also drops the owned duroxide schema)
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
-        echo -e "${YELLOW}Restarting PostgreSQL to reload extension...${NC}"
-        stop_server
-    fi
-    
-    # Start server
-    echo -e "${YELLOW}Starting PostgreSQL...${NC}"
-    "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
-    sleep 2
-    
-    if [ "$NO_PRELOAD" = true ]; then
-        # Drop extension if it exists from a previous run (e.g., unit tests)
-        # so the no-preload test can verify CREATE EXTENSION fails correctly
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
-    else
-        # Always drop and recreate extension to ensure PL/pgSQL functions from extension_sql!
-        # are up to date. Without this, a cached data directory (e.g. from CI) may have stale
-        # PL/pgSQL operator functions even though the Rust .so is updated by cargo pgrx install.
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
-        "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
-    fi
-}
-
-# Cleanup on exit (unless --keep)
-cleanup() {
-    if [ "$KEEP_RUNNING" = false ]; then
-        stop_server
-    else
-        echo ""
-        echo -e "${GREEN}PostgreSQL left running on port $PG_PORT${NC}"
-        echo "Connect: $PSQL -h localhost -p $PG_PORT -d $PG_DB"
-        echo "Logs:    tail -f $LOG_FILE"
-        echo "Stop:    ./scripts/pg-stop.sh"
-    fi
-}
-trap cleanup EXIT
-
-# Start server
-start_server
-
-# Show version and run setup (only when extension is loaded, not in --no-preload mode)
-if [ "$NO_PRELOAD" = false ]; then
-    echo -n "pg_durable version: "
-    "$PSQL" -h localhost -p $PG_PORT -U $PG_USER -d $PG_DB -t -c "SELECT df.version();" 2>/dev/null | tr -d ' \n'
-    echo ""
-    echo ""
-
-    # Run shared E2E setup (outside the repeat loop since it only needs to run once)
-    "$PSQL" -h localhost -p $PG_PORT -U "$PG_USER" -d $PG_DB -v ON_ERROR_STOP=1 -f "$SQL_DIR/00_setup_playground.sql" >/dev/null
-else
-    echo ""
+if [ "$CLEAN_START" = true ] && [ -d "$DATA_DIR" ]; then
+    stop_server
+    echo "Removing old data directory..."
+    rm -rf "$DATA_DIR"
 fi
 
-# Run tests
+build_extension
+ensure_data_dir
+
 TOTAL_PASSED=0
 TOTAL_FAILED=0
 
-for run in $(seq 1 $REPEAT_COUNT); do
+for run in $(seq 1 "$REPEAT_COUNT"); do
     if [ "$REPEAT_COUNT" -gt 1 ]; then
         echo -e "${CYAN}=== Run $run of $REPEAT_COUNT ===${NC}"
     fi
-    
-    PASSED=0
-    FAILED=0
 
-    for test_file in "$SQL_DIR"/*.sql; do
-        [ -f "$test_file" ] || continue
-        
-        test_name=$(basename "$test_file" .sql)
-        
-        # In --no-preload mode, only run the shared_preload_libraries enforcement test
-        if [ "$NO_PRELOAD" = true ] && [[ "$test_name" != *"$NO_PRELOAD_TEST"* ]]; then
-            continue
-        fi
-
-        # In normal mode, skip tests that have specific requirements:
-        # - shared_preload_libraries enforcement test (requires server without preload)
-        # - setup_playground (already run explicitly as shared setup)
-        # - connection limit tests except defaults (require custom Postmaster GUCs;
-        #   run separately via scripts/test-connlimit-e2e.sh)
-        if [ "$NO_PRELOAD" = false ]; then
-            if [[ "$test_name" == *"$NO_PRELOAD_TEST"* ]] \
-               || [[ "$test_name" == "00_setup_playground" ]] \
-               || [[ "$test_name" == *_connection_limit_* && "$test_name" != *_connection_limit_defaults* ]]; then
-                continue
-            fi
-        fi
-
-        # Apply filter
-        if [ -n "$TEST_FILTER" ] && [[ ! "$test_name" == *"$TEST_FILTER"* ]]; then
-            continue
-        fi
-        
-        echo -n "  $test_name ... "
-
-        # Tests run as the non-privileged E2E user unless they need superuser:
-        # 00_requires_shared_preload attempts create extension
-        # 22 and 23 use dblink passwordless connections
-        # 25 tests extension creation security
-        # 26 tests superuser scenarios
-        # 27 creates users and tests permissions
-        # 28 drops/creates the extension
-        # 29 uses dblink and creates pg_durable in a different database
-        # 34 creates/drops a database for multi-database testing
-        # 35 reads df._worker_epoch (internal table)
-        # 37 tests RLS policies, including for superuser, changes users
-        # 38 tests per-user vars RLS isolation, changes users
-        PSQL_USER="$E2E_USER"
-        if [[ "$test_name" == "00_requires_shared_preload" \
-           || "$test_name" == "22_cross_connection" \
-           || "$test_name" == "23_transactions" \
-           || "$test_name" == "25_extension_creation_security" \
-           || "$test_name" == 26_superuser_* \
-           || "$test_name" == "27_user_isolation" \
-           || "$test_name" == "28_bgw_lifecycle" \
-           || "$test_name" == "29_database_validation" \
-           || "$test_name" == "34_multi_database" \
-           || "$test_name" == "35_heartbeat_liveness" \
-           || "$test_name" == "37_rls" \
-           || "$test_name" == "38_rls_vars" ]]; then
-            PSQL_USER="$PG_USER"
-        fi
-        
-        # In verbose mode, show output as it happens
-        if [ "$VERBOSE" = true ]; then
-            echo ""  # Newline before verbose output
-            set +e
-            "$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"
-            exit_code=$?
-            set -e
-
-            if [ $exit_code -eq 0 ]; then
-                echo -e "  ${GREEN}PASS${NC}"
-                PASSED=$((PASSED + 1))
-            else
-                echo -e "  ${RED}FAIL${NC}"
-                FAILED=$((FAILED + 1))
-            fi
-        else
-            # Non-verbose mode: capture output and show summary
-            set +e
-            output=$( "$PSQL" -h localhost -p $PG_PORT -U "$PSQL_USER" -d $PG_DB -v ON_ERROR_STOP=1 -f "$test_file" 2>&1 )
-            exit_code=$?
-            set -e
-            
-            if [ $exit_code -eq 0 ]; then
-                if echo "$output" | grep -q "TEST PASSED"; then
-                    echo -e "${GREEN}PASS${NC}"
-                    PASSED=$((PASSED + 1))
-                elif echo "$output" | grep -q "TEST FAILED"; then
-                    echo -e "${RED}FAIL${NC}"
-                    echo "$output" | grep -E "(NOTICE|ERROR|TEST FAILED)" | tail -15
-                    FAILED=$((FAILED + 1))
-                else
-                    echo -e "${GREEN}PASS${NC}"
-                    PASSED=$((PASSED + 1))
-                fi
-            else
-                echo -e "${RED}FAIL${NC}"
-                echo "$output" | grep -E "(NOTICE|ERROR)" | tail -15
-                FAILED=$((FAILED + 1))
-            fi
-        fi
+    for phase in "${ACTIVE_PHASES[@]}"; do
+        run_phase "$phase"
     done
-    
-    TOTAL_PASSED=$((TOTAL_PASSED + PASSED))
-    TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
-    
+
     if [ "$REPEAT_COUNT" -gt 1 ]; then
-        echo -e "  Run $run: ${GREEN}$PASSED passed${NC}, ${RED}$FAILED failed${NC}"
         echo ""
     fi
 done
 
-echo ""
+restore_keep_running_state
+
 echo "================================================"
 if [ "$REPEAT_COUNT" -gt 1 ]; then
     echo "Total Results ($REPEAT_COUNT runs):"
@@ -395,5 +663,4 @@ fi
 echo -e "Results: ${GREEN}$TOTAL_PASSED passed${NC}, ${RED}$TOTAL_FAILED failed${NC}"
 echo "================================================"
 
-[ $TOTAL_FAILED -eq 0 ]
-
+[ "$TOTAL_FAILED" -eq 0 ]

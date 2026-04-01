@@ -152,11 +152,12 @@ make installcheck          # run only (PostgreSQL must already be running)
 
 ### E2E Tests (Comprehensive Scenario Tests)
 
-Complex integration tests with Docker:
+Complex local integration tests with pgrx PostgreSQL:
 
 ```bash
-./scripts/test-e2e-local.sh              # All tests
-./scripts/test-e2e-local.sh 04_parallel  # Specific test
+./scripts/test-e2e-local.sh                                                  # All local SQL E2E tests, including special restart/config phases
+./scripts/test-e2e-local.sh 04_parallel                                      # Specific test
+./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout      # Only the selected connection-limit phases
 ```
 
 See [tests/e2e/](tests/e2e/) for details.

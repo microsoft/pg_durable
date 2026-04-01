@@ -102,6 +102,12 @@ Fast iteration using local pgrx PostgreSQL. Best for development.
 # Run specific test
 ./scripts/test-e2e-local.sh 04_parallel
 
+# Run only the standard preload-enabled suite
+./scripts/test-e2e-local.sh --standard
+
+# Run only specific special phases
+./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout
+
 # Run test multiple times (stability check)
 ./scripts/test-e2e-local.sh 04_parallel 5
 
@@ -129,7 +135,7 @@ tail -f ~/.pgrx/17.log
 
 ### 3b. Docker E2E Tests
 
-Tests in a linux/amd64 container. Matches production environment.
+Tests in a linux/amd64 container. Runs all the local e2e tests that don't require special settings.
 
 ```bash
 # Run all tests (builds image if needed)
@@ -149,6 +155,8 @@ Tests in a linux/amd64 container. Matches production environment.
 ```
 
 > ⚠️ **Important**: If you change Rust code (`src/`), you must use `--rebuild` to rebuild the Docker image. Test SQL file changes are picked up automatically.
+
+Docker intentionally skips `00_requires_shared_preload.sql` and connection-limit tests `44` through `46`. Use `./scripts/test-e2e-local.sh` for the full phased SQL E2E coverage.
 
 **Investigation mode (`--keep`):**
 ```bash
