@@ -459,6 +459,6 @@ graph TB
 - [STRIDE Methodology](https://docs.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats)
 - [OWASP Threat Dragon](https://owasp.org/www-project-threat-dragon/)
 - [pg_durable Security Model Spec](../spec-security-model.md)
-- [pg_durable SSRF Protection Spec](../spec-ssrf-protection.md)
+- [pg_durable HTTP Security](../http-security.md)
 - [pg_durable User Isolation Design](../user-isolation.md)
 - [pg_durable RLS Design](../rls.md)

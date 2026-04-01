@@ -94,7 +94,7 @@ The security guarantee is: **only superusers can install the extension**, theref
 
 | Threat | Severity | Status | Notes |
 |--------|----------|--------|-------|
-| **T8**: SSRF via HTTP Activity | **CRITICAL** | Implemented | Dataplane protection — see [spec-ssrf-protection.md](spec-ssrf-protection.md) |
+| **T8**: SSRF via HTTP Activity | **CRITICAL** | Implemented | Dataplane protection — see [http-security.md](http-security.md) |
 | **T4**: Information Disclosure via df.* Tables | **HIGH** | Implemented | RLS on `df.instances` and `df.nodes` — see [rls.md](rls.md) |
 | **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
 | **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
@@ -251,7 +251,7 @@ See [rls.md](rls.md) for the full design, policy definitions, grant strategy, an
 
 **Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers.
 
-See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification, blocked IP ranges, and implementation details.
+See [http-security.md](http-security.md) for the full specification, blocked IP ranges, and implementation details.
 
 **Residual Risk**: Low — hardcoded blocklist cannot be bypassed.
 
@@ -598,11 +598,11 @@ ALTER SYSTEM SET df.http_max_response_bytes = 10485760;  -- 10MB
 
 SSRF protection is implemented as a compile-time IP blocklist that blocks all private/reserved IP ranges (RFC 1918, link-local, loopback, IPv6 ULA, etc.), with DNS rebinding protection and IPv4-mapped IPv6 handling.
 
-See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the full specification including blocked ranges, implementation architecture, and testing.
+See [http-security.md](http-security.md) for the full specification including blocked ranges, implementation architecture, and testing.
 
 ### 6.5 Implementation
 
-See [spec-ssrf-protection.md](spec-ssrf-protection.md) for the SSRF implementation details. The access control layers (URL allowlist, rate limiting) described in Section 6.1 are not yet implemented.
+See [http-security.md](http-security.md) for the SSRF implementation details. The access control layers (URL allowlist, rate limiting) described in Section 6.1 are not yet implemented.
 
 ### 6.6 User Experience
 

@@ -49,6 +49,16 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
     // Audit context
     let audit_user = config.submitted_by.as_deref().unwrap_or("unknown");
 
+    // Validation chain — order is security-critical:
+    //   1. Scheme:    blocks file://, gopher://, etc.
+    //   2. Allowlist: blocks ALL bare IPs (public and private) + non-Azure
+    //                 domains. Fails-closed on malformed URLs. Because bare IPs
+    //                 bypass the DNS resolver entirely in reqwest, this is the
+    //                 definitive gate for IP-literal URLs.
+    //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding — a hostname
+    //                 that passes the allowlist but resolves to a private IP at
+    //                 connect time.
+
     // --- Scheme validation (always enforced, regardless of feature flag) ---
     crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
@@ -57,19 +67,10 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
         ));
     })?;
 
-    // --- Azure endpoint allow-list (blocks bare IPs + non-Azure domains) ---
+    // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
     crate::ssrf::validate_url_allowlist(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (allowlist) url={} submitted_by={audit_user}",
-            config.url
-        ));
-    })?;
-
-    // --- IP-literal check (catches http://169.254.169.254 etc., where reqwest
-    //     skips DNS resolution and our resolver never runs) ---
-    crate::ssrf::validate_url_host(&config.url).inspect_err(|_| {
-        ctx.trace_info(format!(
-            "HTTP BLOCKED (ip) url={} submitted_by={audit_user}",
             config.url
         ));
     })?;

@@ -1,6 +1,6 @@
 -- E2E Test: SSRF Protection for df.http()
 -- Tests that HTTP requests to private/reserved IP ranges are blocked.
--- Spec: docs/spec-ssrf-protection.md
+-- Spec: docs/http-security.md
 
 -- ============================================================================
 -- Test 1: Block cloud metadata endpoint (link-local 169.254.169.254)

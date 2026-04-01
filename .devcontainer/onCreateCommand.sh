@@ -124,7 +124,7 @@ if [ "$SUBMODULE_INITIALIZED" = "1" ] && [ -f "duroxide-pg-opt/Cargo.toml" ]; th
     if [ "$SMOKE_MODE" = "1" ]; then
         echo "Smoke mode: skipping cargo build"
     else
-        cargo build --features pg17
+        cargo build --features pg17,http-allow-test-domains
         echo "✅ pg_durable built successfully"
     fi
 
