@@ -119,7 +119,8 @@ would create false positives without any security benefit.
 
 Bare IP literals in URLs (e.g. `http://169.254.169.254/...`) bypass DNS
 entirely — `reqwest` connects directly without calling the resolver.
-`validate_url_host` catches these before the request is built.
+`validate_url_allowlist` blocks all bare IPs unconditionally, so these never
+reach the resolver.
 
 ---
 
@@ -163,9 +164,9 @@ Only subdomains of the following suffixes are permitted.  Apex domains (e.g.
 ### 4.3 Bare IP rejection
 
 All bare IPv4 and IPv6 addresses are rejected by `validate_url_allowlist`
-regardless of feature flag — even under `http-allow-azure-domains`.  This
-provides defence in depth against IP literals that might slip past
-`validate_url_host`.
+regardless of feature flag — even under `http-allow-azure-domains`.
+Because the allowlist blocks all bare IPs, there is no separate IP-literal
+check; the allowlist is the definitive gate for IP-literal URLs.
 
 ---
 

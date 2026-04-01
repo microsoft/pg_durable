@@ -351,7 +351,7 @@ build_extension() {
 build_extension_no_http() {
     echo "Building extension (no http features)..."
     cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" --no-default-features >/dev/null 2>&1
+    cargo pgrx install --pg-config="$PG_CONFIG" --no-default-features --features "pg${PG_VERSION}" >/dev/null 2>&1
     CURRENT_FEATURES="none"
 }
 
@@ -418,6 +418,13 @@ recreate_extension() {
     # cannot race between them. The migration runner creates
     # "CREATE SCHEMA IF NOT EXISTS duroxide" independently, which would cause
     # CREATE EXTENSION to fail with "schema already exists" if there is any gap.
+    #
+    # Note: prepare_phase drops the extension *before* the server restart so
+    # the BGW boots into a clean database and does not start processing before
+    # this function runs.  That means the DROP here is always a no-op in normal
+    # usage.  It is kept so that recreate_extension remains self-contained and
+    # safe to call independently (e.g. from a future caller that skips the
+    # pre-restart drop).
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" <<'SQL' >/dev/null 2>&1
 BEGIN;
 DROP EXTENSION IF EXISTS pg_durable CASCADE;
@@ -499,8 +506,12 @@ prepare_phase() {
     # Drop the extension (and its owned duroxide schema) *before* restarting so
     # the BGW cannot find a pre-existing pg_durable extension on the next boot
     # and race past its "waiting for CREATE EXTENSION" poll loop before
-    # recreate_extension runs.  The || true makes this a no-op when the server
-    # is not yet running (e.g. first phase on a clean data dir).
+    # recreate_extension runs.  This is intentionally done here rather than
+    # inside recreate_extension: by the time that function runs the server is
+    # already up and the BGW is live, so there would be a window for the race.
+    # recreate_extension's own DROP is therefore always a no-op in practice —
+    # see the comment there for details.  The || true makes this a no-op when
+    # the server is not yet running (e.g. first phase on a clean data dir).
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
         -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" \
         >/dev/null 2>&1 || true

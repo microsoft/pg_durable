@@ -1533,7 +1533,9 @@ If the user who submitted a function is dropped **before execution**:
 HTTP requests (`df.http()`) currently execute with the **background worker's privileges**, not the submitting user's privileges:
 
 - All users can make HTTP requests to the same endpoints
-- No user-specific URL allowlists or SSRF protection
+- No user-specific URL allowlists
+
+**Security model:** Outbound HTTP is controlled by compile-time Cargo features and is off by default. When enabled, a hardcoded SSRF IP blocklist and domain allow-list are enforced — all requests to private/reserved IP ranges are blocked and only approved Azure service domains are permitted (e.g. `*.blob.core.windows.net`, `*.openai.azure.com`). These restrictions cannot be bypassed by any database user, including superusers. See `docs/http-security.md` for the full security model and feature flag reference.
 
 **Future:** Per-user HTTP isolation and URL allowlists are planned.
 

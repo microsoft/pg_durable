@@ -72,7 +72,7 @@ pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["api.github.com", "httpbin.org"
 // ---------------------------------------------------------------------------
 /// Returns `Some(reason)` if blocked, `None` if allowed.
 ///
-/// When compiled with the `no-ssrf-protection` feature, always returns `None`.
+/// When compiled with the `http-allow-all` feature, always returns `None`.
 pub fn check_blocked_ip(ip: IpAddr) -> Option<&'static str> {
     // Handle IPv4-mapped IPv6 (::ffff:A.B.C.D) — extract the embedded IPv4
     let ip = match ip {
@@ -149,44 +149,6 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
     }
 }
 
-/// When the URL host is an IP literal (e.g. `http://169.254.169.254/...` or
-/// `http://[::1]/...`), check it against the blocklist *before* reqwest sees the
-/// URL.  reqwest does NOT call the DNS resolver for IP literals, so the
-/// resolver-based check alone is insufficient.
-///
-/// Returns `Ok(())` if the host is a hostname (will be checked by the resolver)
-/// or a non-blocked IP.  Returns `Err` if the IP is in a blocked range.
-///
-/// Under `http-allow-all` this function always returns `Ok(())`.
-pub fn validate_url_host(url: &str) -> Result<(), String> {
-    #[cfg(feature = "http-allow-all")]
-    {
-        let _ = url;
-        Ok(())
-    }
-
-    #[cfg(not(feature = "http-allow-all"))]
-    {
-        let host = match extract_host(url) {
-            Some(h) => h,
-            None => return Ok(()), // malformed, let reqwest handle it
-        };
-
-        // Try to parse as IP address.  If it's a hostname, return Ok — the
-        // SsrfSafeResolver will check it after DNS resolution.
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            if check_blocked_ip(ip).is_some() {
-                return Err(format!(
-                    "Blocked: the resolved IP address for '{}' is in a restricted \
-                     range. df.http() cannot access private or internal network addresses.",
-                    host
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Endpoint allow-list validation
 // ---------------------------------------------------------------------------
@@ -201,65 +163,66 @@ pub fn validate_url_host(url: &str) -> Result<(), String> {
 ///   `httpbingo.org` (for E2E tests).
 /// * `http-allow-all` — allow-list check is skipped entirely; all domains pass.
 pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
-    // http-allow-all: skip all domain checks (IP checks still run in validate_url_host
-    // and the DNS resolver, but those are also bypassed under http-allow-all).
+    // http-allow-all: skip all domain checks.
     #[cfg(feature = "http-allow-all")]
     {
         let _ = url;
         Ok(())
     }
 
-    // No http feature at all — block everything.
-    #[cfg(not(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    )))]
+    #[cfg(not(feature = "http-allow-all"))]
     {
-        let _ = url;
-        Err("Blocked: outbound HTTP requests are disabled. \
-             Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them."
-            .to_string())
-    }
-
-    // http-allow-azure-domains or http-allow-test-domains: enforce allow-list.
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-    ))]
-    {
-        let host = extract_host(url)
-            .ok_or_else(|| "Blocked: unable to extract hostname from URL.".to_string())?;
-
-        let host_lower = host.to_ascii_lowercase();
-
-        // Block ALL bare IP addresses (IPv4 and IPv6).
-        if host_lower.parse::<IpAddr>().is_ok() {
-            return Err("Blocked: requests to bare IP addresses are not permitted. \
-                 Use an approved Azure service hostname instead."
-                .to_string());
+        // No http feature at all — block everything.
+        #[cfg(not(any(
+            feature = "http-allow-azure-domains",
+            feature = "http-allow-test-domains",
+        )))]
+        {
+            let _ = url;
+            Err("Blocked: outbound HTTP requests are disabled. \
+                 Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them."
+                .to_string())
         }
 
-        // Check Azure suffixes (always present when either azure or test feature is on).
-        for suffix in AZURE_DOMAIN_SUFFIXES {
-            if host_lower.ends_with(suffix) {
-                return Ok(());
+        // http-allow-azure-domains or http-allow-test-domains: enforce allow-list.
+        #[cfg(any(
+            feature = "http-allow-azure-domains",
+            feature = "http-allow-test-domains",
+        ))]
+        {
+            let host = extract_host(url)
+                .ok_or_else(|| "Blocked: unable to extract hostname from URL.".to_string())?;
+
+            let host_lower = host.to_ascii_lowercase();
+
+            // Block ALL bare IP addresses (IPv4 and IPv6).
+            if host_lower.parse::<IpAddr>().is_ok() {
+                return Err("Blocked: requests to bare IP addresses are not permitted. \
+                     Use an approved Azure service hostname instead."
+                    .to_string());
             }
-        }
 
-        // Additional test domains (only with http-allow-test-domains).
-        #[cfg(feature = "http-allow-test-domains")]
-        for exact in TEST_EXACT_DOMAINS {
-            if host_lower == *exact {
-                return Ok(());
+            // Check Azure suffixes (always present when either azure or test feature is on).
+            for suffix in AZURE_DOMAIN_SUFFIXES {
+                if host_lower.ends_with(suffix) {
+                    return Ok(());
+                }
             }
-        }
 
-        Err(format!(
-            "Blocked: '{}' is not in the allowed endpoint list. \
-             Only requests to approved Azure service domains are permitted.",
-            host
-        ))
+            // Additional test domains (only with http-allow-test-domains).
+            #[cfg(feature = "http-allow-test-domains")]
+            for exact in TEST_EXACT_DOMAINS {
+                if host_lower == *exact {
+                    return Ok(());
+                }
+            }
+
+            Err(format!(
+                "Blocked: '{}' is not in the allowed endpoint list. \
+                 Only requests to approved Azure service domains are permitted.",
+                host
+            ))
+        }
     }
 }
 
@@ -404,19 +367,23 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     // --- IPv4 blocked ranges ---
+    // Under http-allow-all the blocklist is disabled; these tests only run without it.
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_loopback() {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))).is_some());
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(127, 255, 255, 255))).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_rfc1918_10() {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))).is_some());
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_rfc1918_172() {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 0))).is_some());
@@ -427,12 +394,14 @@ mod tests {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 32, 0, 0))).is_none());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_rfc1918_192_168() {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0))).is_some());
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 255, 255))).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_link_local() {
         // Cloud metadata endpoint
@@ -441,6 +410,7 @@ mod tests {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_this_network() {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))).is_some());
@@ -458,22 +428,27 @@ mod tests {
     }
 
     // --- IPv6 blocked ranges ---
+    // Under http-allow-all the blocklist is disabled; these tests only run without it.
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv6_loopback() {
         assert!(check_blocked_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv6_unspecified() {
         assert!(check_blocked_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv6_link_local() {
         assert!(check_blocked_ip(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv6_ula() {
         assert!(check_blocked_ip(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))).is_some());
@@ -492,7 +467,9 @@ mod tests {
     }
 
     // --- IPv4-mapped IPv6 ---
+    // Under http-allow-all the blocklist is disabled; these tests only run without it.
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv4_mapped_ipv6_loopback() {
         // ::ffff:127.0.0.1
@@ -500,6 +477,7 @@ mod tests {
         assert!(check_blocked_ip(ip).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv4_mapped_ipv6_link_local() {
         // ::ffff:169.254.169.254 (cloud metadata)
@@ -507,6 +485,7 @@ mod tests {
         assert!(check_blocked_ip(ip).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn blocks_ipv4_mapped_ipv6_private() {
         let ip: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
@@ -553,43 +532,6 @@ mod tests {
     fn blocks_empty_and_malformed() {
         assert!(validate_url_scheme("").is_err());
         assert!(validate_url_scheme("no-scheme").is_err());
-    }
-
-    // --- URL host (IP literal) validation ---
-    // Under http-allow-all these would all pass; the tests below run only without it.
-
-    #[cfg(not(feature = "http-allow-all"))]
-    #[test]
-    fn host_blocks_ipv4_literals() {
-        assert!(validate_url_host("http://169.254.169.254/metadata").is_err());
-        assert!(validate_url_host("http://127.0.0.1:8080/path").is_err());
-        assert!(validate_url_host("https://10.0.0.1/admin").is_err());
-        assert!(validate_url_host("http://192.168.1.1").is_err());
-        assert!(validate_url_host("http://172.16.0.1:443/").is_err());
-    }
-
-    #[cfg(not(feature = "http-allow-all"))]
-    #[test]
-    fn host_blocks_ipv6_literals() {
-        assert!(validate_url_host("http://[::1]/path").is_err());
-        assert!(validate_url_host("http://[::1]:8080/path").is_err());
-        assert!(validate_url_host("http://[fe80::1]/path").is_err());
-        assert!(validate_url_host("http://[::ffff:169.254.169.254]/meta").is_err());
-        assert!(validate_url_host("http://[::ffff:127.0.0.1]:80/").is_err());
-    }
-
-    #[test]
-    fn host_allows_public_ips() {
-        assert!(validate_url_host("http://8.8.8.8/dns").is_ok());
-        assert!(validate_url_host("https://93.184.216.34/page").is_ok());
-        assert!(validate_url_host("http://[2001:4860:4860::8888]/dns").is_ok());
-    }
-
-    #[test]
-    fn host_allows_hostnames() {
-        // Hostnames are not checked here — the resolver handles them
-        assert!(validate_url_host("http://example.com/path").is_ok());
-        assert!(validate_url_host("https://internal.corp:8443/api").is_ok());
     }
 
     // --- extract_host helper ---
@@ -793,6 +735,50 @@ mod tests {
         assert!(validate_url_allowlist("not-a-url").is_err());
     }
 
+    // --- Parser-differential attack vectors (Finding 11 regression tests) ---
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_percent_encoded_host() {
+        // %2E is a percent-encoded '.'; our parser does no decoding so the
+        // encoded form never matches the suffix — the request is blocked.
+        // This locks the safe current behavior against accidental URL decoding.
+        assert!(validate_url_allowlist("https://foo%2Eblob%2Ecore%2Ewindows%2Enet/c").is_err());
+        assert!(validate_url_allowlist("https://evil%2Ecom/steal").is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_blocks_unicode_homograph_suffix() {
+        // IDN homograph attack: the suffix portion contains a Unicode lookalike
+        // (e.g. Cyrillic 'о' \u{043E} in place of ASCII 'o').  ends_with() does
+        // byte comparison so the non-ASCII bytes never match the ASCII suffix.
+        assert!(validate_url_allowlist(
+            "https://evil.\u{0431}l\u{043E}\u{0431}.c\u{043E}re.wind\u{043E}ws.net/x"
+        )
+        .is_err());
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_trailing_dot_fqdn_is_blocked() {
+        // Trailing dot is a valid FQDN terminator but our parser does not strip
+        // it, so the suffix check fails (e.g. "net." ≠ "net").  This is
+        // fail-safe (blocks rather than allows) and documents current behavior.
+        // If Finding 9 is fixed (strip trailing dot), this test must be updated
+        // to assert Ok(()) instead.
+        assert!(validate_url_allowlist("https://foo.blob.core.windows.net./c").is_err());
+    }
+
     // --- Query/fragment allowlist bypass vectors (Finding 1 regression tests) ---
 
     #[cfg(any(
@@ -850,5 +836,169 @@ mod tests {
     fn allowlist_still_blocks_arbitrary_domains() {
         assert!(validate_url_allowlist("https://example.com/path").is_err());
         assert!(validate_url_allowlist("https://evil.com/steal").is_err());
+    }
+
+    // --- SsrfSafeResolver behavioral tests ---
+    //
+    // These tests drive the resolver directly with a mock inner resolver so we
+    // don't need real DNS.  They cover the DNS-rebinding scenario: a hostname
+    // that passes the allowlist but resolves to a private IP at connect-time.
+
+    #[cfg(not(feature = "http-allow-all"))]
+    mod resolver_tests {
+        use super::super::{is_ssrf_block_error, SsrfSafeResolver};
+        use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+
+        /// A mock resolver that returns a fixed list of socket addresses.
+        struct MockResolver(Vec<SocketAddr>);
+
+        impl Resolve for MockResolver {
+            fn resolve(&self, _name: Name) -> Resolving {
+                let addrs = self.0.clone();
+                Box::pin(async move { Ok(Box::new(addrs.into_iter()) as Addrs) })
+            }
+        }
+
+        async fn resolve_with(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, String> {
+            let mock = Arc::new(MockResolver(addrs));
+            let safe = SsrfSafeResolver::wrapping(mock);
+            let name: Name = "rebind.example.com".parse().unwrap();
+            use reqwest::dns::Resolve;
+            safe.resolve(name)
+                .await
+                .map(|a| a.collect())
+                .map_err(|e| e.to_string())
+        }
+
+        /// DNS rebinding: hostname resolves exclusively to a private IP → blocked.
+        #[tokio::test]
+        async fn resolver_blocks_private_ip() {
+            let private: SocketAddr = "10.0.0.1:80".parse().unwrap();
+            let result = resolve_with(vec![private]).await;
+            assert!(result.is_err(), "expected error, got {result:?}");
+            let msg = result.unwrap_err();
+            assert!(
+                is_ssrf_block_error(&msg),
+                "error should be detected as SSRF block: {msg}"
+            );
+        }
+
+        /// DNS rebinding via link-local (cloud metadata endpoint).
+        #[tokio::test]
+        async fn resolver_blocks_link_local_ip() {
+            let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
+            let result = resolve_with(vec![metadata]).await;
+            assert!(result.is_err());
+            assert!(is_ssrf_block_error(&result.unwrap_err()));
+        }
+
+        /// Mixed results: private IP filtered out, public IP passes through.
+        #[tokio::test]
+        async fn resolver_filters_private_allows_public() {
+            let private: SocketAddr = "192.168.1.1:443".parse().unwrap();
+            let public: SocketAddr = "93.184.216.34:443".parse().unwrap();
+            let result = resolve_with(vec![private, public]).await;
+            let addrs = result.expect("should succeed when at least one public IP remains");
+            assert_eq!(addrs.len(), 1);
+            assert_eq!(addrs[0], public);
+        }
+
+        /// Public IP only: resolver passes it through unchanged.
+        #[tokio::test]
+        async fn resolver_allows_public_ip() {
+            let public: SocketAddr = "8.8.8.8:53".parse().unwrap();
+            let result = resolve_with(vec![public]).await;
+            let addrs = result.expect("public IP should be allowed");
+            assert_eq!(addrs.len(), 1);
+            assert_eq!(addrs[0], public);
+        }
+
+        /// Loopback (127.0.0.1) is blocked.
+        #[tokio::test]
+        async fn resolver_blocks_loopback() {
+            let loopback: SocketAddr = "127.0.0.1:80".parse().unwrap();
+            let result = resolve_with(vec![loopback]).await;
+            assert!(result.is_err());
+            assert!(is_ssrf_block_error(&result.unwrap_err()));
+        }
+
+        /// 172.16.0.0/12 range is blocked.
+        #[tokio::test]
+        async fn resolver_blocks_rfc1918_172() {
+            let private: SocketAddr = "172.16.0.1:443".parse().unwrap();
+            let result = resolve_with(vec![private]).await;
+            assert!(result.is_err());
+            assert!(is_ssrf_block_error(&result.unwrap_err()));
+        }
+
+        /// IPv6 loopback (::1) is blocked.
+        #[tokio::test]
+        async fn resolver_blocks_ipv6_loopback() {
+            let loopback: SocketAddr = "[::1]:80".parse().unwrap();
+            let result = resolve_with(vec![loopback]).await;
+            assert!(result.is_err());
+            assert!(is_ssrf_block_error(&result.unwrap_err()));
+        }
+
+        /// IPv6 link-local (fe80::/10) is blocked.
+        #[tokio::test]
+        async fn resolver_blocks_ipv6_link_local() {
+            let link_local: SocketAddr = "[fe80::1]:80".parse().unwrap();
+            let result = resolve_with(vec![link_local]).await;
+            assert!(result.is_err());
+            assert!(is_ssrf_block_error(&result.unwrap_err()));
+        }
+
+        /// IPv4-mapped IPv6 private address (::ffff:192.168.x.x) is blocked.
+        #[tokio::test]
+        async fn resolver_blocks_ipv4_mapped_ipv6_private() {
+            let mapped: SocketAddr = "[::ffff:192.168.1.1]:443".parse().unwrap();
+            let result = resolve_with(vec![mapped]).await;
+            assert!(result.is_err());
+            assert!(is_ssrf_block_error(&result.unwrap_err()));
+        }
+    }
+
+    // --- is_ssrf_block_error ---
+    //
+    // These tests act as a regression guard: if the resolver's error message
+    // format or the marker strings ever diverge, one assertion will fail and
+    // force both sides to be updated in sync.
+
+    #[test]
+    fn is_ssrf_block_error_matches_resolver_message() {
+        // Exact format emitted by SsrfSafeResolver::resolve() when all
+        // resolved addresses are in a blocked range (DNS-rebinding scenario).
+        let resolver_msg = "Blocked: the resolved IP address for 'evil.azurewebsites.net' \
+                            is in a restricted range. df.http() cannot access private or \
+                            internal network addresses.";
+        assert!(is_ssrf_block_error(resolver_msg));
+    }
+
+    #[test]
+    fn is_ssrf_block_error_rejects_unrelated_errors() {
+        assert!(!is_ssrf_block_error(
+            "HTTP connection failed: connection refused"
+        ));
+        assert!(!is_ssrf_block_error(
+            "HTTP timeout after 30s: https://example.com"
+        ));
+        assert!(!is_ssrf_block_error(""));
+    }
+
+    #[test]
+    fn is_ssrf_block_error_requires_both_markers() {
+        // "Blocked:" alone (allowlist rejection) must not match — those errors
+        // are caught before request.send() and have their own audit path.
+        assert!(!is_ssrf_block_error(
+            "Blocked: requests to bare IP addresses are not permitted."
+        ));
+        assert!(!is_ssrf_block_error(
+            "Blocked: 'example.com' is not in the allowed endpoint list."
+        ));
+        // "restricted" alone, without the "Blocked:" prefix, must not match.
+        assert!(!is_ssrf_block_error("The IP is in a restricted range."));
     }
 }
