@@ -42,7 +42,7 @@ SELECT public._e2e_drop_extension_safe();
 CREATE EXTENSION pg_durable;
 
 -- Re-grant df privileges to the E2E user (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('df_e2e_user');
+SELECT df.grant_usage('df_e2e_user');
 
 -- Wait for the background worker to fully reinitialize
 SELECT public._e2e_wait_for_worker_ready();

@@ -116,7 +116,44 @@ END $$;
 RESET ROLE;
 
 -- Re-grant df privileges to the E2E user (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('df_e2e_user');
+SELECT df.grant_usage('df_e2e_user');
+
+-- ============================================================================
+-- Test 4: Non-superuser cannot call df.grant_usage() or df.revoke_usage()
+-- ============================================================================
+
+SET ROLE df_e2e_user;
+
+DO $$
+BEGIN
+    -- df.grant_usage() should be blocked for non-superuser
+    BEGIN
+        PERFORM df.grant_usage('df_e2e_user');
+        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.grant_usage()';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM LIKE '%requires superuser%' THEN
+                RAISE NOTICE 'TEST 4a PASSED: df.grant_usage() blocked for non-superuser';
+            ELSE
+                RAISE EXCEPTION 'TEST 4a UNEXPECTED ERROR: %', SQLERRM;
+            END IF;
+    END;
+
+    -- df.revoke_usage() should be blocked for non-superuser
+    BEGIN
+        PERFORM df.revoke_usage('df_e2e_user');
+        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.revoke_usage()';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM LIKE '%requires superuser%' THEN
+                RAISE NOTICE 'TEST 4b PASSED: df.revoke_usage() blocked for non-superuser';
+            ELSE
+                RAISE EXCEPTION 'TEST 4b UNEXPECTED ERROR: %', SQLERRM;
+            END IF;
+    END;
+END $$;
+
+RESET ROLE;
 
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
 SELECT public._e2e_wait_for_worker_ready();

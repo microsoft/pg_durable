@@ -31,8 +31,8 @@ CREATE ROLE rls_alice LOGIN;
 CREATE ROLE rls_bob   LOGIN;
 
 -- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('rls_alice');
-SELECT public._e2e_grant_df_privileges('rls_bob');
+SELECT df.grant_usage('rls_alice');
+SELECT df.grant_usage('rls_bob');
 
 -- Grant TEMPORARY for temp tables
 GRANT TEMPORARY ON DATABASE postgres TO rls_alice, rls_bob;

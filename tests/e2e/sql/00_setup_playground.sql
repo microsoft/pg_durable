@@ -88,20 +88,6 @@ BEGIN
     END LOOP;
 END $$;
 
--- ---------------------------------------------------------------------------
--- Reusable helper: grant df schema/table/function privileges to a role.
---
--- After removing default PUBLIC grants from CREATE EXTENSION, every test
--- role that needs to call df.* functions must be granted explicitly.
--- Wraps df.grant_usage() so tests stay DRY and use the canonical helper.
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public._e2e_grant_df_privileges(p_role TEXT)
-RETURNS void
-LANGUAGE plpgsql AS $$
-BEGIN
-    PERFORM df.grant_usage(p_role);
-END $$;
-
 -- Install extensions needed by tests (requires superuser)
 CREATE EXTENSION IF NOT EXISTS dblink;
 
@@ -111,7 +97,7 @@ GRANT USAGE, CREATE ON SCHEMA public TO df_e2e_user;
 
 -- Grant df privileges to the default E2E user. CREATE EXTENSION no longer
 -- grants to PUBLIC, so every non-superuser role needs explicit privileges.
-SELECT public._e2e_grant_df_privileges('df_e2e_user');
+SELECT df.grant_usage('df_e2e_user');
 
 -- Create playground schema
 CREATE SCHEMA IF NOT EXISTS playground;

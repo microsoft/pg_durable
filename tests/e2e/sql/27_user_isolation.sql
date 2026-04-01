@@ -27,8 +27,8 @@ CREATE ROLE iso_alice LOGIN;
 CREATE ROLE iso_bob   LOGIN;
 
 -- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('iso_alice');
-SELECT public._e2e_grant_df_privileges('iso_bob');
+SELECT df.grant_usage('iso_alice');
+SELECT df.grant_usage('iso_bob');
 
 -- Grant non-auto privileges needed by these tests.
 GRANT TEMPORARY ON DATABASE postgres TO iso_alice, iso_bob;
@@ -183,7 +183,7 @@ INSERT INTO iso_analyst_data (value) VALUES ('analyst report') ON CONFLICT DO NO
 -- Grant iso_analysts to alice and grant df permissions to the group role
 GRANT iso_analysts TO iso_alice;
 -- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('iso_analysts');
+SELECT df.grant_usage('iso_analysts');
 GRANT TEMPORARY ON DATABASE postgres TO iso_analysts;
 
 -- Test 5a: SET ROLE to NOLOGIN role → df.start() should error
@@ -357,7 +357,7 @@ END $test7_setup$;
 
 CREATE ROLE iso_ephemeral LOGIN;
 -- Grant df privileges explicitly (no longer auto-granted to PUBLIC)
-SELECT public._e2e_grant_df_privileges('iso_ephemeral');
+SELECT df.grant_usage('iso_ephemeral');
 GRANT TEMPORARY ON DATABASE postgres TO iso_ephemeral;
 
 -- Submit a sequence: df.sleep(3) followed by df.sql('SELECT 1')
