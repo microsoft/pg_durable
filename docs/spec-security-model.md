@@ -259,16 +259,19 @@ See [http-security.md](http-security.md) for the full specification, blocked IP 
 
 #### T9: Unauthorized HTTP Access
 
-**Severity**: HIGH  |  **Status**: Not implemented (future spec)
+**Severity**: HIGH  |  **Status**: Partially implemented
 
 **Threat**: User abuses `df.http()` to access external resources they shouldn't (exfiltrate data, attack external services).
 
-**Mitigation** (to be addressed in a future customer-facing access control spec):
-- `df.http()` function has EXECUTE permission revoked from PUBLIC by default
-- DBA grants EXECUTE to roles that need HTTP access
-- GUC-based URL allowlist (`df.http_allowed_hosts`) for fine-grained control
-- Rate limiting via GUCs
-- Audit logging of all HTTP activity
+**Mitigation**:
+- `df.http()` has `EXECUTE` revoked from `PUBLIC` on fresh installs
+- DBA grants HTTP access explicitly, either with `df.grant_usage(role, include_http => true)` or a direct `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer)`
+- The worker re-checks `EXECUTE` at execution time to block raw `df.start()` JSON injection
+- Audit logging records HTTP attempts
+
+**Future enhancements**:
+- Per-customer or per-role destination controls beyond the current feature-gated allowlist
+- Rate limiting
 
 **Residual Risk**: Medium until customer-level controls are implemented. T8 (SSRF/dataplane) protection is independent and addressed first.
 
@@ -444,7 +447,7 @@ pg_durable supports shared secrets for workflows.
 - Log secret *name* usage for traceability (never log values).
 
 **Scenarios that this enables**:
-- Any user can run a workflow that calls `df.http()` to a configured allowlisted host and uses an Authorization header populated from `df.secrets`.
+- Any user granted `EXECUTE` on `df.http(text, text, text, jsonb, integer)` can run a workflow that calls `df.http()` to an allowed host and uses an Authorization header populated from `df.secrets`.
 - Any user can run a workflow that queries an external FDW/API gateway where the credential is provided by the worker.
 
 ---
@@ -518,13 +521,13 @@ See [Section 8: Implementation Specification](#8-implementation-specification) f
 
 ### 6.1 Overview
 
-HTTP requests have no native PostgreSQL permission model. Security is enforced via:
+HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF defenses. In the current implementation, security is enforced via:
 
-1. **Function-level permission**: `GRANT/REVOKE EXECUTE ON FUNCTION df.http`
-2. **SSRF protection**: Block internal IPs at the code level
-3. **URL allowlist**: GUC-based configuration for allowed destinations
-4. **Rate limiting**: GUC-based per-user limits
-5. **Redirect handling**: Redirects are **disabled by default**; if explicitly enabled, each hop must re-validate host/IP/port against SSRF and allowlist rules
+1. **Function-level permission**: `GRANT/REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer)`
+2. **Execution-time privilege re-check**: the worker validates that `submitted_by` still has `EXECUTE` before any network activity
+3. **SSRF protection**: Block internal IPs at the code level
+4. **Compile-time endpoint allowlist**: allowed destinations depend on the HTTP Cargo feature
+5. **Redirect handling**: redirects are disabled
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -533,28 +536,24 @@ HTTP requests have no native PostgreSQL permission model. Security is enforced v
 │                                                                 │
 │  Layer 1: Function Permission (PostgreSQL native)              │
 │  ┌───────────────────────────────────────────────────────────┐ │
-│  │ REVOKE EXECUTE ON FUNCTION df.http FROM PUBLIC;           │ │
-│  │ GRANT EXECUTE ON FUNCTION df.http TO api_users;           │ │
+│  │ REVOKE EXECUTE ON FUNCTION df.http(text, text, text,      │ │
+│  │     jsonb, integer) FROM PUBLIC;                          │ │
+│  │ SELECT df.grant_usage('api_users', include_http => true); │ │
+│  │ -- or GRANT EXECUTE ON FUNCTION df.http(text, text, text, │ │
+│  │ --     jsonb, integer) TO api_users;                      │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
-│  Layer 2: SSRF Protection (code-level)                         │
+│  Layer 2: Execution-Time Privilege Check                       │
 │  ┌───────────────────────────────────────────────────────────┐ │
-│  │ Block: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16         │ │
-│  │ Block: 169.254.0.0/16 (cloud metadata)                    │ │
-│  │ Block: 127.0.0.0/8, ::1 (localhost)                       │ │
-│  │ DNS rebinding protection                                   │ │
+│  │ submitted_by must still have EXECUTE on df.http(...)      │ │
+│  │ Blocks raw df.start() JSON injection bypasses             │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
-│  Layer 3: URL Allowlist (GUC-based)                            │
+│  Layer 3: SSRF Protection + Feature Allowlist                  │
 │  ┌───────────────────────────────────────────────────────────┐ │
-│  │ df.http_allowed_hosts = '*.company.com, api.github.com'   │ │
-│  │ df.http_blocked_hosts = 'internal.*, *.local'             │ │
-│  └───────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│  Layer 4: Rate Limiting (GUC-based)                            │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │ df.http_rate_limit_per_minute = 60                        │ │
-│  │ df.http_max_concurrent = 10                               │ │
+│  │ Block: private/link-local/loopback ranges                │ │
+│  │ Allow only feature-approved hostnames                    │ │
+│  │ No redirects                                              │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -565,34 +564,24 @@ HTTP requests have no native PostgreSQL permission model. Security is enforced v
 **Function-level access control** (PostgreSQL native):
 
 ```sql
--- Extension installation: HTTP disabled by default
-REVOKE EXECUTE ON FUNCTION df.http FROM PUBLIC;
+-- Fresh installs: HTTP disabled by default
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 
 -- DBA enables HTTP for specific roles
-GRANT EXECUTE ON FUNCTION df.http TO etl_service;
-GRANT EXECUTE ON FUNCTION df.http TO webhook_handler;
+SELECT df.grant_usage('etl_service', include_http => true);
+SELECT df.grant_usage('webhook_handler', include_http => true);
 
 -- Regular app users cannot use HTTP
 SET ROLE app_user;
-SELECT df.start(df.http('GET', 'https://example.com'), 'test');
+SELECT df.start(df.http('https://example.com', 'GET'), 'test');
 -- ERROR: permission denied for function df.http
 ```
 
 ### 6.3 GUC Configuration
 
-```sql
--- System-wide URL allowlist (superuser only)
-ALTER SYSTEM SET df.http_allowed_hosts = '*.company.com, api.github.com, httpbin.org';
-SELECT pg_reload_conf();
-
--- Block specific patterns (in addition to default SSRF blocks)
-ALTER SYSTEM SET df.http_blocked_hosts = '*.internal.company.com';
-
--- Rate limiting
-ALTER SYSTEM SET df.http_rate_limit_per_minute = 60;
-ALTER SYSTEM SET df.http_timeout_seconds = 30;
-ALTER SYSTEM SET df.http_max_response_bytes = 10485760;  -- 10MB
-```
+The current implementation does not expose HTTP allowlists or rate limits via
+GUCs. Allowed destinations are compiled in through Cargo features and the
+execution-time permission model is documented in [http-security.md](http-security.md).
 
 ### 6.4 SSRF Protection
 
@@ -602,20 +591,19 @@ See [http-security.md](http-security.md) for the full specification including bl
 
 ### 6.5 Implementation
 
-See [http-security.md](http-security.md) for the SSRF implementation details. The access control layers (URL allowlist, rate limiting) described in Section 6.1 are not yet implemented.
+See [http-security.md](http-security.md) for the implemented privilege check,
+SSRF protections, and feature-gated hostname allowlist.
 
 ### 6.6 User Experience
 
 ```sql
 -- DBA setup (one-time)
-GRANT EXECUTE ON FUNCTION df.http TO etl_service;
-ALTER SYSTEM SET df.http_allowed_hosts = 'api.company.com, *.amazonaws.com';
-SELECT pg_reload_conf();
+SELECT df.grant_usage('etl_service', include_http => true);
 
 -- User with permission
 SET ROLE etl_service;
 SELECT df.start(
-    df.http('POST', 'https://api.company.com/webhook', '{"event": "done"}'),
+    df.http('https://api.company.com/webhook', 'POST', '{"event": "done"}'),
     'notify-completion'
 );
 -- ✓ Succeeds
@@ -623,7 +611,7 @@ SELECT df.start(
 -- User without permission
 SET ROLE app_user;
 SELECT df.start(
-    df.http('GET', 'https://api.company.com/data'),
+    df.http('https://api.company.com/data', 'GET'),
     'fetch-data'
 );
 -- ✗ ERROR: permission denied for function df.http
@@ -631,7 +619,7 @@ SELECT df.start(
 -- SSRF attempt (even with permission)
 SET ROLE etl_service;
 SELECT df.start(
-    df.http('GET', 'http://169.254.169.254/latest/meta-data/'),
+    df.http('http://169.254.169.254/latest/meta-data/', 'GET'),
     'ssrf-attempt'
 );
 -- ✗ ERROR: HTTP request blocked: resolves to internal IP
@@ -741,8 +729,12 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA df FROM PUBLIC;
 -- df.sql() - available to anyone who can use df.start()
 -- (actual SQL permission checked via per-user sqlx connection)
 
--- df.http() - disabled by default, DBA enables per-role  
-REVOKE EXECUTE ON FUNCTION df.http FROM PUBLIC;
+-- df.http() - disabled by default, DBA enables per-role
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+
+-- Convenience helper: grant standard df usage, excluding df.http() unless
+-- include_http => true is passed.
+-- Example: SELECT df.grant_usage('app_role', include_http => true);
 
 -- df.start(), df.status() - grant to users who need durable functions
 -- DBA grants these: GRANT EXECUTE ON FUNCTION df.start TO app_role;
@@ -751,7 +743,11 @@ REVOKE EXECUTE ON FUNCTION df.http FROM PUBLIC;
 -- df.secrets - admin-only mutators; no generic getter for non-admins
 ```
 
-### 8.3 GUC Definitions
+### 8.3 Earlier GUC Proposal (Not Implemented)
+
+The following GUC definitions were part of an earlier proposal. The current
+implementation uses Cargo features plus the execution-time privilege check
+described in `docs/http-security.md`, not runtime HTTP GUCs.
 
 ```rust
 // src/lib.rs
@@ -970,11 +966,13 @@ ORDER BY submitted_at DESC;
 -- (see USER_GUIDE.md "Privilege Grants" for the full list of individual grants)
 SELECT df.grant_usage('app_backend');
 
--- 2. Configure HTTP allowlist
-ALTER SYSTEM SET df.http_allowed_hosts = '*.company.com, api.stripe.com';
-SELECT pg_reload_conf();
+-- 2. Opt a role into HTTP access only when needed
+SELECT df.grant_usage('app_backend_http', include_http => true);
 
--- 3. View all instances (superuser bypasses RLS)
+-- 3. Allowed HTTP destinations depend on the build feature set.
+-- See docs/http-security.md for the current allowlist.
+
+-- 4. View all instances (superuser bypasses RLS)
 SELECT submitted_by, count(*) 
 FROM df.instances 
 GROUP BY submitted_by;
@@ -984,7 +982,7 @@ GROUP BY submitted_by;
 
 | Scenario | Error Message |
 |----------|---------------|
-| No function permission | `ERROR: permission denied for function df.http` |
+| No function permission | `ERROR: permission denied for function df.http` or execution-time `Blocked: role '{role}' does not have EXECUTE privilege on df.http()...` |
 | SQL permission denied | `ERROR: permission denied for table secret_data` (in df.status result) |
 | HTTP host not allowed | `ERROR: HTTP request blocked: host 'evil.com' not in allowed list` |
 | SSRF blocked | `ERROR: HTTP request blocked: resolves to internal IP 169.254.169.254` |
@@ -1470,19 +1468,18 @@ DROP USER IF EXISTS sec_test_ssrf_user;
 CREATE USER sec_test_ssrf_user;
 GRANT EXECUTE ON FUNCTION df.start TO sec_test_ssrf_user;
 GRANT EXECUTE ON FUNCTION df.sql TO sec_test_ssrf_user;
-GRANT EXECUTE ON FUNCTION df.http TO sec_test_ssrf_user;  -- Has HTTP permission
+GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO sec_test_ssrf_user;  -- Has HTTP permission
 GRANT EXECUTE ON FUNCTION df.status TO sec_test_ssrf_user;
 GRANT sec_test_ssrf_user TO duroxide;
 
--- Configure allowlist to allow all (but SSRF protection still applies)
-ALTER SYSTEM SET df.http_allowed_hosts = '*';
-SELECT pg_reload_conf();
+-- Build with a feature set that allows the chosen public test destination.
+-- SSRF protection still applies regardless of that feature set.
 
 -- Test 1: AWS metadata endpoint (169.254.169.254) should be blocked
 SET ROLE sec_test_ssrf_user;
 CREATE TEMP TABLE _test_ssrf_1 (instance_id TEXT);
 INSERT INTO _test_ssrf_1 SELECT df.start(
-    df.http('GET', 'http://169.254.169.254/latest/meta-data/'),
+    df.http('http://169.254.169.254/latest/meta-data/', 'GET'),
     'ssrf-test-aws-metadata'
 );
 RESET ROLE;
@@ -1517,7 +1514,7 @@ END $$;
 SET ROLE sec_test_ssrf_user;
 CREATE TEMP TABLE _test_ssrf_2 (instance_id TEXT);
 INSERT INTO _test_ssrf_2 SELECT df.start(
-    df.http('GET', 'http://127.0.0.1:8080/'),
+    df.http('http://127.0.0.1:8080/', 'GET'),
     'ssrf-test-localhost'
 );
 RESET ROLE;
@@ -1546,9 +1543,6 @@ DROP TABLE _test_ssrf_1;
 DROP TABLE _test_ssrf_2;
 REVOKE sec_test_ssrf_user FROM duroxide;
 DROP USER sec_test_ssrf_user;
-ALTER SYSTEM RESET df.http_allowed_hosts;
-SELECT pg_reload_conf();
-
 SELECT 'TEST PASSED: E2E-SEC-07 HTTP SSRF Protection' AS result;
 ```
 
@@ -1574,22 +1568,20 @@ GRANT EXECUTE ON FUNCTION df.status TO sec_test_http_denied, sec_test_http_allow
 GRANT SELECT ON df.instances TO sec_test_http_denied, sec_test_http_allowed;
 
 -- Only sec_test_http_allowed gets HTTP permission
-GRANT EXECUTE ON FUNCTION df.http TO sec_test_http_allowed;
+GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO sec_test_http_allowed;
 -- NOTE: sec_test_http_denied does NOT get df.http permission
 
 GRANT sec_test_http_denied TO duroxide;
 GRANT sec_test_http_allowed TO duroxide;
 
--- Configure allowlist
-ALTER SYSTEM SET df.http_allowed_hosts = 'httpbin.org';
-SELECT pg_reload_conf();
+-- Build with a feature set that allows httpbin.org.
 
 -- Test 1: User WITHOUT df.http permission should fail
 SET ROLE sec_test_http_denied;
 DO $$
 BEGIN
     PERFORM df.start(
-        df.http('GET', 'https://httpbin.org/get'),
+        df.http('https://httpbin.org/get', 'GET'),
         'http-test-denied'
     );
     RAISE EXCEPTION 'SECURITY FAILURE: User without df.http permission could use it!';
@@ -1608,7 +1600,7 @@ RESET ROLE;
 SET ROLE sec_test_http_allowed;
 CREATE TEMP TABLE _test_http_allowed (instance_id TEXT);
 INSERT INTO _test_http_allowed SELECT df.start(
-    df.http('GET', 'https://httpbin.org/get'),
+    df.http('https://httpbin.org/get', 'GET'),
     'http-test-allowed'
 );
 RESET ROLE;
@@ -1638,8 +1630,6 @@ REVOKE sec_test_http_denied FROM duroxide;
 REVOKE sec_test_http_allowed FROM duroxide;
 DROP USER sec_test_http_denied;
 DROP USER sec_test_http_allowed;
-ALTER SYSTEM RESET df.http_allowed_hosts;
-SELECT pg_reload_conf();
 
 SELECT 'TEST PASSED: E2E-SEC-08 HTTP Function Permission' AS result;
 ```
@@ -1649,7 +1639,8 @@ SELECT 'TEST PASSED: E2E-SEC-08 HTTP Function Permission' AS result;
 **File**: `tests/e2e/sql/security_09_http_allowlist.sql`
 
 ```sql
--- Test: HTTP requests only allowed to hosts in df.http_allowed_hosts
+-- Test: HTTP requests only allowed to the destinations permitted by the
+-- build-time feature allowlist
 -- Expected: Requests to non-allowlisted hosts are denied
 
 -- Setup
@@ -1657,20 +1648,18 @@ DROP USER IF EXISTS sec_test_allowlist_user;
 CREATE USER sec_test_allowlist_user;
 GRANT EXECUTE ON FUNCTION df.start TO sec_test_allowlist_user;
 GRANT EXECUTE ON FUNCTION df.sql TO sec_test_allowlist_user;
-GRANT EXECUTE ON FUNCTION df.http TO sec_test_allowlist_user;
+GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO sec_test_allowlist_user;
 GRANT EXECUTE ON FUNCTION df.status TO sec_test_allowlist_user;
 GRANT SELECT ON df.instances TO sec_test_allowlist_user;
 GRANT sec_test_allowlist_user TO duroxide;
 
--- Configure restrictive allowlist
-ALTER SYSTEM SET df.http_allowed_hosts = 'httpbin.org, *.example.com';
-SELECT pg_reload_conf();
+-- Build with a feature set that allows httpbin.org but not evil.com.
 
 -- Test 1: Allowlisted host should succeed
 SET ROLE sec_test_allowlist_user;
 CREATE TEMP TABLE _test_allowed (instance_id TEXT);
 INSERT INTO _test_allowed SELECT df.start(
-    df.http('GET', 'https://httpbin.org/get'),
+    df.http('https://httpbin.org/get', 'GET'),
     'allowlist-test-allowed'
 );
 RESET ROLE;
@@ -1698,7 +1687,7 @@ END $$;
 SET ROLE sec_test_allowlist_user;
 CREATE TEMP TABLE _test_denied (instance_id TEXT);
 INSERT INTO _test_denied SELECT df.start(
-    df.http('GET', 'https://evil.com/steal-data'),
+    df.http('https://evil.com/steal-data', 'GET'),
     'allowlist-test-denied'
 );
 RESET ROLE;
@@ -1733,8 +1722,6 @@ DROP TABLE _test_allowed;
 DROP TABLE _test_denied;
 REVOKE sec_test_allowlist_user FROM duroxide;
 DROP USER sec_test_allowlist_user;
-ALTER SYSTEM RESET df.http_allowed_hosts;
-SELECT pg_reload_conf();
 
 SELECT 'TEST PASSED: E2E-SEC-09 HTTP URL Allowlist' AS result;
 ```

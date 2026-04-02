@@ -616,6 +616,22 @@ print_failure_excerpt() {
     fi
 }
 
+check_expected_warning_fragments() {
+    local test_file="$1"
+    local output="$2"
+    local fragment
+
+    while IFS= read -r fragment; do
+        [ -n "$fragment" ] || continue
+        if [[ "$output" != *"$fragment"* ]]; then
+            echo "    Missing expected warning fragment: $fragment"
+            return 1
+        fi
+    done < <(sed -n 's/^-- EXPECT WARNING: //p' "$test_file")
+
+    return 0
+}
+
 run_test_file() {
     local test_file="$1"
     local test_name
@@ -627,17 +643,29 @@ run_test_file() {
 
     if [ "$VERBOSE" = true ]; then
         echo ""
-        if "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"; then
+        if output=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file" 2>&1); then
+            printf '%s\n' "$output"
+            if ! check_expected_warning_fragments "$test_file" "$output"; then
+                echo -e "  ${RED}FAIL${NC}"
+                return 1
+            fi
             echo -e "  ${GREEN}PASS${NC}"
             return 0
         fi
 
+        printf '%s\n' "$output"
         echo -e "  ${RED}FAIL${NC}"
         return 1
     fi
 
     if output=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -f "$test_file" 2>&1); then
         if printf '%s\n' "$output" | grep -q "TEST FAILED"; then
+            echo -e "${RED}FAIL${NC}"
+            print_failure_excerpt "$output"
+            return 1
+        fi
+
+        if ! check_expected_warning_fragments "$test_file" "$output"; then
             echo -e "${RED}FAIL${NC}"
             print_failure_excerpt "$output"
             return 1

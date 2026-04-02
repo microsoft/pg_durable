@@ -202,40 +202,110 @@ END $$;
 
 RESET ROLE;
 
+-- Test 3c: Admin helpers are not executable by non-superusers by default
+DO $$
+DECLARE
+    can_grant_usage BOOLEAN;
+    can_revoke_usage BOOLEAN;
+BEGIN
+    SELECT has_function_privilege(
+        'df_e2e_user',
+        'df.grant_usage(text, boolean)',
+        'EXECUTE'
+    ) INTO can_grant_usage;
+
+    SELECT has_function_privilege(
+        'df_e2e_user',
+        'df.revoke_usage(text)',
+        'EXECUTE'
+    ) INTO can_revoke_usage;
+
+    IF can_grant_usage THEN
+        RAISE EXCEPTION 'SECURITY FAILURE: df.grant_usage() is executable by df_e2e_user before any explicit helper grant';
+    END IF;
+
+    IF can_revoke_usage THEN
+        RAISE EXCEPTION 'SECURITY FAILURE: df.revoke_usage() is executable by df_e2e_user before any explicit helper grant';
+    END IF;
+
+    RAISE NOTICE 'TEST 3c PASSED: admin helpers are not executable by non-superusers by default';
+END $$;
+
 -- Re-grant df privileges to the E2E user
 SELECT df.grant_usage('df_e2e_user');
 
--- Test 4: Non-superuser cannot call df.grant_usage() or df.revoke_usage()
-SET ROLE df_e2e_user;
+-- Test 4: df.grant_usage() does not grant EXECUTE on admin helpers to the target role
+DO $$
+DECLARE
+    can_grant_usage BOOLEAN;
+    can_revoke_usage BOOLEAN;
+BEGIN
+    SELECT has_function_privilege(
+        'df_e2e_user',
+        'df.grant_usage(text, boolean)',
+        'EXECUTE'
+    ) INTO can_grant_usage;
+
+    SELECT has_function_privilege(
+        'df_e2e_user',
+        'df.revoke_usage(text)',
+        'EXECUTE'
+    ) INTO can_revoke_usage;
+
+    IF can_grant_usage THEN
+        RAISE EXCEPTION 'SECURITY FAILURE: df.grant_usage() granted EXECUTE on itself to df_e2e_user';
+    END IF;
+
+    IF can_revoke_usage THEN
+        RAISE EXCEPTION 'SECURITY FAILURE: df.grant_usage() granted EXECUTE on df.revoke_usage() to df_e2e_user';
+    END IF;
+
+    RAISE NOTICE 'TEST 4 PASSED: df.grant_usage() does not grant EXECUTE on admin helpers';
+END $$;
+
+-- Test 5: If EXECUTE is granted manually, helper bodies still reject non-superusers
+DROP ROLE IF EXISTS test_helper_grantee;
+CREATE ROLE test_helper_grantee LOGIN;
+
+GRANT USAGE ON SCHEMA df TO test_helper_grantee;
+GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean) TO test_helper_grantee;
+GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO test_helper_grantee;
+
+SET ROLE test_helper_grantee;
 
 DO $$
 BEGIN
     BEGIN
         PERFORM df.grant_usage('df_e2e_user');
-        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.grant_usage()';
+        RAISE EXCEPTION 'SECURITY FAILURE: manually granted non-superuser was able to call df.grant_usage()';
     EXCEPTION
         WHEN OTHERS THEN
             IF SQLERRM LIKE '%requires superuser%' THEN
-                RAISE NOTICE 'TEST 4a PASSED: df.grant_usage() blocked for non-superuser';
+                RAISE NOTICE 'TEST 5a PASSED: df.grant_usage() reached superuser guard after explicit EXECUTE grant';
             ELSE
-                RAISE EXCEPTION 'TEST 4a UNEXPECTED ERROR: %', SQLERRM;
+                RAISE EXCEPTION 'TEST 5a UNEXPECTED ERROR: %', SQLERRM;
             END IF;
     END;
 
     BEGIN
         PERFORM df.revoke_usage('df_e2e_user');
-        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.revoke_usage()';
+        RAISE EXCEPTION 'SECURITY FAILURE: manually granted non-superuser was able to call df.revoke_usage()';
     EXCEPTION
         WHEN OTHERS THEN
             IF SQLERRM LIKE '%requires superuser%' THEN
-                RAISE NOTICE 'TEST 4b PASSED: df.revoke_usage() blocked for non-superuser';
+                RAISE NOTICE 'TEST 5b PASSED: df.revoke_usage() reached superuser guard after explicit EXECUTE grant';
             ELSE
-                RAISE EXCEPTION 'TEST 4b UNEXPECTED ERROR: %', SQLERRM;
+                RAISE EXCEPTION 'TEST 5b UNEXPECTED ERROR: %', SQLERRM;
             END IF;
     END;
 END $$;
 
 RESET ROLE;
+
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean) FROM test_helper_grantee;
+REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM test_helper_grantee;
+REVOKE USAGE ON SCHEMA df FROM test_helper_grantee;
+DROP ROLE test_helper_grantee;
 
 -- Wait for the background worker to fully reinitialize after the drop/recreate.
 SELECT public._e2e_wait_for_worker_ready();

@@ -738,4 +738,273 @@ END $$;
 DROP TABLE _test_ssrf11;
 
 RESET SESSION AUTHORIZATION;
+
+-- ============================================================================
+-- === HTTP Permission Tests ===
+-- (merged from 49_http_permissions)
+--
+-- These tests exercise the opt-in HTTP access model.  They require superuser
+-- operations (CREATE/DROP ROLE, GRANT/REVOKE) so they run outside the
+-- df_e2e_user session.
+-- ============================================================================
+
+-- --- Setup ---
+DO $setup$
+BEGIN
+    PERFORM pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE usename IN ('http_priv_alice', 'http_priv_bob')
+        AND pid <> pg_backend_pid();
+
+    BEGIN DROP OWNED BY http_priv_alice; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE http_priv_alice;     EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP OWNED BY http_priv_bob;   EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE http_priv_bob;       EXCEPTION WHEN undefined_object THEN NULL; END;
+END $setup$;
+
+CREATE ROLE http_priv_alice LOGIN;
+GRANT TEMPORARY ON DATABASE postgres TO http_priv_alice;
+
+CREATE ROLE http_priv_bob LOGIN;
+GRANT TEMPORARY ON DATABASE postgres TO http_priv_bob;
+
+-- Grant full df access including df.http() (opt-in via include_http => true)
+SELECT df.grant_usage('http_priv_alice', include_http => true);
+
+-- Permission Test 1: User with EXECUTE on df.http() can run HTTP nodes
+SET SESSION AUTHORIZATION http_priv_alice;
+CREATE TEMP TABLE _test_http_priv1 (instance_id TEXT);
+INSERT INTO _test_http_priv1
+SELECT df.start(
+    df.http('https://api.github.com/', 'GET'),
+    'test-http-grant-allowed'
+);
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status  TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_priv1;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    -- The request may succeed or fail due to network/rate-limiting, but it
+    -- must NOT fail with a privilege error.
+    IF lower(status) NOT IN ('completed', 'failed') THEN
+        RAISE EXCEPTION 'TEST FAILED: unexpected status = %', status;
+    END IF;
+
+    DECLARE
+        node_result TEXT;
+    BEGIN
+        SELECT result::text INTO node_result
+        FROM df.nodes
+        WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+        IF node_result ILIKE '%does not have EXECUTE privilege%' THEN
+            RAISE EXCEPTION 'TEST FAILED: privilege check blocked a user who should have access: %', node_result;
+        END IF;
+    END;
+
+    RAISE NOTICE 'TEST PASSED: http_grant_allowed';
+END $$;
+
+DROP TABLE _test_http_priv1;
+
+-- Permission Test 2: After REVOKE, user is blocked at execution time even via raw JSON
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM http_priv_alice;
+
+SET SESSION AUTHORIZATION http_priv_alice;
+CREATE TEMP TABLE _test_http_priv2 (instance_id TEXT);
+INSERT INTO _test_http_priv2
+SELECT df.start(
+    '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+    'test-http-grant-revoked'
+);
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id     TEXT;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_priv2;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected status = failed after privilege revocation, got %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%does not have EXECUTE privilege%' THEN
+        RAISE EXCEPTION
+            'TEST FAILED: expected privilege-denied message in node result, got: %',
+            node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_grant_revoked_blocks_execution';
+END $$;
+
+DROP TABLE _test_http_priv2;
+
+-- Permission Test 3: Restore grant and confirm access works again
+GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO http_priv_alice;
+
+SET SESSION AUTHORIZATION http_priv_alice;
+CREATE TEMP TABLE _test_http_priv3 (instance_id TEXT);
+INSERT INTO _test_http_priv3
+SELECT df.start(
+    df.http('https://api.github.com/', 'GET'),
+    'test-http-grant-restored'
+);
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id     TEXT;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_priv3;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    IF lower(status) NOT IN ('completed', 'failed') THEN
+        RAISE EXCEPTION 'TEST FAILED: unexpected status = %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result ILIKE '%does not have EXECUTE privilege%' THEN
+        RAISE EXCEPTION 'TEST FAILED: privilege check blocked a user whose grant was restored: %', node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_grant_restored';
+END $$;
+
+DROP TABLE _test_http_priv3;
+
+-- Permission Test 4: grant_usage default (include_http => false) blocks HTTP at execution
+SELECT df.grant_usage('http_priv_bob');
+
+SET SESSION AUTHORIZATION http_priv_bob;
+CREATE TEMP TABLE _test_http_priv4 (instance_id TEXT);
+INSERT INTO _test_http_priv4
+SELECT df.start(
+    '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+    'test-http-no-grant'
+);
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id     TEXT;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_priv4;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected status = failed for role without HTTP grant, got %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%does not have EXECUTE privilege%' THEN
+        RAISE EXCEPTION
+            'TEST FAILED: expected privilege-denied message in node result, got: %',
+            node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_no_grant_blocks_execution';
+END $$;
+
+DROP TABLE _test_http_priv4;
+
+-- Permission Test 5: grant_usage(false) emits WARNING when PUBLIC still has the grant
+GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO PUBLIC;
+
+-- EXPECT WARNING: still has effective EXECUTE privilege on df.http() despite include_http => false
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM df.grant_usage('http_priv_bob', include_http => false);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'TEST FAILED: grant_usage raised an unexpected exception: %', SQLERRM;
+    END;
+    -- PostgreSQL WARNING messages cannot be caught in PL/pgSQL without
+    -- SET client_min_messages; instead, verify the residual privilege directly.
+    IF NOT has_function_privilege('http_priv_bob'::regrole,
+                                   'df.http(text, text, text, jsonb, integer)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'TEST FAILED: expected http_priv_bob to still have effective HTTP access via PUBLIC grant';
+    END IF;
+    RAISE NOTICE 'TEST PASSED: grant_usage_warns_on_residual_public_grant';
+END $$;
+
+-- Restore: revoke the PUBLIC grant again so subsequent tests are unaffected
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+
+-- Permission Test 6: Superuser always passes the execution-time privilege check
+CREATE TEMP TABLE _test_http_priv6 (instance_id TEXT);
+INSERT INTO _test_http_priv6
+SELECT df.start(
+    '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+    'test-http-superuser'
+);
+
+DO $$
+DECLARE
+    inst_id     TEXT;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_priv6;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    IF lower(status) NOT IN ('completed', 'failed') THEN
+        RAISE EXCEPTION 'TEST FAILED: unexpected status for superuser HTTP node = %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result ILIKE '%does not have EXECUTE privilege%' THEN
+        RAISE EXCEPTION 'TEST FAILED: superuser was blocked by privilege check: %', node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: superuser_bypasses_http_privilege_check';
+END $$;
+
+DROP TABLE _test_http_priv6;
+
+-- --- Permission Test Cleanup ---
+DO $cleanup$
+BEGIN
+    PERFORM pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE usename IN ('http_priv_alice', 'http_priv_bob')
+        AND pid <> pg_backend_pid();
+
+    BEGIN DROP OWNED BY http_priv_alice; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE http_priv_alice;     EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP OWNED BY http_priv_bob;   EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE http_priv_bob;       EXCEPTION WHEN undefined_object THEN NULL; END;
+END $cleanup$;
+
 SELECT 'TEST PASSED' AS result;

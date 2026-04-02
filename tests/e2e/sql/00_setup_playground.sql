@@ -96,8 +96,9 @@ CREATE EXTENSION IF NOT EXISTS dblink;
 GRANT USAGE, CREATE ON SCHEMA public TO df_e2e_user;
 
 -- Grant df privileges to the default E2E user. CREATE EXTENSION no longer
--- grants to PUBLIC, so every non-superuser role needs explicit privileges.
-SELECT df.grant_usage('df_e2e_user');
+-- grants to PUBLIC, so every non-privileged role needs explicit privileges.
+-- include_http => true is needed because tests in 04 and 06 use df.http().
+SELECT df.grant_usage('df_e2e_user', include_http => true);
 
 -- Create playground schema
 CREATE SCHEMA IF NOT EXISTS playground;
