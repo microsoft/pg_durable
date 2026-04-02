@@ -1,8 +1,8 @@
 # pg_durable User Guide
 
-**Durable SQL Functions for PostgreSQL**
+**Durable SQL Workflows for PostgreSQL**
 
-pg_durable is a PostgreSQL extension that brings durable, fault-tolerant function execution directly into your database. Define durable SQL functions using a SQL-native DSL, and let the extension handle persistence, retries, and scheduling.
+pg_durable is a PostgreSQL extension that brings durable, fault-tolerant workflow execution directly into your database. Define durable workflows using a declarative SQL API, and let the extension handle persistence, retries, and scheduling.
 
 ---
 
@@ -11,15 +11,15 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 1. [Overview](#overview)
 2. [Getting Started](#getting-started)
 3. [Core Concepts](#core-concepts)
-4. [DSL Reference](#dsl-reference)
+4. [API Reference](#api-reference)
 5. [Condition Evaluation](#condition-evaluation)
-6. [Function Examples](#function-examples)
+6. [Workflow Examples](#workflow-examples)
 7. [HTTP Requests](#http-requests)
-8. [Durable Function Variables](#durable-function-variables)
+8. [Durable Workflow Variables](#durable-workflow-variables)
 9. [Loops & Cron Jobs](#loops--cron-jobs)
 10. [Signals](#signals)
 11. [Multi-Database Support](#multi-database-support)
-12. [Visualizing Functions](#visualizing-functions)
+12. [Visualizing Workflows](#visualizing-workflows)
 13. [Monitoring](#monitoring)
 14. [User Isolation & Privileges](#user-isolation--privileges)
 15. [Connection Limits](#connection-limits)
@@ -33,31 +33,31 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 
 ### What is pg_durable?
 
-pg_durable enables you to define and execute **durable SQL functions** entirely within PostgreSQL. Unlike traditional job queues or external workflow engines, pg_durable:
+pg_durable enables you to define and execute **durable SQL workflows** entirely within PostgreSQL. Unlike traditional job queues or external workflow engines, pg_durable:
 
 - **Lives in your database** - No external services to manage
-- **Uses SQL syntax** - Define functions with familiar SQL operators
-- **Is fault-tolerant** - Functions survive crashes and restarts
+- **Uses declarative SQL** - Define workflows with composable step functions
+- **Is fault-tolerant** - Workflows survive crashes and restarts
 - **Supports scheduling** - Built-in cron-style scheduling for recurring jobs
-- **Provides visibility** - Monitor function status directly via SQL queries
+- **Provides visibility** - Monitor workflow status directly via SQL queries
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **SQL DSL** | Define functions using plain SQL strings with intuitive operators |
-| **Sequential Execution** | Chain steps with `~>` operator |
-| **Parallel Execution** | Run steps concurrently with `&` operator or `df.join()` |
-| **Race Execution** | First to complete wins with `\|` operator or `df.race()` |
-| **Conditional Logic** | Branch with `?>` `!>` operators or `df.if()` |
+| **Declarative API** | Define workflows using `df.create_workflow()` with composable step functions |
+| **Sequential Execution** | Steps in an array execute in order |
+| **Parallel Execution** | Run steps concurrently with `df.join()` |
+| **Race Execution** | First to complete wins with `df.race()` |
+| **Conditional Logic** | Branch with `df.if()` and `df.if_rows()` |
 | **Timers & Delays** | Sleep with `df.sleep()` |
 | **Cron Scheduling** | Schedule with `df.wait_for_schedule()` |
-| **Eternal Loops** | Create forever-running jobs with `@>` operator or `df.loop()` |
+| **Loops** | Create forever-running or conditional loops with `df.loop()` |
 | **Signals** | Wait for external events with `df.wait_for_signal()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
-| **Labels** | Tag functions with friendly names |
-| **Visualization** | Preview function structure with `df.explain()` |
-| **Monitoring** | Query function status, history, and metrics |
+| **Labels** | Tag workflows with friendly names |
+| **Visualization** | Preview workflow structure with `df.explain()` |
+| **Monitoring** | Query workflow status, history, and metrics |
 
 ---
 
@@ -81,20 +81,25 @@ SELECT df.grant_usage('app_role');
 
 After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
 
-> ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
+> ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable workflows cannot execute.
 
-### Your First Durable Function
+### Your First Durable Workflow
 
 ```sql
--- Execute a simple SQL query as a durable function
-SELECT df.start('SELECT ''Hello, durable world!''');
+-- Execute a simple SQL query as a durable workflow
+SELECT df.create_workflow(
+    name => 'hello-world',
+    steps => ARRAY[
+        df.sql('SELECT ''Hello, durable world!''')
+    ]
+);
 -- Returns: a1b2c3d4 (8-character instance ID)
 ```
 
 ### Check the Result
 
 ```sql
--- List all functions
+-- List all workflows
 SELECT * FROM df.list_instances();
 
 -- Get result of a specific instance
@@ -109,12 +114,12 @@ SELECT df.result('a1b2c3d4');
 
 ## Core Concepts
 
-### Function Lifecycle
+### Workflow Lifecycle
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │   Define    │ ──► │   Start     │ ──► │  Running    │
-│  (DSL)      │     │  (returns   │     │  (bg work)  │
+│  (Steps)    │     │  (returns   │     │  (bg work)  │
 │             │     │   inst_id)  │     │             │
 └─────────────┘     └─────────────┘     └──────┬──────┘
                                                │
@@ -127,118 +132,100 @@ SELECT df.result('a1b2c3d4');
 
 ### Instance IDs
 
-Every durable function gets a unique 8-character hex ID (e.g., `a1b2c3d4`). Use this ID to:
+Every durable workflow gets a unique 8-character hex ID (e.g., `a1b2c3d4`). Use this ID to:
 - Check status: `SELECT df.status('a1b2c3d4')`
 - Get result: `SELECT df.result('a1b2c3d4')`
 - Cancel: `SELECT df.cancel('a1b2c3d4')`
 
 ### Durability
 
-Functions are persisted to disk. If PostgreSQL crashes:
+Workflows are persisted to disk. If PostgreSQL crashes:
 - Completed steps are not re-executed
 - In-progress steps resume from the last checkpoint
 - Pending steps execute when the server restarts
 
-### Graph Construction
+### Workflow Construction
 
-DSL functions build graph structures **in memory** without touching the database. Only when you call `df.start()` are the nodes written to the database:
+Step functions build graph structures **in memory** without touching the database. Only when you call `df.create_workflow()` are the nodes written to the database and execution begins:
 
 ```sql
--- This creates a JSON string representing the graph.
-SELECT 'SELECT 1' ~> 'SELECT 2';
--- Returns: {"node_type":"THEN","left_node":{"node_type":"SQL","query":"SELECT 1"},"right_node":{"node_type":"SQL","query":"SELECT 2"}}
+-- Step functions compose into a JSON graph representation
+SELECT df.sql('SELECT 1');
+-- Returns a step descriptor (JSON)
 
--- Only df.start() writes to the database
-SELECT df.start('SELECT 1' ~> 'SELECT 2');
+-- Only df.create_workflow() writes to the database and starts execution
+SELECT df.create_workflow(
+    name => 'example',
+    steps => ARRAY[
+        df.sql('SELECT 1'),
+        df.sql('SELECT 2')
+    ]
+);
 ```
 
 ---
 
-## DSL Reference
+## API Reference
 
-### Auto-Wrap SQL
+### df.create_workflow()
 
-Plain SQL strings are automatically wrapped - no need for explicit `df.sql()` calls:
+The primary entry point for defining and starting durable workflows:
 
 ```sql
--- These are equivalent:
-'SELECT 1' ~> 'SELECT 2'
-df.sql('SELECT 1') ~> df.sql('SELECT 2')
+SELECT df.create_workflow(
+    name     => TEXT,                    -- Required: workflow name/label
+    steps    => df.step[],              -- Required: array of steps (executed sequentially)
+    database => TEXT DEFAULT NULL,       -- Optional: target database (default: current)
+    options  => JSONB DEFAULT '{}'       -- Optional: configuration
+) RETURNS TEXT;                          -- Returns: 8-character instance ID
 ```
 
-### Functions
+### Step Functions
 
 | Function | Description | Example |
 |----------|-------------|---------|
+| `df.sql(query, result_name)` | Execute a SQL query | `df.sql('SELECT 1', result_name => 'x')` |
 | `df.sleep(seconds)` | Pause for N seconds | `df.sleep(60)` |
 | `df.wait_for_schedule(cron)` | Wait until cron matches | `df.wait_for_schedule('0 * * * *')` |
-| `df.http(url, method, body, headers, timeout)` | Make HTTP request | `df.http('https://api.example.com', 'POST', '{"key": "value"}')` |
-| `df.join(a, b)` | Execute in parallel, wait for all | `df.join('SELECT 1', 'SELECT 2')` |
-| `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
-| `df.race(a, b)` | Execute in parallel, first wins | `df.race(fast_query, slow_query)` |
-| `df.if(cond, then, else)` | Conditional branch | `df.if('SELECT true', a, b)` |
-| `df.loop(body)` | Repeat forever | `df.loop(body)` |
-| `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
+| `df.http(url, method, body, headers, timeout, result_name)` | Make HTTP request | `df.http('https://api.example.com', 'POST')` |
+| `df.join(steps)` | Execute in parallel, wait for all | `df.join(ARRAY[step1, step2])` |
+| `df.join(steps, result_name)` | Parallel join with named result | `df.join(ARRAY[s1, s2], result_name => 'r')` |
+| `df.race(steps)` | Execute in parallel, first wins | `df.race(ARRAY[fast, slow])` |
+| `df.if(condition, then_steps, else_steps)` | Conditional branch | `df.if('SELECT true', ARRAY[a], ARRAY[b])` |
+| `df.if_rows(name, then_steps, else_steps)` | Branch on row existence | `df.if_rows('result', ARRAY[a], ARRAY[b])` |
+| `df.loop(steps...)` | Repeat forever (variadic) | `df.loop(body1, body2)` |
+| `df.loop(steps..., condition)` | Repeat while condition is true | `df.loop(body, condition => 'SELECT ...')` |
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with return value | `df.break('{"done": true}')` |
-| `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
-| `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
+| `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
+| `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
+
+### Management Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `df.create_workflow(name, steps, ...)` | Create and start workflow | See above |
+| `df.cancel(id, reason)` | Cancel workflow | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
 | `df.explain(input)` | Visualize graph | `df.explain('a1b2c3d4')` |
-| `df.setvar(name, value)` | Set durable function variable | `df.setvar('api_url', 'https://...')` |
-| `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
-| `df.unsetvar(name)` | Remove durable function variable | `df.unsetvar('api_url')` |
-| `df.clearvars()` | Clear all durable function variables | `df.clearvars()` |
-| `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
-| `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
+| `df.setvar(name, value)` | Set durable workflow variable | `df.setvar('api_url', 'https://...')` |
+| `df.getvar(name)` | Get durable workflow variable | `df.getvar('api_url')` |
+| `df.unsetvar(name)` | Remove durable workflow variable | `df.unsetvar('api_url')` |
+| `df.clearvars()` | Clear all durable workflow variables | `df.clearvars()` |
 | `df.signal(id, name, data)` | Send signal to instance | `df.signal('a1b2', 'go', '{}')` |
 
-### Operators
+### Result Naming
 
-| Operator | Name | Description | Example |
-|----------|------|-------------|---------|
-| `~>` | Sequence | Run left, then right | `'SELECT 1' ~> 'SELECT 2'` |
-| `\|=>` | Name | Name result for later use | `'SELECT 1' \|=> 'myvar'` |
-| `&` | Join | Run in parallel, wait for all | `'SELECT 1' & 'SELECT 2'` |
-| `\|` | Race | Run in parallel, first wins | `fast_query \| slow_query` |
-| `?>` | If-Then | Conditional then branch | `cond ?> then_branch` |
-| `!>` | Else | Conditional else branch | `cond ?> then !> else` |
-| `@>` | Loop | Repeat forever (prefix) | `@> body` |
-
-### Operator Examples
+Use `result_name` to capture a step's output for use in subsequent steps via `$name`:
 
 ```sql
--- Join: run both in parallel, wait for all
-SELECT df.start('SELECT 1' & 'SELECT 2');
-
--- Race: run both, first to complete wins
-SELECT df.start(
-    'SELECT quick_result()' | df.sleep(30)  -- timeout after 30s
-);
-
--- If-then-else with operators
-SELECT df.start(
-    'SELECT count(*) > 10 FROM orders' 
-        ?> 'SELECT ''high volume'''
-        !> 'SELECT ''low volume'''
-);
-
--- Loop with operator (prefix)
-SELECT df.start(
-    @> ('INSERT INTO heartbeats (ts) VALUES (now())' ~> df.sleep(60)),
-    'heartbeat-job'
-);
-```
-
-### Variable Substitution
-
-Use `$name` to reference named results in subsequent steps:
-
-```sql
-SELECT df.start(
-    'SELECT 100 as amount' |=> 'total'        -- save result as $total
-    ~> 'SELECT $total * 2 as doubled'         -- use $total in next step
+SELECT df.create_workflow(
+    name => 'naming-example',
+    steps => ARRAY[
+        df.sql('SELECT 100 as amount', result_name => 'total'),
+        df.sql('SELECT $total * 2 as doubled')
+    ]
 );
 ```
 
@@ -247,9 +234,12 @@ SELECT df.start(
 Access specific columns by name instead of just the first column:
 
 ```sql
-SELECT df.start(
-    $$SELECT 42 AS id, 'Alice' AS name$$ |=> 'user'
-    ~> $$SELECT $user.id, $user.name$$          -- access specific columns
+SELECT df.create_workflow(
+    name => 'dot-notation',
+    steps => ARRAY[
+        df.sql($$SELECT 42 AS id, 'Alice' AS name$$, result_name => 'user'),
+        df.sql($$SELECT $user.id, $user.name$$)
+    ]
 );
 ```
 
@@ -258,9 +248,12 @@ SELECT df.start(
 By default, referencing a result with no rows or a NULL value **fails** the instance with a clear error. Use the `?` suffix to substitute `NULL` instead:
 
 ```sql
-SELECT df.start(
-    $$SELECT NULL::text AS val$$ |=> 'x'
-    ~> $$SELECT COALESCE($x.val?, 'fallback')$$   -- NULL → 'fallback'
+SELECT df.create_workflow(
+    name => 'null-safe',
+    steps => ARRAY[
+        df.sql($$SELECT NULL::text AS val$$, result_name => 'x'),
+        df.sql($$SELECT COALESCE($x.val?, 'fallback')$$)
+    ]
 );
 ```
 
@@ -276,9 +269,12 @@ SELECT df.start(
 Expand a multi-row result into an inline `VALUES` subquery:
 
 ```sql
-SELECT df.start(
-    $$SELECT id, name FROM users WHERE active$$ |=> 'batch'
-    ~> $$SELECT count(*) FROM $batch.*$$                   -- FROM expansion
+SELECT df.create_workflow(
+    name => 'row-expansion',
+    steps => ARRAY[
+        df.sql($$SELECT id, name FROM users WHERE active$$, result_name => 'batch'),
+        df.sql($$SELECT count(*) FROM $batch.*$$)
+    ]
 );
 ```
 
@@ -310,7 +306,7 @@ This is useful for passing row sets between steps. The expansion generates SQL l
 
 ## Condition Evaluation
 
-When using conditional operators (`?>`, `!>`), `df.if()`, or loop conditions (`df.loop(body, condition)`), pg_durable needs to interpret SQL results as boolean values. This section explains how arbitrary data types are evaluated for truthiness.
+When using `df.if()` or loop conditions (`df.loop(steps..., condition)`), pg_durable needs to interpret SQL results as boolean values. This section explains how arbitrary data types are evaluated for truthiness.
 
 ### How SQL Results Are Evaluated
 
@@ -321,10 +317,15 @@ When a condition SQL query executes, pg_durable:
 
 ```sql
 -- Example: condition evaluates the first column of first row
-SELECT df.start(
-    'SELECT count(*) > 10 FROM orders'   -- Returns: true or false
-        ?> 'SELECT ''high volume'''
-        !> 'SELECT ''low volume'''
+SELECT df.create_workflow(
+    name => 'condition-demo',
+    steps => ARRAY[
+        df.if(
+            condition => 'SELECT count(*) > 10 FROM orders',
+            then_steps => ARRAY[df.sql('SELECT ''high volume''')],
+            else_steps => ARRAY[df.sql('SELECT ''low volume''')]
+        )
+    ]
 );
 ```
 
@@ -397,15 +398,18 @@ SELECT df.start(
 
 ### Loop Condition Example
 
-For `df.loop(body, condition)`, the condition is evaluated after each iteration:
+For `df.loop(steps..., condition)`, the condition is evaluated after each iteration:
 
 ```sql
 -- Loop while there are pending items
-SELECT df.start(
-    df.loop(
-        'SELECT process_next_item()',
-        'SELECT count(*) > 0 FROM queue WHERE status = ''pending'''  -- condition
-    )
+SELECT df.create_workflow(
+    name => 'loop-until-empty',
+    steps => ARRAY[
+        df.loop(
+            df.sql('SELECT process_next_item()'),
+            condition => 'SELECT count(*) > 0 FROM queue WHERE status = ''pending'''
+        )
+    ]
 );
 ```
 
@@ -413,101 +417,103 @@ The loop continues while the condition is truthy and exits when it becomes falsy
 
 ---
 
-## Function Examples
+## Workflow Examples
 
 ### 1. Simple Query
 
 ```sql
-SELECT df.start(
-    'SELECT COUNT(*) FROM playground.users WHERE active = true',
-    'count-active-users'
+SELECT df.create_workflow(
+    name => 'count-active-users',
+    steps => ARRAY[
+        df.sql('SELECT COUNT(*) FROM playground.users WHERE active = true')
+    ]
 );
 ```
 
 ### 2. Sequential Steps
 
 ```sql
-SELECT df.start(
-    'INSERT INTO playground.logs (msg) VALUES (''Step 1: Starting'')'
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Step 2: Processing'')'
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Step 3: Complete'')',
-    'three-step-function'
+SELECT df.create_workflow(
+    name => 'three-step-workflow',
+    steps => ARRAY[
+        df.sql('INSERT INTO playground.logs (msg) VALUES (''Step 1: Starting'')'),
+        df.sql('INSERT INTO playground.logs (msg) VALUES (''Step 2: Processing'')'),
+        df.sql('INSERT INTO playground.logs (msg) VALUES (''Step 3: Complete'')')
+    ]
 );
 ```
 
 ### 3. Multi-Step ETL
 
 ```sql
-SELECT df.start(
-    'DELETE FROM playground.target 
-     WHERE loaded_at < now() - interval ''1 day'''                    -- cleanup
-    ~> 'UPDATE playground.staging 
-        SET processed_at = now() WHERE processed_at IS NULL'          -- mark
-    ~> 'INSERT INTO playground.target (data, source_id, processed_at) 
-        SELECT data, source_id, processed_at FROM playground.staging 
-        WHERE processed_at IS NOT NULL',                              -- load
-    'daily-etl'
+SELECT df.create_workflow(
+    name => 'daily-etl',
+    steps => ARRAY[
+        df.sql('DELETE FROM playground.target
+                WHERE loaded_at < now() - interval ''1 day'''),
+        df.sql('UPDATE playground.staging
+                SET processed_at = now() WHERE processed_at IS NULL'),
+        df.sql('INSERT INTO playground.target (data, source_id, processed_at)
+                SELECT data, source_id, processed_at FROM playground.staging
+                WHERE processed_at IS NOT NULL')
+    ]
 );
 ```
 
 ### 4. With Variables
 
 ```sql
-SELECT df.start(
-    'SELECT id FROM playground.orders 
-     WHERE status = ''pending'' LIMIT 1' |=> 'order_id'               -- get order
-    ~> 'UPDATE playground.orders 
-        SET status = ''processing'' WHERE id = $order_id'             -- mark processing
-    ~> df.sleep(2)                                               -- simulate work
-    ~> 'UPDATE playground.orders 
-        SET status = ''completed'', processed_at = now() 
-        WHERE id = $order_id',                                        -- complete
-    'process-order'
+SELECT df.create_workflow(
+    name => 'process-order',
+    steps => ARRAY[
+        df.sql('SELECT id FROM playground.orders
+                WHERE status = ''pending'' LIMIT 1',
+               result_name => 'order_id'),
+        df.sql('UPDATE playground.orders
+                SET status = ''processing'' WHERE id = $order_id'),
+        df.sleep(2),
+        df.sql('UPDATE playground.orders
+                SET status = ''completed'', processed_at = now()
+                WHERE id = $order_id')
+    ]
 );
 ```
 
 ### 5. Parallel Execution
 
 ```sql
--- Using & operator (preferred)
-SELECT df.start(
-    'SELECT COUNT(*) as user_count FROM playground.users'             -- branch 1
-    & 'SELECT COUNT(*) as order_count FROM playground.orders'         -- branch 2
-    ~> 'INSERT INTO playground.logs (msg) 
-        VALUES (''Parallel counts complete'')',
-    'parallel-counts'
-);
-
--- Or using df.join() function
-SELECT df.start(
-    df.join(
-        'SELECT COUNT(*) as user_count FROM playground.users',
-        'SELECT COUNT(*) as order_count FROM playground.orders'
-    )
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Done'')',
-    'parallel-counts-func'
+SELECT df.create_workflow(
+    name => 'parallel-counts',
+    steps => ARRAY[
+        df.join(ARRAY[
+            df.sql('SELECT COUNT(*) as user_count FROM playground.users'),
+            df.sql('SELECT COUNT(*) as order_count FROM playground.orders')
+        ]),
+        df.sql('INSERT INTO playground.logs (msg)
+                VALUES (''Parallel counts complete'')')
+    ]
 );
 ```
 
 ### 6. Conditional Logic
 
 ```sql
--- Using ?> !> operators (preferred)
-SELECT df.start(
-    'SELECT COUNT(*) > 3 FROM playground.task_queue WHERE status = ''pending'''
-        ?> 'INSERT INTO playground.logs (msg, level) VALUES (''High load!'', ''warning'')'
-        !> 'INSERT INTO playground.logs (msg) VALUES (''Queue normal'')',
-    'check-task-load'
-);
-
--- Or using df.if() function
-SELECT df.start(
-    df.if(
-        'SELECT COUNT(*) > 3 FROM playground.task_queue WHERE status = ''pending''',
-        'INSERT INTO playground.logs (msg, level) VALUES (''High load!'', ''warning'')',
-        'INSERT INTO playground.logs (msg) VALUES (''Queue normal'')'
-    ),
-    'check-task-load-func'
+SELECT df.create_workflow(
+    name => 'check-task-load',
+    steps => ARRAY[
+        df.if(
+            condition => 'SELECT COUNT(*) > 3 FROM playground.task_queue
+                          WHERE status = ''pending''',
+            then_steps => ARRAY[
+                df.sql('INSERT INTO playground.logs (msg, level)
+                        VALUES (''High load!'', ''warning'')')
+            ],
+            else_steps => ARRAY[
+                df.sql('INSERT INTO playground.logs (msg)
+                        VALUES (''Queue normal'')')
+            ]
+        )
+    ]
 );
 ```
 
@@ -516,36 +522,46 @@ SELECT df.start(
 Use `df.if_rows()` to branch based on whether a named result has rows — without executing an extra SQL query:
 
 ```sql
-SELECT df.start(
-    $$SELECT id FROM orders WHERE status = 'pending'$$ |=> 'pending'
-    ~> df.if_rows(
-        'pending',                                               -- result name
-        $$UPDATE orders SET status = 'processing' WHERE id = $pending.id$$,  -- then
-        $$INSERT INTO logs (msg) VALUES ('No pending orders')$$               -- else
-    ),
-    'check-pending'
+SELECT df.create_workflow(
+    name => 'check-pending',
+    steps => ARRAY[
+        df.sql($$SELECT id FROM orders WHERE status = 'pending'$$,
+               result_name => 'pending'),
+        df.if_rows(
+            result => 'pending',
+            then_steps => ARRAY[
+                df.sql($$UPDATE orders SET status = 'processing' WHERE id = $pending.id$$)
+            ],
+            else_steps => ARRAY[
+                df.sql($$INSERT INTO logs (msg) VALUES ('No pending orders')$$)
+            ]
+        )
+    ]
 );
 ```
 
 ### 7. Task Queue Processor
 
 ```sql
-SELECT df.start(
-    'UPDATE playground.task_queue 
-     SET status = ''processing'', started_at = now()
-     WHERE id = (
-         SELECT id FROM playground.task_queue 
-         WHERE status = ''pending'' 
-         ORDER BY priority DESC, created_at 
-         LIMIT 1 
-         FOR UPDATE SKIP LOCKED
-     )
-     RETURNING id, payload' |=> 'task'                                -- claim task
-    ~> df.sleep(1)                                               -- process
-    ~> 'UPDATE playground.task_queue 
-        SET status = ''completed'', completed_at = now()
-        WHERE status = ''processing''',                               -- complete
-    'process-next-task'
+SELECT df.create_workflow(
+    name => 'process-next-task',
+    steps => ARRAY[
+        df.sql('UPDATE playground.task_queue
+                SET status = ''processing'', started_at = now()
+                WHERE id = (
+                    SELECT id FROM playground.task_queue
+                    WHERE status = ''pending''
+                    ORDER BY priority DESC, created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, payload',
+               result_name => 'task'),
+        df.sleep(1),
+        df.sql('UPDATE playground.task_queue
+                SET status = ''completed'', completed_at = now()
+                WHERE status = ''processing''')
+    ]
 );
 ```
 
@@ -555,16 +571,17 @@ SELECT df.start(
 
 Use `df.http()` to make HTTP requests to external APIs, webhooks, or services. HTTP requests are executed as durable activities - they survive crashes and can be retried.
 
-### df.http() Function
+### df.http() Step Function
 
 ```sql
 df.http(
-    url TEXT,                     -- Required: endpoint URL
-    method TEXT DEFAULT 'POST',   -- GET, POST, PUT, DELETE, PATCH
-    body TEXT DEFAULT NULL,       -- Request body (JSON)
-    headers JSONB DEFAULT '{}',   -- Custom headers
-    timeout_seconds INT DEFAULT 30
-) RETURNS TEXT                    -- JSON response object
+    url TEXT,                              -- Required: endpoint URL
+    method TEXT DEFAULT 'POST',            -- GET, POST, PUT, DELETE, PATCH
+    body TEXT DEFAULT NULL,                -- Request body (JSON)
+    headers JSONB DEFAULT '{}',            -- Custom headers
+    timeout_seconds INT DEFAULT 30,
+    result_name TEXT DEFAULT NULL           -- Optional: name for referencing result
+) RETURNS df.step                           -- Step descriptor
 ```
 
 ### Response Format
@@ -601,125 +618,173 @@ HTTP calls return a JSON object with full response details:
 #### 1. Simple GET Request
 
 ```sql
-SELECT df.start(
-    df.http('https://api.example.com/users/123', 'GET') |=> 'user'
-    ~> 'INSERT INTO users_cache (data) VALUES (($user::jsonb->>''body'')::jsonb)',
-    'fetch-user'
+SELECT df.create_workflow(
+    name => 'fetch-user',
+    steps => ARRAY[
+        df.http('https://api.example.com/users/123', 'GET',
+                result_name => 'user'),
+        df.sql('INSERT INTO users_cache (data)
+                VALUES (($user::jsonb->>''body'')::jsonb)')
+    ]
 );
 ```
 
 #### 2. POST with JSON Body
 
 ```sql
-SELECT df.start(
-    df.http(
-        'https://api.example.com/orders',
-        'POST',
-        '{"product_id": 42, "quantity": 2}'
-    ) |=> 'response'
-    ~> df.if(
-        'SELECT ($response::jsonb->>''ok'')::boolean',
-        'INSERT INTO playground.logs (msg) VALUES (''Order created'')',
-        'INSERT INTO playground.logs (msg, level) VALUES (''Order failed'', ''error'')'
-    ),
-    'create-order'
+SELECT df.create_workflow(
+    name => 'create-order',
+    steps => ARRAY[
+        df.http(
+            'https://api.example.com/orders',
+            'POST',
+            '{"product_id": 42, "quantity": 2}',
+            result_name => 'response'
+        ),
+        df.if(
+            condition => 'SELECT ($response::jsonb->>''ok'')::boolean',
+            then_steps => ARRAY[
+                df.sql('INSERT INTO playground.logs (msg) VALUES (''Order created'')')
+            ],
+            else_steps => ARRAY[
+                df.sql('INSERT INTO playground.logs (msg, level)
+                        VALUES (''Order failed'', ''error'')')
+            ]
+        )
+    ]
 );
 ```
 
 #### 3. HTTP with Custom Headers
 
 ```sql
-SELECT df.start(
-    df.http(
-        'https://api.example.com/secure/data',
-        'GET',
-        NULL,
-        '{"Authorization": "Bearer token123", "X-Custom-Header": "value"}'::jsonb
-    ) |=> 'response'
-    ~> 'SELECT ($response::jsonb->>''body'')::jsonb',
-    'authenticated-request'
+SELECT df.create_workflow(
+    name => 'authenticated-request',
+    steps => ARRAY[
+        df.http(
+            'https://api.example.com/secure/data',
+            'GET',
+            NULL,
+            '{"Authorization": "Bearer token123", "X-Custom-Header": "value"}'::jsonb,
+            result_name => 'response'
+        ),
+        df.sql('SELECT ($response::jsonb->>''body'')::jsonb')
+    ]
 );
 ```
 
 #### 4. Parallel API Calls
 
 ```sql
-SELECT df.start(
-    df.join(
-        df.http('https://api.example.com/users', 'GET'),
-        df.http('https://api.example.com/products', 'GET')
-    ) |=> 'results'
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Fetched users and products'')',
-    'parallel-fetch'
+SELECT df.create_workflow(
+    name => 'parallel-fetch',
+    steps => ARRAY[
+        df.join(
+            ARRAY[
+                df.http('https://api.example.com/users', 'GET'),
+                df.http('https://api.example.com/products', 'GET')
+            ],
+            result_name => 'results'
+        ),
+        df.sql('INSERT INTO playground.logs (msg)
+                VALUES (''Fetched users and products'')')
+    ]
 );
 ```
 
 #### 5. HTTP with Variable Substitution
 
 ```sql
-SELECT df.start(
-    'SELECT id, email FROM playground.users WHERE id = 1' |=> 'user'
-    ~> df.http(
-        'https://api.example.com/notifications',
-        'POST',
-        '{"user_id": "$user.id", "message": "Welcome!"}'
-    ) |=> 'notification'
-    ~> 'UPDATE playground.users SET notified = true WHERE id = ($user::jsonb->>''id'')::int',
-    'send-notification'
+SELECT df.create_workflow(
+    name => 'send-notification',
+    steps => ARRAY[
+        df.sql('SELECT id, email FROM playground.users WHERE id = 1',
+               result_name => 'user'),
+        df.http(
+            'https://api.example.com/notifications',
+            'POST',
+            '{"user_id": "$user.id", "message": "Welcome!"}',
+            result_name => 'notification'
+        ),
+        df.sql('UPDATE playground.users SET notified = true
+                WHERE id = ($user::jsonb->>''id'')::int')
+    ]
 );
 ```
 
 #### 6. Handle 4xx Errors in Workflow
 
 ```sql
-SELECT df.start(
-    df.http('https://api.example.com/users/999', 'GET') |=> 'response'
-    ~> df.if(
-        'SELECT ($response::jsonb->>''status'')::int = 404',
-        'INSERT INTO playground.logs (msg) VALUES (''User not found - creating new'')'
-            ~> df.http('https://api.example.com/users', 'POST', '{"name": "New User"}'),
-        'SELECT ($response::jsonb->>''body'')::jsonb'
-    ),
-    'fetch-or-create-user'
+SELECT df.create_workflow(
+    name => 'fetch-or-create-user',
+    steps => ARRAY[
+        df.http('https://api.example.com/users/999', 'GET',
+                result_name => 'response'),
+        df.if(
+            condition => 'SELECT ($response::jsonb->>''status'')::int = 404',
+            then_steps => ARRAY[
+                df.sql('INSERT INTO playground.logs (msg)
+                        VALUES (''User not found - creating new'')'),
+                df.http('https://api.example.com/users', 'POST',
+                        '{"name": "New User"}')
+            ],
+            else_steps => ARRAY[
+                df.sql('SELECT ($response::jsonb->>''body'')::jsonb')
+            ]
+        )
+    ]
 );
 ```
 
 #### 7. Webhook Integration
 
 ```sql
-SELECT df.start(
-    'SELECT order_id, status, total FROM playground.orders WHERE id = 1' |=> 'order'
-    ~> df.http(
-        'https://partner.example.com/webhook/order-update',
-        'POST',
-        '{"order_id": "$order.order_id", "status": "$order.status", "total": "$order.total"}',
-        '{"X-Webhook-Secret": "shared-secret-123"}'::jsonb
-    ) |=> 'webhook_response'
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Webhook sent: '' || ($webhook_response::jsonb->>''status''))',
-    'send-order-webhook'
+SELECT df.create_workflow(
+    name => 'send-order-webhook',
+    steps => ARRAY[
+        df.sql('SELECT order_id, status, total FROM playground.orders WHERE id = 1',
+               result_name => 'order'),
+        df.http(
+            'https://partner.example.com/webhook/order-update',
+            'POST',
+            '{"order_id": "$order.order_id", "status": "$order.status", "total": "$order.total"}',
+            '{"X-Webhook-Secret": "shared-secret-123"}'::jsonb,
+            result_name => 'webhook_response'
+        ),
+        df.sql('INSERT INTO playground.logs (msg)
+                VALUES (''Webhook sent: '' || ($webhook_response::jsonb->>''status''))')
+    ]
 );
 ```
 
 #### 8. Scheduled API Polling
 
 ```sql
-SELECT df.start(
-    @> (
-        df.wait_for_schedule('*/5 * * * *')  -- Every 5 minutes
-        ~> df.http('https://api.example.com/status', 'GET') |=> 'status'
-        ~> df.if(
-            'SELECT ($status::jsonb->''body''::jsonb->>''healthy'')::boolean = false',
-            'INSERT INTO playground.logs (msg, level) VALUES (''Service unhealthy!'', ''error'')',
-            'SELECT ''healthy'''
+SELECT df.create_workflow(
+    name => 'api-health-monitor',
+    steps => ARRAY[
+        df.loop(
+            df.wait_for_schedule('*/5 * * * *'),
+            df.http('https://api.example.com/status', 'GET',
+                    result_name => 'status'),
+            df.if(
+                condition => 'SELECT ($status::jsonb->''body''::jsonb->>''healthy'')::boolean = false',
+                then_steps => ARRAY[
+                    df.sql('INSERT INTO playground.logs (msg, level)
+                            VALUES (''Service unhealthy!'', ''error'')')
+                ],
+                else_steps => ARRAY[
+                    df.sql('SELECT ''healthy''')
+                ]
+            )
         )
-    ),
-    'api-health-monitor'
+    ]
 );
 ```
 
 #### 9. Real-World Example: Scheduled GitHub Commit Sync
 
-This example creates a scheduled durable function that fetches the last 5 commits from a GitHub repository every 30 minutes and stores them in a table. It demonstrates variables, HTTP requests, parsing complex JSON, and scheduled loops.
+This example creates a scheduled durable workflow that fetches the last 5 commits from a GitHub repository every 30 minutes and stores them in a table. It demonstrates variables, HTTP requests, parsing complex JSON, and scheduled loops.
 
 ```sql
 -- Create table to store commit data (sha, author, message, time)
@@ -732,31 +797,34 @@ CREATE TABLE IF NOT EXISTS github_commits (
     fetched_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Configure the sync URL using durable function variable
+-- Configure the sync URL using durable workflow variable
 SELECT df.setvar('github_url', 'https://api.github.com/repos/microsoft/duroxide/commits?per_page=5');
 
 -- Start scheduled commit sync (runs every 30 minutes)
-SELECT df.start(
-    @> (
-        (df.http(
-            '{github_url}',
-            'GET',
-            NULL,
-            '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable"}'::jsonb
-        ) |=> 'response')
-        ~> 'INSERT INTO github_commits (sha, author, message, committed_at)
-            SELECT 
-                c->>''sha'',
-                c->''commit''->''author''->>''name'',
-                c->''commit''->>''message'',
-                (c->''commit''->''author''->>''date'')::timestamptz
-            FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS c
-            ON CONFLICT (sha) DO UPDATE SET
-                fetched_at = now()
-            RETURNING sha'
-        ~> df.wait_for_schedule('*/30 * * * *')  -- Every 30 minutes
-    ),
-    'github-commit-sync'
+SELECT df.create_workflow(
+    name => 'github-commit-sync',
+    steps => ARRAY[
+        df.loop(
+            df.http(
+                '{github_url}',
+                'GET',
+                NULL,
+                '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable"}'::jsonb,
+                result_name => 'response'
+            ),
+            df.sql('INSERT INTO github_commits (sha, author, message, committed_at)
+                    SELECT
+                        c->>''sha'',
+                        c->''commit''->''author''->>''name'',
+                        c->''commit''->>''message'',
+                        (c->''commit''->''author''->>''date'')::timestamptz
+                    FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS c
+                    ON CONFLICT (sha) DO UPDATE SET
+                        fetched_at = now()
+                    RETURNING sha'),
+            df.wait_for_schedule('*/30 * * * *')
+        )
+    ]
 );
 
 -- Check the results
@@ -767,7 +835,7 @@ SELECT sha, author, committed_at, LEFT(message, 50) AS message FROM github_commi
 ```
 
 This demonstrates:
-- Configuring API endpoints with durable function variables
+- Configuring API endpoints with durable workflow variables
 - Calling a real REST API (GitHub)
 - Setting required headers (User-Agent, Accept)
 - Parsing nested JSON (extracting `commit.author.name` and `commit.message`)
@@ -776,36 +844,36 @@ This demonstrates:
 
 ---
 
-## Durable Function Variables
+## Durable Workflow Variables
 
-Durable function variables allow you to configure durable functions with external values like API endpoints, credentials, or configuration settings. Variables are set **before** starting a durable function and remain **immutable** during execution.
+Durable workflow variables allow you to configure workflows with external values like API endpoints, credentials, or configuration settings. Variables are set **before** starting a workflow and remain **immutable** during execution.
 
 ### How Variables Work
 
-1. **Set variables** using `df.setvar()` before calling `df.start()`
-2. Variables are **captured** when `df.start()` is called
-3. Variables are **immutable** during durable function execution
+1. **Set variables** using `df.setvar()` before calling `df.create_workflow()`
+2. Variables are **captured** when `df.create_workflow()` is called
+3. Variables are **immutable** during workflow execution
 4. Use `{varname}` syntax in SQL to substitute variable values
 
 ### Variable Functions
 
 | Function | Description |
 |----------|-------------|
-| `df.setvar(name, value)` | Set a variable (before durable function starts) |
+| `df.setvar(name, value)` | Set a variable (before workflow starts) |
 | `df.getvar(name)` | Get a variable value |
 | `df.unsetvar(name)` | Remove a variable |
 | `df.clearvars()` | Clear all variables |
 
-> **Important**: `df.setvar()`, `df.unsetvar()`, and `df.clearvars()` cannot be called from within a running durable function. They are for configuration only.
+> **Important**: `df.setvar()`, `df.unsetvar()`, and `df.clearvars()` cannot be called from within a running workflow. They are for configuration only.
 
 ### System Variables
 
-These read-only variables are automatically available during durable function execution:
+These read-only variables are automatically available during workflow execution:
 
 | Variable | Description |
 |----------|-------------|
-| `{sys_instance_id}` | Current durable function instance ID |
-| `{sys_label}` | Durable function label (if provided) |
+| `{sys_instance_id}` | Current workflow instance ID |
+| `{sys_label}` | Workflow label (if provided) |
 
 ### Variable Substitution
 
@@ -816,11 +884,14 @@ Use `{varname}` in SQL queries to substitute variable values:
 SELECT df.setvar('api_base', 'https://api.example.com');
 SELECT df.setvar('api_key', 'secret123');
 
--- Start durable function using variables
-SELECT df.start(
-    df.http('{api_base}/users', 'GET', NULL, '{"Authorization": "Bearer {api_key}"}'::jsonb)
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Fetched users'')',
-    'fetch-users'
+-- Start workflow using variables
+SELECT df.create_workflow(
+    name => 'fetch-users',
+    steps => ARRAY[
+        df.http('{api_base}/users', 'GET', NULL,
+                '{"Authorization": "Bearer {api_key}"}'::jsonb),
+        df.sql('INSERT INTO playground.logs (msg) VALUES (''Fetched users'')')
+    ]
 );
 ```
 
@@ -833,23 +904,28 @@ SELECT df.setvar('target_table', 'processed_orders');
 SELECT df.setvar('batch_size', '100');
 
 -- Start the pipeline
-SELECT df.start(
-    'SELECT * FROM {source_table} LIMIT {batch_size}::int' |=> 'batch'
-    ~> 'INSERT INTO {target_table} SELECT * FROM ($batch) AS source',
-    'etl-pipeline'
+SELECT df.create_workflow(
+    name => 'etl-pipeline',
+    steps => ARRAY[
+        df.sql('SELECT * FROM {source_table} LIMIT {batch_size}::int',
+               result_name => 'batch'),
+        df.sql('INSERT INTO {target_table} SELECT * FROM ($batch) AS source')
+    ]
 );
 ```
 
 ### Example: Using System Variables for Logging
 
 ```sql
-SELECT df.start(
-    'INSERT INTO audit_log (instance_id, label, action, ts) 
-     VALUES (''{sys_instance_id}'', ''{sys_label}'', ''started'', now())'
-    ~> 'SELECT process_data()'
-    ~> 'INSERT INTO audit_log (instance_id, label, action, ts) 
-        VALUES (''{sys_instance_id}'', ''{sys_label}'', ''completed'', now())',
-    'audit-example'
+SELECT df.create_workflow(
+    name => 'audit-example',
+    steps => ARRAY[
+        df.sql('INSERT INTO audit_log (instance_id, label, action, ts)
+                VALUES (''{sys_instance_id}'', ''{sys_label}'', ''started'', now())'),
+        df.sql('SELECT process_data()'),
+        df.sql('INSERT INTO audit_log (instance_id, label, action, ts)
+                VALUES (''{sys_instance_id}'', ''{sys_label}'', ''completed'', now())')
+    ]
 );
 ```
 
@@ -859,11 +935,14 @@ SELECT df.start(
 -- Configure API endpoint
 SELECT df.setvar('webhook_url', 'https://hooks.example.com/notify');
 
--- Durable function that calls the configured webhook
-SELECT df.start(
-    'SELECT id, status FROM orders WHERE id = 1' |=> 'order'
-    ~> df.http('{webhook_url}', 'POST', '{"order_id": "$order"}'),
-    'order-webhook'
+-- Workflow that calls the configured webhook
+SELECT df.create_workflow(
+    name => 'order-webhook',
+    steps => ARRAY[
+        df.sql('SELECT id, status FROM orders WHERE id = 1',
+               result_name => 'order'),
+        df.http('{webhook_url}', 'POST', '{"order_id": "$order"}')
+    ]
 );
 ```
 
@@ -879,7 +958,7 @@ SELECT df.start(
 │                           │                                 │
 │                           ▼                                 │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │ df.start(workflow, 'label')                         │    │
+│  │ df.create_workflow(name, steps)                      │    │
 │  │   → Variables CAPTURED (snapshot taken)             │    │
 │  │   → Variables become IMMUTABLE for this execution   │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -887,7 +966,7 @@ SELECT df.start(
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Background Worker (Durable Function Execution)             │
+│  Background Worker (Workflow Execution)                      │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │ {key} → 'value'         ← Substitution works        │    │
 │  │ {url} → 'https://...'                               │    │
@@ -904,21 +983,18 @@ SELECT df.start(
 
 ### Eternal Loops
 
-Use `@>` operator or `df.loop()` to create functions that run forever. Each iteration creates a new execution with fresh state (via continue-as-new).
+Use `df.loop()` to create workflows that run forever. Each iteration creates a new execution with fresh state (via continue-as-new).
 
 ```sql
--- Simple heartbeat every 30 seconds (using @> operator)
-SELECT df.start(
-    @> ('INSERT INTO playground.heartbeats (ts) VALUES (now())' ~> df.sleep(30)),
-    'heartbeat-30s'
-);
-
--- Same using df.loop() function
-SELECT df.start(
-    df.loop(
-        'INSERT INTO playground.heartbeats (ts) VALUES (now())' ~> df.sleep(30)
-    ),
-    'heartbeat-30s-func'
+-- Simple heartbeat every 30 seconds
+SELECT df.create_workflow(
+    name => 'heartbeat-30s',
+    steps => ARRAY[
+        df.loop(
+            df.sql('INSERT INTO playground.heartbeats (ts) VALUES (now())'),
+            df.sleep(30)
+        )
+    ]
 );
 ```
 
@@ -928,68 +1004,84 @@ Use `df.wait_for_schedule()` with a cron expression:
 
 ```sql
 -- Every minute: log a tick
-SELECT df.start(
-    @> (
-        df.wait_for_schedule('* * * * *')
-        ~> 'INSERT INTO playground.logs (msg) VALUES (''Minute tick: '' || now()::text)'
-    ),
-    'every-minute-tick'
+SELECT df.create_workflow(
+    name => 'every-minute-tick',
+    steps => ARRAY[
+        df.loop(
+            df.wait_for_schedule('* * * * *'),
+            df.sql('INSERT INTO playground.logs (msg)
+                    VALUES (''Minute tick: '' || now()::text)')
+        )
+    ]
 );
 
 -- Every 5 minutes: check for pending tasks
-SELECT df.start(
-    @> (
-        df.wait_for_schedule('*/5 * * * *')
-        ~> 'SELECT COUNT(*) as pending FROM playground.task_queue 
-            WHERE status = ''pending''' |=> 'count'
-        ~> 'INSERT INTO playground.logs (msg) VALUES (''Pending tasks: '' || $count)'
-    ),
-    'task-monitor-5min'
+SELECT df.create_workflow(
+    name => 'task-monitor-5min',
+    steps => ARRAY[
+        df.loop(
+            df.wait_for_schedule('*/5 * * * *'),
+            df.sql('SELECT COUNT(*) as pending FROM playground.task_queue
+                    WHERE status = ''pending''',
+                   result_name => 'count'),
+            df.sql('INSERT INTO playground.logs (msg)
+                    VALUES (''Pending tasks: '' || $count)')
+        )
+    ]
 );
 
 -- Hourly: clean up old logs
-SELECT df.start(
-    @> (
-        df.wait_for_schedule('0 * * * *')
-        ~> 'DELETE FROM playground.logs 
-            WHERE created_at < now() - interval ''24 hours'''
-    ),
-    'hourly-log-cleanup'
+SELECT df.create_workflow(
+    name => 'hourly-log-cleanup',
+    steps => ARRAY[
+        df.loop(
+            df.wait_for_schedule('0 * * * *'),
+            df.sql('DELETE FROM playground.logs
+                    WHERE created_at < now() - interval ''24 hours''')
+        )
+    ]
 );
 
 -- Daily at midnight: archive completed orders
-SELECT df.start(
-    @> (
-        df.wait_for_schedule('0 0 * * *')
-        ~> 'UPDATE playground.orders SET status = ''archived'' 
-            WHERE status = ''completed'' 
-            AND processed_at < now() - interval ''7 days'''
-    ),
-    'daily-order-archive'
+SELECT df.create_workflow(
+    name => 'daily-order-archive',
+    steps => ARRAY[
+        df.loop(
+            df.wait_for_schedule('0 0 * * *'),
+            df.sql('UPDATE playground.orders SET status = ''archived''
+                    WHERE status = ''completed''
+                    AND processed_at < now() - interval ''7 days''')
+        )
+    ]
 );
 
 -- Weekdays at 9am: generate report
-SELECT df.start(
-    @> (
-        df.wait_for_schedule('0 9 * * 1-5')
-        ~> 'SELECT playground.generate_report(''daily_summary'')'
-    ),
-    'weekday-morning-report'
+SELECT df.create_workflow(
+    name => 'weekday-morning-report',
+    steps => ARRAY[
+        df.loop(
+            df.wait_for_schedule('0 9 * * 1-5'),
+            df.sql('SELECT playground.generate_report(''daily_summary'')')
+        )
+    ]
 );
 ```
 
 ### While Loops
 
-Use `df.loop(body, condition)` to repeat while a condition is true:
+Use `df.loop(steps..., condition)` to repeat while a condition is true:
 
 ```sql
 -- Process items while queue has entries
-SELECT df.start(
-    df.loop(
-        'SELECT process_next_item()' ~> df.sleep(1),
-        'SELECT count(*) > 0 FROM task_queue WHERE status = ''pending'''
-    ),
-    'queue-processor'
+SELECT df.create_workflow(
+    name => 'queue-processor',
+    steps => ARRAY[
+        df.loop(
+            df.sql('SELECT process_next_item()'),
+            df.sleep(1),
+            condition => 'SELECT count(*) > 0 FROM task_queue WHERE status = ''pending'''
+        )
+    ]
 );
 ```
 
@@ -999,16 +1091,22 @@ Use `df.break()` to exit a loop from inside its body:
 
 ```sql
 -- Process batches until done flag is set
-SELECT df.start(
-    df.loop(
-        'SELECT process_batch()' |=> 'batch'
-        ~> (
-            '$batch.done'
-                ?> df.break('{"status": "complete", "total": $batch.count}')
-                !> df.sleep(5)
+SELECT df.create_workflow(
+    name => 'batch-processor',
+    steps => ARRAY[
+        df.loop(
+            df.sql('SELECT process_batch()', result_name => 'batch'),
+            df.if(
+                condition => 'SELECT ($batch::jsonb->>''done'')::boolean',
+                then_steps => ARRAY[
+                    df.break('{"status": "complete", "total": $batch.count}')
+                ],
+                else_steps => ARRAY[
+                    df.sleep(5)
+                ]
+            )
         )
-    ),
-    'batch-processor'
+    ]
 );
 ```
 
@@ -1030,7 +1128,7 @@ SELECT df.cancel('found_id', 'Stopping cron job');
 
 ## Signals
 
-Signals allow external code to send events to running durable functions. This enables:
+Signals allow external code to send events to running durable workflows. This enables:
 - **Human-in-the-loop workflows** - Wait for approval before proceeding
 - **Webhook callbacks** - Receive notifications from external systems
 - **Event-driven coordination** - Synchronize between processes
@@ -1056,7 +1154,7 @@ SELECT df.signal('instance_id', 'signal_name', '{"data": "value"}');
 ```
 
 **Parameters:**
-- `instance_id` - The durable function instance ID (required)
+- `instance_id` - The durable workflow instance ID (required)
 - `signal_name` - Name of the signal (must match what the instance is waiting for)
 - `signal_data` - JSON payload (optional, defaults to `'{}'`)
 
@@ -1084,19 +1182,27 @@ If the signal times out:
 ### Example: Order Approval Workflow
 
 ```sql
-SELECT df.start(
-    'SELECT order_id, total FROM orders WHERE id = 1' |=> 'order'
-    ~> df.wait_for_signal('approval', 86400) |=> 'sig'  -- 24h timeout
-    ~> df.if(
-        'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean 
-            AND ($sig::jsonb->''data''->>''approved'')::boolean',
-        'UPDATE orders SET status = ''approved'' WHERE id = $order_id',
-        'UPDATE orders SET status = ''rejected'' WHERE id = $order_id'
-    ),
-    'order-approval'
+SELECT df.create_workflow(
+    name => 'order-approval',
+    steps => ARRAY[
+        df.sql('SELECT order_id, total FROM orders WHERE id = 1',
+               result_name => 'order'),
+        df.wait_for_signal('approval', 86400,
+                           result_name => 'sig'),
+        df.if(
+            condition => 'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean
+                AND ($sig::jsonb->''data''->>''approved'')::boolean',
+            then_steps => ARRAY[
+                df.sql('UPDATE orders SET status = ''approved'' WHERE id = $order_id')
+            ],
+            else_steps => ARRAY[
+                df.sql('UPDATE orders SET status = ''rejected'' WHERE id = $order_id')
+            ]
+        )
+    ]
 );
 
--- Later, approve the order (using the instance ID returned by df.start)
+-- Later, approve the order (using the instance ID returned by df.create_workflow)
 SELECT df.signal('a1b2c3d4', 'approval', '{"approved": true, "approver": "jane@acme.com"}');
 ```
 
@@ -1105,15 +1211,21 @@ SELECT df.signal('a1b2c3d4', 'approval', '{"approved": true, "approver": "jane@a
 Wait for multiple approvals using `df.join()`:
 
 ```sql
-SELECT df.start(
-    'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
-    ~> df.join(
-        df.wait_for_signal('legal_approval'),
-        df.wait_for_signal('tech_approval'),
-        df.wait_for_signal('mgmt_approval')
-    ) |=> 'approvals'
-    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc_id',
-    'multi-approval'
+SELECT df.create_workflow(
+    name => 'multi-approval',
+    steps => ARRAY[
+        df.sql('SELECT doc_id FROM documents WHERE id = 1',
+               result_name => 'doc'),
+        df.join(
+            ARRAY[
+                df.wait_for_signal('legal_approval'),
+                df.wait_for_signal('tech_approval'),
+                df.wait_for_signal('mgmt_approval')
+            ],
+            result_name => 'approvals'
+        ),
+        df.sql('UPDATE documents SET status = ''approved'' WHERE id = $doc_id')
+    ]
 );
 
 -- Each approver sends their signal independently
@@ -1127,15 +1239,23 @@ SELECT df.signal('abc123', 'mgmt_approval', '{"approved": true}');
 Start a job and wait for external callback:
 
 ```sql
-SELECT df.start(
-    df.http('{job_api}/start', 'POST', '{"type": "render"}') |=> 'job'
-    ~> df.wait_for_signal('job_complete', 3600) |=> 'result'
-    ~> df.if(
-        'SELECT NOT ($result::jsonb->>''timed_out'')::boolean',
-        'INSERT INTO completed_jobs VALUES ($job, $result)',
-        'INSERT INTO failed_jobs VALUES ($job, ''timeout'')'
-    ),
-    'webhook-job'
+SELECT df.create_workflow(
+    name => 'webhook-job',
+    steps => ARRAY[
+        df.http('{job_api}/start', 'POST', '{"type": "render"}',
+                result_name => 'job'),
+        df.wait_for_signal('job_complete', 3600,
+                           result_name => 'result'),
+        df.if(
+            condition => 'SELECT NOT ($result::jsonb->>''timed_out'')::boolean',
+            then_steps => ARRAY[
+                df.sql('INSERT INTO completed_jobs VALUES ($job, $result)')
+            ],
+            else_steps => ARRAY[
+                df.sql('INSERT INTO failed_jobs VALUES ($job, ''timeout'')')
+            ]
+        )
+    ]
 );
 
 -- External system calls back via df.signal when job completes
@@ -1146,58 +1266,54 @@ SELECT df.start(
 
 ## Multi-Database Support
 
-By default, all SQL in a durable function runs in the database where the extension is installed (the `pg_durable.database` GUC, typically `postgres`). You can target a different database on the same cluster by passing the `database` parameter to `df.start()`.
+By default, all SQL in a workflow runs in the database where the extension is installed (the `pg_durable.database` GUC, typically `postgres`). You can target a different database on the same cluster by passing the `database` parameter to `df.create_workflow()`.
 
 ### Running SQL in Another Database
 
 ```sql
 -- Run a query in the 'analytics' database
-SELECT df.start(
-    'INSERT INTO reports (date, total) SELECT now(), count(*) FROM events',
-    'daily-report',
-    'analytics'
-);
-
--- Using named parameter syntax (skip the label)
-SELECT df.start(
-    'SELECT 1',
+SELECT df.create_workflow(
+    name => 'daily-report',
+    steps => ARRAY[
+        df.sql('INSERT INTO reports (date, total) SELECT now(), count(*) FROM events')
+    ],
     database => 'analytics'
 );
 ```
 
-All SQL nodes in the function execute against the specified database. The DSL itself (`~>`, `&`, `df.sql()`, etc.) is unchanged — database is purely a property of the instance.
+All SQL steps in the workflow execute against the specified database. The step functions are unchanged — database is purely a property of the instance.
 
 ### Key Points
 
-- **One database per invocation.** All SQL in a single `df.start()` call targets the same database. For cross-database workflows, start separate durable functions per database, or use `dblink`/`postgres_fdw` within your SQL.
+- **One database per invocation.** All SQL in a single `df.create_workflow()` call targets the same database. For cross-database workflows, start separate durable workflows per database, or use `dblink`/`postgres_fdw` within your SQL.
 - **Backwards compatible.** Omitting `database` (or passing NULL) uses the extension database — existing queries are unaffected.
-- **Validated at submission time.** If the database doesn't exist, `df.start()` raises an immediate error.
-- **Role isolation preserved.** The function runs as the user who called `df.start()`, not the background worker. The login role must be able to connect to the target database (`GRANT CONNECT`).
+- **Validated at submission time.** If the database doesn't exist, `df.create_workflow()` raises an immediate error.
+- **Role isolation preserved.** The workflow runs as the user who called `df.create_workflow()`, not the background worker. The login role must be able to connect to the target database (`GRANT CONNECT`).
 
 ### Example: Multi-Tenant Processing
 
 ```sql
 -- Process data in each tenant database
-SELECT df.start(
-    'CALL refresh_materialized_views()',
-    'tenant-alpha-refresh',
-    'tenant_alpha'
+SELECT df.create_workflow(
+    name => 'tenant-alpha-refresh',
+    steps => ARRAY[df.sql('CALL refresh_materialized_views()')],
+    database => 'tenant_alpha'
 );
 
-SELECT df.start(
-    'CALL refresh_materialized_views()',
-    'tenant-beta-refresh',
-    'tenant_beta'
+SELECT df.create_workflow(
+    name => 'tenant-beta-refresh',
+    steps => ARRAY[df.sql('CALL refresh_materialized_views()')],
+    database => 'tenant_beta'
 );
 ```
 
 ---
 
-## Visualizing Functions
+## Visualizing Workflows
 
 ### df.explain()
 
-Use `df.explain()` to visualize function structure. It works in two modes:
+Use `df.explain()` to visualize workflow structure. It works in two modes:
 
 **1. Live Instance** - Pass an instance ID to see execution status:
 
@@ -1216,17 +1332,19 @@ SQL |=> 'step1': SELECT 1                    ✓ Completed
 → SQL: INSERT INTO results...               ✓ Completed
 ```
 
-**2. Dry-Run Preview** - Pass a DSL expression to visualize without executing:
+**2. Dry-Run Preview** - Pass a steps array to `df.explain()` to visualize without executing:
 
 ```sql
 SELECT df.explain(
-    'SELECT 1' |=> 'a'
-    ~> 'SELECT 2' |=> 'b'
-    ~> df.if(
-        'SELECT $a > 0',
-        'SELECT ''yes''',
-        'SELECT ''no'''
-    )
+    ARRAY[
+        df.sql('SELECT 1', result_name => 'a'),
+        df.sql('SELECT 2', result_name => 'b'),
+        df.if(
+            condition => 'SELECT $a > 0',
+            then_steps => ARRAY[df.sql('SELECT ''yes''')],
+            else_steps => ARRAY[df.sql('SELECT ''no''')]
+        )
+    ]
 );
 ```
 
@@ -1256,22 +1374,33 @@ SQL |=> 'a': SELECT 1
 
 ```sql
 SELECT df.explain(
-    'SELECT * FROM staging WHERE status = ''pending'' LIMIT 1' |=> 'record'
-    ~> df.if(
-        'SELECT $record IS NOT NULL',
-        'UPDATE staging SET status = ''validating'' WHERE id = $record.id'
-            ~> df.join(
-                'SELECT validate_schema($record.data)' |=> 'schema_ok',
-                'SELECT validate_rules($record.data)' |=> 'rules_ok'
-            )
-            ~> df.if(
-                'SELECT $schema_ok AND $rules_ok',
-                'INSERT INTO target SELECT * FROM staging WHERE id = $record.id'
-                    ~> 'UPDATE staging SET status = ''loaded'' WHERE id = $record.id',
-                'UPDATE staging SET status = ''failed'' WHERE id = $record.id'
-            ),
-        'SELECT ''no pending records'''
-    )
+    ARRAY[
+        df.sql($$SELECT * FROM staging WHERE status = 'pending' LIMIT 1$$,
+               result_name => 'record'),
+        df.if(
+            condition => 'SELECT $record IS NOT NULL',
+            then_steps => ARRAY[
+                df.sql('UPDATE staging SET status = ''validating'' WHERE id = $record.id'),
+                df.join(ARRAY[
+                    df.sql('SELECT validate_schema($record.data)', result_name => 'schema_ok'),
+                    df.sql('SELECT validate_rules($record.data)', result_name => 'rules_ok')
+                ]),
+                df.if(
+                    condition => 'SELECT $schema_ok AND $rules_ok',
+                    then_steps => ARRAY[
+                        df.sql('INSERT INTO target SELECT * FROM staging WHERE id = $record.id'),
+                        df.sql('UPDATE staging SET status = ''loaded'' WHERE id = $record.id')
+                    ],
+                    else_steps => ARRAY[
+                        df.sql('UPDATE staging SET status = ''failed'' WHERE id = $record.id')
+                    ]
+                )
+            ],
+            else_steps => ARRAY[
+                df.sql('SELECT ''no pending records''')
+            ]
+        )
+    ]
 );
 ```
 
@@ -1300,15 +1429,22 @@ SQL |=> 'record': SELECT * FROM staging WHERE status = 'pending' LIMIT 1
 
 ```sql
 SELECT df.explain(
-    df.loop(
-        df.wait_for_schedule('0 * * * *')
-        ~> 'DELETE FROM logs WHERE created_at < now() - interval ''7 days''' |=> 'deleted'
-        ~> df.if(
-            'SELECT $deleted > 0',
-            'INSERT INTO audit (action, count) VALUES (''cleanup'', $deleted)',
-            'SELECT ''nothing to clean'''
+    ARRAY[
+        df.loop(
+            df.wait_for_schedule('0 * * * *'),
+            df.sql('DELETE FROM logs WHERE created_at < now() - interval ''7 days''',
+                   result_name => 'deleted'),
+            df.if(
+                condition => 'SELECT $deleted > 0',
+                then_steps => ARRAY[
+                    df.sql('INSERT INTO audit (action, count) VALUES (''cleanup'', $deleted)')
+                ],
+                else_steps => ARRAY[
+                    df.sql('SELECT ''nothing to clean''')
+                ]
+            )
         )
-    )
+    ]
 );
 ```
 
@@ -1328,24 +1464,32 @@ LOOP
 **Daily Midnight Order Archive (from Examples section):**
 
 ```sql
--- Visualize the daily-order-archive function before starting it
+-- Visualize the daily-order-archive workflow before starting it
 SELECT df.explain(
-    df.loop(
-        df.wait_for_schedule('0 0 * * *')
-        ~> 'SELECT COUNT(*) as cnt FROM playground.orders 
-            WHERE status = ''completed'' 
-            AND processed_at < now() - interval ''7 days''' |=> 'to_archive'
-        ~> df.if(
-            'SELECT $to_archive > 0',
-            'UPDATE playground.orders SET status = ''archived'' 
-             WHERE status = ''completed'' 
-             AND processed_at < now() - interval ''7 days''' |=> 'archived'
-                ~> 'INSERT INTO playground.logs (msg, level) 
-                    VALUES (''Archived '' || $archived || '' orders'', ''info'')',
-            'INSERT INTO playground.logs (msg) 
-             VALUES (''No orders to archive'')'
+    ARRAY[
+        df.loop(
+            df.wait_for_schedule('0 0 * * *'),
+            df.sql('SELECT COUNT(*) as cnt FROM playground.orders
+                    WHERE status = ''completed''
+                    AND processed_at < now() - interval ''7 days''',
+                   result_name => 'to_archive'),
+            df.if(
+                condition => 'SELECT $to_archive > 0',
+                then_steps => ARRAY[
+                    df.sql('UPDATE playground.orders SET status = ''archived''
+                            WHERE status = ''completed''
+                            AND processed_at < now() - interval ''7 days''',
+                           result_name => 'archived'),
+                    df.sql('INSERT INTO playground.logs (msg, level)
+                            VALUES (''Archived '' || $archived || '' orders'', ''info'')')
+                ],
+                else_steps => ARRAY[
+                    df.sql('INSERT INTO playground.logs (msg)
+                            VALUES (''No orders to archive'')')
+                ]
+            )
         )
-    )
+    ]
 );
 ```
 
@@ -1394,7 +1538,7 @@ SELECT * FROM df.instance_info('a1b2c3d4');
 
 ### Execution History
 
-For loops and retried functions, see the execution history:
+For loops and retried workflows, see the execution history:
 
 ```sql
 -- Last 5 executions (default)
@@ -1406,9 +1550,9 @@ SELECT * FROM df.instance_executions('a1b2c3d4', 20);
 
 **Columns:** `execution_id`, `status`, `event_count`, `duration_ms`, `output`
 
-### Function Nodes
+### Workflow Nodes
 
-See the function graph structure:
+See the workflow graph structure:
 
 ```sql
 -- Last 5 executions (default)
@@ -1459,12 +1603,12 @@ The background worker updates `last_seen_at` every ~5 seconds as part of its nor
 
 ### How Privilege Isolation Works
 
-Durable functions **execute with the privileges of the user who submitted them**, not the background worker's privileges. This means:
+Durable workflows **execute with the privileges of the user who submitted them**, not the background worker's privileges. This means:
 
 - ✅ Your SQL runs as **you**, with your permissions
 - ✅ You can only access tables and data **you** have access to
-- ✅ Non-superusers cannot escalate privileges through durable functions
-- ✅ Superusers' functions run with superuser privileges (expected behavior)
+- ✅ Non-superusers cannot escalate privileges through durable workflows
+- ✅ Superusers' workflows run with superuser privileges (expected behavior)
 
 **Example:**
 
@@ -1474,18 +1618,24 @@ CREATE USER alice;
 CREATE TABLE alice_data (secret TEXT);
 ALTER TABLE alice_data OWNER TO alice;
 
--- Alice submits a durable function
+-- Alice submits a durable workflow
 SET SESSION AUTHORIZATION alice;
-SELECT df.start('SELECT * FROM alice_data');
+SELECT df.create_workflow(
+    name => 'read-my-data',
+    steps => ARRAY[df.sql('SELECT * FROM alice_data')]
+);
 -- ✅ This works - alice can access her own table
 
-SELECT df.start('SELECT * FROM bob_data');
+SELECT df.create_workflow(
+    name => 'read-bob-data',
+    steps => ARRAY[df.sql('SELECT * FROM bob_data')]
+);
 -- ❌ This fails - alice doesn't have permission
 ```
 
 ### How Identity Is Captured
 
-When you call `df.start()`, pg_durable captures two pieces of identity:
+When you call `df.create_workflow()`, pg_durable captures two pieces of identity:
 
 1. **Login role** (`session_user`) - The user you authenticated as
 2. **Effective role** (`current_user`) - Your current effective privileges (after `SET ROLE`, if used)
@@ -1497,7 +1647,7 @@ The background worker then:
 
 ### Working with Group Roles
 
-You can use `SET ROLE` to switch to a group role before submitting a durable function:
+You can use `SET ROLE` to switch to a group role before submitting a durable workflow:
 
 ```sql
 -- Create a group role (no LOGIN)
@@ -1512,19 +1662,22 @@ SET SESSION AUTHORIZATION alice;
 SET ROLE analysts;
 
 -- Submit as the group role
-SELECT df.start('SELECT * FROM analyst_reports');
+SELECT df.create_workflow(
+    name => 'analyst-query',
+    steps => ARRAY[df.sql('SELECT * FROM analyst_reports')]
+);
 -- ✅ Runs as 'analysts', alice's session user is used for authentication
 ```
 
 ### What Happens If a Role Is Dropped?
 
-If the user who submitted a function is dropped **before execution**:
+If the user who submitted a workflow is dropped **before execution**:
 
 - The background worker will fail to connect
 - The instance transitions to `failed` status
 - You'll see a clear error message: `"Failed to connect as 'username'..."`
 
-**Important:** Don't drop roles that have running or pending durable functions.
+**Important:** Don't drop roles that have running or pending durable workflows.
 
 ### Current Limitations
 
@@ -1566,7 +1719,7 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 SELECT df.grant_usage('app_role');
 ```
 
-`df.grant_usage()` issues every GRANT a role needs to call DSL functions, submit workflows, and read results. Only superusers can execute it (EXECUTE is revoked from PUBLIC). **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
+`df.grant_usage()` issues every GRANT a role needs to call step functions, submit workflows, and read results. Only superusers can execute it (EXECUTE is revoked from PUBLIC). **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
@@ -1597,11 +1750,11 @@ SELECT df.grant_usage('pg_durable_user');
 GRANT pg_durable_user TO app_backend, etl_service;
 ```
 
-> **Security note:** If a user/role has INSERT privilege on `df.nodes`, they can construct function graphs with any available node type (including powerful types like HTTP). Granular restrictions on node types are deferred to future work.
+> **Security note:** If a user/role has INSERT privilege on `df.nodes`, they can construct workflow graphs with any available node type (including powerful types like HTTP). Granular restrictions on node types are deferred to future work.
 
 > **Note:** `GRANT EXECUTE ON ALL FUNCTIONS` only applies to functions that exist when the grant runs. After upgrading pg_durable with `ALTER EXTENSION pg_durable UPDATE`, re-run `df.grant_usage('role')` (or re-issue the manual grants) so new functions are accessible.
 
-Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — the identity column (`submitted_by`) and structural columns are protected.
+Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.create_workflow()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — the identity column (`submitted_by`) and structural columns are protected.
 
 > **Note:** `df.vars` uses per-user scoping via an `owner` column and RLS — each user can only read and write their own variables. Superusers bypass RLS but the DSL functions (`df.setvar()`, `df.getvar()`, etc.) still scope to the calling user via explicit filters. Avoid storing secrets in plain text.
 
@@ -1643,7 +1796,7 @@ The background worker maintains three categories of connections:
 | **Duroxide pool** | Orchestration state, LISTEN/NOTIFY for work dispatch | `pg_durable.max_duroxide_connections` | 10 |
 | **User-execution** | Per-SQL-node connections authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
 
-Each PG backend session (user calling `df.start()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
+Each PG backend session (user calling `df.create_workflow()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
 
 ### GUC Reference
 
@@ -1746,7 +1899,7 @@ pg_durable.execution_acquire_timeout = 60
 
 ### Extension Exists But Workflows Don't Start
 
-**Symptom**: You've run `CREATE EXTENSION pg_durable` but `df.start()` returns an instance ID that never completes.
+**Symptom**: You've run `CREATE EXTENSION pg_durable` but `df.create_workflow()` returns an instance ID that never completes.
 
 **Cause**: The background worker is not running, usually because `pg_durable` is not in `shared_preload_libraries`.
 
@@ -1769,7 +1922,7 @@ pg_durable.execution_acquire_timeout = 60
 
 ### "Failed to connect to duroxide store" Error
 
-**Symptom**: Calling `df.start()`, `df.status()`, or monitoring functions returns an error:
+**Symptom**: Calling `df.create_workflow()`, `df.status()`, or monitoring functions returns an error:
 ```
 Failed to connect to duroxide store: ...
 ```
@@ -1786,7 +1939,7 @@ Failed to connect to duroxide store: ...
 
 ### Background Worker Not Initializing
 
-**Symptom**: After `CREATE EXTENSION`, functions still don't execute, and logs show:
+**Symptom**: After `CREATE EXTENSION`, workflows still don't execute, and logs show:
 ```
 pg_durable: waiting for CREATE EXTENSION pg_durable...
 ```
@@ -1797,7 +1950,7 @@ pg_durable: waiting for CREATE EXTENSION pg_durable...
 1. Verify you're creating the extension in the correct database
 2. Check which database the background worker connects to:
    - Defaults to the database specified by `PGDATABASE` environment variable or `postgres`
-   - The background worker only processes functions in **one** database
+   - The background worker only processes workflows in **one** database
 3. If you need pg_durable in a different database:
    - Create the extension in the database the background worker uses, OR
    - Update environment variables and restart PostgreSQL
@@ -1820,7 +1973,7 @@ DROP EXTENSION pg_durable CASCADE;
 CREATE EXTENSION pg_durable;
 ```
 
-### Functions Complete But Results Are Empty
+### Workflows Complete But Results Are Empty
 
 **Symptom**: `df.status()` shows `Completed` but `df.result()` returns empty or null.
 
@@ -1831,26 +1984,37 @@ CREATE EXTENSION pg_durable;
    SELECT * FROM users WHERE id = 999999;  -- no such user
    ```
    
-2. **Variable not named**: Use `|=>` to capture results in named variables
+2. **Result not named**: Use `result_name` to capture results for later access
    ```sql
    -- Bad: result not captured
-   SELECT df.start('SELECT id FROM users LIMIT 1');
+   SELECT df.create_workflow(
+       name => 'example',
+       steps => ARRAY[df.sql('SELECT id FROM users LIMIT 1')]
+   );
    
    -- Good: result captured
-   SELECT df.start('SELECT id FROM users LIMIT 1' |=> 'user_id');
-   ```
-
-3. **ETL workflow that doesn't return data**: If the function performs INSERTs/UPDATEs, those succeed without returning data. Add a final query to return status:
-   ```sql
-   SELECT df.start(
-     'INSERT INTO logs (msg) VALUES (''done'')' ~>
-     'SELECT ''success'' as status'
+   SELECT df.create_workflow(
+       name => 'example',
+       steps => ARRAY[
+           df.sql('SELECT id FROM users LIMIT 1', result_name => 'user_id')
+       ]
    );
    ```
 
-### Slow Function Startup
+3. **ETL workflow that doesn't return data**: If the workflow performs INSERTs/UPDATEs, those succeed without returning data. Add a final query to return status:
+   ```sql
+   SELECT df.create_workflow(
+       name => 'etl-with-status',
+       steps => ARRAY[
+           df.sql('INSERT INTO logs (msg) VALUES (''done'')'),
+           df.sql('SELECT ''success'' as status')
+       ]
+   );
+   ```
 
-**Symptom**: There's a delay between `df.start()` returning and the function actually executing.
+### Slow Workflow Startup
+
+**Symptom**: There's a delay between `df.create_workflow()` returning and the workflow actually executing.
 
 **Explanation**: This is normal during:
 - **Initial extension creation**: Background worker needs 1-5 seconds to initialize
@@ -1863,7 +2027,7 @@ CREATE EXTENSION pg_durable;
 
 ### Debugging Failed Workflows
 
-When a durable function fails or produces unexpected results, use these steps to diagnose the issue from `psql` — no server log access required.
+When a durable workflow fails or produces unexpected results, use these steps to diagnose the issue from `psql` — no server log access required.
 
 #### Step 1: Check Status
 
@@ -1916,7 +2080,7 @@ This shows every node in the graph with its status and result. Key things to loo
 
 #### Step 5: Trace Variable Flow
 
-When using `|=>` to pass results between steps, check how values flow through the graph:
+When using `result_name` to pass results between steps, check how values flow through the graph:
 
 ```sql
 -- Show only nodes that produce named results
@@ -1979,37 +2143,93 @@ Look for lines starting with `pg_durable:` for background worker activity.
 ## Quick Reference Card
 
 ```sql
--- Start a durable function (plain SQL auto-wrapped)
-SELECT df.start('SELECT 1', 'optional-label');
+-- Create and start a durable workflow
+SELECT df.create_workflow(
+    name => 'my-workflow',
+    steps => ARRAY[df.sql('SELECT 1')]
+);
 
 -- Start in a different database
-SELECT df.start('SELECT 1', 'label', 'analytics');
-SELECT df.start('SELECT 1', database => 'analytics');
+SELECT df.create_workflow(
+    name => 'remote-job',
+    steps => ARRAY[df.sql('SELECT 1')],
+    database => 'analytics'
+);
 
--- Chain steps with ~>
-SELECT df.start('SELECT 1' ~> 'SELECT 2' ~> 'SELECT 3');
+-- Sequential steps (array ordering)
+SELECT df.create_workflow(
+    name => 'sequential',
+    steps => ARRAY[
+        df.sql('SELECT 1'),
+        df.sql('SELECT 2'),
+        df.sql('SELECT 3')
+    ]
+);
 
--- Name a result with |=>
-SELECT df.start('SELECT 1' |=> 'myvar' ~> 'SELECT $myvar * 2');
+-- Name a result with result_name
+SELECT df.create_workflow(
+    name => 'with-vars',
+    steps => ARRAY[
+        df.sql('SELECT 1', result_name => 'myvar'),
+        df.sql('SELECT $myvar * 2')
+    ]
+);
 
--- Parallel join (& operator or df.join)
-SELECT df.start('SELECT 1' & 'SELECT 2');         -- operator
-SELECT df.start(df.join('SELECT 1', 'SELECT 2')); -- function
+-- Parallel join (wait for all)
+SELECT df.create_workflow(
+    name => 'parallel',
+    steps => ARRAY[
+        df.join(ARRAY[
+            df.sql('SELECT 1'),
+            df.sql('SELECT 2')
+        ])
+    ]
+);
 
--- Race (| operator or df.race) - first wins
-SELECT df.start('fast_query' | df.sleep(30));     -- operator
-SELECT df.start(df.race(fast, slow));             -- function
+-- Race (first wins)
+SELECT df.create_workflow(
+    name => 'race',
+    steps => ARRAY[
+        df.race(ARRAY[
+            df.sql('SELECT quick_result()'),
+            df.sleep(30)
+        ])
+    ]
+);
 
--- Conditional (?> !> operators or df.if)
-SELECT df.start('SELECT true' ?> 'yes' !> 'no');  -- operator
-SELECT df.start(df.if('SELECT true', 'yes', 'no')); -- function
+-- Conditional (if/then/else)
+SELECT df.create_workflow(
+    name => 'conditional',
+    steps => ARRAY[
+        df.if(
+            condition => 'SELECT true',
+            then_steps => ARRAY[df.sql('SELECT ''yes''')],
+            else_steps => ARRAY[df.sql('SELECT ''no''')]
+        )
+    ]
+);
 
--- Loop forever (@> operator or df.loop)
-SELECT df.start(@> (body ~> df.sleep(60)));       -- operator
-SELECT df.start(df.loop(body ~> df.sleep(60)));   -- function
+-- Loop forever
+SELECT df.create_workflow(
+    name => 'eternal-loop',
+    steps => ARRAY[
+        df.loop(
+            df.sql('SELECT do_work()'),
+            df.sleep(60)
+        )
+    ]
+);
 
 -- While loop (continues while condition is true)
-SELECT df.start(df.loop(body, 'SELECT count(*) > 0 FROM queue'));
+SELECT df.create_workflow(
+    name => 'while-loop',
+    steps => ARRAY[
+        df.loop(
+            df.sql('SELECT process_item()'),
+            condition => 'SELECT count(*) > 0 FROM queue'
+        )
+    ]
+);
 
 -- Break out of loop
 df.break()                               -- exit loop
@@ -2023,15 +2243,19 @@ df.wait_for_schedule('*/5 * * * *')      -- every 5 min
 df.http('https://api.example.com', 'GET')                    -- simple GET
 df.http('https://api.example.com', 'POST', '{"key": "val"}') -- POST with body
 df.http(url, 'GET', NULL, '{"Auth": "Bearer x"}'::jsonb)     -- with headers
+df.http(url, 'GET', result_name => 'resp')                   -- with named result
 
--- Durable function variables (set BEFORE df.start)
+-- Durable workflow variables (set BEFORE df.create_workflow)
 SELECT df.setvar('api_url', 'https://api.example.com');      -- set variable
 SELECT df.getvar('api_url');                                  -- get variable
 SELECT df.unsetvar('api_url');                                -- remove variable
 SELECT df.clearvars();                                        -- clear all
 
 -- Use variables in workflows: {varname}
-SELECT df.start(df.http('{api_url}/data', 'GET'));           -- variable substitution
+SELECT df.create_workflow(
+    name => 'with-var',
+    steps => ARRAY[df.http('{api_url}/data', 'GET')]
+);
 -- System vars: {sys_instance_id}, {sys_label}
 
 -- Signals (wait for external events)
@@ -2040,8 +2264,11 @@ df.wait_for_signal('approval', 3600)              -- wait with 1h timeout
 SELECT df.signal('inst_id', 'approval', '{}');    -- send signal
 
 -- Visualize
-SELECT df.explain('instance_id');        -- live instance
-SELECT df.explain('a' ~> 'b');           -- dry-run preview
+SELECT df.explain('instance_id');                 -- live instance
+SELECT df.explain(ARRAY[                          -- dry-run preview
+    df.sql('SELECT 1'),
+    df.sql('SELECT 2')
+]);
 
 -- Monitor
 SELECT * FROM df.list_instances();
@@ -2062,7 +2289,7 @@ Copy and paste this script into `psql` to create test schemas and sample data fo
 ```sql
 -- ============================================================================
 -- pg_durable Test Data Setup
--- Run this script to create sample schemas and data for testing functions
+-- Run this script to create sample schemas and data for testing workflows
 -- ============================================================================
 
 -- Create a playground schema for testing
@@ -2098,7 +2325,7 @@ CREATE TABLE IF NOT EXISTS playground.task_queue (
     completed_at TIMESTAMP
 );
 
--- Logs table for function output
+-- Logs table for workflow output
 CREATE TABLE IF NOT EXISTS playground.logs (
     id SERIAL PRIMARY KEY,
     msg TEXT NOT NULL,
@@ -2199,4 +2426,4 @@ SELECT 'Orders: ' || COUNT(*) FROM playground.orders;
 SELECT 'Tasks: ' || COUNT(*) FROM playground.task_queue;
 ```
 
-After running this script, you can test durable functions against the `playground` schema.
+After running this script, you can test durable workflows against the `playground` schema.
