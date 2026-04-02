@@ -314,7 +314,10 @@ CREATE POLICY vars_user_isolation ON df.vars
 -- Must be called by a superuser or the extension owner.
 -- Safety: format(%I) quotes identifiers to prevent SQL injection. Additionally,
 -- this is SECURITY INVOKER so it cannot escalate beyond the caller's privileges.
-CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT)
+-- include_http controls whether the role is granted EXECUTE on df.http().
+-- Default is false: HTTP access is opt-in because df.http() makes outbound
+-- network requests and requires explicit administrator approval.
+CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT, include_http boolean DEFAULT false)
 RETURNS VOID
 LANGUAGE plpgsql
 SET search_path = pg_catalog, df, pg_temp
@@ -332,7 +335,7 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role);
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO %I', p_role);
     -- Exclude grant_usage and revoke_usage — only superusers should call them.
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT) FROM %I', p_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT, boolean) FROM %I', p_role);
     EXECUTE format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM %I', p_role);
     EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role);
     EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role);
@@ -340,6 +343,19 @@ BEGIN
     EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role);
     EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role);
+
+    -- df.http() carries network-access implications and is opt-in.
+    -- The blanket ALL FUNCTIONS grant above included df.http; undo that unless
+    -- the caller explicitly requested HTTP access.
+    IF NOT include_http THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I', p_role);
+        -- Warn if the role still has effective HTTP access via a PUBLIC grant or
+        -- another role grant (e.g. a pre-upgrade install that has not yet had
+        -- PUBLIC revoked, or a manual GRANT by an admin).
+        IF has_function_privilege(p_role::regrole, 'df.http(text, text, text, jsonb, integer)', 'EXECUTE') THEN
+            RAISE WARNING 'pg_durable: role "%" still has effective EXECUTE privilege on df.http() despite include_http => false (possibly via a PUBLIC grant or another role grant). To remove it, run: REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;', p_role;
+        END IF;
+    END IF;
 
     RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
 END;
@@ -399,9 +415,22 @@ BEGIN
         RAISE WARNING 'pg_durable: worker role "%" is not a superuser. The background worker must be a superuser to bypass RLS and manage all users'' instances. Grant superuser or BYPASSRLS to this role.', wrole;
     END IF;
 END $$;
+
+-- df.http() carries network-access implications and must be opt-in.
+-- PostgreSQL grants EXECUTE to PUBLIC by default when functions are created;
+-- revoke that so only roles explicitly granted access (via
+-- df.grant_usage(role, include_http => true) or a direct GRANT) can make
+-- HTTP requests.
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+
+-- df.grant_usage() and df.revoke_usage() are admin-only helpers.
+-- Revoke PUBLIC's default EXECUTE privilege so that only superusers
+-- (who already pass the is_superuser guard inside the functions) can call them.
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
-    requires = ["create_tables"]
+    requires = ["create_tables", dsl::http]
 );
 
 // ============================================================================

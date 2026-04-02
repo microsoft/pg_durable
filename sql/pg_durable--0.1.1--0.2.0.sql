@@ -234,9 +234,18 @@ ALTER TABLE df.nodes DROP COLUMN IF EXISTS login_role;
 
 -- ============================================================================
 -- 6. Add df.grant_usage() and df.revoke_usage() helpers for role privilege management
+--
+-- df.grant_usage(role, include_http => false) grants all standard df privileges
+-- but NOT df.http() by default.  Pass include_http => true to opt in.
+--
+-- Upgrade note: step 7 below documents the PUBLIC EXECUTE grant on
+-- df.http() that v0.1.1 issued via 'GRANT EXECUTE ON ALL FUNCTIONS'.
+-- The upgrade intentionally does NOT revoke it (to avoid breaking running
+-- workflows).  If any roles should lose HTTP access, run:
+--   REVOKE EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) FROM <role>;
 -- ============================================================================
 
-CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT)
+CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT, include_http boolean DEFAULT false)
 RETURNS VOID
 LANGUAGE plpgsql
 SET search_path = pg_catalog, df, pg_temp
@@ -253,7 +262,7 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role);
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO %I', p_role);
     -- Exclude grant_usage and revoke_usage — only superusers should call them.
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT) FROM %I', p_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT, boolean) FROM %I', p_role);
     EXECUTE format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM %I', p_role);
     EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role);
     EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role);
@@ -261,6 +270,19 @@ BEGIN
     EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role);
     EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role);
+
+    -- df.http() carries network-access implications and is opt-in.
+    -- The blanket ALL FUNCTIONS grant above included df.http; undo that unless
+    -- the caller explicitly requested HTTP access.
+    IF NOT include_http THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I', p_role);
+        -- Warn if the role still has effective HTTP access via a PUBLIC grant or
+        -- another role grant (e.g. a pre-upgrade install that has not yet had
+        -- PUBLIC revoked, or a manual GRANT by an admin).
+        IF has_function_privilege(p_role::regrole, 'df.http(text, text, text, jsonb, integer)', 'EXECUTE') THEN
+            RAISE WARNING 'pg_durable: role "%" still has effective EXECUTE privilege on df.http() despite include_http => false (possibly via a PUBLIC grant or another role grant). To remove it, run: REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;', p_role;
+        END IF;
+    END IF;
 
     RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
 END;
@@ -292,3 +314,15 @@ BEGIN
     RAISE NOTICE 'pg_durable: revoked df usage privileges from "%"', p_role;
 END;
 $fn$;
+
+-- ============================================================================
+-- 7. Note on df.http() PUBLIC privilege
+--    v0.1.1 issued GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC,
+--    which included df.http().  New installs (0.2.0+) revoke this at
+--    CREATE EXTENSION time, but upgraded installs retain the PUBLIC grant.
+--
+--    If you want to adopt opt-in HTTP permissions after upgrading, run:
+--      REVOKE EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) FROM PUBLIC;
+--    Then use df.grant_usage(role, include_http => true) to re-grant to roles
+--    that should have HTTP access.
+-- ============================================================================

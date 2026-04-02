@@ -15,6 +15,7 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
     let graph_pool = pool.clone();
     let status_pool = pool.clone();
     let node_status_pool = pool.clone();
+    let http_pool = pool.clone();
 
     ActivityRegistry::builder()
         .register(activities::execute_sql::NAME, move |ctx: ActivityContext, input_json: String| {
@@ -33,8 +34,9 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
             let pool = node_status_pool.clone();
             async move { activities::update_node_status::execute(ctx, pool, input_json).await }
         })
-        .register(activities::execute_http::NAME, |ctx: ActivityContext, config_json: String| {
-            async move { activities::execute_http::execute(ctx, config_json).await }
+        .register(activities::execute_http::NAME, move |ctx: ActivityContext, config_json: String| {
+            let pool = http_pool.clone();
+            async move { activities::execute_http::execute(ctx, pool, config_json).await }
         })
         .build()
 }

@@ -415,21 +415,23 @@ SELECT df.clearvars();
 
 ## Administration Functions
 
-### df.grant_usage(role_name)
+### df.grant_usage(role_name [, include_http])
 
-Grants all privileges a role needs to use pg_durable (schema usage, function execution, table access). Must be called by a superuser.
+Grants the privileges a role needs to use pg_durable. By default this grants general `df` usage but does not grant `EXECUTE` on `df.http()`. Pass `include_http => true` to opt a role into HTTP access. Must be called by a superuser.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `role_name` | TEXT | The role to grant privileges to |
+| `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer)` |
 
 ```sql
 SELECT df.grant_usage('app_role');
+SELECT df.grant_usage('app_role', include_http => true);
 ```
 
 ### df.revoke_usage(role_name)
 
-Revokes all privileges previously granted by `df.grant_usage()`. Must be called by a superuser. Also useful for revoking legacy PUBLIC grants on upgraded installs.
+Revokes all privileges previously granted by `df.grant_usage()`, including any `df.http()` access. Must be called by a superuser. On upgraded installs, revoking `df.http()` from `PUBLIC` is still a separate manual step.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

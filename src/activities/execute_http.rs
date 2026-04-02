@@ -9,12 +9,40 @@
 //! See docs/http-security.md for the full security model.
 
 use duroxide::ActivityContext;
+use std::sync::Arc;
 use std::time::Duration;
+
+use sqlx::PgPool;
 
 use crate::types::HttpConfig;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-http";
+
+/// Check that `submitted_by` holds EXECUTE privilege on `df.http()`.
+///
+/// This closes the bypass path where a user crafts a raw Durofut JSON and
+/// passes it directly to `df.start()`, inserting an HTTP node without going
+/// through the DSL guard in `df.http()`.
+async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
+    let has_priv: Option<bool> = sqlx::query_scalar(
+        "SELECT has_function_privilege($1::regrole, \
+             'df.http(text,text,text,jsonb,integer)'::regprocedure, \
+             'EXECUTE')",
+    )
+    .bind(submitted_by)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
+
+    match has_priv {
+        Some(true) => Ok(()),
+        _ => Err(format!(
+            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http(). \
+             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {submitted_by} to allow HTTP requests."
+        )),
+    }
+}
 
 /// Build a reqwest Client with optional SSRF-safe DNS resolver.
 ///
@@ -42,14 +70,27 @@ fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
 }
 
 /// Execute an HTTP request and return the response as JSON
-pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String, String> {
+pub async fn execute(
+    ctx: ActivityContext,
+    pool: Arc<PgPool>,
+    config_json: String,
+) -> Result<String, String> {
     let config: HttpConfig =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid HTTP config: {e}"))?;
 
-    // Audit context
-    let audit_user = config.submitted_by.as_deref().unwrap_or("unknown");
+    // Audit context — submitted_by is always set by the orchestration (from
+    // FunctionNode.submitted_by which is non-optional), but guard explicitly
+    // so a missing value produces a clear error instead of a confusing
+    // 'role "unknown" does not exist' from the regrole cast.
+    let audit_user = config
+        .submitted_by
+        .as_deref()
+        .ok_or("Blocked: HTTP node has no submitted_by \u{2014} cannot verify privilege")?;
 
     // Validation chain — order is security-critical:
+    //   0. Privilege: submitted_by must hold EXECUTE on df.http(). Closes the
+    //                 bypass path where a user crafts raw Durofut JSON and passes
+    //                 it to df.start() without going through the DSL guard.
     //   1. Scheme:    blocks file://, gopher://, etc.
     //   2. Allowlist: blocks ALL bare IPs (public and private) + non-Azure
     //                 domains. Fails-closed on malformed URLs. Because bare IPs
@@ -58,6 +99,16 @@ pub async fn execute(ctx: ActivityContext, config_json: String) -> Result<String
     //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding — a hostname
     //                 that passes the allowlist but resolves to a private IP at
     //                 connect time.
+
+    // --- Privilege check (Layer 0): submitted_by must have EXECUTE on df.http() ---
+    check_http_privilege(&pool, audit_user)
+        .await
+        .inspect_err(|_| {
+            ctx.trace_info(format!(
+                "HTTP BLOCKED (privilege) url={} submitted_by={audit_user}",
+                config.url
+            ));
+        })?;
 
     // --- Scheme validation (always enforced, regardless of feature flag) ---
     crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
