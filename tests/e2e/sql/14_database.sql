@@ -1,28 +1,109 @@
--- Test: Multi-database support
---
--- Validates that df.start() can target a specific database on the cluster
--- using the optional `database` parameter.
---
--- Must run as superuser because it creates/drops a database.
---
--- Tests:
--- 1. df.start() with database => works and executes SQL in the target database
--- 2. df.start() with database => 'nonexistent' raises an immediate error
--- 3. df.start() without database parameter (regression) still works
--- 4. Multi-node sequence graph targeting another database
--- 5. Database dropped after df.start() — deferred connection failure
+-- Merged from: 29_database_validation, 34_multi_database
+-- Tests: CREATE EXTENSION rejected in wrong database, workflows execute in correct database,
+--        df.start() with explicit database parameter, invalid database rejection,
+--        multi-node sequence in another database, dropped database failure handling
+-- Runs as postgres throughout (creates/drops databases)
+
+-- === Test: 29_database_validation ===
 
 CREATE EXTENSION IF NOT EXISTS dblink;
 
--- ============================================================================
--- Test 1: Execute durable function in a different database
--- ============================================================================
+-- Verify we're running in the correct database
+DO $$
+DECLARE
+    current_db TEXT;
+    target_db TEXT;
+BEGIN
+    SELECT current_database() INTO current_db;
+    SELECT df.target_database() INTO target_db;
+    
+    IF current_db != target_db THEN
+        RAISE EXCEPTION 'TEST SETUP ERROR: This test must run in database "%" (currently in "%")', target_db, current_db;
+    END IF;
+    
+    RAISE NOTICE 'Test running in correct database: %', current_db;
+END $$;
 
+-- Test 1: CREATE EXTENSION should succeed in the correct database
+SELECT public._e2e_drop_extension_safe();
+CREATE EXTENSION pg_durable;
+
+SELECT df.grant_usage('df_e2e_user');
+
+SELECT public._e2e_wait_for_worker_ready();
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_durable') THEN
+        RAISE EXCEPTION 'TEST FAILED: Extension should exist in correct database';
+    END IF;
+    RAISE NOTICE 'PASSED: CREATE EXTENSION succeeded in correct database';
+END $$;
+
+-- Test 2: Verify workflows can execute (BGW is connected to this database)
+CREATE TEMP TABLE _test_state (instance_id TEXT);
+INSERT INTO _test_state
+SELECT df.start('SELECT 42 as answer', 'test-correct-db');
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state;
+
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: Workflow should complete in correct database, got status: %', status;
+    END IF;
+    
+    RAISE NOTICE 'PASSED: Workflow executed successfully in correct database';
+END $$;
+
+DROP TABLE _test_state;
+
+-- Test 3: CREATE EXTENSION must fail in a wrong database
+DROP DATABASE IF EXISTS _test_wrong_db;
+CREATE DATABASE _test_wrong_db;
+
+DO $$
+DECLARE
+    connstr TEXT;
+    err_msg TEXT;
+BEGIN
+    connstr := format(
+        'host=localhost dbname=_test_wrong_db port=%s user=postgres',
+        current_setting('port')
+    );
+
+    BEGIN
+        PERFORM dblink_exec(connstr, 'CREATE EXTENSION pg_durable;');
+        RAISE EXCEPTION 'TEST FAILED: CREATE EXTENSION should have been rejected in wrong database';
+    EXCEPTION WHEN OTHERS THEN
+        err_msg := SQLERRM;
+    END;
+
+    IF err_msg NOT ILIKE '%must be created in database%' THEN
+        RAISE EXCEPTION 'TEST FAILED: Expected "must be created in database" in error, got: %', err_msg;
+    END IF;
+    IF err_msg NOT ILIKE '%_test_wrong_db%' THEN
+        RAISE EXCEPTION 'TEST FAILED: Expected wrong db name in error, got: %', err_msg;
+    END IF;
+
+    RAISE NOTICE 'PASSED: CREATE EXTENSION correctly rejected in wrong database';
+    RAISE NOTICE 'Error was: %', err_msg;
+END $$;
+
+DROP DATABASE IF EXISTS _test_wrong_db;
+
+-- === Test: 34_multi_database ===
+
+-- Test 1: Execute durable function in a different database
 DROP DATABASE IF EXISTS _test_multi_db;
 CREATE DATABASE _test_multi_db;
 GRANT CONNECT ON DATABASE _test_multi_db TO df_e2e_user;
 
--- Create a test table in the target database and grant access to df_e2e_user
 SELECT dblink_exec(
     format('host=localhost dbname=_test_multi_db port=%s user=postgres', current_setting('port')),
     'CREATE TABLE test_multi (id INT, value TEXT)'
@@ -32,7 +113,6 @@ SELECT dblink_exec(
     'GRANT ALL ON test_multi TO df_e2e_user'
 );
 
--- Submit durable function as df_e2e_user targeting _test_multi_db
 SET SESSION AUTHORIZATION df_e2e_user;
 
 CREATE TEMP TABLE _test_state (instance_id TEXT);
@@ -60,7 +140,6 @@ BEGIN
     RAISE NOTICE 'PASSED: durable function completed in target database';
 END $$;
 
--- Verify the row exists in _test_multi_db
 DO $$
 DECLARE
     connstr TEXT;
@@ -82,7 +161,6 @@ BEGIN
     RAISE NOTICE 'PASSED: verified row exists in target database: %', row_value;
 END $$;
 
--- Verify the database column is set on the instance and nodes
 DO $$
 DECLARE
     inst_id TEXT;
@@ -106,10 +184,7 @@ END $$;
 
 DROP TABLE _test_state;
 
--- ============================================================================
 -- Test 2: Invalid database raises immediate error
--- ============================================================================
-
 SET SESSION AUTHORIZATION df_e2e_user;
 
 DO $$
@@ -122,7 +197,6 @@ BEGIN
             'test-bad-db',
             'nonexistent_database_abc'
         );
-        -- Should not reach here
         RAISE EXCEPTION 'TEST FAILED: df.start() should have errored for nonexistent database';
     EXCEPTION WHEN OTHERS THEN
         err_msg := SQLERRM;
@@ -140,10 +214,7 @@ END $$;
 
 RESET SESSION AUTHORIZATION;
 
--- ============================================================================
 -- Test 3: Regression - df.start() without database still works
--- ============================================================================
-
 SET SESSION AUTHORIZATION df_e2e_user;
 CREATE TEMP TABLE _test_state2 (instance_id TEXT);
 
@@ -178,11 +249,7 @@ END $$;
 
 DROP TABLE _test_state2;
 
--- ============================================================================
 -- Test 4: Multi-node sequence graph targeting another database
--- ============================================================================
-
--- Insert a second row and update it in sequence, all in the target database
 SET SESSION AUTHORIZATION df_e2e_user;
 
 CREATE TEMP TABLE _test_state3 (instance_id TEXT);
@@ -211,7 +278,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED [multi-node seq]: status = %', status;
     END IF;
 
-    -- Verify all nodes in the graph have the database field set
     SELECT COUNT(*), COUNT(database) INTO node_count, nodes_with_db
     FROM df.nodes WHERE instance_id = inst_id;
 
@@ -222,19 +288,16 @@ BEGIN
     RAISE NOTICE 'PASSED: multi-node sequence completed (% nodes, all with database)', node_count;
 END $$;
 
--- Verify the rows in _test_multi_db
 DO $$
 DECLARE
     connstr TEXT;
     row_val TEXT;
-    row_cnt INT;
 BEGIN
     connstr := format(
         'host=localhost dbname=_test_multi_db port=%s user=postgres',
         current_setting('port')
     );
 
-    -- id=10 should have been updated to 'step2'
     SELECT val INTO row_val
     FROM dblink(connstr, 'SELECT value FROM test_multi WHERE id = 10')
          AS t(val TEXT);
@@ -242,7 +305,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED [multi-node seq verify]: id=10 expected step2, got %', row_val;
     END IF;
 
-    -- id=11 should exist with 'step3'
     SELECT val INTO row_val
     FROM dblink(connstr, 'SELECT value FROM test_multi WHERE id = 11')
          AS t(val TEXT);
@@ -255,18 +317,11 @@ END $$;
 
 DROP TABLE _test_state3;
 
--- ============================================================================
 -- Test 5: Database dropped after df.start() — deferred connection failure
--- ============================================================================
-
--- Create a temporary database, start a loop targeting it, then drop it
--- to verify the worker produces a clean 'failed' status.
-
 DROP DATABASE IF EXISTS _test_drop_db;
 CREATE DATABASE _test_drop_db;
 GRANT CONNECT ON DATABASE _test_drop_db TO df_e2e_user;
 
--- Create a table in the target database so the first iteration can succeed
 SELECT dblink_exec(
     format('host=localhost dbname=_test_drop_db port=%s user=postgres', current_setting('port')),
     'CREATE TABLE drop_test (id SERIAL, ts TIMESTAMP DEFAULT now())'
@@ -293,15 +348,12 @@ INSERT INTO _test_state4 SELECT df.start(
 
 RESET SESSION AUTHORIZATION;
 
--- Give the first iteration time to start
 SELECT pg_sleep(3);
 
--- Drop the database (terminate existing connections first)
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity
 WHERE datname = '_test_drop_db' AND pid != pg_backend_pid();
 DROP DATABASE IF EXISTS _test_drop_db;
 
--- Wait for the instance to fail (loop should fail on next iteration)
 DO $$
 DECLARE
     inst_id TEXT;
@@ -326,10 +378,7 @@ END $$;
 
 DROP TABLE _test_state4;
 
--- ============================================================================
 -- Cleanup
--- ============================================================================
-
 DROP DATABASE IF EXISTS _test_multi_db;
 
 SELECT 'TEST PASSED' AS result;

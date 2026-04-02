@@ -1,9 +1,8 @@
--- E2E Test: Signals
--- Tests df.wait_for_signal() and df.signal() functionality
+-- From: 21_signals
+-- Tests: basic signal send/receive, signal timeout, signal with data
+SET SESSION AUTHORIZATION df_e2e_user;
 
--- ============================================================================
--- Setup
--- ============================================================================
+-- === Test: 21_signals ===
 
 DROP TABLE IF EXISTS signal_test_log;
 CREATE TABLE signal_test_log (
@@ -13,10 +12,7 @@ CREATE TABLE signal_test_log (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- ============================================================================
 -- Test 1: Basic Signal Send/Receive
--- ============================================================================
-
 CREATE TEMP TABLE _test_signal_basic (instance_id TEXT);
 
 INSERT INTO _test_signal_basic SELECT df.start(
@@ -71,7 +67,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: basic signal status = %', status;
     END IF;
     
-    -- Verify signal data was received with timed_out = false
     IF NOT EXISTS (
         SELECT 1 FROM signal_test_log 
         WHERE msg = 'received' 
@@ -80,7 +75,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: signal data not logged correctly';
     END IF;
     
-    -- Verify we received the value 42 in the signal data
     IF NOT EXISTS (
         SELECT 1 FROM signal_test_log 
         WHERE msg = 'received' 
@@ -95,20 +89,16 @@ END $$;
 DROP TABLE _test_signal_basic;
 DELETE FROM signal_test_log;
 
--- ============================================================================
 -- Test 2: Signal Timeout
--- ============================================================================
-
 CREATE TEMP TABLE _test_signal_timeout (instance_id TEXT);
 
 INSERT INTO _test_signal_timeout SELECT df.start(
-    df.wait_for_signal('never_arrives', 2) |=> 'sig'  -- 2 second timeout
+    df.wait_for_signal('never_arrives', 2) |=> 'sig'
     ~> 'INSERT INTO signal_test_log (msg, data) 
         VALUES (''timeout_result'', $sig::jsonb)',
     'test-signal-timeout'
 );
 
--- Wait for timeout (should take ~2 seconds)
 DO $$
 DECLARE
     inst_id TEXT;
@@ -123,7 +113,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: signal timeout status = %', status;
     END IF;
     
-    -- Verify timed_out flag is true
     IF NOT EXISTS (
         SELECT 1 FROM signal_test_log 
         WHERE msg = 'timeout_result' 
@@ -138,10 +127,7 @@ END $$;
 DROP TABLE _test_signal_timeout;
 DELETE FROM signal_test_log;
 
--- ============================================================================
 -- Test 3: Signal with Data
--- ============================================================================
-
 CREATE TEMP TABLE _test_signal_data (instance_id TEXT);
 
 INSERT INTO _test_signal_data SELECT df.start(
@@ -166,7 +152,6 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_data;
     
-    -- Send signal with data
     PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
     RAISE NOTICE 'Testing signal with data: %', inst_id;
 
@@ -176,7 +161,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: signal data status = %', status;
     END IF;
     
-    -- Verify data was extracted correctly
     IF NOT EXISTS (
         SELECT 1 FROM signal_test_log 
         WHERE msg = 'approval_received' 
@@ -190,12 +174,7 @@ BEGIN
 END $$;
 
 DROP TABLE _test_signal_data;
-
--- ============================================================================
--- Cleanup
--- ============================================================================
-
 DROP TABLE signal_test_log;
 
+RESET SESSION AUTHORIZATION;
 SELECT 'ALL SIGNAL TESTS PASSED' AS result;
-

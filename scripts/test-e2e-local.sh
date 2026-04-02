@@ -161,17 +161,6 @@ phase_for_test() {
     esac
 }
 
-test_user_for() {
-    case "$1" in
-        00_requires_shared_preload|22_cross_connection|23_transactions|25_extension_creation_security|26_superuser_*|27_user_isolation|28_bgw_lifecycle|29_database_validation|34_multi_database|35_heartbeat_liveness|37_rls|38_rls_vars)
-            echo "$PG_USER"
-            ;;
-        *)
-            echo "$E2E_USER"
-            ;;
-    esac
-}
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep)
@@ -630,17 +619,15 @@ print_failure_excerpt() {
 run_test_file() {
     local test_file="$1"
     local test_name
-    local psql_user
     local output
 
     test_name=$(basename "$test_file" .sql)
-    psql_user=$(test_user_for "$test_name")
 
     printf "  %-45s ... " "$test_name"
 
     if [ "$VERBOSE" = true ]; then
         echo ""
-        if "$PSQL" -h localhost -p "$PG_PORT" -U "$psql_user" -d "$PG_DB" -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"; then
+        if "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -v client_min_messages=notice -f "$test_file"; then
             echo -e "  ${GREEN}PASS${NC}"
             return 0
         fi
@@ -649,7 +636,7 @@ run_test_file() {
         return 1
     fi
 
-    if output=$("$PSQL" -h localhost -p "$PG_PORT" -U "$psql_user" -d "$PG_DB" -v ON_ERROR_STOP=1 -f "$test_file" 2>&1); then
+    if output=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -f "$test_file" 2>&1); then
         if printf '%s\n' "$output" | grep -q "TEST FAILED"; then
             echo -e "${RED}FAIL${NC}"
             print_failure_excerpt "$output"

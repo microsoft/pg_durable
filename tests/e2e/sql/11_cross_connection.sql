@@ -1,10 +1,9 @@
--- E2E Test: Cross-Connection Operations
--- Tests that df.signal() and df.cancel() work when called from a different
--- PostgreSQL connection (different backend process) than the one that started the DF.
+-- Merged from: 22_cross_connection, 23_transactions
+-- Tests: df.signal() and df.cancel() from a different backend connection (dblink),
+--        transaction semantics — committed txn executes, rolled-back txn does not
+-- Runs as postgres throughout (uses dblink with postgres user)
 
--- ============================================================================
--- Setup
--- ============================================================================
+-- === Test: 22_cross_connection ===
 
 DROP TABLE IF EXISTS cross_conn_log;
 CREATE TABLE cross_conn_log (
@@ -15,18 +14,12 @@ CREATE TABLE cross_conn_log (
 );
 
 -- Connection string for dblink (same database, different connection)
--- This simulates an external system or different user session
--- Use host=localhost to force TCP connection instead of socket
 CREATE TEMP TABLE _dblink_conn AS 
 SELECT format('host=localhost dbname=postgres port=%s user=postgres', current_setting('port')) AS connstr;
 
--- ============================================================================
 -- Test 1: Signal from Different Connection
--- ============================================================================
-
 CREATE TEMP TABLE _test_cross_signal (instance_id TEXT);
 
--- Start workflow in THIS connection
 INSERT INTO _test_cross_signal SELECT df.start(
     'SELECT ''started''' |=> 'msg'
     ~> (df.wait_for_signal('external_trigger') |=> 'sig')
@@ -64,7 +57,6 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_signal;
     SELECT c.connstr INTO connstr FROM _dblink_conn c;
     
-    -- This executes df.signal() in a completely separate backend process
     SELECT * INTO result FROM dblink(
         connstr,
         format('SELECT df.signal(%L, ''external_trigger'', ''{"source": "other_connection", "value": 123}'')', inst_id)
@@ -87,7 +79,6 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: cross-connection signal status = %', status;
     END IF;
     
-    -- Verify the signal data was received correctly
     IF NOT EXISTS (
         SELECT 1 FROM cross_conn_log 
         WHERE msg = 'signal_received'
@@ -103,13 +94,9 @@ END $$;
 DROP TABLE _test_cross_signal;
 DELETE FROM cross_conn_log;
 
--- ============================================================================
 -- Test 2: Cancel from Different Connection
--- ============================================================================
-
 CREATE TEMP TABLE _test_cross_cancel (instance_id TEXT);
 
--- Start a long-running workflow in THIS connection
 INSERT INTO _test_cross_cancel SELECT df.start(
     @> (
         'INSERT INTO cross_conn_log (msg) VALUES (''loop_iteration'')'
@@ -118,7 +105,7 @@ INSERT INTO _test_cross_cancel SELECT df.start(
     'cross-conn-cancel'
 );
 
--- Wait for at least one loop iteration to be committed (poll instead of fixed sleep)
+-- Wait for at least one loop iteration to be committed
 DO $$
 DECLARE
     inst_id TEXT;
@@ -153,7 +140,6 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_cancel;
     SELECT c.connstr INTO connstr FROM _dblink_conn c;
     
-    -- This executes df.cancel() in a completely separate backend process
     SELECT * INTO result FROM dblink(
         connstr,
         format('SELECT df.cancel(%L, ''Canceled from external system'')', inst_id)
@@ -162,7 +148,6 @@ BEGIN
     RAISE NOTICE 'Cancel sent from other connection: %', result;
 END $$;
 
--- Wait for cancellation and verify
 DO $$
 DECLARE
     inst_id TEXT;
@@ -170,10 +155,8 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_cancel;
 
-    -- Wait for cancellation (may show as 'failed' or 'cancelled')
     SELECT df.wait_for_completion(inst_id, 10) INTO status;
 
-    -- Canceled workflows end up as 'failed' or 'canceled'/'cancelled'
     IF status NOT IN ('canceled', 'cancelled', 'failed') THEN
         RAISE EXCEPTION 'TEST FAILED: cross-connection cancel status = % (expected canceled/cancelled/failed)', status;
     END IF;
@@ -183,19 +166,14 @@ END $$;
 
 DROP TABLE _test_cross_cancel;
 
--- ============================================================================
 -- Test 3: Monitor from Different Connection
--- ============================================================================
-
 CREATE TEMP TABLE _test_cross_monitor (instance_id TEXT);
 
--- Start workflow in THIS connection
 INSERT INTO _test_cross_monitor SELECT df.start(
     'SELECT 1' ~> df.sleep(1) ~> 'SELECT 2',
     'cross-conn-monitor'
 );
 
--- Query status from DIFFERENT connection using dblink
 DO $$
 DECLARE
     inst_id TEXT;
@@ -206,13 +184,11 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_monitor;
     SELECT c.connstr INTO connstr FROM _dblink_conn c;
     
-    -- Get status from the other connection
     SELECT * INTO remote_status FROM dblink(
         connstr,
         format('SELECT df.status(%L)', inst_id)
     ) AS t(status TEXT);
     
-    -- Get status from this connection
     SELECT s INTO local_status FROM df.status(inst_id) s;
     
     RAISE NOTICE 'Status from other connection: %, from this connection: %', remote_status, local_status;
@@ -224,7 +200,6 @@ BEGIN
     RAISE NOTICE 'TEST PASSED: cross_connection_monitor';
 END $$;
 
--- Wait for completion before cleanup
 DO $$
 DECLARE
     inst_id TEXT;
@@ -235,12 +210,164 @@ BEGIN
 END $$;
 
 DROP TABLE _test_cross_monitor;
-
--- ============================================================================
--- Cleanup
--- ============================================================================
-
 DROP TABLE cross_conn_log;
 
-SELECT 'ALL CROSS-CONNECTION TESTS PASSED' AS result;
+-- === Test: 23_transactions ===
 
+DROP TABLE IF EXISTS txn_test_log;
+CREATE TABLE txn_test_log (
+    id SERIAL PRIMARY KEY,
+    msg TEXT,
+    instance_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Test 1: DF Started Within DO Block (Same Transaction) - Should Work via Retry
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    attempts INT := 0;
+BEGIN
+    RAISE NOTICE 'Test 1: DF started within same transaction (tests retry logic)';
+    
+    inst_id := df.start(
+        'INSERT INTO txn_test_log (msg, instance_id) VALUES (''same_txn_df_ran'', ''{sys_instance_id}'')',
+        'txn-test-same-txn'
+    );
+    
+    RAISE NOTICE 'Started DF: %. Worker will retry until this txn commits...', inst_id;
+    
+    PERFORM pg_sleep(0.5);
+    
+    RAISE NOTICE 'Transaction about to commit after 500ms delay...';
+    
+    INSERT INTO txn_test_log (msg, instance_id) VALUES ('test1_instance_id', inst_id);
+END $$;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM txn_test_log WHERE msg = 'test1_instance_id';
+    RAISE NOTICE 'Test 1: Waiting for DF: %', inst_id;
+    
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: same-txn DF status = % (retry logic should have waited for commit)', status;
+    END IF;
+    
+    IF NOT EXISTS (SELECT 1 FROM txn_test_log WHERE msg = 'same_txn_df_ran') THEN
+        RAISE EXCEPTION 'TEST FAILED: same-txn DF did not execute';
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: same_transaction_with_retry';
+END $$;
+
+DELETE FROM txn_test_log;
+
+-- Test 2: Rolled Back Transaction - DF Should NOT Execute
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    attempts INT := 0;
+BEGIN
+    RAISE NOTICE 'Test 2: Rolled back transaction (via savepoint)';
+    
+    BEGIN
+        inst_id := df.start(
+            'INSERT INTO txn_test_log (msg) VALUES (''rollback_df_should_not_run'')',
+            'txn-test-rollback'
+        );
+        
+        RAISE NOTICE 'Started DF that will be rolled back: %', inst_id;
+        
+        INSERT INTO txn_test_log (msg, instance_id) VALUES ('rollback_test_id', inst_id);
+        
+        RAISE EXCEPTION 'Simulated rollback';
+        
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Transaction rolled back (exception caught)';
+    END;
+    
+    RAISE NOTICE 'After rollback, checking if DF data persisted...';
+END $$;
+
+DO $$
+DECLARE
+    rollback_id TEXT;
+    node_count INT;
+    instance_count INT;
+BEGIN
+    SELECT instance_id INTO rollback_id FROM txn_test_log WHERE msg = 'rollback_test_id';
+    
+    IF rollback_id IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: rollback_test_id should have been rolled back but found: %', rollback_id;
+    END IF;
+    
+    SELECT COUNT(*) INTO instance_count FROM df.instances WHERE label = 'txn-test-rollback';
+    
+    IF instance_count > 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: rolled back DF should not exist in df.instances';
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: rollback_transaction_no_instance';
+END $$;
+
+SELECT pg_sleep(2);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM txn_test_log WHERE msg = 'rollback_df_should_not_run') THEN
+        RAISE EXCEPTION 'TEST FAILED: rolled back DF should not have executed';
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: rollback_transaction_no_execution';
+END $$;
+
+-- Test 3: Explicit Transaction with Rollback (using dblink)
+DO $$
+DECLARE
+    connstr TEXT := format('host=localhost dbname=postgres port=%s user=postgres', current_setting('port'));
+    result TEXT;
+    instance_count INT;
+BEGIN
+    RAISE NOTICE 'Test 3: Explicit transaction rollback via separate connection';
+    
+    BEGIN
+        SELECT * INTO result FROM dblink(
+            connstr,
+            $dblink$
+                BEGIN;
+                SELECT df.start(
+                    'INSERT INTO txn_test_log (msg) VALUES (''explicit_rollback_should_not_run'')',
+                    'txn-test-explicit-rollback'
+                );
+                ROLLBACK;
+            $dblink$
+        ) AS t(result TEXT);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'dblink completed (exception: %)', SQLERRM;
+    END;
+    
+    PERFORM pg_sleep(2);
+    
+    SELECT COUNT(*) INTO instance_count FROM df.instances WHERE label = 'txn-test-explicit-rollback';
+    
+    IF instance_count > 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: explicitly rolled back DF should not exist';
+    END IF;
+    
+    IF EXISTS (SELECT 1 FROM txn_test_log WHERE msg = 'explicit_rollback_should_not_run') THEN
+        RAISE EXCEPTION 'TEST FAILED: explicitly rolled back DF should not have executed';
+    END IF;
+    
+    RAISE NOTICE 'TEST PASSED: explicit_rollback_transaction';
+END $$;
+
+DROP TABLE txn_test_log;
+
+SELECT 'ALL CROSS-CONNECTION AND TRANSACTION TESTS PASSED' AS result;
