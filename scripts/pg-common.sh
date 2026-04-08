@@ -42,6 +42,7 @@ configure_local_cluster() {
     set_pg_conf "shared_preload_libraries" "pg_durable"
     set_pg_conf "pg_durable.worker_role" "postgres"
     set_pg_conf "pg_durable.database" "${PGDATABASE:-postgres}"
+    set_pg_conf "pg_durable.enable_superuser_instances" "on"
     set_pg_conf "unix_socket_directories" "$HOME/.pgrx"
 }
 

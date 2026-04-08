@@ -7,7 +7,9 @@ use duroxide::ActivityContext;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
-use crate::types::{FunctionGraph, FunctionNode};
+use crate::types::{
+    is_role_superuser_name, superuser_instances_enabled, FunctionGraph, FunctionNode,
+};
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::load-function-graph";
@@ -26,25 +28,37 @@ pub async fn execute(
         "Loading function graph for instance: {instance_id}"
     ));
 
-    let instance_query = "SELECT root_node FROM df.instances WHERE id = $1";
+    let instance_query = "SELECT root_node, r.rolname AS submitted_by
+        FROM df.instances i
+        LEFT JOIN pg_catalog.pg_roles r ON r.oid = i.submitted_by::oid
+        WHERE i.id = $1";
 
     // Retry loop: wait for instance data to appear
     let start_time = std::time::Instant::now();
-    let root_node_id: String = loop {
-        match sqlx::query_scalar::<_, String>(instance_query)
+    let (root_node_id, instance_submitted_by): (String, String) = loop {
+        match sqlx::query(instance_query)
             .bind(&instance_id)
-            .fetch_one(pool.as_ref())
+            .fetch_optional(pool.as_ref())
             .await
         {
-            Ok(id) => break id,
-            Err(e) => {
+            Ok(Some(row)) => {
+                let submitted_by: Option<String> = row.get("submitted_by");
+                match submitted_by {
+                    Some(name) => break (row.get("root_node"), name),
+                    None => {
+                        return Err(format!(
+                        "Instance {instance_id}: submitted_by role no longer exists in pg_roles"
+                    ))
+                    }
+                }
+            }
+            Ok(None) => {
                 let elapsed = start_time.elapsed();
                 if elapsed.as_secs() >= MAX_WAIT_SECS {
                     return Err(format!(
-                        "Instance {instance_id} not found after {MAX_WAIT_SECS}s (transaction may have been rolled back): {e}"
+                        "Instance {instance_id} not found after {MAX_WAIT_SECS}s (transaction may have been rolled back)"
                     ));
                 }
-                // Log first retry and then every second
                 if elapsed.as_millis() < POLL_INTERVAL_MS as u128 * 2 {
                     ctx.trace_info(format!(
                         "Instance {instance_id} not yet visible, waiting for transaction commit..."
@@ -52,12 +66,42 @@ pub async fn execute(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
             }
+            Err(e) => {
+                let elapsed = start_time.elapsed();
+                if elapsed.as_secs() >= MAX_WAIT_SECS {
+                    return Err(format!(
+                        "Instance {instance_id} not found after {MAX_WAIT_SECS}s: {e}"
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            }
         }
     };
 
+    // Worker-side superuser guard: reject before executing any user SQL.
+    // This closes the forgery path where a BYPASSRLS role inserts rows with
+    // submitted_by = <superuser> directly, bypassing the df.start() check.
+    if !superuser_instances_enabled() {
+        match is_role_superuser_name(pool.as_ref(), &instance_submitted_by).await {
+            Ok(true) => {
+                return Err(format!(
+                    "pg_durable blocked instance {instance_id}: submitted_by role \
+                     \"{instance_submitted_by}\" is a superuser, but \
+                     pg_durable.enable_superuser_instances is off"
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return Err(format!(
+                    "pg_durable: superuser check failed for instance {instance_id}: {e}"
+                ));
+            }
+        }
+    }
+
     let nodes_query = r#"SELECT n.id, n.node_type, n.query, n.result_name,
            n.left_node, n.right_node,
-           COALESCE(r.rolname, n.submitted_by::oid::text) AS submitted_by,
+           r.rolname AS submitted_by,
            n.database
         FROM df.nodes n
         LEFT JOIN pg_catalog.pg_roles r ON r.oid = n.submitted_by::oid
@@ -75,6 +119,21 @@ pub async fn execute(
     let mut nodes = std::collections::BTreeMap::new();
     for row in rows {
         let id: String = row.get("id");
+        let submitted_by: Option<String> = row.get("submitted_by");
+        let submitted_by = match submitted_by {
+            Some(name) => name,
+            None => {
+                return Err(format!(
+                "Instance {instance_id}: node {id} submitted_by role no longer exists in pg_roles"
+            ))
+            }
+        };
+
+        // No per-node superuser check needed: a composite FK
+        //   (instance_id, submitted_by) REFERENCES df.instances (id, submitted_by)
+        // guarantees every node shares the instance's submitted_by.
+        // The instance-level check above already covers the superuser case.
+
         let node = FunctionNode {
             id: id.clone(),
             node_type: row.get("node_type"),
@@ -82,7 +141,7 @@ pub async fn execute(
             result_name: row.get("result_name"),
             left_node: row.get("left_node"),
             right_node: row.get("right_node"),
-            submitted_by: row.get::<String, _>("submitted_by"),
+            submitted_by,
             database: row.get("database"),
         };
         nodes.insert(id, node);

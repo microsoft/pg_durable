@@ -95,15 +95,18 @@ GucRegistry::define_bool_guc(
     c"Allow pg_durable instances whose submitted_by role is a PostgreSQL superuser",
     c"Disabled by default to prevent superuser execution-identity forgery via RLS-bypassing roles.",
     &ENABLE_SUPERUSER_INSTANCES,
-    GucContext::Suset,
-    GucFlags::NO_SHOW_ALL | GucFlags::SUPERUSER_ONLY,
+    GucContext::Postmaster,
+    GucFlags::SUPERUSER_ONLY,
 );
 ```
 
 Note: in pgrx 0.16.1, `GucFlags::NO_SHOW_ALL` is a combined constant that sets both
 `GUC_NO_SHOW_ALL` (hides from `SHOW ALL` and `pg_settings`) and `GUC_NOT_IN_SAMPLE`
-(hides from the sample `postgresql.conf`). `GucFlags::SUPERUSER_ONLY` additionally
-restricts visibility in `pg_settings` to superusers.
+(hides from the sample `postgresql.conf`). However, `GUC_NO_SHOW_ALL` also hides the
+GUC from `pg_settings`, which breaks any unit tests that query that view to verify
+`boot_val` or `context`. Therefore **do not use `GucFlags::NO_SHOW_ALL`** for this GUC.
+`GucFlags::SUPERUSER_ONLY` already ensures non-superusers cannot see the GUC in
+`pg_settings`; that is the meaningful security property here.
 
 Recommended default:
 
@@ -179,17 +182,22 @@ validation closes gaps left by DSL-time validation.
 
 ## Implementation Plan
 
+> **Status: implemented.** All four steps below are complete and the build is
+> clean. Changed files:
+> - [`src/lib.rs`](../src/lib.rs) — GUC static + registration
+> - [`src/types.rs`](../src/types.rs) — helper functions
+> - [`src/dsl.rs`](../src/dsl.rs) — submission-time check
+> - [`src/activities/load_function_graph.rs`](../src/activities/load_function_graph.rs) — worker-side guard
+
 ### 1. Add the GUC in `src/lib.rs`
 
 - Define a new static `GucSetting<bool>` with default `false`.
 - Register `pg_durable.enable_superuser_instances` in `_PG_init()`.
-- Use `GucContext::Suset` so only a superuser can change it, without requiring
-  a restart.
-- Use `GucFlags::NO_SHOW_ALL | GucFlags::SUPERUSER_ONLY`: `NO_SHOW_ALL` hides
-  it from `SHOW ALL`, `pg_settings`, and the sample `postgresql.conf`;
-  `SUPERUSER_ONLY` further restricts `pg_settings` visibility to superusers.
-  Both flags are appropriate for an internal security control that operators
-  set deliberately rather than discovering through general documentation.
+- Use `GucContext::Postmaster` so the GUC requires a server restart to change.
+- Use `GucFlags::SUPERUSER_ONLY`: restricts `pg_settings` visibility to
+  superusers. Do **not** use `GucFlags::NO_SHOW_ALL`; that flag maps to
+  `GUC_NO_SHOW_ALL` which hides the GUC from `pg_settings` entirely, breaking
+  unit tests that verify `boot_val` and `context`.
 
 ### 2. Add a helper for role privilege classification
 
@@ -272,33 +280,89 @@ evolution.
 
 ## Testing Plan
 
+> **Status: implemented.**
+> - `scripts/test-e2e-local.sh` — `enable_superuser_instances = on` added to all phases in `configure_phase()` so existing tests are unaffected.
+> - [`tests/e2e/sql/17_superuser_guc.sql`](../tests/e2e/sql/17_superuser_guc.sql) — new E2E test (cases 1–4 below).
+
+### Impact on existing E2E tests
+
+The test runner (`scripts/test-e2e-local.sh`) connects as `postgres` (a
+superuser) for all tests. Individual test files switch away from that identity
+using `SET SESSION AUTHORIZATION` or `SET ROLE` before calling `df.start()`.
+
+With the GUC defaulting to `off`, a `df.start()` call made while still in the
+`postgres` identity will now fail. This affects every test file that calls
+`df.start()` **without** first switching identity, or that contains a section
+that does DDL-level setup as `postgres` and then calls `df.start()` directly.
+
+The table below lists the affected tests. Tests not listed are already safe
+because they switch to `df_e2e_user` or another non-superuser role before any
+`df.start()` call.
+
+| File | Status | Required action |
+|------|--------|-----------------|
+| `10_connection_limits.sql` | **Broken** — calls `df.start()` as `postgres` throughout | Add `SET SESSION AUTHORIZATION df_e2e_user` at the top and `RESET` at the end |
+| `11_cross_connection.sql` | **Broken** — calls `df.start()` as `postgres` throughout | Add `SET SESSION AUTHORIZATION df_e2e_user` at the top and `RESET` at the end |
+| `12_extension_lifecycle.sql` | **Partially broken** — some `df.start()` calls are inside `SET ROLE df_e2e_user` blocks; others may be as `postgres`; needs audit | Audit and add explicit identity switching around any `df.start()` calls that run as `postgres` |
+| `14_database.sql` | **Partially broken** — some tests already use `SET SESSION AUTHORIZATION df_e2e_user`; the `df.start()` on line 46 runs as `postgres` | Guard that call and any others that remain as `postgres` |
+| `44_connection_limit_backpressure.sql` | **Broken** — calls `df.start()` as `postgres` throughout | Add `SET SESSION AUTHORIZATION df_e2e_user` at the top and `RESET` at the end |
+| `45_connection_limit_timeout.sql` | **Broken** — calls `df.start()` as `postgres` throughout | Add `SET SESSION AUTHORIZATION df_e2e_user` at the top and `RESET` at the end |
+| `15_rls.sql` | **Needs audit** — comment says "runs as postgres throughout"; check if any `df.start()` calls happen before a `SET SESSION AUTHORIZATION` | Audit |
+
+Tests already using `SET SESSION AUTHORIZATION df_e2e_user` at the top level
+before all `df.start()` calls (`01`, `02`, `03`, `04`, `05`, `06`, `07`, `08`,
+`09`, `13`) are **unaffected** and require no changes.
+
+The `00_setup_playground.sql` is also unaffected — it runs DDL as a superuser
+but does not call `df.start()`.
+
+### Approach: set the GUC in `postgresql.conf` for tests, not per-test
+
+An alternative to fixing the identity of every broken test is to set
+`pg_durable.enable_superuser_instances = on` in `postgresql.conf` during test
+runs, restoring pre-implementation behavior for all existing tests and letting
+the new security E2E test cover the GUC-off path explicitly.
+
+This is the **recommended approach** because:
+
+- it fixes all broken tests in one place (the test runner)
+- it avoids changing many existing test files for reasons unrelated to what
+  they are testing
+- the GUC-off path is validated by the new dedicated E2E test
+
+The test runner already writes a `postgresql.conf` line for `worker_role`; add
+a matching line:
+
+```bash
+set_conf_line "pg_durable.enable_superuser_instances" "on"
+```
+
+This should be set for all phases in `prepare_phase()`, not just `standard`.
+
+### New E2E test
+
+Add `17_superuser_guc.sql` to cover the following cases when the GUC is off:
+
+1. **superuser calls `df.start()`** — expect error  
+2. **Non-superuser submission unaffected** — `df_e2e_user` can submit.
+3. **Worker-side forgery rejection** — as a role with `BYPASSRLS`, insert a
+   forged row directly into `df.instances` and `df.nodes` with
+   `submitted_by = postgres`, then verify the instance transitions to `failed`
+   with the expected error message before any SQL is executed.
+
+Case 3 requires a role that has both `df.grant_usage()` privileges and
+`BYPASSRLS`. The test must set up that role in its own body (not via
+`00_setup_playground.sql`) and grant it `BYPASSRLS` explicitly.
+
 ### Unit / pg_test coverage
 
 Add tests for:
 
 - GUC default is `false`
-- helper correctly identifies a superuser role
-- helper correctly identifies a non-superuser role
+- `is_role_superuser_oid()` correctly identifies a superuser role
+- `is_role_superuser_oid()` correctly identifies a non-superuser role
 - `df.start()` rejects superuser submissions when the GUC is `off`
 - `df.start()` allows superuser submissions when the GUC is `on`
-
-### E2E coverage
-
-Add a new SQL E2E scenario covering both legitimate and forged paths.
-
-Recommended cases:
-
-1. As a superuser, verify `df.start()` fails by default.
-2. Set `pg_durable.enable_superuser_instances = on` as superuser, verify
-   `df.start()` succeeds.
-3. As a non-superuser role with pg_durable access, verify normal submissions are
-   unaffected.
-4. As a role with `BYPASSRLS`, forge rows in `df.instances` and `df.nodes` with
-   `submitted_by = postgres` (or another superuser), then verify the worker
-   fails the instance before execution.
-
-The fourth test is the key regression test. Without it, the change only proves
-the ergonomic API guard, not the actual security property.
 
 ## Documentation Follow-Ups
 

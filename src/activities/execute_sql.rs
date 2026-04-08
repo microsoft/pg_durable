@@ -1,6 +1,18 @@
 //! ExecuteSQL activity - runs SQL queries against PostgreSQL
 //!
 //! Connects as the submitting user (submitted_by) for proper privilege isolation.
+//! The submitted_by value comes from the in-memory FunctionGraph cached by
+//! duroxide after load_function_graph runs.  Within a single orchestration
+//! generation that cache is immutable: post-load tampering of df.nodes cannot
+//! change the identity used by execute_sql.
+//!
+//! ⚠️  Loop functions use continue_as_new, which discards duroxide history and
+//! starts a fresh orchestration generation.  load_function_graph is therefore
+//! called again at the start of every loop iteration, re-reading submitted_by
+//! from df.instances and df.nodes.  A tamper applied between iterations is
+//! caught by load_function_graph's superuser check on the next re-read, which
+//! fails the instance rather than executing SQL under a forged identity.
+//!
 //! Connection count is gated by a semaphore sized from the
 //! pg_durable.max_user_connections GUC.
 

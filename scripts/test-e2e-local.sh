@@ -11,6 +11,7 @@
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
 #   --no-preload              Run only the shared_preload_libraries enforcement phase
 #   --standard                Run only the standard preload-enabled phase
+#   --superuser-guc-off       Run only the superuser GUC off phase
 #   --connlimit-backpressure  Run only the connection limit backpressure phase
 #   --connlimit-timeout       Run only the connection limit timeout phase
 #   --connlimit-startup       Run only the connection limit startup-validation phase
@@ -55,6 +56,7 @@ declare -a ACTIVE_PHASES=()
 ALL_PHASES=(
     "no-preload"
     "standard"
+    "superuser-guc-off"
     "connlimit-backpressure"
     "connlimit-timeout"
     "connlimit-startup"
@@ -140,6 +142,9 @@ phase_for_test() {
         "$NO_PRELOAD_TEST")
             echo "no-preload"
             ;;
+        17_superuser_guc)
+            echo "superuser-guc-off"
+            ;;
         44_connection_limit_backpressure)
             echo "connlimit-backpressure"
             ;;
@@ -191,6 +196,11 @@ while [[ $# -gt 0 ]]; do
         --standard)
             EXPLICIT_PHASES=true
             add_requested_phase "standard"
+            shift
+            ;;
+        --superuser-guc-off)
+            EXPLICIT_PHASES=true
+            add_requested_phase "superuser-guc-off"
             shift
             ;;
         --connlimit-backpressure)
@@ -426,6 +436,8 @@ configure_phase() {
     local phase="$1"
 
     ensure_data_dir
+    # Clear stale ALTER SYSTEM overrides from prior phases/runs.
+    : > "$DATA_DIR/postgresql.auto.conf"
     set_conf_line "port" "$PG_PORT"
     clear_connlimit_gucs
 
@@ -437,17 +449,27 @@ configure_phase() {
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
+            ;;
+        superuser-guc-off)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            # Remove any previous override so the GUC defaults to off
+            remove_conf_key "pg_durable.enable_superuser_instances"
             ;;
         connlimit-backpressure)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "2"
             ;;
         connlimit-timeout)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "1"
             set_conf_line "pg_durable.execution_acquire_timeout" "2"
             ;;
@@ -455,17 +477,20 @@ configure_phase() {
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_duroxide_connections" "1"
             ;;
         http-disabled)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
             ;;
         http-allow-all)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
             ;;
     esac
 }
@@ -482,7 +507,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|connlimit-backpressure|connlimit-timeout|connlimit-startup)
+        no-preload|standard|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -527,6 +552,10 @@ prepare_phase() {
             fi
             ;;
         connlimit-backpressure|connlimit-timeout)
+            ensure_e2e_role
+            wait_for_worker_ready
+            ;;
+        superuser-guc-off)
             ensure_e2e_role
             wait_for_worker_ready
             ;;
