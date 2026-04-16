@@ -1,0 +1,342 @@
+-- Tests: delegated grant_usage / revoke_usage via with_grant parameter
+--
+-- Scenario: PaaS operator (superuser) grants an admin role the ability to
+-- manage other roles' pg_durable access without superuser involvement.
+--
+-- Test matrix:
+--   1. Superuser grants admin_role with with_grant => true
+--   2. admin_role can use pg_durable (start + complete a workflow)
+--   3. Non-superuser admin CANNOT set with_grant => true
+--   4. Non-superuser admin CANNOT set include_http => true without HTTP grant permission
+--   5. admin_role can call df.grant_usage() to grant app_role access
+--   6. app_role can use pg_durable (start + complete a workflow)
+--   7. app_role CANNOT call df.grant_usage() (no EXECUTE privilege)
+--   8. admin_role can revoke app_role access
+--   9. app_role can no longer use pg_durable
+--   10. Self-revoke protection: admin_role cannot revoke its own access
+--
+-- Note: cross-admin revoke is intentionally not tested here. These helper
+-- functions are SECURITY INVOKER, and PostgreSQL revoke semantics are scoped
+-- to the privileges the current role granted. That limitation is documented.
+--
+-- Runs as postgres throughout (creates/drops roles, uses SET SESSION AUTHORIZATION)
+
+-- === Setup ===
+DO $setup$
+BEGIN
+    PERFORM pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE usename IN ('dg_admin', 'dg_app', 'dg_delegate_target', 'dg_http_target')
+        AND pid <> pg_backend_pid();
+
+    BEGIN DROP OWNED BY dg_admin; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP OWNED BY dg_app;   EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP OWNED BY dg_delegate_target; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP OWNED BY dg_http_target; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE dg_admin;     EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE dg_app;       EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE dg_delegate_target; EXCEPTION WHEN undefined_object THEN NULL; END;
+    BEGIN DROP ROLE dg_http_target; EXCEPTION WHEN undefined_object THEN NULL; END;
+END $setup$;
+
+CREATE ROLE dg_admin LOGIN;
+CREATE ROLE dg_app   LOGIN;
+CREATE ROLE dg_delegate_target LOGIN;
+CREATE ROLE dg_http_target LOGIN;
+
+-- The admin needs to create temp tables for df.start state tracking
+GRANT TEMPORARY ON DATABASE postgres TO dg_admin, dg_app, dg_delegate_target, dg_http_target;
+-- The admin needs CREATE on public for temp state tables used in tests
+GRANT USAGE, CREATE ON SCHEMA public TO dg_admin, dg_app, dg_delegate_target, dg_http_target;
+
+-- === Test 1: Superuser grants admin with with_grant => true ===
+SELECT df.grant_usage('dg_admin', include_http => false, with_grant => true);
+
+-- Verify admin has EXECUTE on admin helpers
+DO $$
+DECLARE
+    can_grant BOOLEAN;
+    can_revoke BOOLEAN;
+BEGIN
+    SELECT has_function_privilege(
+        'dg_admin',
+        'df.grant_usage(text, boolean, boolean)',
+        'EXECUTE'
+    ) INTO can_grant;
+
+    SELECT has_function_privilege(
+        'dg_admin',
+        'df.revoke_usage(text)',
+        'EXECUTE'
+    ) INTO can_revoke;
+
+    IF NOT can_grant THEN
+        RAISE EXCEPTION 'TEST 1 FAILED: dg_admin should have EXECUTE on df.grant_usage after with_grant => true';
+    END IF;
+
+    IF NOT can_revoke THEN
+        RAISE EXCEPTION 'TEST 1 FAILED: dg_admin should have EXECUTE on df.revoke_usage after with_grant => true';
+    END IF;
+
+    RAISE NOTICE 'TEST 1 PASSED: admin role has EXECUTE on admin helpers after with_grant => true';
+END $$;
+
+-- === Test 2: admin_role can use pg_durable ===
+SET SESSION AUTHORIZATION dg_admin;
+
+CREATE TEMP TABLE _dg_admin_state (instance_id TEXT);
+INSERT INTO _dg_admin_state
+SELECT df.start(df.sql('SELECT 100 AS admin_result'), 'dg-admin-test');
+
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _dg_admin_state;
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST 2 FAILED: admin workflow expected completed, got %', status;
+    END IF;
+
+    RAISE NOTICE 'TEST 2 PASSED: admin role can use pg_durable';
+END $$;
+
+DROP TABLE _dg_admin_state;
+
+-- === Test 3: non-superuser admin CANNOT set with_grant => true ===
+SET SESSION AUTHORIZATION dg_admin;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM df.grant_usage('dg_delegate_target', with_grant => true);
+        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser admin was able to set with_grant => true';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM ILIKE '%only superusers may set with_grant => true%' THEN
+                RAISE NOTICE 'TEST 3 PASSED: non-superuser admin blocked from setting with_grant => true';
+            ELSE
+                RAISE EXCEPTION 'TEST 3 UNEXPECTED ERROR: %', SQLERRM;
+            END IF;
+    END;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    can_grant BOOLEAN;
+BEGIN
+    SELECT has_function_privilege(
+        'dg_delegate_target',
+        'df.grant_usage(text, boolean, boolean)',
+        'EXECUTE'
+    ) INTO can_grant;
+
+    IF can_grant THEN
+        RAISE EXCEPTION 'TEST 3 FAILED: dg_delegate_target should NOT have EXECUTE on df.grant_usage after failed with_grant attempt';
+    END IF;
+
+    RAISE NOTICE 'TEST 3 verification PASSED: failed with_grant attempt did not delegate admin helper access';
+END $$;
+
+-- === Test 4: non-superuser admin CANNOT set include_http => true without HTTP grant permission ===
+SET SESSION AUTHORIZATION dg_admin;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM df.grant_usage('dg_http_target', include_http => true);
+        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser admin was able to set include_http => true without HTTP grant permission';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 4 PASSED: non-superuser admin blocked from setting include_http => true without HTTP grant permission';
+        WHEN OTHERS THEN
+            IF SQLERRM ILIKE '%permission denied%' THEN
+                RAISE NOTICE 'TEST 4 PASSED: non-superuser admin blocked from setting include_http => true (%)', SQLERRM;
+            ELSE
+                RAISE EXCEPTION 'TEST 4 UNEXPECTED ERROR: %', SQLERRM;
+            END IF;
+    END;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    can_http BOOLEAN;
+BEGIN
+    SELECT has_function_privilege(
+        'dg_http_target',
+        'df.http(text, text, text, jsonb, integer)',
+        'EXECUTE'
+    ) INTO can_http;
+
+    IF can_http THEN
+        RAISE EXCEPTION 'TEST 4 FAILED: dg_http_target should NOT have EXECUTE on df.http after failed include_http attempt';
+    END IF;
+
+    RAISE NOTICE 'TEST 4 verification PASSED: failed include_http attempt did not grant HTTP access';
+END $$;
+
+-- === Test 5: admin_role can grant access to app_role (without with_grant) ===
+SET SESSION AUTHORIZATION dg_admin;
+
+DO $$
+BEGIN
+    PERFORM df.grant_usage('dg_app');
+    RAISE NOTICE 'TEST 5 PASSED: admin role successfully called df.grant_usage for app role';
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+-- Verify app_role does NOT have EXECUTE on admin helpers
+DO $$
+DECLARE
+    can_grant BOOLEAN;
+    can_revoke BOOLEAN;
+BEGIN
+    SELECT has_function_privilege(
+        'dg_app',
+        'df.grant_usage(text, boolean, boolean)',
+        'EXECUTE'
+    ) INTO can_grant;
+
+    SELECT has_function_privilege(
+        'dg_app',
+        'df.revoke_usage(text)',
+        'EXECUTE'
+    ) INTO can_revoke;
+
+    IF can_grant THEN
+        RAISE EXCEPTION 'TEST 5 FAILED: dg_app should NOT have EXECUTE on df.grant_usage';
+    END IF;
+
+    IF can_revoke THEN
+        RAISE EXCEPTION 'TEST 5 FAILED: dg_app should NOT have EXECUTE on df.revoke_usage';
+    END IF;
+
+    RAISE NOTICE 'TEST 5 verification PASSED: app role does not have admin helper access';
+END $$;
+
+-- === Test 6: app_role can use pg_durable ===
+SET SESSION AUTHORIZATION dg_app;
+
+CREATE TEMP TABLE _dg_app_state (instance_id TEXT);
+INSERT INTO _dg_app_state
+SELECT df.start(df.sql('SELECT 200 AS app_result'), 'dg-app-test');
+
+RESET SESSION AUTHORIZATION;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _dg_app_state;
+    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST 6 FAILED: app workflow expected completed, got %', status;
+    END IF;
+
+    RAISE NOTICE 'TEST 6 PASSED: app role can use pg_durable via delegated grant';
+END $$;
+
+DROP TABLE _dg_app_state;
+
+-- === Test 7: app_role CANNOT call df.grant_usage() ===
+SET SESSION AUTHORIZATION dg_app;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM df.grant_usage('dg_admin');
+        RAISE EXCEPTION 'SECURITY FAILURE: app role was able to call df.grant_usage()';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 7 PASSED: app role blocked from calling df.grant_usage (insufficient privilege)';
+    END;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+-- === Test 8: admin_role can revoke app_role access ===
+SET SESSION AUTHORIZATION dg_admin;
+
+DO $$
+BEGIN
+    PERFORM df.revoke_usage('dg_app');
+    RAISE NOTICE 'TEST 8 PASSED: admin role successfully called df.revoke_usage for app role';
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+-- === Test 9: app_role can no longer use pg_durable ===
+SET SESSION AUTHORIZATION dg_app;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM df.start(df.sql('SELECT 1 AS should_not_run_after_revoke'), 'dg-app-after-revoke');
+        RAISE EXCEPTION 'SECURITY FAILURE: revoked app role was able to call df.start()';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 9 PASSED: revoked app role blocked from df.start()';
+        WHEN OTHERS THEN
+            IF SQLERRM ILIKE '%permission denied%' THEN
+                RAISE NOTICE 'TEST 9 PASSED: revoked app role blocked from df.start() (%)', SQLERRM;
+            ELSE
+                RAISE EXCEPTION 'TEST 9 UNEXPECTED ERROR: %', SQLERRM;
+            END IF;
+    END;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+-- === Test 10: Self-revoke protection ===
+SET SESSION AUTHORIZATION dg_admin;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM df.revoke_usage('dg_admin');
+        RAISE EXCEPTION 'SECURITY FAILURE: admin was able to revoke its own access';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM ILIKE '%cannot revoke df privileges%' AND SQLERRM ILIKE '%member of it%' THEN
+                RAISE NOTICE 'TEST 10 PASSED: self-revoke prevented with clear error';
+            ELSE
+                RAISE EXCEPTION 'TEST 10 UNEXPECTED ERROR: %', SQLERRM;
+            END IF;
+    END;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
+-- === Cleanup ===
+-- Revoke admin privileges (as superuser)
+SELECT df.revoke_usage('dg_admin');
+
+DO $cleanup$
+BEGIN
+    PERFORM pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE usename IN ('dg_admin', 'dg_app', 'dg_delegate_target', 'dg_http_target')
+        AND pid <> pg_backend_pid();
+
+    DROP OWNED BY dg_admin;
+    DROP OWNED BY dg_app;
+    DROP OWNED BY dg_delegate_target;
+    DROP OWNED BY dg_http_target;
+    DROP ROLE dg_admin;
+    DROP ROLE dg_app;
+    DROP ROLE dg_delegate_target;
+    DROP ROLE dg_http_target;
+END $cleanup$;
+
+SELECT 'TEST PASSED: 18_delegated_grants' AS result;

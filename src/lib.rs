@@ -324,59 +324,133 @@ CREATE POLICY vars_user_isolation ON df.vars
 -- "Privilege Grants" for the equivalent manual GRANT statements.
 
 -- Helper: grant all required df privileges to a role in one call.
--- Must be called by a superuser or the extension owner.
--- Safety: format(%I) quotes identifiers to prevent SQL injection. Additionally,
--- this is SECURITY INVOKER so it cannot escalate beyond the caller's privileges.
+-- Authorization model: This function is SECURITY INVOKER and EXECUTE is
+-- revoked from PUBLIC, so only roles explicitly granted EXECUTE (via
+-- with_grant => true or a direct superuser GRANT) can call it. The inner
+-- GRANT statements run as the caller, so the caller must also hold the
+-- underlying privileges WITH GRANT OPTION (automatically true for
+-- superusers; for delegated admins, df.grant_usage(..., with_grant => true)
+-- grants all privileges WITH GRANT OPTION).
+--
+-- This function is purely additive — it never issues REVOKE.  To downgrade
+-- a role's privileges, call df.revoke_usage() first, then df.grant_usage()
+-- with the desired options.
+--
 -- include_http controls whether the role is granted EXECUTE on df.http().
 -- Default is false: HTTP access is opt-in because df.http() makes outbound
 -- network requests and requires explicit administrator approval.
-CREATE OR REPLACE FUNCTION df.grant_usage(p_role TEXT, include_http boolean DEFAULT false)
+--
+-- with_grant controls whether the target role receives privileges WITH GRANT
+-- OPTION and can itself call df.grant_usage() / df.revoke_usage() to manage
+-- other roles' access. Only superusers may set with_grant => true.
+--
+-- MAINTENANCE: when adding a new df.* function, add it to the func_sigs
+-- array below.  Functions NOT in this list are deny-by-default.
+CREATE OR REPLACE FUNCTION df.grant_usage(
+    p_role TEXT,
+    include_http boolean DEFAULT false,
+    with_grant boolean DEFAULT false
+)
 RETURNS VOID
 LANGUAGE plpgsql
 SET search_path = pg_catalog, df, pg_temp
 AS $fn$
+DECLARE
+    grant_opt TEXT := '';
+    func_sig TEXT;
+    -- Explicit list of df.* functions to grant.  Sensitive functions
+    -- (df.http, df.grant_usage, df.revoke_usage) are excluded from this
+    -- list and granted conditionally below.
+    func_sigs TEXT[] := ARRAY[
+        -- DSL functions
+        'df.sql(text)',
+        'df.seq(text, text)',
+        'df.as(text, text)',
+        'df.sleep(bigint)',
+        'df.wait_for_schedule(text)',
+        'df.loop(text, text)',
+        'df.break(text)',
+        'df.if(text, text, text)',
+        'df.if_rows(text, text, text)',
+        'df.join(text, text)',
+        'df.join3(text, text, text)',
+        'df.race(text, text)',
+        'df.wait_for_signal(text, integer)',
+        'df.signal(text, text, text)',
+        'df.start(text, text, text)',
+        'df.setvar(text, text)',
+        'df.getvar(text)',
+        'df.unsetvar(text)',
+        'df.clearvars()',
+        -- Monitoring functions
+        'df.status(text)',
+        'df.result(text)',
+        'df.cancel(text, text)',
+        'df.wait_for_completion(text, integer)',
+        'df.run(text)',
+        'df.list_instances(text, integer)',
+        'df.instance_info(text)',
+        'df.instance_nodes(text, integer)',
+        'df.instance_executions(text, integer)',
+        'df.metrics()',
+        -- Internal helpers (operators, version, etc.)
+        'df.as_op(text, text)',
+        'df.if_then_op(text, text)',
+        'df.if_else_op(text, text)',
+        'df.ensure_durofut(text)',
+        'df.loop_prefix_op(text)',
+        'df.version()',
+        'df.debug_connection()',
+        'df.explain(text)',
+        'df.target_database()'
+    ];
 BEGIN
-    IF NOT current_setting('is_superuser')::bool THEN
-        RAISE EXCEPTION 'df.grant_usage() requires superuser';
-    END IF;
-
     -- Validate the role exists
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
         RAISE EXCEPTION 'role "%" does not exist', p_role;
     END IF;
 
-    EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role);
-    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO %I', p_role);
-    -- Exclude grant_usage and revoke_usage — only superusers should call them.
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT, boolean) FROM %I', p_role);
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM %I', p_role);
-    EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role);
-    EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role);
-    EXECUTE format('GRANT SELECT ON df.nodes TO %I', p_role);
-    EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role);
-    EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role);
-
-    -- df.http() carries network-access implications and is opt-in.
-    -- The blanket ALL FUNCTIONS grant above included df.http; undo that unless
-    -- the caller explicitly requested HTTP access.
-    IF NOT include_http THEN
-        EXECUTE format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I', p_role);
-        -- Warn if the role still has effective HTTP access via a PUBLIC grant or
-        -- another role grant (e.g. a pre-upgrade install that has not yet had
-        -- PUBLIC revoked, or a manual GRANT by an admin).
-        IF has_function_privilege(p_role::regrole, 'df.http(text, text, text, jsonb, integer)', 'EXECUTE') THEN
-            RAISE WARNING 'pg_durable: role "%" still has effective EXECUTE privilege on df.http() despite include_http => false (possibly via a PUBLIC grant or another role grant). To remove it, run: REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;', p_role;
+    IF with_grant THEN
+        IF NOT current_setting('is_superuser')::bool THEN
+            RAISE EXCEPTION 'only superusers may set with_grant => true';
         END IF;
+        grant_opt := ' WITH GRANT OPTION';
     END IF;
+
+    -- Schema access
+    EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role) || grant_opt;
+
+    -- Grant EXECUTE on each standard function explicitly.
+    FOREACH func_sig IN ARRAY func_sigs LOOP
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', func_sig, p_role) || grant_opt;
+    END LOOP;
+
+    -- df.http() — opt-in because it makes outbound network requests.
+    IF include_http THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) || grant_opt;
+    END IF;
+
+    -- Admin helpers — only for delegated administrators.
+    IF with_grant THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) || grant_opt;
+        EXECUTE format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) || grant_opt;
+    END IF;
+
+    -- Table privileges
+    EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role) || grant_opt;
+    EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) || grant_opt;
+    EXECUTE format('GRANT SELECT ON df.nodes TO %I', p_role) || grant_opt;
+    EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) || grant_opt;
+    EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) || grant_opt;
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role) || grant_opt;
 
     RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
 END;
 $fn$;
 
 -- Revoke all df privileges previously granted by df.grant_usage().
--- Must be called by a superuser or the extension owner.
--- Useful for hardening upgraded installs or removing a role's access.
+-- Authorization: same model as df.grant_usage() — EXECUTE is revoked from
+-- PUBLIC, caller must hold the underlying privileges to revoke them.
 -- Safety: format(%I) quotes identifiers to prevent SQL injection. Additionally,
 -- this is SECURITY INVOKER so it cannot escalate beyond the caller's privileges.
 CREATE OR REPLACE FUNCTION df.revoke_usage(p_role TEXT)
@@ -384,14 +458,23 @@ RETURNS VOID
 LANGUAGE plpgsql
 SET search_path = pg_catalog, df, pg_temp
 AS $fn$
+DECLARE
+    func_oid oid;
 BEGIN
-    IF NOT current_setting('is_superuser')::bool THEN
-        RAISE EXCEPTION 'df.revoke_usage() requires superuser';
-    END IF;
-
     -- Validate the role exists
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
         RAISE EXCEPTION 'role "%" does not exist', p_role;
+    END IF;
+
+    -- Prevent accidentally revoking your own access.  pg_has_role checks
+    -- both direct identity (current_user = p_role) and inherited membership
+    -- (current_user is a member of p_role), so revoking a parent role that
+    -- the caller depends on is also caught.
+    -- Superusers are exempt: pg_has_role returns true for all roles when the
+    -- caller is a superuser, and superusers can always re-grant themselves.
+    IF NOT current_setting('is_superuser')::bool
+       AND pg_has_role(current_user, p_role, 'MEMBER') THEN
+        RAISE EXCEPTION 'cannot revoke df privileges from "%" because the current role ("%") is a member of it — use a different administrator', p_role, current_user;
     END IF;
 
     EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I', p_role);
@@ -400,10 +483,25 @@ BEGIN
     EXECUTE format('REVOKE INSERT ON df.instances FROM %I', p_role);
     EXECUTE format('REVOKE UPDATE ON df.instances FROM %I', p_role);
     EXECUTE format('REVOKE SELECT ON df.instances FROM %I', p_role);
-    EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA df FROM %I', p_role);
+
+    -- Revoke EXECUTE per-function rather than using the blanket
+    -- REVOKE ON ALL FUNCTIONS.  A delegated admin may lack privilege on
+    -- some functions (e.g. df.http); per-function revokes let us skip those.
+    FOR func_oid IN
+        SELECT p.oid FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'df'
+    LOOP
+        BEGIN
+            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', func_oid::regprocedure, p_role);
+        EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+        END;
+    END LOOP;
+
     EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I', p_role);
 
-    RAISE NOTICE 'pg_durable: revoked df usage privileges from "%"', p_role;
+    RAISE NOTICE 'pg_durable: revoked df usage privileges granted by "%" from "%"', current_user, p_role;
 END;
 $fn$;
 
@@ -437,9 +535,10 @@ END $$;
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 
 -- df.grant_usage() and df.revoke_usage() are admin-only helpers.
--- Revoke PUBLIC's default EXECUTE privilege so that only superusers
--- (who already pass the is_superuser guard inside the functions) can call them.
-REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean) FROM PUBLIC;
+-- Revoke PUBLIC's default EXECUTE privilege so that only roles explicitly
+-- granted access (via with_grant => true or a direct superuser GRANT) can
+-- manage other roles' df privileges.
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",

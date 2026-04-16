@@ -102,7 +102,7 @@ gate were ever removed.
 ### 4. df.grant_usage() — opt-in HTTP via include_http parameter
 
 ```sql
-df.grant_usage(p_role TEXT, include_http boolean DEFAULT false)
+df.grant_usage(p_role TEXT, include_http boolean DEFAULT false, with_grant boolean DEFAULT false)
 ```
 
 The second parameter defaults to `false`. The function uses a blanket
@@ -112,7 +112,8 @@ The second parameter defaults to `false`. The function uses a blanket
 ```sql
 -- Always granted:
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO <role>;
-REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT, boolean) FROM <role>;
+-- Admin helpers revoked unless with_grant => true:
+REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT, boolean, boolean) FROM <role>;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM <role>;
 -- df.http revoked unless include_http => true:
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM <role>;
@@ -135,6 +136,10 @@ SELECT df.grant_usage('my_role', include_http => true);
 GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO my_role;
 ```
 
+If `include_http => true` is requested by a delegated admin that does not have
+permission to grant `df.http()`, `df.grant_usage()` raises an error rather than
+silently skipping the HTTP grant.
+
 To revoke:
 
 ```sql
@@ -155,14 +160,17 @@ The `rls_and_grants` extension SQL block revokes the default grant immediately
 after both functions are created:
 
 ```sql
-REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 ```
 
-Because both functions already guard on `is_superuser` internally, the revoke
-is defense-in-depth — but it avoids leaking confusing error messages to
-non-superusers and is consistent with the principle that admin functions should
-not be executable by `PUBLIC`.
+Authorization is enforced by two PostgreSQL-native mechanisms:
+1. **EXECUTE privilege** on the functions (revoked from PUBLIC) — controls who can call them
+2. **WITH GRANT OPTION** on underlying objects — the inner GRANT/REVOKE statements run as the caller via SECURITY INVOKER, so PostgreSQL's native privilege checks prevent escalation
+
+When `with_grant => true` is used, the target role receives all privileges
+WITH GRANT OPTION and retains EXECUTE on the admin helpers. This parameter is
+superuser-only; delegated admins cannot create additional delegated admins.
 
 These functions are new in v0.2.0, so this does not affect the upgrade path
 from v0.1.1 — there is no pre-existing PUBLIC grant to worry about.
@@ -213,14 +221,16 @@ access via the PUBLIC grant, prompting the admin to take action.
       block in `src/lib.rs` revokes `EXECUTE ON FUNCTION df.http(...)  FROM PUBLIC`
       immediately after the function is created (`requires = [dsl::http]`).
 - [x] **REVOKE grant_usage / revoke_usage FROM PUBLIC** — added
-      `REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean) FROM PUBLIC` and
+      `REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC` and
       `REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC` to the
       `rls_and_grants` block.  These functions are new in v0.2.0 so no upgrade
       script changes are needed.
-- [x] **`df.grant_usage(role, include_http DEFAULT false)`** — signature updated
+- [x] **`df.grant_usage(role, include_http DEFAULT false, with_grant DEFAULT false)`** — signature updated
       in both `src/lib.rs` and `sql/pg_durable--0.1.1--0.2.0.sql`.  The function
-      always revokes `df.http` from the role after the blanket grant, unless
-      `include_http => true`.  Emits a `WARNING` if effective privilege remains.
+      uses explicit per-function GRANTs; `df.http()` is only granted when
+      `include_http => true`.  When `with_grant => true`, all grants include
+      `WITH GRANT OPTION` and admin helpers are granted to the target role.
+      The function is purely additive — it never issues REVOKE.
 - [x] **Upgrade script** — section 7 of `pg_durable--0.1.1--0.2.0.sql` is
       documentation only (no DDL); explains that PUBLIC HTTP access is retained
       after upgrade and how to tighten it.
@@ -233,7 +243,7 @@ access via the PUBLIC grant, prompting the admin to take action.
 
 - [x] **Expand E2E test coverage** — `49_http_permissions.sql` now covers:
   - [x] `grant_usage(role)` default blocks HTTP at execution (Test 4)
-  - [x] `grant_usage(role, false)` emits WARNING when PUBLIC grant is present (Test 5)
+  - [x] `grant_usage(role, false)` does not grant df.http; residual PUBLIC grant persists (Test 5)
   - [x] `grant_usage(role, include_http => true)` — HTTP works, no privilege error (Test 1)
   - [x] Manual `GRANT/REVOKE` respected at execution time (Tests 2 & 3)
   - [x] Superuser bypasses the privilege check (Test 6)
