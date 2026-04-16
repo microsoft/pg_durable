@@ -46,7 +46,7 @@ cron = "0.13"
 chrono = "0.4"
 
 # For HTTP requests (df.http)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 
 # For duroxide tracing integration
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

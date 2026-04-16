@@ -50,9 +50,10 @@ RUN cargo pgrx package --features http-allow-test-domains --pg-config /usr/lib/p
 # Stage 2: Runtime image with PostgreSQL
 FROM postgres:17-bookworm
 
-# Install runtime dependencies
+# Install runtime dependencies (ca-certificates needed for native-tls HTTPS)
 RUN apt-get update && apt-get install -y \
     libssl3 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built extension from builder
