@@ -181,17 +181,9 @@ jobs:
       - name: Run unit tests
         run: cargo pgrx test pg${{ matrix.pg_version }} --features http-allow-test-domains
 
-      - name: Run E2E tests (shared_preload_libraries enforcement)
-        id: e2e_no_preload
-        run: ./scripts/test-e2e-local.sh --clean --no-preload --pg-version ${{ matrix.pg_version }}
-
-      - name: Run E2E tests (standard suite)
-        id: e2e_tests
-        run: ./scripts/test-e2e-local.sh --clean --standard --pg-version ${{ matrix.pg_version }}
-
-      - name: Run connection limit E2E tests
-        id: connlimit_tests
-        run: ./scripts/test-e2e-local.sh --clean --connlimit-backpressure --connlimit-timeout --connlimit-startup --pg-version ${{ matrix.pg_version }}
+      - name: Run E2E tests (default-build phases)
+        id: e2e_default_build_phases
+        run: ./scripts/test-e2e-local.sh --clean --default-build-phases --pg-version ${{ matrix.pg_version }}
 
       - name: Run upgrade tests
         id: upgrade_tests
