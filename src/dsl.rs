@@ -647,6 +647,12 @@ pub fn start(
 
     // Capture user identity for privilege isolation
     let current_user_oid = unsafe { pgrx::pg_sys::GetUserId() };
+    let current_user_name = unsafe {
+        let name_ptr = pgrx::pg_sys::GetUserNameFromId(current_user_oid, false);
+        std::ffi::CStr::from_ptr(name_ptr)
+            .to_string_lossy()
+            .into_owned()
+    };
 
     // Validate current_user has LOGIN privilege
     let has_login: bool = match Spi::get_one_with_args(
@@ -669,18 +675,29 @@ pub fn start(
         }
     };
     if !has_login {
-        let username = unsafe {
-            let name_ptr = pgrx::pg_sys::GetUserNameFromId(current_user_oid, false);
-            std::ffi::CStr::from_ptr(name_ptr)
-                .to_string_lossy()
-                .into_owned()
-        };
         pgrx::error!(
             "current_user \"{}\" does not have LOGIN privilege. \
              The background worker must connect as this role to execute SQL. \
              Grant LOGIN to this role or call df.start() as a role with LOGIN.",
-            username
+            current_user_name
         );
+    }
+
+    // Reject superuser submission identities unless explicitly enabled.
+    if !crate::types::superuser_instances_enabled() {
+        let is_super = match crate::types::is_role_superuser_oid(current_user_oid) {
+            Ok(v) => v,
+            Err(e) => pgrx::error!("pg_durable: superuser check failed: {}", e),
+        };
+        if is_super {
+            pgrx::error!(
+                "pg_durable: superuser instances are disabled. \
+                 current_user \"{}\" is a superuser, but \
+                 pg_durable.enable_superuser_instances is off. \
+                 Set pg_durable.enable_superuser_instances = on to allow this.",
+                current_user_name
+            );
+        }
     }
 
     // Insert all nodes from the nested graph into df.nodes, returning root node ID

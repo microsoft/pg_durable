@@ -53,6 +53,40 @@ pub fn get_execution_acquire_timeout() -> Duration {
     Duration::from_secs(crate::EXECUTION_ACQUIRE_TIMEOUT.get() as u64)
 }
 
+/// Returns `true` when superuser-submitted instances are permitted.
+pub fn superuser_instances_enabled() -> bool {
+    crate::ENABLE_SUPERUSER_INSTANCES.get()
+}
+
+/// Returns `true` if the role identified by `role_oid` is a PostgreSQL superuser.
+/// Runs a SPI query against `pg_catalog.pg_roles`.  Must be called from a
+/// backend context (not the background worker).
+pub fn is_role_superuser_oid(role_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
+    match pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE oid = $1",
+        &[role_oid.into()],
+    ) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(format!("role oid {} not found in pg_roles", role_oid)),
+        Err(e) => Err(format!(
+            "superuser check failed for role oid {}: {}",
+            role_oid, e
+        )),
+    }
+}
+
+/// Returns `true` if the role identified by `role_name` is a PostgreSQL superuser.
+/// Issues a single async query against `pg_catalog.pg_roles` using the provided pool.
+/// Must be called from an async context (background worker).
+pub async fn is_role_superuser_name(pool: &sqlx::PgPool, role_name: &str) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = $1")
+        .bind(role_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("superuser check failed for role '{}': {}", role_name, e))
+        .and_then(|opt| opt.ok_or_else(|| format!("role '{}' not found in pg_roles", role_name)))
+}
+
 /// Generate a short 8-character instance ID from a UUID
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();

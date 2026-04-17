@@ -73,7 +73,7 @@ The connection authenticates directly as `submitted_by`. `RESET ROLE` reverts to
 - **RESET ROLE safety**: No-op since connection authenticates directly as `submitted_by`.
 
 **Not protected:**
-- **Superusers**: A superuser's durable functions run with superuser privileges (expected).
+- **Superusers**: By default (`pg_durable.enable_superuser_instances = off`), superuser submissions are **blocked** — `df.start()` raises an error if `current_user` is a superuser, and the background worker rejects any instance whose `submitted_by` resolves to a superuser at execution time. Set `enable_superuser_instances = on` to opt in for administrative use cases. See [superuser_guc.md](superuser_guc.md).
 - **SECURITY DEFINER**: Runs as definer, not caller (expected; documented above).
 - **DoS**: No rate limiting on durable function submissions.
 
@@ -89,6 +89,7 @@ The connection authenticates directly as `submitted_by`. `RESET ROLE` reverts to
 - [tests/e2e/sql/37_rls.sql](../tests/e2e/sql/37_rls.sql) — Row-Level Security policy enforcement on `df.instances` and `df.nodes`.
 - [tests/e2e/sql/38_rls_vars.sql](../tests/e2e/sql/38_rls_vars.sql) — RLS enforcement on `df.vars`.
 - [tests/e2e/sql/25_extension_creation_security.sql](../tests/e2e/sql/25_extension_creation_security.sql) — Extension creation requires superuser.
+- [tests/e2e/sql/17_superuser_guc.sql](../tests/e2e/sql/17_superuser_guc.sql) — `pg_durable.enable_superuser_instances` GUC enforcement: superuser rejection (GUC off), superuser submission (GUC on), non-superuser unaffected, BYPASSRLS forgery rejection by the worker.
 
 ## History
 

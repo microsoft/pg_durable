@@ -441,4 +441,46 @@ Revokes all privileges previously granted by `df.grant_usage()`, including any `
 SELECT df.revoke_usage('app_role');
 ```
 
+---
+
+## Server Configuration (GUCs)
+
+These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf` and take effect after `SELECT pg_reload_conf()` (no restart required).
+
+---
+
+### pg_durable.enable_superuser_instances
+
+Controls whether pg_durable allows durable function instances whose `submitted_by` role is a PostgreSQL superuser.
+
+| Property | Value |
+|----------|-------|
+| Type | `boolean` |
+| Default | `off` |
+| Context | `SUSET` (superuser can change at runtime; no restart needed) |
+| Visibility | Hidden from `SHOW ALL` and `pg_settings` for non-superusers |
+
+**When `off` (default):**
+- `df.start()` raises an error immediately if `current_user` is a superuser.
+- The background worker rejects any instance whose `submitted_by` resolves to a superuser at execution time, even if the row was tampered with after submission.
+
+**When `on`:**
+- Superusers may submit durable functions. Their SQL nodes execute with superuser privileges.
+- Intended for administrative tasks in single-tenant or fully-trusted deployments.
+
+```sql
+-- Enable (requires superuser)
+ALTER SYSTEM SET pg_durable.enable_superuser_instances = on;
+SELECT pg_reload_conf();
+
+-- Disable (default; recommended for multi-tenant)
+ALTER SYSTEM SET pg_durable.enable_superuser_instances = off;
+SELECT pg_reload_conf();
+
+-- Check current value (superuser only)
+SHOW pg_durable.enable_superuser_instances;
+```
+
+**Security note:** Setting this GUC to `on` in a multi-tenant environment allows any role with `BYPASSRLS` to forge `submitted_by` to a superuser OID and execute arbitrary SQL as superuser. Keep `off` unless you have a specific need and understand the risk. See [docs/superuser_guc.md](superuser_guc.md) for the full threat analysis.
+
 

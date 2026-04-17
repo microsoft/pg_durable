@@ -1818,14 +1818,16 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 
 ### OQ4: Superuser Durable Functions
 
+**Status**: Resolved — implemented via `pg_durable.enable_superuser_instances`.
+
 **Question**: Should superusers be able to create durable functions that run as superuser?
 
 **Considerations**:
 - Useful for administrative tasks
 - Higher risk if function graph is compromised
-- May want separate `df_superuser` role
+- BYPASSRLS roles can forge `submitted_by` to a superuser OID, making this a privilege escalation vector in multi-tenant environments
 
-**Recommendation**: Allow by default (superuser can do anything anyway), but log prominently.
+**Resolution**: Gated behind `pg_durable.enable_superuser_instances` (default `off`). When `off`, `df.start()` immediately rejects any submission whose `current_user` is a superuser, and the background worker rejects any instance whose `submitted_by` resolves to a superuser at execution time (closing the BYPASSRLS forgery path). When `on`, superuser submissions are allowed as before. The GUC is `SUSET` / `SUPERUSER_ONLY` and hidden from `SHOW ALL`. See [superuser_guc.md](superuser_guc.md) for full design rationale.
 
 ---
 

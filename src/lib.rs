@@ -21,6 +21,10 @@ pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
+/// When `false` (default), pg_durable rejects any instance whose `submitted_by`
+/// role is a PostgreSQL superuser. Set to `true` only when superuser durable
+/// functions are explicitly desired. See docs/superuser_guc.md.
+pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 // Module declarations
 pub mod activities;
@@ -117,6 +121,15 @@ pub extern "C-unwind" fn _PG_init() {
         3600,
         GucContext::Postmaster,
         GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_durable.enable_superuser_instances",
+        c"Allow pg_durable instances whose submitted_by role is a PostgreSQL superuser",
+        c"Disabled by default to prevent superuser execution-identity forgery via RLS-bypassing roles. Requires server restart to change.",
+        &ENABLE_SUPERUSER_INSTANCES,
+        GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY,
     );
 
     worker::register_background_worker();
@@ -2260,6 +2273,86 @@ mod tests {
             std::time::Duration::from_secs(30)
         );
     }
+
+    // ========================================================================
+    // Unit Tests - Superuser GUC
+    // ========================================================================
+
+    #[pg_test]
+    fn test_superuser_guc_boot_default_is_off() {
+        // The test postgresql.conf overrides enable_superuser_instances = on,
+        // but the boot_val (before any config override) should still be 'off'.
+        let boot_val = Spi::get_one::<String>(
+            "SELECT boot_val FROM pg_catalog.pg_settings \
+             WHERE name = 'pg_durable.enable_superuser_instances'",
+        )
+        .unwrap()
+        .expect("GUC should exist in pg_settings");
+        assert_eq!(
+            boot_val, "off",
+            "pg_durable.enable_superuser_instances boot default should be 'off'"
+        );
+    }
+
+    #[pg_test]
+    fn test_superuser_guc_context_is_postmaster() {
+        // Verify the GUC requires a server restart to change.
+        let context = Spi::get_one::<String>(
+            "SELECT context FROM pg_catalog.pg_settings \
+             WHERE name = 'pg_durable.enable_superuser_instances'",
+        )
+        .unwrap()
+        .expect("GUC should exist in pg_settings");
+        assert_eq!(
+            context, "postmaster",
+            "pg_durable.enable_superuser_instances should be postmaster-level"
+        );
+    }
+
+    #[pg_test]
+    fn test_is_role_superuser_oid_identifies_superuser() {
+        // pg_test runs as postgres (superuser); GetUserId() returns its OID.
+        let su_oid = unsafe { pgrx::pg_sys::GetUserId() };
+        let result = crate::types::is_role_superuser_oid(su_oid)
+            .expect("superuser check should not error for postgres");
+        assert!(
+            result,
+            "current user (postgres) should be identified as a superuser"
+        );
+    }
+
+    #[pg_test]
+    fn test_is_role_superuser_oid_identifies_non_superuser() {
+        Spi::run(
+            "DO $$ BEGIN CREATE ROLE su_guc_unit_nonsuperuser NOLOGIN; \
+             EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+        )
+        .unwrap();
+        // Use PostgreSQL's get_role_oid() to obtain the native Oid directly,
+        // avoiding SPI datum type conversion issues with the oid type.
+        let role_name = std::ffi::CString::new("su_guc_unit_nonsuperuser").unwrap();
+        let role_oid = unsafe { pgrx::pg_sys::get_role_oid(role_name.as_ptr(), false) };
+        let result = crate::types::is_role_superuser_oid(role_oid)
+            .expect("superuser check should not error for non-superuser role");
+        Spi::run("DROP ROLE IF EXISTS su_guc_unit_nonsuperuser").unwrap();
+        assert!(
+            !result,
+            "su_guc_unit_nonsuperuser should not be identified as a superuser"
+        );
+    }
+
+    #[pg_test]
+    fn test_start_allows_superuser_when_guc_on() {
+        // postgresql_conf_options() sets enable_superuser_instances = on.
+        // Verify df.start() succeeds for superuser with GUC on.
+        let instance_id =
+            Spi::get_one::<String>("SELECT df.start('SELECT 1', 'unit-test-su-allowed')")
+                .unwrap()
+                .expect("df.start() should return an instance_id when GUC is on");
+        assert!(!instance_id.is_empty(), "instance_id should not be empty");
+        // Cancel immediately so the BGW does not attempt to execute this instance.
+        Spi::run(&format!("SELECT df.cancel('{instance_id}')")).unwrap();
+    }
 }
 
 /// Required by `cargo pgrx test`
@@ -2275,6 +2368,7 @@ pub mod pg_test {
             "shared_preload_libraries = 'pg_durable'",
             "pg_durable.worker_role = 'postgres'",
             "pg_durable.database = 'postgres'",
+            "pg_durable.enable_superuser_instances = on",
         ]
     }
 }

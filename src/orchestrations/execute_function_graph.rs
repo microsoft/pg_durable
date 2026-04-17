@@ -51,12 +51,30 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         ctx.trace_info(format!("Workflow vars: {keys:?}"));
     }
 
-    let graph_json = ctx
+    let graph_json = match ctx
         .schedule_activity(
             activities::load_function_graph::NAME,
             input.instance_id.clone(),
         )
-        .await?;
+        .await
+    {
+        Ok(json) => json,
+        Err(e) => {
+            // load_function_graph failed (e.g., superuser blocked).
+            // Mark the instance as failed before propagating.
+            let status_input = serde_json::json!({
+                "instance_id": input.instance_id,
+                "status": "failed"
+            });
+            let _ = ctx
+                .schedule_activity(
+                    activities::update_instance_status::NAME,
+                    status_input.to_string(),
+                )
+                .await;
+            return Err(e);
+        }
+    };
 
     let graph: FunctionGraph = serde_json::from_str(&graph_json)
         .map_err(|e| format!("Failed to parse function graph: {e}"))?;
