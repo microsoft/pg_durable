@@ -1,4 +1,5 @@
 -- Test: Parallel execution with df.join() and & operator
+SET ROLE df_regress_user;
 DROP TABLE IF EXISTS test_parallel_log;
 CREATE TABLE test_parallel_log (id SERIAL, branch TEXT, variant TEXT);
 
