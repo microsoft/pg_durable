@@ -1,4 +1,5 @@
 -- Test: Variable substitution using |=> operator and df.as() function
+SET ROLE df_regress_user;
 DROP TABLE IF EXISTS test_vars_log;
 CREATE TABLE test_vars_log (id SERIAL, val TEXT, variant TEXT);
 

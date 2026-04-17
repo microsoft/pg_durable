@@ -1,5 +1,6 @@
 -- Test: Simple SQL execution
 -- Tests both auto-wrapped SQL and explicit df.sql() function
+SET ROLE df_regress_user;
 
 -- Test A: Auto-wrapped SQL (plain string)
 SELECT df.start('SELECT 42 as answer', 'test-simple-auto') AS instance_id \gset

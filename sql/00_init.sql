@@ -40,3 +40,14 @@ BEGIN
     END IF;
     RAISE NOTICE 'Background worker ready';
 END $$;
+
+-- Create a non-superuser role for testing so that pg_regress passes
+-- without pg_durable.enable_superuser_instances = on.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_regress_user') THEN
+        CREATE ROLE df_regress_user LOGIN;
+    END IF;
+END $$;
+SELECT df.grant_usage('df_regress_user');
+GRANT CREATE ON SCHEMA public TO df_regress_user;

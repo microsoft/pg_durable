@@ -1,4 +1,5 @@
 -- Test: Conditional execution using df.if() and ?> !> operators
+SET ROLE df_regress_user;
 DROP TABLE IF EXISTS test_cond_log;
 CREATE TABLE test_cond_log (id SERIAL, branch TEXT, variant TEXT);
 
