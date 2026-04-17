@@ -9,6 +9,7 @@
 #   --clean                   Start with a fresh database cluster
 #   --verbose, -v             Show NOTICE messages and full test output
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
+#   --default-build-phases    Run all phases that share the standard build artifact
 #   --no-preload              Run only the shared_preload_libraries enforcement phase
 #   --standard                Run only the standard preload-enabled phase
 #   --superuser-guc-off       Run only the superuser GUC off phase
@@ -25,6 +26,7 @@
 #   ./scripts/test-e2e-local.sh 04_parallel 5
 #   ./scripts/test-e2e-local.sh --keep
 #   ./scripts/test-e2e-local.sh --clean --pg-version 18
+#   ./scripts/test-e2e-local.sh --default-build-phases
 #   ./scripts/test-e2e-local.sh --no-preload
 #   ./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout
 #   ./scripts/test-e2e-local.sh --http-disabled
@@ -52,6 +54,15 @@ CURRENT_FEATURES=""  # tracks what Cargo features the installed .so was built wi
 declare -a REQUESTED_PHASES=()
 declare -a MATCHED_TESTS=()
 declare -a ACTIVE_PHASES=()
+
+DEFAULT_BUILD_PHASES=(
+    "no-preload"
+    "standard"
+    "superuser-guc-off"
+    "connlimit-backpressure"
+    "connlimit-timeout"
+    "connlimit-startup"
+)
 
 ALL_PHASES=(
     "no-preload"
@@ -106,6 +117,14 @@ add_requested_phase() {
     if ! contains_value "$phase" "${REQUESTED_PHASES[@]}"; then
         REQUESTED_PHASES+=("$phase")
     fi
+}
+
+add_requested_phases() {
+    local phase
+
+    for phase in "$@"; do
+        add_requested_phase "$phase"
+    done
 }
 
 phase_label() {
@@ -187,6 +206,11 @@ while [[ $# -gt 0 ]]; do
             fi
             PG_VERSION="$2"
             shift 2
+            ;;
+        --default-build-phases)
+            EXPLICIT_PHASES=true
+            add_requested_phases "${DEFAULT_BUILD_PHASES[@]}"
+            shift
             ;;
         --no-preload)
             EXPLICIT_PHASES=true
