@@ -210,7 +210,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'df_e2e_user',
-        'df.grant_usage(text, boolean)',
+        'df.grant_usage(text, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant_usage;
 
@@ -242,7 +242,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'df_e2e_user',
-        'df.grant_usage(text, boolean)',
+        'df.grant_usage(text, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant_usage;
 
@@ -263,12 +263,14 @@ BEGIN
     RAISE NOTICE 'TEST 4 PASSED: df.grant_usage() does not grant EXECUTE on admin helpers';
 END $$;
 
--- Test 5: If EXECUTE is granted manually, helper bodies still reject non-superusers
+-- Test 5: If EXECUTE is granted manually but without WITH GRANT OPTION on
+-- underlying objects, the inner GRANT/REVOKE statements fail (PostgreSQL's
+-- native privilege checks prevent escalation).
 DROP ROLE IF EXISTS test_helper_grantee;
 CREATE ROLE test_helper_grantee LOGIN;
 
 GRANT USAGE ON SCHEMA df TO test_helper_grantee;
-GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean) TO test_helper_grantee;
+GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO test_helper_grantee;
 GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO test_helper_grantee;
 
 SET ROLE test_helper_grantee;
@@ -279,9 +281,11 @@ BEGIN
         PERFORM df.grant_usage('df_e2e_user');
         RAISE EXCEPTION 'SECURITY FAILURE: manually granted non-superuser was able to call df.grant_usage()';
     EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 5a PASSED: df.grant_usage() blocked by PostgreSQL privilege check';
         WHEN OTHERS THEN
-            IF SQLERRM LIKE '%requires superuser%' THEN
-                RAISE NOTICE 'TEST 5a PASSED: df.grant_usage() reached superuser guard after explicit EXECUTE grant';
+            IF SQLERRM ILIKE '%permission denied%' THEN
+                RAISE NOTICE 'TEST 5a PASSED: df.grant_usage() blocked by PostgreSQL privilege check (%)', SQLERRM;
             ELSE
                 RAISE EXCEPTION 'TEST 5a UNEXPECTED ERROR: %', SQLERRM;
             END IF;
@@ -291,9 +295,11 @@ BEGIN
         PERFORM df.revoke_usage('df_e2e_user');
         RAISE EXCEPTION 'SECURITY FAILURE: manually granted non-superuser was able to call df.revoke_usage()';
     EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'TEST 5b PASSED: df.revoke_usage() blocked by PostgreSQL privilege check';
         WHEN OTHERS THEN
-            IF SQLERRM LIKE '%requires superuser%' THEN
-                RAISE NOTICE 'TEST 5b PASSED: df.revoke_usage() reached superuser guard after explicit EXECUTE grant';
+            IF SQLERRM ILIKE '%permission denied%' OR SQLERRM ILIKE '%cannot revoke df privileges%' THEN
+                RAISE NOTICE 'TEST 5b PASSED: df.revoke_usage() blocked (%)', SQLERRM;
             ELSE
                 RAISE EXCEPTION 'TEST 5b UNEXPECTED ERROR: %', SQLERRM;
             END IF;
@@ -302,7 +308,7 @@ END $$;
 
 RESET ROLE;
 
-REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean) FROM test_helper_grantee;
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM test_helper_grantee;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM test_helper_grantee;
 REVOKE USAGE ON SCHEMA df FROM test_helper_grantee;
 DROP ROLE test_helper_grantee;

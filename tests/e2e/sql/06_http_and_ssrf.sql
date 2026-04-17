@@ -934,10 +934,11 @@ END $$;
 
 DROP TABLE _test_http_priv4;
 
--- Permission Test 5: grant_usage(false) emits WARNING when PUBLIC still has the grant
+-- Permission Test 5: grant_usage(false) does NOT grant df.http, but residual PUBLIC grant persists
 GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO PUBLIC;
 
--- EXPECT WARNING: still has effective EXECUTE privilege on df.http() despite include_http => false
+-- grant_usage is purely additive — it does not revoke df.http or warn about
+-- residual PUBLIC grants.  The caller is responsible for revoking separately.
 
 DO $$
 BEGIN
@@ -946,8 +947,8 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         RAISE EXCEPTION 'TEST FAILED: grant_usage raised an unexpected exception: %', SQLERRM;
     END;
-    -- PostgreSQL WARNING messages cannot be caught in PL/pgSQL without
-    -- SET client_min_messages; instead, verify the residual privilege directly.
+    -- grant_usage(include_http => false) does not grant df.http, but the
+    -- PUBLIC grant above still gives http_priv_bob effective access.
     IF NOT has_function_privilege('http_priv_bob'::regrole,
                                    'df.http(text, text, text, jsonb, integer)', 'EXECUTE') THEN
         RAISE EXCEPTION 'TEST FAILED: expected http_priv_bob to still have effective HTTP access via PUBLIC grant';

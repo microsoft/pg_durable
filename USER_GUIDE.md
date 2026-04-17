@@ -75,7 +75,7 @@ pg_durable requires:
 ```sql
 CREATE EXTENSION pg_durable;
 
--- Grant usage to application roles
+-- Grant usage to application roles (superuser or delegated admin)
 SELECT df.grant_usage('app_role');
 ```
 
@@ -1562,20 +1562,74 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 **Recommended — use the built-in helper:**
 
 ```sql
--- Grant all required df privileges to a role (must be run by a superuser)
+-- Grant all required df privileges to a role
 SELECT df.grant_usage('app_role');
+
+-- Grant with HTTP access (opt-in)
+SELECT df.grant_usage('app_role', include_http => true);
+
+-- Grant with delegation — superuser-only; target role can itself call df.grant_usage/df.revoke_usage
+SELECT df.grant_usage('admin_role', include_http => true, with_grant => true);
 ```
 
-`df.grant_usage()` issues every GRANT a role needs to call DSL functions, submit workflows, and read results. Only superusers can execute it (EXECUTE is revoked from PUBLIC). **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
+`df.grant_usage()` issues every GRANT a role needs to call DSL functions, submit workflows, and read results. EXECUTE is revoked from PUBLIC — only superusers and roles granted `with_grant => true` can call it. `with_grant => true` itself is superuser-only. **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
+
+This function is purely additive — it never issues REVOKE. To downgrade a role's privileges (e.g., remove HTTP access), call `df.revoke_usage()` first, then `df.grant_usage()` with the desired options.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `p_role` | *(required)* | Target role name |
+| `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
+| `with_grant` | `false` | Superuser-only. Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access |
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
 
 ```sql
 GRANT USAGE ON SCHEMA df TO app_role;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO app_role;
-REVOKE EXECUTE ON FUNCTION df.grant_usage(TEXT) FROM app_role;   -- admin-only
-REVOKE EXECUTE ON FUNCTION df.revoke_usage(TEXT) FROM app_role;  -- admin-only
+-- Standard functions (df.http, df.grant_usage, df.revoke_usage are NOT included)
+GRANT EXECUTE ON FUNCTION df.sql(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.seq(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.as(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.sleep(bigint) TO app_role;
+GRANT EXECUTE ON FUNCTION df.wait_for_schedule(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.loop(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.break(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.if(text, text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.if_rows(text, text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.join(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.join3(text, text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.race(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.wait_for_signal(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.signal(text, text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.start(text, text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.setvar(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.getvar(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.unsetvar(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.clearvars() TO app_role;
+GRANT EXECUTE ON FUNCTION df.status(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.result(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.cancel(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.wait_for_completion(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.run(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.list_instances(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.instance_info(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.instance_nodes(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.instance_executions(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.metrics() TO app_role;
+GRANT EXECUTE ON FUNCTION df.as_op(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.if_then_op(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.if_else_op(text, text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.ensure_durofut(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.loop_prefix_op(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.version() TO app_role;
+GRANT EXECUTE ON FUNCTION df.debug_connection() TO app_role;
+GRANT EXECUTE ON FUNCTION df.explain(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.target_database() TO app_role;
+-- Optional: HTTP access (include_http => true)
+-- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
 GRANT SELECT ON df.instances TO app_role;
 GRANT UPDATE (status, updated_at) ON df.instances TO app_role;
 GRANT SELECT ON df.nodes TO app_role;
@@ -1585,6 +1639,24 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
 ```
 
 </details>
+
+**Delegated administration (PaaS pattern):**
+
+In environments where application roles do not have superuser access, the superuser (or PaaS infrastructure) can delegate grant management to a non-superuser admin role:
+
+```sql
+-- Superuser or PaaS hook grants the admin role with delegation
+SELECT df.grant_usage('customer_admin', include_http => true, with_grant => true);
+
+-- The admin role (non-superuser) can now manage other roles:
+SET ROLE customer_admin;
+SELECT df.grant_usage('app_backend');           -- standard access
+-- include_http => true requires the admin to have WITH GRANT OPTION on
+-- df.http(); otherwise PostgreSQL's native privilege check blocks the grant.
+SELECT df.revoke_usage('app_backend');          -- revoke when needed
+```
+
+> **Delegation note:** `with_grant => true` can only be set by a superuser. Delegated admins can manage standard grants, but they cannot create additional delegated admins.
 
 Alternatively, create an indirection role and grant membership to application roles:
 
@@ -1613,7 +1685,9 @@ To remove a role's access to pg_durable:
 SELECT df.revoke_usage('app_role');
 ```
 
-This revokes all privileges previously granted by `df.grant_usage()`.
+This revokes all privileges previously granted by `df.grant_usage()`. As a safety measure, `df.revoke_usage()` prevents revoking privileges from a role the caller is a member of (including the caller's own role).
+
+For non-superusers, `df.revoke_usage()` is still subject to PostgreSQL's normal grantor rules because it is a SECURITY INVOKER helper. In practice, that means a delegated admin can only revoke the privileges that delegated admin granted; removing grants made by another role requires the original grantor or a superuser.
 
 ### Hardening Upgraded Installs
 
