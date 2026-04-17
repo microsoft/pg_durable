@@ -102,11 +102,8 @@ Fast iteration using local pgrx PostgreSQL. Best for development.
 # Run specific test
 ./scripts/test-e2e-local.sh 04_parallel
 
-# Run only the standard preload-enabled suite
-./scripts/test-e2e-local.sh --standard
-
-# Run only specific special phases
-./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout
+# Run only the phases that share the standard build artifact
+./scripts/test-e2e-local.sh --default-build-phases
 
 # Run test multiple times (stability check)
 ./scripts/test-e2e-local.sh 04_parallel 5

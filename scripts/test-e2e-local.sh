@@ -10,12 +10,6 @@
 #   --verbose, -v             Show NOTICE messages and full test output
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
 #   --default-build-phases    Run all phases that share the standard build artifact
-#   --no-preload              Run only the shared_preload_libraries enforcement phase
-#   --standard                Run only the standard preload-enabled phase
-#   --superuser-guc-off       Run only the superuser GUC off phase
-#   --connlimit-backpressure  Run only the connection limit backpressure phase
-#   --connlimit-timeout       Run only the connection limit timeout phase
-#   --connlimit-startup       Run only the connection limit startup-validation phase
 #   --http-disabled           Run only the HTTP-disabled (no http Cargo feature) phase
 #   --http-allow-all          Run only the http-allow-all Cargo feature phase
 #   --help, -h                Show this help
@@ -27,9 +21,9 @@
 #   ./scripts/test-e2e-local.sh --keep
 #   ./scripts/test-e2e-local.sh --clean --pg-version 18
 #   ./scripts/test-e2e-local.sh --default-build-phases
-#   ./scripts/test-e2e-local.sh --no-preload
-#   ./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout
-#   ./scripts/test-e2e-local.sh --http-disabled
+#   ./scripts/test-e2e-local.sh 00_requires_shared_preload
+#   ./scripts/test-e2e-local.sh 45_connection_limit_timeout
+#   ./scripts/test-e2e-local.sh --http-disabled 47_http_dsl_disabled
 #   ./scripts/test-e2e-local.sh --http-allow-all
 # END_USAGE
 
@@ -210,36 +204,6 @@ while [[ $# -gt 0 ]]; do
         --default-build-phases)
             EXPLICIT_PHASES=true
             add_requested_phases "${DEFAULT_BUILD_PHASES[@]}"
-            shift
-            ;;
-        --no-preload)
-            EXPLICIT_PHASES=true
-            add_requested_phase "no-preload"
-            shift
-            ;;
-        --standard)
-            EXPLICIT_PHASES=true
-            add_requested_phase "standard"
-            shift
-            ;;
-        --superuser-guc-off)
-            EXPLICIT_PHASES=true
-            add_requested_phase "superuser-guc-off"
-            shift
-            ;;
-        --connlimit-backpressure)
-            EXPLICIT_PHASES=true
-            add_requested_phase "connlimit-backpressure"
-            shift
-            ;;
-        --connlimit-timeout)
-            EXPLICIT_PHASES=true
-            add_requested_phase "connlimit-timeout"
-            shift
-            ;;
-        --connlimit-startup)
-            EXPLICIT_PHASES=true
-            add_requested_phase "connlimit-startup"
             shift
             ;;
         --http-disabled)
