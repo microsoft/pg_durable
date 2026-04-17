@@ -43,7 +43,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | File | Description |
 |------|-------------|
 | `00_setup_playground.sql` | Shared test infrastructure — creates `playground.*` tables and helper functions (not a test) |
-| `00_requires_shared_preload.sql` | Verifies that the extension requires `shared_preload_libraries`; runs in `--no-preload` phase only |
+| `00_requires_shared_preload.sql` | Verifies that the extension requires `shared_preload_libraries`; runs in the `no-preload` phase when selected by filename |
 
 ### Non-Privileged Tests (runs as `df_e2e_user`)
 

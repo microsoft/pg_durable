@@ -4,7 +4,7 @@
 -- via shared_preload_libraries. It must be run against a PostgreSQL instance
 -- that does NOT have pg_durable in shared_preload_libraries.
 --
--- Usage: ./scripts/test-e2e-local.sh --no-preload
+-- Usage: ./scripts/test-e2e-local.sh 00_requires_shared_preload
 
 DO $$
 BEGIN

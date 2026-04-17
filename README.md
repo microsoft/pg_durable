@@ -157,7 +157,7 @@ Complex local integration tests with pgrx PostgreSQL:
 ```bash
 ./scripts/test-e2e-local.sh                                                  # All local SQL E2E tests, including special restart/config phases
 ./scripts/test-e2e-local.sh 04_parallel                                      # Specific test
-./scripts/test-e2e-local.sh --connlimit-backpressure --connlimit-timeout      # Only the selected connection-limit phases
+./scripts/test-e2e-local.sh --default-build-phases                            # Only the default-build phase group
 ```
 
 See [tests/e2e/](tests/e2e/) for details.
