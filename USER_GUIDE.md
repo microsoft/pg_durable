@@ -1568,11 +1568,11 @@ SELECT df.grant_usage('app_role');
 -- Grant with HTTP access (opt-in)
 SELECT df.grant_usage('app_role', include_http => true);
 
--- Grant with delegation — superuser-only; target role can itself call df.grant_usage/df.revoke_usage
+-- Grant with delegation — target role can itself call df.grant_usage/df.revoke_usage
 SELECT df.grant_usage('admin_role', include_http => true, with_grant => true);
 ```
 
-`df.grant_usage()` issues every GRANT a role needs to call DSL functions, submit workflows, and read results. EXECUTE is revoked from PUBLIC — only superusers and roles granted `with_grant => true` can call it. `with_grant => true` itself is superuser-only. **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
+`df.grant_usage()` issues every GRANT a role needs to call DSL functions, submit workflows, and read results. EXECUTE is revoked from PUBLIC — only superusers and roles granted `with_grant => true` can call it. **This function is the authoritative source for the required grant set** — see the equivalent manual grants below for the full list.
 
 This function is purely additive — it never issues REVOKE. To downgrade a role's privileges (e.g., remove HTTP access), call `df.revoke_usage()` first, then `df.grant_usage()` with the desired options.
 
@@ -1582,7 +1582,7 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 |-----------|---------|-------------|
 | `p_role` | *(required)* | Target role name |
 | `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
-| `with_grant` | `false` | Superuser-only. Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access |
+| `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
@@ -1656,7 +1656,7 @@ SELECT df.grant_usage('app_backend');           -- standard access
 SELECT df.revoke_usage('app_backend');          -- revoke when needed
 ```
 
-> **Delegation note:** `with_grant => true` can only be set by a superuser. Delegated admins can manage standard grants, but they cannot create additional delegated admins.
+> **Delegation note:** `with_grant => true` requires the caller to hold each underlying privilege WITH GRANT OPTION. Superusers satisfy this automatically. Delegated admins (granted via `with_grant => true`) can also create additional delegated admins, since they hold all privileges WITH GRANT OPTION.
 
 Alternatively, create an indirection role and grant membership to application roles:
 

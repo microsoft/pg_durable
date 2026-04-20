@@ -169,8 +169,10 @@ Authorization is enforced by two PostgreSQL-native mechanisms:
 2. **WITH GRANT OPTION** on underlying objects — the inner GRANT/REVOKE statements run as the caller via SECURITY INVOKER, so PostgreSQL's native privilege checks prevent escalation
 
 When `with_grant => true` is used, the target role receives all privileges
-WITH GRANT OPTION and retains EXECUTE on the admin helpers. This parameter is
-superuser-only; delegated admins cannot create additional delegated admins.
+WITH GRANT OPTION and retains EXECUTE on the admin helpers. Authorization is
+enforced by PostgreSQL’s native WITH GRANT OPTION mechanism: the caller must
+hold each underlying privilege WITH GRANT OPTION, which is automatically true
+for superusers and for delegated admins granted via `with_grant => true`.
 
 These functions are new in v0.2.0, so this does not affect the upgrade path
 from v0.1.1 — there is no pre-existing PUBLIC grant to worry about.

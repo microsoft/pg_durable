@@ -239,7 +239,8 @@ ALTER TABLE df.nodes DROP COLUMN IF EXISTS login_role;
 -- standard df privileges but NOT df.http() by default.
 -- Pass include_http => true to opt in to HTTP.
 -- Pass with_grant => true to allow the role to delegate access to others.
--- Only superusers may set with_grant => true.
+-- Authorization is enforced by PostgreSQL's native WITH GRANT OPTION
+-- mechanism (see src/lib.rs for details).
 --
 -- Upgrade note: step 7 below documents the PUBLIC EXECUTE grant on
 -- df.http() that v0.1.1 issued via 'GRANT EXECUTE ON ALL FUNCTIONS'.
@@ -312,9 +313,6 @@ BEGIN
     END IF;
 
     IF with_grant THEN
-        IF NOT current_setting('is_superuser')::bool THEN
-            RAISE EXCEPTION 'only superusers may set with_grant => true';
-        END IF;
         grant_opt := ' WITH GRANT OPTION';
     END IF;
 
@@ -367,17 +365,25 @@ BEGIN
     -- the caller depends on is also caught.
     -- Superusers are exempt: pg_has_role returns true for all roles when the
     -- caller is a superuser, and superusers can always re-grant themselves.
-    IF NOT current_setting('is_superuser')::bool
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_roles
+        WHERE rolname = current_user
+          AND rolsuper
+    )
        AND pg_has_role(current_user, p_role, 'MEMBER') THEN
         RAISE EXCEPTION 'cannot revoke df privileges from "%" because the current role ("%") is a member of it — use a different administrator', p_role, current_user;
     END IF;
 
-    EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I', p_role);
-    EXECUTE format('REVOKE INSERT ON df.nodes FROM %I', p_role);
-    EXECUTE format('REVOKE SELECT ON df.nodes FROM %I', p_role);
-    EXECUTE format('REVOKE INSERT ON df.instances FROM %I', p_role);
-    EXECUTE format('REVOKE UPDATE ON df.instances FROM %I', p_role);
-    EXECUTE format('REVOKE SELECT ON df.instances FROM %I', p_role);
+    -- CASCADE: if the target role granted sub-grants (via WITH GRANT OPTION),
+    -- CASCADE ensures those dependent privileges are also revoked.
+    -- Column-level revokes must match the column-level grants from grant_usage().
+    EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I CASCADE', p_role);
+    EXECUTE format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
+    EXECUTE format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
+    EXECUTE format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
 
     FOR func_oid IN
         SELECT p.oid FROM pg_proc p
@@ -385,13 +391,13 @@ BEGIN
         WHERE n.nspname = 'df'
     LOOP
         BEGIN
-            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', func_oid::regprocedure, p_role);
+            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I CASCADE', func_oid::regprocedure, p_role);
         EXCEPTION WHEN insufficient_privilege THEN
             NULL;
         END;
     END LOOP;
 
-    EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I', p_role);
+    EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I CASCADE', p_role);
 
     RAISE NOTICE 'pg_durable: revoked df usage privileges granted by "%" from "%"', current_user, p_role;
 END;

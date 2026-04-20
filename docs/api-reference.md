@@ -415,23 +415,27 @@ SELECT df.clearvars();
 
 ## Administration Functions
 
-### df.grant_usage(role_name [, include_http])
+### df.grant_usage(role_name [, include_http] [, with_grant])
 
-Grants the privileges a role needs to use pg_durable. By default this grants general `df` usage but does not grant `EXECUTE` on `df.http()`. Pass `include_http => true` to opt a role into HTTP access. Must be called by a superuser.
+Grants the privileges a role needs to use pg_durable. By default this grants general `df` usage but does not grant `EXECUTE` on `df.http()`. Pass `include_http => true` to opt a role into HTTP access. Pass `with_grant => true` to allow the role to delegate access to others.
+
+Authorization is enforced by PostgreSQL’s native mechanisms: EXECUTE on this function is revoked from PUBLIC (so only roles explicitly granted access can call it), and the inner GRANT statements run as the caller via SECURITY INVOKER, so the caller must hold the underlying privileges WITH GRANT OPTION.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `role_name` | TEXT | The role to grant privileges to |
 | `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer)` |
+| `with_grant` | BOOLEAN | Optional, defaults to `false`; when `true`, grants all privileges WITH GRANT OPTION and retains EXECUTE on `df.grant_usage` / `df.revoke_usage` |
 
 ```sql
 SELECT df.grant_usage('app_role');
 SELECT df.grant_usage('app_role', include_http => true);
+SELECT df.grant_usage('admin_role', with_grant => true);
 ```
 
 ### df.revoke_usage(role_name)
 
-Revokes all privileges previously granted by `df.grant_usage()`, including any `df.http()` access. Must be called by a superuser. On upgraded installs, revoking `df.http()` from `PUBLIC` is still a separate manual step.
+Revokes all privileges previously granted by `df.grant_usage()`, including any `df.http()` access. Authorization is enforced the same way as `df.grant_usage()` — EXECUTE is revoked from PUBLIC, and the inner REVOKE statements run as the caller. On upgraded installs, revoking `df.http()` from `PUBLIC` is still a separate manual step.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

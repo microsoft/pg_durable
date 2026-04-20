@@ -6,7 +6,7 @@
 -- Test matrix:
 --   1. Superuser grants admin_role with with_grant => true
 --   2. admin_role can use pg_durable (start + complete a workflow)
---   3. Non-superuser admin CANNOT set with_grant => true
+--   3. Non-superuser admin CAN set with_grant => true (delegated admin can create sub-admins)
 --   4. Non-superuser admin CANNOT set include_http => true without HTTP grant permission
 --   5. admin_role can call df.grant_usage() to grant app_role access
 --   6. app_role can use pg_durable (start + complete a workflow)
@@ -107,22 +107,15 @@ END $$;
 
 DROP TABLE _dg_admin_state;
 
--- === Test 3: non-superuser admin CANNOT set with_grant => true ===
+-- === Test 3: non-superuser admin CAN set with_grant => true ===
+-- Since dg_admin was granted with_grant => true, it holds all privileges
+-- WITH GRANT OPTION and can delegate to other roles (including with_grant).
 SET SESSION AUTHORIZATION dg_admin;
 
 DO $$
 BEGIN
-    BEGIN
-        PERFORM df.grant_usage('dg_delegate_target', with_grant => true);
-        RAISE EXCEPTION 'SECURITY FAILURE: non-superuser admin was able to set with_grant => true';
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLERRM ILIKE '%only superusers may set with_grant => true%' THEN
-                RAISE NOTICE 'TEST 3 PASSED: non-superuser admin blocked from setting with_grant => true';
-            ELSE
-                RAISE EXCEPTION 'TEST 3 UNEXPECTED ERROR: %', SQLERRM;
-            END IF;
-    END;
+    PERFORM df.grant_usage('dg_delegate_target', with_grant => true);
+    RAISE NOTICE 'TEST 3 PASSED: delegated admin can set with_grant => true';
 END $$;
 
 RESET SESSION AUTHORIZATION;
@@ -137,12 +130,15 @@ BEGIN
         'EXECUTE'
     ) INTO can_grant;
 
-    IF can_grant THEN
-        RAISE EXCEPTION 'TEST 3 FAILED: dg_delegate_target should NOT have EXECUTE on df.grant_usage after failed with_grant attempt';
+    IF NOT can_grant THEN
+        RAISE EXCEPTION 'TEST 3 FAILED: dg_delegate_target should have EXECUTE on df.grant_usage after with_grant delegation';
     END IF;
 
-    RAISE NOTICE 'TEST 3 verification PASSED: failed with_grant attempt did not delegate admin helper access';
+    RAISE NOTICE 'TEST 3 verification PASSED: delegated with_grant propagated admin helper access';
 END $$;
+
+-- Clean up the delegation so it doesn't affect later tests
+SELECT df.revoke_usage('dg_delegate_target');
 
 -- === Test 4: non-superuser admin CANNOT set include_http => true without HTTP grant permission ===
 SET SESSION AUTHORIZATION dg_admin;

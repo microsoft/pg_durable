@@ -120,7 +120,7 @@ HTTP access is **opt-in** and separate from general `df` access.
 
 #### Granting access
 
-Use `df.grant_usage()` with `include_http => true` (requires superuser):
+Use `df.grant_usage()` with `include_http => true`:
 
 ```sql
 SELECT df.grant_usage('my_role', include_http => true);
