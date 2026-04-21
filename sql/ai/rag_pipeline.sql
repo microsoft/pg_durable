@@ -46,10 +46,11 @@ INSERT INTO documents (title, content) VALUES
 
 SELECT ai.create_pipeline(
     name    => 'rag_pipeline',
-    source  => ai.table_source('documents', incremental_column => 'updated_at'),
+    source  => ai.file_source('documents', incremental_column => 'updated_at'),
     steps   => ARRAY[
         ai.chunk(input_column => 'content'),
         ai.embed(model => 'text-embedding-3-small', input_column => 'chunk_text', dimensions => 1536)
+    
     ],
     trigger => 'on_change'
 );
@@ -60,7 +61,7 @@ SELECT ai.create_pipeline(
 -- Step 3: Inspect the execution plan
 -- ---------------------------------------------------------------------------
 
-SELECT ai.explain('rag_pipeline');
+SELECT ai.explain('demo_rag_pipeline');
 
 -- Output:
 --   Pipeline: rag_pipeline
@@ -89,42 +90,42 @@ SELECT ai.run('rag_pipeline');
 -- ---------------------------------------------------------------------------
 
 -- Quick status check
-SELECT * FROM ai.status('rag_pipeline');
+SELECT * FROM ai.status('demo_rag_pipeline');
 
 -- Wait for the current run to finish (up to 60s)
-SELECT ai.wait_for_completion('rag_pipeline', 60);
+SELECT ai.wait_for_completion('demo_rag_pipeline', 60);
 
 -- Check the auto-created output table
 SELECT doc_id, chunk_index, left(chunk_text, 60) AS chunk_preview
-  FROM rag_pipeline_output
+  FROM demo_rag_pipeline_output
  ORDER BY doc_id, chunk_index;
 
 -- List all registered pipelines
 SELECT * FROM ai.list_pipelines();
 
 -- View run history and results
-SELECT * FROM ai.result('rag_pipeline');
+SELECT * FROM ai.result('demo_rag_pipeline');
 
 -- ---------------------------------------------------------------------------
 -- Step 6: Backfill — reprocess all data after model or strategy changes
 -- ---------------------------------------------------------------------------
 
 -- Reset the checkpoint and run from scratch
-SELECT ai.backfill('rag_pipeline');
-SELECT ai.wait_for_completion('rag_pipeline', 300);
+SELECT ai.backfill('demo_rag_pipeline');
+SELECT ai.wait_for_completion('demo_rag_pipeline', 300);
 
 -- ---------------------------------------------------------------------------
 -- Step 7: Pause / resume / drop
 -- ---------------------------------------------------------------------------
 
 -- Pause pipeline (on_change trigger still fires but runs are skipped)
-SELECT ai.pause('rag_pipeline');
+SELECT ai.pause('demo_rag_pipeline');
 
 -- Resume when ready
-SELECT ai.resume('rag_pipeline');
+SELECT ai.resume('demo_rag_pipeline');
 
 -- Remove pipeline entirely (drops trigger, deletes metadata)
--- SELECT ai.drop('rag_pipeline');
+-- SELECT ai.drop('demo_rag_pipeline');
 
 -- ---------------------------------------------------------------------------
 -- Step 8: Retrieve relevant chunks for a user query using azure_ai + pgvector
@@ -148,7 +149,7 @@ SELECT
     dv.chunk_index,
     dv.chunk_text,
     1 - (dv.embedding <=> q.embedding) AS similarity
-FROM rag_pipeline_output dv, query q
+FROM demo_rag_pipeline_output dv, query q
 ORDER BY dv.embedding <=> q.embedding
 LIMIT 5;
 

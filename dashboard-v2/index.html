@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pg_durable — Visualization Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --surface2: #1c2129; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+  --purple: #bc8cff; --cyan: #39d2c0; --amber: #e3b341; --orange: #f0883e;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+
+/* ── Header ── */
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+header h1 { font-size: 18px; font-weight: 700; }
+header h1 span { color: var(--accent); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.refresh-btn { background: none; border: 1px solid var(--border); color: var(--text); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.refresh-btn:hover { border-color: var(--accent); }
+.auto-refresh { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.auto-refresh input { accent-color: var(--accent); }
+
+/* ── Navigation Tabs ── */
+.nav-tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 20px; flex-shrink: 0; gap: 2px; }
+.nav-tab { padding: 10px 18px; border: none; background: none; color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; position: relative; }
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.nav-tab .badge-count { position: absolute; top: 4px; right: 4px; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 8px; min-width: 16px; text-align: center; display: none; }
+.nav-tab .badge-count.visible { display: block; }
+
+/* ── Stats Bar ── */
+.stats-bar { display: flex; gap: 10px; padding: 12px 20px; flex-shrink: 0; flex-wrap: wrap; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 16px; min-width: 100px; }
+.stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat .value { font-size: 24px; font-weight: 700; margin-top: 2px; }
+.stat.s-total .value { color: var(--text); }
+.stat.s-completed .value { color: var(--green); }
+.stat.s-running .value { color: var(--blue); }
+.stat.s-failed .value { color: var(--red); }
+.stat.s-waiting .value { color: var(--amber); }
+
+/* ── View Panels ── */
+.view-panel { display: none; flex: 1; overflow: hidden; }
+.view-panel.active { display: flex; flex-direction: column; }
+
+/* ── INSTANCE DASHBOARD ── */
+.dash-toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
+.dash-toolbar select, .dash-toolbar input { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+.dash-toolbar input { width: 220px; }
+.dash-toolbar select:focus, .dash-toolbar input:focus { outline: none; border-color: var(--accent); }
+.dash-toolbar label { font-size: 12px; color: var(--muted); font-weight: 600; }
+
+.instance-table-wrap { flex: 1; overflow: auto; }
+.instance-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.instance-table th { text-align: left; padding: 10px 14px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 1; cursor: pointer; user-select: none; }
+.instance-table th:hover { color: var(--accent); }
+.instance-table th .sort-arrow { font-size: 10px; margin-left: 4px; }
+.instance-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.instance-table tr { cursor: pointer; transition: background 0.1s; }
+.instance-table tbody tr:hover { background: var(--surface); }
+.instance-table tbody tr.selected { background: var(--surface2); border-left: 3px solid var(--accent); }
+.instance-table .id-col { font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; font-size: 11px; color: var(--muted); }
+.instance-table .label-col { font-weight: 600; }
+.instance-table .time-col { font-size: 12px; color: var(--muted); }
+.instance-table .dur-col { font-family: 'SF Mono', monospace; font-size: 12px; }
+
+/* Status badge */
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge.completed, .badge.done { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge.failed { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge.running { background: rgba(88,166,255,0.15); color: var(--blue); }
+.badge.pending { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.badge.waiting, .badge.signal { background: rgba(227,179,65,0.15); color: var(--amber); }
+.badge.canceled, .badge.cancelled { background: rgba(139,148,158,0.15); color: var(--muted); }
+
+/* ── SPLIT VIEW (graph/timeline) ── */
+.split-view { display: flex; flex: 1; overflow: hidden; }
+.split-left { width: 380px; min-width: 300px; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.split-right { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+
+.split-left .search-bar { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.split-left .search-bar input { width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+.split-left .search-bar input:focus { outline: none; border-color: var(--accent); }
+
+.instance-list { flex: 1; overflow-y: auto; }
+.instance-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s; }
+.instance-item:hover { background: var(--surface); }
+.instance-item.selected { background: var(--surface2); border-left: 3px solid var(--accent); }
+.instance-item .item-top { display: flex; justify-content: space-between; align-items: center; }
+.instance-item .item-label { font-weight: 600; font-size: 13px; }
+.instance-item .item-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+.instance-item .item-id { font-family: 'SF Mono', monospace; font-size: 10px; color: var(--muted); }
+.instance-item .item-time { font-size: 11px; color: var(--muted); }
+
+/* Graph header & container */
+.graph-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.graph-header h2 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.graph-header .meta { font-size: 12px; color: var(--muted); }
+.graph-toggle { display: flex; gap: 4px; }
+.graph-toggle button { background: none; border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+.graph-toggle button.active { background: rgba(88,166,255,0.1); color: var(--accent); border-color: rgba(88,166,255,0.3); }
+
+.graph-container { flex: 1; overflow: auto; position: relative; }
+.graph-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--muted); gap: 12px; }
+.graph-placeholder .icon { font-size: 48px; opacity: 0.3; }
+
+/* DAG Nodes */
+.dag-wrap { position: relative; }
+.dag-svg { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; }
+.dag-node { position: absolute; background: var(--surface); border: 2px solid var(--border); border-radius: 10px; padding: 10px 14px; z-index: 2; cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; }
+.dag-node:hover { box-shadow: 0 0 16px rgba(88,166,255,0.2); z-index: 5; }
+.dag-node.n-completed { border-color: var(--green); }
+.dag-node.n-running { border-color: var(--blue); box-shadow: 0 0 12px rgba(88,166,255,0.25); }
+.dag-node.n-pending { border-color: var(--border); }
+.dag-node.n-failed { border-color: var(--red); }
+.dag-node.n-waiting { border-color: var(--amber); }
+.dag-node .n-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.dag-node .n-type { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.6px; padding: 1px 6px; border-radius: 4px; }
+.dag-node .n-type.SQL { background: rgba(88,166,255,0.15); color: var(--blue); }
+.dag-node .n-type.IF { background: rgba(188,140,255,0.15); color: var(--purple); border-radius: 50%; padding: 2px 6px; }
+.dag-node .n-type.JOIN { background: rgba(57,210,192,0.15); color: var(--cyan); }
+.dag-node .n-type.RACE { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.dag-node .n-type.LOOP { background: rgba(248,81,73,0.15); color: var(--red); }
+.dag-node .n-type.SIGNAL { background: rgba(188,140,255,0.15); color: var(--purple); }
+.dag-node .n-type.HTTP { background: rgba(63,185,80,0.15); color: var(--green); }
+.dag-node .n-type.SLEEP { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.dag-node .n-type.WAIT_SCHEDULE { background: rgba(227,179,65,0.15); color: var(--amber); }
+.dag-node .n-type.BREAK { background: rgba(248,81,73,0.15); color: var(--red); }
+.dag-node .n-status-icon { font-size: 12px; }
+.dag-node .n-query { font-size: 11px; color: var(--muted); font-family: 'SF Mono', monospace; line-height: 1.4; word-break: break-word; margin-top: 3px; }
+.dag-node .n-result-name { font-size: 10px; color: var(--accent); margin-top: 3px; font-weight: 600; }
+.dag-node .n-timing { font-size: 9px; color: var(--muted); margin-top: 3px; }
+
+.dag-connector { position: absolute; background: var(--surface); border: 2px dashed var(--border); border-radius: 10px; display: flex; align-items: center; justify-content: center; z-index: 2; }
+.dag-connector span { font-size: 11px; font-weight: 700; }
+.dag-connector.c-join { border-color: var(--cyan); }
+.dag-connector.c-join span { color: var(--cyan); }
+.dag-connector.c-race { border-color: var(--yellow); }
+.dag-connector.c-race span { color: var(--yellow); }
+.dag-connector.c-if { border-color: var(--purple); }
+.dag-connector.c-if span { color: var(--purple); }
+.dag-connector.c-loop { border-color: var(--yellow); }
+.dag-connector.c-loop span { color: var(--yellow); }
+.dag-connector.c-merge { border-color: var(--muted); }
+.dag-connector.c-merge span { color: var(--muted); }
+
+.edge-label { position: absolute; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 1px 5px; border-radius: 3px; z-index: 3; pointer-events: none; background: var(--bg); }
+.edge-label.el-green { color: var(--green); }
+.edge-label.el-red { color: var(--red); }
+.edge-label.el-cyan { color: var(--cyan); }
+.edge-label.el-yellow { color: var(--yellow); }
+.edge-label.el-muted { color: var(--muted); }
+
+/* ── EXECUTION TIMELINE (Gantt) ── */
+.timeline-container { flex: 1; overflow: auto; padding: 20px; }
+.timeline-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.timeline-header h2 { font-size: 15px; font-weight: 600; }
+.timeline { position: relative; }
+.timeline-ruler { display: flex; border-bottom: 1px solid var(--border); height: 28px; font-size: 10px; color: var(--muted); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+.timeline-ruler .tick { border-left: 1px solid var(--border); padding: 6px 4px; }
+.timeline-row { display: flex; align-items: center; height: 36px; border-bottom: 1px solid rgba(48,54,61,0.4); }
+.timeline-row .tl-label { width: 200px; min-width: 200px; padding: 0 12px; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-row .tl-bars { flex: 1; position: relative; height: 100%; }
+.tl-bar { position: absolute; height: 20px; top: 8px; border-radius: 4px; min-width: 3px; transition: opacity 0.2s; cursor: pointer; }
+.tl-bar:hover { opacity: 0.85; }
+.tl-bar.tb-completed { background: var(--green); }
+.tl-bar.tb-running { background: var(--blue); animation: pulse-bar 2s infinite; }
+.tl-bar.tb-pending { background: var(--border); }
+.tl-bar.tb-failed { background: var(--red); }
+.tl-bar.tb-waiting { background: var(--amber); }
+@keyframes pulse-bar { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.tl-bar .tl-bar-label { position: absolute; left: 100%; margin-left: 6px; font-size: 10px; color: var(--muted); white-space: nowrap; top: 3px; }
+.tl-legend { display: flex; gap: 16px; padding: 10px 20px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); flex-shrink: 0; }
+.tl-legend .tl-leg { display: flex; align-items: center; gap: 5px; }
+.tl-legend .tl-leg-box { width: 14px; height: 10px; border-radius: 2px; }
+
+/* ── SIGNAL & APPROVAL PANEL ── */
+.approval-panel { flex: 1; overflow-y: auto; padding: 20px; }
+.approval-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+.approval-card .ap-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.approval-card .ap-label { font-weight: 700; font-size: 15px; }
+.approval-card .ap-id { font-family: 'SF Mono', monospace; font-size: 11px; color: var(--muted); }
+.approval-card .ap-signal { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.approval-card .ap-signal-name { background: rgba(188,140,255,0.12); color: var(--purple); font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 4px; }
+.approval-card .ap-since { font-size: 12px; color: var(--muted); }
+.approval-card .ap-context { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 10px 0; font-size: 12px; overflow-x: auto; }
+.approval-card .ap-context table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.approval-card .ap-context th { text-align: left; padding: 4px 8px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: 11px; }
+.approval-card .ap-context td { padding: 4px 8px; border-bottom: 1px solid rgba(48,54,61,0.4); font-family: 'SF Mono', monospace; font-size: 11px; }
+.approval-actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.btn-approve { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.3); padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.btn-approve:hover { background: rgba(63,185,80,0.3); }
+.btn-reject { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3); padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.btn-reject:hover { background: rgba(248,81,73,0.3); }
+.btn-graph { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.2); padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.btn-graph:hover { background: rgba(88,166,255,0.2); }
+.bulk-bar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.bulk-bar .bulk-check { accent-color: var(--accent); }
+.bulk-bar .bulk-label { font-size: 12px; color: var(--muted); }
+.no-approvals { text-align: center; padding: 80px 20px; color: var(--muted); }
+.no-approvals .icon { font-size: 52px; margin-bottom: 16px; opacity: 0.3; }
+.no-approvals p { font-size: 14px; line-height: 1.6; }
+.no-approvals code { background: var(--surface); border: 1px solid var(--border); padding: 2px 6px; border-radius: 4px; font-size: 12px; color: var(--purple); }
+
+/* Signal form inline */
+.signal-form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); display: none; }
+.signal-form.open { display: block; }
+.signal-form label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
+.signal-form input, .signal-form textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 10px; font-size: 12px; font-family: 'SF Mono', monospace; margin-bottom: 8px; }
+.signal-form textarea { resize: vertical; min-height: 50px; }
+.signal-form input:focus, .signal-form textarea:focus { outline: none; border-color: var(--accent); }
+.signal-result { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+.signal-result.success { background: rgba(63,185,80,0.1); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
+.signal-result.error { background: rgba(248,81,73,0.1); color: var(--red); border: 1px solid rgba(248,81,73,0.2); }
+
+/* ── Node Detail Modal ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: 90%; max-width: 800px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.modal-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.modal-close { background: none; border: 1px solid var(--border); color: var(--muted); width: 26px; height: 26px; border-radius: 6px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+.modal-close:hover { border-color: var(--red); color: var(--red); }
+.modal-meta { padding: 8px 16px; display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.modal-meta .mm-label { font-weight: 600; color: var(--text); }
+.modal-body { flex: 1; overflow: auto; padding: 14px 16px; }
+.modal-body .sec-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 14px 0 4px; }
+.modal-body .sec-label:first-child { margin-top: 0; }
+.modal-body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: 'SF Mono', monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; overflow-x: auto; margin: 0; }
+.modal-body pre.result-pre { border-color: rgba(63,185,80,0.2); background: rgba(63,185,80,0.03); }
+.modal-body pre.error-pre { border-color: rgba(248,81,73,0.2); background: rgba(248,81,73,0.03); color: var(--red); }
+.modal-body pre .kw { color: var(--purple); font-weight: 600; }
+.modal-body pre .fn { color: var(--cyan); }
+.modal-body pre .str { color: var(--green); }
+.modal-body pre .num { color: var(--yellow); }
+.modal-foot { padding: 8px 16px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+.modal-foot button { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.2); padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.modal-foot button:hover { background: rgba(88,166,255,0.2); }
+.modal-foot button.copied { background: rgba(63,185,80,0.15); color: var(--green); border-color: rgba(63,185,80,0.3); }
+/* Result table in modal */
+.result-table-wrap { border: 1px solid rgba(63,185,80,0.2); border-radius: 8px; overflow: hidden; background: rgba(63,185,80,0.02); }
+.result-table-hdr { display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(63,185,80,0.05); border-bottom: 1px solid rgba(63,185,80,0.15); font-size: 11px; color: var(--green); font-weight: 600; }
+.result-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.result-table th { text-align: left; padding: 6px 10px; color: var(--accent); font-size: 10px; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+.result-table td { padding: 5px 10px; border-bottom: 1px solid rgba(48,54,61,0.4); font-family: 'SF Mono', monospace; font-size: 11px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-table tr:last-child td { border-bottom: none; }
+
+/* ── Loading / Spinner ── */
+.loading { display: flex; align-items: center; justify-content: center; padding: 60px; color: var(--muted); gap: 10px; }
+.spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Dry-run Explain ── */
+.explain-container { padding: 24px; overflow: auto; flex: 1; }
+.explain-toolbar { display: flex; gap: 10px; padding: 10px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; align-items: center; }
+.explain-toolbar input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: 'SF Mono', monospace; }
+.explain-toolbar input:focus { outline: none; border-color: var(--accent); }
+.explain-toolbar button { background: rgba(88,166,255,0.12); color: var(--accent); border: 1px solid rgba(88,166,255,0.25); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.explain-toolbar button:hover { background: rgba(88,166,255,0.25); }
+.explain-tree { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; font-family: 'SF Mono', monospace; font-size: 13px; line-height: 1.7; white-space: pre; overflow-x: auto; color: var(--text); }
+
+/* ── Context menu ── */
+.ctx-menu { position: fixed; z-index: 200; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px 0; min-width: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
+.ctx-menu .ctx-item { padding: 7px 14px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.ctx-menu .ctx-item:hover { background: rgba(88,166,255,0.1); }
+.ctx-menu .ctx-sep { border-top: 1px solid var(--border); margin: 3px 0; }
+
+@media (max-width: 900px) {
+  .split-left { width: 260px; min-width: 200px; }
+  .instance-table .id-col { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <h1><span>pg_durable</span> Visualization</h1>
+  <div class="header-right">
+    <button class="refresh-btn" onclick="loadAll()">⟳ Refresh</button>
+    <div class="auto-refresh">
+      <input type="checkbox" id="autoRefreshCheck" checked>
+      <label for="autoRefreshCheck">Auto-refresh</label>
+    </div>
+  </div>
+</header>
+
+<!-- Stats -->
+<div class="stats-bar" id="statsBar"></div>
+
+<!-- Navigation -->
+<div class="nav-tabs">
+  <button class="nav-tab active" data-view="dashboard" onclick="switchView('dashboard')">Instance Dashboard</button>
+  <button class="nav-tab" data-view="graph" onclick="switchView('graph')">Workflow Graph</button>
+  <button class="nav-tab" data-view="timeline" onclick="switchView('timeline')">Execution Timeline</button>
+  <button class="nav-tab" data-view="approvals" onclick="switchView('approvals')">
+    Signals &amp; Approvals
+    <span class="badge-count" id="approvalBadge">0</span>
+  </button>
+</div>
+
+<!-- ═══ VIEW: Instance Dashboard ═══ -->
+<div class="view-panel active" id="view-dashboard">
+  <div class="dash-toolbar">
+    <label>Status:</label>
+    <select id="filterStatus" onchange="renderInstanceTable()">
+      <option value="all">All</option>
+      <option value="running">⏳ Running</option>
+      <option value="completed">✓ Completed</option>
+      <option value="failed">✗ Failed</option>
+      <option value="canceled">Cancelled</option>
+      <option value="waiting">⏸ Waiting</option>
+    </select>
+    <input type="text" id="filterSearch" placeholder="Search by label..." oninput="renderInstanceTable()">
+    <label>Group:</label>
+    <select id="groupBy" onchange="renderInstanceTable()">
+      <option value="none">None</option>
+      <option value="status">Status</option>
+      <option value="label">Label</option>
+    </select>
+    <label>Sort:</label>
+    <select id="sortBy" onchange="renderInstanceTable()">
+      <option value="created_desc">Newest first</option>
+      <option value="created_asc">Oldest first</option>
+      <option value="duration_desc">Longest duration</option>
+      <option value="duration_asc">Shortest duration</option>
+      <option value="label_asc">Label A-Z</option>
+    </select>
+  </div>
+  <div class="instance-table-wrap">
+    <table class="instance-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Label</th>
+          <th>Status</th>
+          <th>Started</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody id="instanceTableBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══ VIEW: Workflow Graph ═══ -->
+<div class="view-panel" id="view-graph">
+  <div class="split-view">
+    <div class="split-left">
+      <div class="search-bar">
+        <input type="text" id="graphSearch" placeholder="Search instances..." oninput="filterGraphList()">
+      </div>
+      <div class="instance-list" id="graphInstanceList"></div>
+    </div>
+    <div class="split-right" id="graphRight">
+      <!-- Sub-toolbar for dry-run -->
+      <div class="explain-toolbar" id="explainToolbar" style="display:none;">
+        <input type="text" id="explainExpr" placeholder="df.start('SELECT 1' ~> 'SELECT 2', 'my-label') — no leading SELECT">
+        <button onclick="doDryRun()">Preview Graph</button>
+      </div>
+      <div class="graph-header" id="graphHeader" style="display:none;">
+        <h2 id="graphTitle"></h2>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span class="meta" id="graphMeta"></span>
+          <div class="graph-toggle">
+            <button class="active" onclick="setGraphMode('graph',this)">Graph</button>
+            <button onclick="setGraphMode('dryrun',this)">Dry-Run</button>
+          </div>
+        </div>
+      </div>
+      <div class="graph-container" id="graphContainer">
+        <div class="graph-placeholder">
+          <div class="icon">⬡</div>
+          <p>Select an instance to view its workflow graph</p>
+          <p style="font-size:12px;">Or use <strong>Dry-Run</strong> mode to preview an expression</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ VIEW: Execution Timeline ═══ -->
+<div class="view-panel" id="view-timeline">
+  <div class="split-view">
+    <div class="split-left">
+      <div class="search-bar">
+        <input type="text" id="tlSearch" placeholder="Search instances..." oninput="filterTimelineList()">
+      </div>
+      <div class="instance-list" id="tlInstanceList"></div>
+    </div>
+    <div class="split-right">
+      <div class="timeline-header" id="tlHeader">
+        <h2 id="tlTitle">Select an instance</h2>
+        <span class="meta" id="tlMeta"></span>
+      </div>
+      <div class="timeline-container" id="tlContainer">
+        <div class="graph-placeholder">
+          <div class="icon">📊</div>
+          <p>Select an instance to view its execution timeline</p>
+        </div>
+      </div>
+      <div class="tl-legend">
+        <div class="tl-leg"><div class="tl-leg-box" style="background:var(--green);"></div> Completed</div>
+        <div class="tl-leg"><div class="tl-leg-box" style="background:var(--blue);"></div> Running</div>
+        <div class="tl-leg"><div class="tl-leg-box" style="background:var(--border);"></div> Pending</div>
+        <div class="tl-leg"><div class="tl-leg-box" style="background:var(--red);"></div> Failed</div>
+        <div class="tl-leg"><div class="tl-leg-box" style="background:var(--amber);"></div> Waiting (signal/schedule)</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ VIEW: Signals & Approvals ═══ -->
+<div class="view-panel" id="view-approvals">
+  <div class="bulk-bar" id="bulkBar" style="display:none;">
+    <input type="checkbox" class="bulk-check" id="bulkCheckAll" onchange="toggleBulkAll(this.checked)">
+    <span class="bulk-label" id="bulkLabel">0 selected</span>
+    <button class="btn-approve" style="padding:5px 14px;font-size:12px;" onclick="bulkApprove()">Approve Selected</button>
+    <button class="btn-reject" style="padding:5px 14px;font-size:12px;" onclick="bulkReject()">Reject Selected</button>
+  </div>
+  <div class="approval-panel" id="approvalPanel"></div>
+</div>
+
+<!-- Modal -->
+<div id="nodeModal"></div>
+<!-- Context Menu -->
+<div id="ctxMenu" class="ctx-menu" style="display:none;"></div>
+
+<script>
+/* ═══════════════════════════════════════════════
+   pg_durable Visualization Dashboard
+   ═══════════════════════════════════════════════ */
+
+const API = '';
+let instances = [];
+let allNodes = {};     // instanceId -> nodes[]
+let waitingInstances = [];
+let selectedGraphId = null;
+let selectedTlId = null;
+let graphMode = 'graph'; // 'graph' | 'dryrun'
+let refreshTimer = null;
+let bulkSelected = new Set();
+
+const NODE_W = 250, NODE_GAP_X = 60, NODE_GAP_Y = 50, PAD = 32;
+const LEAF_TYPES = ['SQL','HTTP','SLEEP','SIGNAL','BREAK','WAIT_SCHEDULE'];
+
+// ── Utility ──
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function trunc(s, n) { return !s?'':s.length>n?s.substring(0,n)+'…':s; }
+async function fetchJSON(url) { const r = await fetch(API + url); return r.json(); }
+
+function relativeTime(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr.replace(' ', 'T') + 'Z');
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  if (diff < 172800) return 'Yesterday';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function formatDuration(secs) {
+  if (!secs) return '';
+  const s = parseFloat(secs);
+  if (s < 60) return s.toFixed(1) + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + Math.floor(s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
+function statusIcon(status) {
+  switch ((status||'').toLowerCase()) {
+    case 'completed': return '✓';
+    case 'running': return '⏳';
+    case 'pending': return '○';
+    case 'failed': return '✗';
+    default: return '⏸';
+  }
+}
+
+// ── View Switching ──
+function switchView(name) {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
+  document.querySelectorAll('.view-panel').forEach(p => p.classList.toggle('active', p.id === 'view-' + name));
+}
+
+// ── Stats ──
+async function loadStats() {
+  const stats = await fetchJSON('/api/stats');
+  if (stats.error) return;
+  const c = { completed: 0, failed: 0, pending: 0, running: 0, canceled: 0, total: 0 };
+  stats.forEach(s => {
+    const k = (s.status||'').toLowerCase();
+    c[k] = (c[k]||0) + parseInt(s.count);
+    c.total += parseInt(s.count);
+  });
+  const waitCount = waitingInstances.length;
+  document.getElementById('statsBar').innerHTML = `
+    <div class="stat s-total"><div class="label">Total</div><div class="value">${c.total}</div></div>
+    <div class="stat s-running"><div class="label">Running</div><div class="value">${c.running}</div></div>
+    <div class="stat s-completed"><div class="label">Completed</div><div class="value">${c.completed}</div></div>
+    <div class="stat s-failed"><div class="label">Failed</div><div class="value">${c.failed}</div></div>
+    <div class="stat s-waiting"><div class="label">Waiting</div><div class="value">${waitCount}</div></div>`;
+}
+
+// ══════════════════════════════════
+// INSTANCE DASHBOARD
+// ══════════════════════════════════
+
+async function loadInstances() {
+  const data = await fetchJSON('/api/instances');
+  if (data.error) { instances = []; return; }
+  instances = data;
+}
+
+function renderInstanceTable() {
+  const status = document.getElementById('filterStatus').value;
+  const search = document.getElementById('filterSearch').value.toLowerCase();
+  const group = document.getElementById('groupBy').value;
+  const sort = document.getElementById('sortBy').value;
+
+  let filtered = instances.filter(i => {
+    if (status !== 'all' && (i.status||'').toLowerCase() !== status) return false;
+    if (search && !(i.label||'').toLowerCase().includes(search)) return false;
+    return true;
+  });
+
+  // Sort
+  filtered.sort((a, b) => {
+    switch (sort) {
+      case 'created_desc': return (b.created_at||'').localeCompare(a.created_at||'');
+      case 'created_asc': return (a.created_at||'').localeCompare(b.created_at||'');
+      case 'duration_desc': return (parseFloat(b.duration_secs)||0) - (parseFloat(a.duration_secs)||0);
+      case 'duration_asc': return (parseFloat(a.duration_secs)||0) - (parseFloat(b.duration_secs)||0);
+      case 'label_asc': return (a.label||'').localeCompare(b.label||'');
+      default: return 0;
+    }
+  });
+
+  const body = document.getElementById('instanceTableBody');
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:40px;color:var(--muted);">No instances found</td></tr>';
+    return;
+  }
+
+  if (group === 'status') {
+    const groups = {};
+    filtered.forEach(i => { const k = i.status||'unknown'; (groups[k]=groups[k]||[]).push(i); });
+    // Priority order
+    const order = ['Running','pending','completed','failed','canceled'];
+    const keys = [...new Set([...order.filter(k => groups[k]), ...Object.keys(groups)])];
+    body.innerHTML = keys.map(k =>
+      `<tr><td colspan="5" style="background:var(--surface);padding:8px 14px;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);">${statusIcon(k)} ${esc(k)} (${groups[k].length})</td></tr>` +
+      groups[k].map(i => instanceRow(i)).join('')
+    ).join('');
+  } else if (group === 'label') {
+    const groups = {};
+    filtered.forEach(i => { const k = i.label||'(unlabeled)'; (groups[k]=groups[k]||[]).push(i); });
+    body.innerHTML = Object.keys(groups).sort().map(k =>
+      `<tr><td colspan="5" style="background:var(--surface);padding:8px 14px;font-weight:700;font-size:12px;color:var(--muted);">${esc(k)} (${groups[k].length})</td></tr>` +
+      groups[k].map(i => instanceRow(i)).join('')
+    ).join('');
+  } else {
+    body.innerHTML = filtered.map(i => instanceRow(i)).join('');
+  }
+}
+
+function instanceRow(i) {
+  const dur = formatDuration(i.duration_secs);
+  const s = (i.status||'').toLowerCase();
+  return `<tr onclick="openInstanceFromDash('${esc(i.id)}')" oncontextmenu="showCtxMenu(event,'${esc(i.id)}','${esc(i.label||'')}')">
+    <td class="id-col">${esc((i.id||'').substring(0,8))}</td>
+    <td class="label-col">${esc(i.label||'(no label)')}</td>
+    <td><span class="badge ${s}">${statusIcon(i.status)} ${esc(i.status||'')}</span></td>
+    <td class="time-col">${relativeTime(i.created_at)}</td>
+    <td class="dur-col">${dur}</td>
+  </tr>`;
+}
+
+function openInstanceFromDash(id) {
+  selectedGraphId = id;
+  switchView('graph');
+  loadGraphForInstance(id);
+}
+
+// ══════════════════════════════════
+// WORKFLOW GRAPH VIEW
+// ══════════════════════════════════
+
+function renderGraphInstanceList() {
+  const list = document.getElementById('graphInstanceList');
+  list.innerHTML = instances.map(i => {
+    const s = (i.status||'').toLowerCase();
+    return `<div class="instance-item ${selectedGraphId===i.id?'selected':''}" onclick="loadGraphForInstance('${esc(i.id)}')">
+      <div class="item-top"><span class="item-label">${esc(i.label||'(no label)')}</span><span class="badge ${s}">${statusIcon(i.status)} ${esc(i.status||'')}</span></div>
+      <div class="item-bottom"><span class="item-id">${esc((i.id||'').substring(0,8))}</span><span class="item-time">${relativeTime(i.created_at)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function filterGraphList() {
+  const q = document.getElementById('graphSearch').value.toLowerCase();
+  document.querySelectorAll('#graphInstanceList .instance-item').forEach(el => {
+    const label = el.querySelector('.item-label').textContent.toLowerCase();
+    el.style.display = label.includes(q) ? '' : 'none';
+  });
+}
+
+async function loadGraphForInstance(id) {
+  selectedGraphId = id;
+  renderGraphInstanceList();
+
+  const hdr = document.getElementById('graphHeader');
+  const container = document.getElementById('graphContainer');
+  const toolbar = document.getElementById('explainToolbar');
+  toolbar.style.display = 'none';
+  hdr.style.display = 'flex';
+  container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading graph…</div>';
+
+  const inst = instances.find(i => i.id === id);
+  document.getElementById('graphTitle').innerHTML = `${esc(inst?.label||id)} <span class="badge ${(inst?.status||'').toLowerCase()}">${statusIcon(inst?.status)} ${esc(inst?.status||'')}</span>`;
+  document.getElementById('graphMeta').textContent = `ID: ${(id||'').substring(0,12)} · ${relativeTime(inst?.created_at)}`;
+
+  const nodes = await fetchJSON(`/api/nodes?instance_id=${id}`);
+  if (nodes.error) { container.innerHTML = `<div class="loading" style="color:var(--red);">${esc(nodes.error)}</div>`; return; }
+  allNodes[id] = nodes;
+  renderDAG(container, nodes);
+}
+
+function setGraphMode(mode, btn) {
+  graphMode = mode;
+  document.querySelectorAll('.graph-toggle button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  const toolbar = document.getElementById('explainToolbar');
+  const hdr = document.getElementById('graphHeader');
+
+  if (mode === 'dryrun') {
+    toolbar.style.display = 'flex';
+    hdr.style.display = 'none';
+    document.getElementById('graphContainer').innerHTML = `<div class="explain-container"><div class="graph-placeholder"><div class="icon">🔍</div><p>Enter a df.start() expression above and click <strong>Preview Graph</strong></p></div></div>`;
+  } else {
+    toolbar.style.display = 'none';
+    if (selectedGraphId) {
+      hdr.style.display = 'flex';
+      if (allNodes[selectedGraphId]) renderDAG(document.getElementById('graphContainer'), allNodes[selectedGraphId]);
+    }
+  }
+}
+
+async function doDryRun() {
+  const expr = document.getElementById('explainExpr').value.trim();
+  if (!expr) return;
+  const container = document.getElementById('graphContainer');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div> Running df.explain()…</div>';
+  const result = await fetchJSON(`/api/explain?expression=${encodeURIComponent(expr)}`);
+  if (result.error) {
+    container.innerHTML = `<div class="loading" style="color:var(--red);">${esc(result.error)}</div>`;
+    return;
+  }
+  container.innerHTML = `<div class="explain-container"><div class="explain-tree">${esc(result.explain||'(empty)')}</div></div>`;
+}
+
+// ── DAG Layout Engine ──
+
+function buildTree(nodes) {
+  const map = {};
+  nodes.forEach(n => { map[n.id] = n; });
+  const childIds = new Set();
+  nodes.forEach(n => {
+    if (n.left_node) childIds.add(n.left_node);
+    if (n.right_node) childIds.add(n.right_node);
+    if ((n.node_type==='IF'||n.node_type==='LOOP') && n.query) {
+      try { const c = JSON.parse(n.query); if (c.condition_node) childIds.add(c.condition_node); } catch(e) {}
+    }
+    if (n.node_type==='JOIN' && n.query) {
+      try { const c = JSON.parse(n.query); if (c.extra_nodes) c.extra_nodes.forEach(id => childIds.add(id)); } catch(e) {}
+    }
+  });
+  let rootId = null;
+  for (const n of nodes) { if (!childIds.has(n.id)) { rootId = n.id; break; } }
+  if (!rootId && nodes.length) rootId = nodes[0].id;
+  return { map, rootId };
+}
+
+function layoutNode(id, map, x, y) {
+  const node = map[id];
+  if (!node) return { w: 0, h: 0, items: [], edges: [] };
+  if (LEAF_TYPES.includes(node.node_type)) { const h = measureH(node); return { w: NODE_W, h, items: [{ id: node.id, x, y, w: NODE_W, h, node }], edges: [] }; }
+  if (node.node_type === 'THEN') return layoutSeq(flattenThen(id, map), map, x, y);
+  if (node.node_type === 'JOIN') return layoutParallel(node, map, x, y, 'JOIN');
+  if (node.node_type === 'RACE') return layoutParallel(node, map, x, y, 'RACE');
+  if (node.node_type === 'IF') return layoutCond(node, map, x, y);
+  if (node.node_type === 'LOOP') return layoutLoop(node, map, x, y);
+  const h = measureH(node); return { w: NODE_W, h, items: [{ id: node.id, x, y, w: NODE_W, h, node }], edges: [] };
+}
+
+function flattenThen(id, map) { const n = map[id]; if (!n) return []; if (n.node_type !== 'THEN') return [id]; return [...flattenThen(n.left_node, map), ...flattenThen(n.right_node, map)]; }
+
+function layoutSeq(ids, map, sx, sy) {
+  const items = [], edges = [], subs = [];
+  let y = sy, maxW = 0;
+  for (const nid of ids) { const sub = layoutNode(nid, map, sx, y); subs.push(sub); items.push(...sub.items); edges.push(...sub.edges); maxW = Math.max(maxW, sub.w); y += sub.h + NODE_GAP_Y; }
+  for (const sub of subs) { if (sub.w < maxW) { const dx = Math.floor((maxW - sub.w)/2); sub.items.forEach(it => { it.x += dx; }); } }
+  for (let i = 0; i < subs.length - 1; i++) { const f = botItem(subs[i].items), t = topItem(subs[i+1].items); if (f && t) edges.push({ from: f, to: t, label: '', type: 'seq' }); }
+  return { w: maxW, h: Math.max(y - sy - NODE_GAP_Y, 0), items, edges };
+}
+
+function layoutParallel(node, map, x, y, type) {
+  const branches = [node.left_node, node.right_node].filter(Boolean);
+  if (node.query) { try { const c = JSON.parse(node.query); if (c.extra_nodes) branches.push(...c.extra_nodes); } catch(e) {} }
+  const items = [], edges = [], hdrH = 36;
+  let bx = x, maxBH = 0;
+  const bY = y + hdrH + NODE_GAP_Y, bSubs = [];
+  for (const bid of branches) { const sub = layoutNode(bid, map, bx, bY); bSubs.push(sub); items.push(...sub.items); edges.push(...sub.edges); maxBH = Math.max(maxBH, sub.h); bx += sub.w + NODE_GAP_X; }
+  const totalBW = Math.max(bx - x - NODE_GAP_X, NODE_W);
+  const hdr = { id: node.id+'-hdr', x: x + Math.max(0, Math.floor((totalBW-NODE_W)/2)), y, w: NODE_W, h: hdrH, node, isConn: true, connType: type };
+  items.push(hdr);
+  const ftrY = bY + maxBH + NODE_GAP_Y;
+  const ftr = { id: node.id+'-ftr', x: hdr.x, y: ftrY, w: NODE_W, h: hdrH, node, isConn: true, connType: 'merge' };
+  items.push(ftr);
+  for (let i = 0; i < bSubs.length; i++) { const t = topItem(bSubs[i].items), b = botItem(bSubs[i].items); if (t) edges.push({ from: hdr, to: t, label: 'branch '+(i+1), type: 'fork' }); if (b) edges.push({ from: b, to: ftr, label: '', type: 'join' }); }
+  return { w: totalBW, h: ftrY + hdrH - y, items, edges };
+}
+
+function layoutCond(node, map, x, y) {
+  const items = [], edges = [];
+  let condNodeId = null;
+  if (node.query) { try { condNodeId = JSON.parse(node.query).condition_node; } catch(e) {} }
+  let curY = y;
+  if (condNodeId && map[condNodeId]) { const cL = layoutNode(condNodeId, map, x, curY); items.push(...cL.items); edges.push(...cL.edges); curY += cL.h + NODE_GAP_Y; }
+  const hdrH = 36;
+  const hdr = { id: node.id+'-if', x, y: curY, w: NODE_W, h: hdrH, node, isConn: true, connType: 'IF' };
+  items.push(hdr);
+  if (condNodeId && map[condNodeId]) { const cb = botItem(items.filter(it => it.id !== hdr.id)); if (cb) edges.push({ from: cb, to: hdr, label: 'eval', type: 'seq' }); }
+  const brY = curY + hdrH + NODE_GAP_Y;
+  const thenL = node.left_node ? layoutNode(node.left_node, map, x, brY) : null;
+  const thenW = thenL?.w || NODE_W;
+  const elseL = node.right_node ? layoutNode(node.right_node, map, x + thenW + NODE_GAP_X, brY) : null;
+  if (thenL) { items.push(...thenL.items); edges.push(...thenL.edges); }
+  if (elseL) { items.push(...elseL.items); edges.push(...elseL.edges); }
+  const totalBW = thenW + (elseL ? NODE_GAP_X + elseL.w : 0);
+  hdr.x = x + Math.max(0, Math.floor((totalBW - NODE_W) / 2));
+  if (thenL) { const t = topItem(thenL.items); if (t) edges.push({ from: hdr, to: t, label: 'TRUE ✓', type: 'cond-true' }); }
+  if (elseL) { const t = topItem(elseL.items); if (t) edges.push({ from: hdr, to: t, label: 'FALSE ✗', type: 'cond-false' }); }
+  const maxBH = Math.max(thenL?.h||0, elseL?.h||0);
+  const ftrY = brY + maxBH + NODE_GAP_Y;
+  const ftr = { id: node.id+'-endif', x: hdr.x, y: ftrY, w: NODE_W, h: hdrH, node, isConn: true, connType: 'merge' };
+  items.push(ftr);
+  if (thenL) { const b = botItem(thenL.items); if (b) edges.push({ from: b, to: ftr, label: '', type: 'join' }); }
+  if (elseL) { const b = botItem(elseL.items); if (b) edges.push({ from: b, to: ftr, label: '', type: 'join' }); }
+  return { w: Math.max(totalBW, NODE_W), h: ftrY + hdrH - y, items, edges };
+}
+
+function layoutLoop(node, map, x, y) {
+  const items = [], edges = [], hdrH = 36;
+  const hdr = { id: node.id+'-loop', x, y, w: NODE_W, h: hdrH, node, isConn: true, connType: 'LOOP' };
+  items.push(hdr);
+  const bodyY = y + hdrH + NODE_GAP_Y;
+  const bodyL = node.left_node ? layoutNode(node.left_node, map, x + 20, bodyY) : null;
+  if (bodyL) { items.push(...bodyL.items); edges.push(...bodyL.edges); const t = topItem(bodyL.items); if (t) edges.push({ from: hdr, to: t, label: 'body', type: 'seq' }); }
+  let condId = null;
+  if (node.query) { try { condId = JSON.parse(node.query).condition_node; } catch(e) {} }
+  let totalH = bodyL?.h || 0;
+  if (condId && map[condId]) {
+    const condY = bodyY + (bodyL?.h||0) + NODE_GAP_Y;
+    const condL = layoutNode(condId, map, x + 20, condY);
+    items.push(...condL.items); edges.push(...condL.edges);
+    if (bodyL) { const b = botItem(bodyL.items), ct = topItem(condL.items); if (b&&ct) edges.push({from:b,to:ct,label:'check',type:'seq'}); }
+    const cb = botItem(condL.items);
+    if (cb) edges.push({ from: cb, to: hdr, label: 'repeat', type: 'loop-back' });
+    totalH = condY + condL.h - bodyY + NODE_GAP_Y;
+  } else if (bodyL) {
+    const b = botItem(bodyL.items); if (b) edges.push({ from: b, to: hdr, label: 'repeat ∞', type: 'loop-back' });
+  }
+  return { w: Math.max((bodyL?.w||0) + 40, NODE_W), h: hdrH + NODE_GAP_Y + totalH + 10, items, edges };
+}
+
+function measureH(n) { let h = 42; if (n.query) h += Math.min(Math.ceil(n.query.length/35), 3)*14 + 4; if (n.result_name) h += 14; if (n.result && n.result !== '{"rows": [], "row_count": 0}') h += 14; if (n.error) h += 14; return Math.max(h, 48); }
+function topItem(items) { return items.length ? items.reduce((a,b) => a.y < b.y ? a : b) : null; }
+function botItem(items) { return items.length ? items.reduce((a,b) => (a.y+a.h)>(b.y+b.h)?a:b) : null; }
+
+// ── Render DAG ──
+let _dagNodes = {};
+
+function renderDAG(container, nodes) {
+  const { map, rootId } = buildTree(nodes);
+  _dagNodes = map;
+  if (!rootId) { container.innerHTML = '<div class="loading">No nodes found</div>'; return; }
+  const layout = layoutNode(rootId, map, PAD, PAD);
+  const cW = layout.w + PAD * 2 + 60, cH = layout.h + PAD * 2 + 60;
+
+  let html = `<div class="dag-wrap" style="width:${cW}px;height:${cH}px;">`;
+  // SVG edges
+  html += `<svg class="dag-svg" width="${cW}" height="${cH}"><defs>
+    <marker id="m-seq" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#3fb950"/></marker>
+    <marker id="m-fork" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#39d2c0"/></marker>
+    <marker id="m-true" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#3fb950"/></marker>
+    <marker id="m-false" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#f85149"/></marker>
+    <marker id="m-join" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#8b949e"/></marker>
+    <marker id="m-loop" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#d29922"/></marker>
+  </defs>`;
+  for (const e of layout.edges) html += drawEdge(e);
+  html += '</svg>';
+
+  // Edge labels
+  for (const e of layout.edges) if (e.label && e.type !== 'join' && e.type !== 'seq') html += drawEdgeLabel(e);
+  // Nodes
+  for (const it of layout.items) html += drawNodeHTML(it);
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function drawEdge(e) {
+  const fx = e.from.x + e.from.w/2, fy = e.from.y + e.from.h, tx = e.to.x + e.to.w/2, ty = e.to.y;
+  let color, marker, dash = '';
+  switch (e.type) {
+    case 'seq': color='#3fb950'; marker='url(#m-seq)'; break;
+    case 'fork': color='#39d2c0'; marker='url(#m-fork)'; break;
+    case 'cond-true': color='#3fb950'; marker='url(#m-true)'; break;
+    case 'cond-false': color='#f85149'; marker='url(#m-false)'; break;
+    case 'join': color='#8b949e'; marker='url(#m-join)'; dash='4,3'; break;
+    case 'loop-back': color='#d29922'; marker='url(#m-loop)'; dash='6,3'; break;
+    default: color='#30363d'; marker='url(#m-seq)';
+  }
+  if (e.type === 'loop-back') {
+    const lx = Math.min(e.from.x, e.to.x) - 30;
+    return `<path d="M${fx},${fy} C${fx},${fy+22} ${lx},${fy+22} ${lx},${(fy+ty)/2} S${lx},${ty-22} ${tx},${ty}" fill="none" stroke="${color}" stroke-width="2" stroke-dasharray="${dash}" marker-end="${marker}" opacity="0.8"/>`;
+  }
+  if (Math.abs(fx-tx) < 5) return `<line x1="${fx}" y1="${fy}" x2="${tx}" y2="${ty}" stroke="${color}" stroke-width="2" marker-end="${marker}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;
+  const my = fy + (ty - fy)*0.4;
+  return `<path d="M${fx},${fy} C${fx},${my} ${tx},${my} ${tx},${ty}" fill="none" stroke="${color}" stroke-width="2" marker-end="${marker}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;
+}
+
+function drawEdgeLabel(e) {
+  const fx = e.from.x + e.from.w/2, fy = e.from.y + e.from.h, tx = e.to.x + e.to.w/2, ty = e.to.y;
+  const lx = fx + (tx-fx)*0.5, ly = fy + (ty-fy)*0.3;
+  let cls = 'el-muted';
+  if (e.type==='cond-true') cls='el-green'; else if (e.type==='cond-false') cls='el-red'; else if (e.type==='fork') cls='el-cyan'; else if (e.type==='loop-back') cls='el-yellow';
+  return `<div class="edge-label ${cls}" style="left:${lx-16}px;top:${ly-6}px;">${esc(e.label)}</div>`;
+}
+
+function drawNodeHTML(item) {
+  const n = item.node, s = (n.status||'').toLowerCase();
+  if (item.isConn) {
+    let label, cls;
+    switch (item.connType) {
+      case 'JOIN': label='⑂ PARALLEL — wait all'; cls='c-join'; break;
+      case 'RACE': label='⚡ RACE — first wins'; cls='c-race'; break;
+      case 'IF': label='❓ IF condition'; cls='c-if'; break;
+      case 'LOOP': label='🔄 LOOP'; cls='c-loop'; break;
+      default: label='⊕ merge'; cls='c-merge';
+    }
+    return `<div class="dag-connector ${cls}" style="left:${item.x}px;top:${item.y}px;width:${item.w}px;height:${item.h}px;"><span>${esc(label)}</span></div>`;
+  }
+
+  const qp = n.query ? trunc(n.query.replace(/\s+/g,' '), 80) : '';
+  let extra = '';
+  if (n.result_name) extra += `<div class="n-result-name">|=&gt; $${esc(n.result_name)}</div>`;
+  if (n.result && n.result !== '{"rows": [], "row_count": 0}') {
+    try { const r = JSON.parse(n.result); if (r.rows?.length>0) extra += `<div style="font-size:10px;color:var(--green);margin-top:2px;">✓ ${esc(trunc(JSON.stringify(r.rows[0]),60))}</div>`; } catch(e) { extra += `<div style="font-size:10px;color:var(--green);margin-top:2px;">${esc(trunc(n.result,50))}</div>`; }
+  }
+  if (n.error) extra += `<div style="font-size:10px;color:var(--red);margin-top:2px;">✗ ${esc(trunc(n.error,60))}</div>`;
+  if (n.created_at && n.updated_at) { extra += `<div class="n-timing">${esc(n.created_at)} → ${esc(n.updated_at)}</div>`; }
+
+  const sIcon = statusIcon(n.status);
+  return `<div class="dag-node n-${s}" style="left:${item.x}px;top:${item.y}px;width:${item.w}px;" onclick="showNodeModal('${esc(item.id)}')" oncontextmenu="showCtxMenu(event,'${esc(item.id)}')">
+    <div class="n-head"><span class="n-type ${n.node_type}">${n.node_type}</span><span class="n-status-icon">${sIcon}</span></div>
+    ${qp?`<div class="n-query">${esc(qp)}</div>`:''}
+    ${extra}
+  </div>`;
+}
+
+// ══════════════════════════════════
+// EXECUTION TIMELINE (Gantt)
+// ══════════════════════════════════
+
+function renderTimelineInstanceList() {
+  const list = document.getElementById('tlInstanceList');
+  list.innerHTML = instances.map(i => {
+    const s = (i.status||'').toLowerCase();
+    return `<div class="instance-item ${selectedTlId===i.id?'selected':''}" onclick="loadTimelineForInstance('${esc(i.id)}')">
+      <div class="item-top"><span class="item-label">${esc(i.label||'(no label)')}</span><span class="badge ${s}">${statusIcon(i.status)} ${esc(i.status||'')}</span></div>
+      <div class="item-bottom"><span class="item-id">${esc((i.id||'').substring(0,8))}</span><span class="item-time">${relativeTime(i.created_at)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function filterTimelineList() {
+  const q = document.getElementById('tlSearch').value.toLowerCase();
+  document.querySelectorAll('#tlInstanceList .instance-item').forEach(el => {
+    const label = el.querySelector('.item-label').textContent.toLowerCase();
+    el.style.display = label.includes(q) ? '' : 'none';
+  });
+}
+
+async function loadTimelineForInstance(id) {
+  selectedTlId = id;
+  renderTimelineInstanceList();
+  const container = document.getElementById('tlContainer');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading timeline…</div>';
+  const inst = instances.find(i => i.id === id);
+  document.getElementById('tlTitle').innerHTML = `${esc(inst?.label||id)} <span class="badge ${(inst?.status||'').toLowerCase()}">${esc(inst?.status||'')}</span>`;
+  document.getElementById('tlMeta').textContent = `ID: ${(id||'').substring(0,12)}`;
+
+  const nodes = await fetchJSON(`/api/nodes?instance_id=${id}`);
+  if (nodes.error) { container.innerHTML = `<div class="loading" style="color:var(--red);">${esc(nodes.error)}</div>`; return; }
+  allNodes[id] = nodes;
+  renderTimeline(container, nodes, inst);
+}
+
+function renderTimeline(container, nodes, inst) {
+  // Filter to leaf nodes only (the actual work items)
+  const leafNodes = nodes.filter(n => LEAF_TYPES.includes(n.node_type));
+  if (!leafNodes.length) { container.innerHTML = '<div class="loading">No executable nodes found</div>'; return; }
+
+  // Parse timestamps
+  const instanceStart = inst?.created_at ? new Date(inst.created_at.replace(' ','T')+'Z').getTime() : null;
+  let minT = Infinity, maxT = -Infinity;
+  const parsed = leafNodes.map(n => {
+    const start = n.created_at ? new Date(n.created_at.replace(' ','T')+'Z').getTime() : null;
+    const end = n.updated_at ? new Date(n.updated_at.replace(' ','T')+'Z').getTime() : null;
+    if (start) { minT = Math.min(minT, start); if (end) maxT = Math.max(maxT, end); else maxT = Math.max(maxT, Date.now()); }
+    return { ...n, _start: start, _end: end || (n.status==='Running' ? Date.now() : start) };
+  });
+
+  // If no timestamps, use synthetic positions
+  if (minT === Infinity) {
+    let t = 0;
+    parsed.forEach((n, i) => { n._start = t; n._end = t + 1000; t += 1200; });
+    minT = 0; maxT = t;
+  }
+
+  const totalMs = Math.max(maxT - minT, 1000);
+  const barAreaW = 700;
+
+  // Ruler ticks
+  const tickCount = Math.min(10, Math.max(4, Math.floor(barAreaW / 80)));
+  let rulerHtml = '<div class="timeline-ruler" style="padding-left:200px;">';
+  for (let i = 0; i <= tickCount; i++) {
+    const ms = (totalMs / tickCount) * i;
+    const label = ms < 1000 ? Math.round(ms) + 'ms' : ms < 60000 ? (ms/1000).toFixed(1) + 's' : (ms/60000).toFixed(1) + 'm';
+    const w = barAreaW / tickCount;
+    rulerHtml += `<div class="tick" style="width:${w}px;">${label}</div>`;
+  }
+  rulerHtml += '</div>';
+
+  // Rows
+  let rowsHtml = '';
+  for (const n of parsed) {
+    const s = (n.status||'').toLowerCase();
+    const label = n.node_type + (n.query ? ': ' + trunc(n.query.replace(/\s+/g,' '), 30) : '');
+    const left = n._start !== null ? ((n._start - minT) / totalMs * barAreaW) : 0;
+    const width = n._start !== null && n._end !== null ? Math.max(((n._end - n._start) / totalMs * barAreaW), 3) : 3;
+    const durLabel = n._start && n._end ? formatDuration((n._end - n._start) / 1000) : '';
+    const barClass = s === 'completed' ? 'tb-completed' : s === 'running' ? 'tb-running' : s === 'failed' ? 'tb-failed' : (s === 'waiting' || n.node_type === 'SIGNAL' || n.node_type === 'WAIT_SCHEDULE') ? 'tb-waiting' : 'tb-pending';
+
+    rowsHtml += `<div class="timeline-row">
+      <div class="tl-label" title="${esc(label)}">${esc(label)}</div>
+      <div class="tl-bars">
+        <div class="tl-bar ${barClass}" style="left:${left}px;width:${width}px;" onclick="showNodeModal('${esc(n.id)}')" title="${esc(n.node_type)}: ${durLabel}">
+          <span class="tl-bar-label">${durLabel}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  container.innerHTML = `<div class="timeline">${rulerHtml}${rowsHtml}</div>`;
+}
+
+// ══════════════════════════════════
+// SIGNALS & APPROVALS
+// ══════════════════════════════════
+
+async function loadWaiting() {
+  const data = await fetchJSON('/api/waiting');
+  waitingInstances = data.error ? [] : data;
+  const count = waitingInstances.length;
+  const badge = document.getElementById('approvalBadge');
+  badge.textContent = count;
+  badge.classList.toggle('visible', count > 0);
+  document.getElementById('bulkBar').style.display = count > 0 ? 'flex' : 'none';
+  renderApprovals();
+}
+
+function renderApprovals() {
+  const panel = document.getElementById('approvalPanel');
+  if (!waitingInstances.length) {
+    panel.innerHTML = `<div class="no-approvals">
+      <div class="icon">✓</div>
+      <p>No pending approvals.</p>
+      <p style="margin-top:10px;">Instances using <code>df.wait_for_signal()</code> will appear here<br>when they need input.</p>
+    </div>`;
+    return;
+  }
+
+  bulkSelected.clear();
+
+  panel.innerHTML = waitingInstances.map(w => {
+    const sigName = w.signal_name || 'human_decision';
+    const contextHtml = w.context_data ? renderContextTable(w.context_data) : '';
+
+    return `<div class="approval-card" id="ap-${w.instance_id}">
+      <div class="ap-header">
+        <span class="ap-label">${esc(w.label||'(no label)')}</span>
+        <span class="ap-id">${esc(w.instance_id)}</span>
+      </div>
+      <div class="ap-signal">
+        <span class="ap-signal-name">⏸ ${esc(sigName)}</span>
+        <span class="ap-since">${relativeTime(w.created_at)}</span>
+        ${w.timeout_seconds ? `<span style="font-size:11px;color:var(--muted);">timeout: ${w.timeout_seconds}s</span>` : ''}
+      </div>
+      ${contextHtml}
+      <div class="approval-actions">
+        <input type="checkbox" class="bulk-check" data-id="${esc(w.instance_id)}" data-signal="${esc(sigName)}" onchange="updateBulkCount()">
+        <button class="btn-approve" onclick="doSignal('${esc(w.instance_id)}','${esc(sigName)}',true)">Approve</button>
+        <button class="btn-reject" onclick="doSignal('${esc(w.instance_id)}','${esc(sigName)}',false)">Reject</button>
+        <button class="btn-graph" onclick="openInstanceFromDash('${esc(w.instance_id)}')">View Full Graph</button>
+        <button class="btn-graph" style="background:rgba(188,140,255,0.08);color:var(--purple);border-color:rgba(188,140,255,0.2);" onclick="toggleSignalForm('${esc(w.instance_id)}')">⚙ Custom</button>
+      </div>
+      <div class="signal-form" id="sf-${w.instance_id}">
+        <label>Signal Name</label>
+        <input type="text" id="sn-${w.instance_id}" value="${esc(sigName)}">
+        <label>Payload (JSON)</label>
+        <textarea id="sd-${w.instance_id}">{"approved": true, "reviewer": "dashboard-user"}</textarea>
+        <button class="btn-approve" style="padding:5px 14px;font-size:12px;" onclick="sendCustomSignal('${esc(w.instance_id)}')">Send Signal</button>
+        <div id="sr-${w.instance_id}"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderContextTable(dataStr) {
+  try {
+    const data = JSON.parse(dataStr);
+    if (!Array.isArray(data) || !data.length) return '';
+    const cols = Object.keys(data[0]);
+    return `<div class="ap-context"><table>
+      <thead><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${data.map(row => `<tr>${cols.map(c => `<td>${esc(String(row[c]||''))}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table></div>`;
+  } catch(e) {
+    return `<div class="ap-context"><pre>${esc(dataStr)}</pre></div>`;
+  }
+}
+
+function toggleSignalForm(id) {
+  const el = document.getElementById('sf-' + id);
+  if (el) el.classList.toggle('open');
+}
+
+async function doSignal(instanceId, signalName, approved) {
+  const data = JSON.stringify({ approved, reviewer: 'dashboard-user', notes: approved ? 'Approved from dashboard' : 'Rejected from dashboard' });
+  await sendSignalAPI(instanceId, signalName, data);
+}
+
+async function sendCustomSignal(instanceId) {
+  const name = document.getElementById('sn-' + instanceId)?.value;
+  const data = document.getElementById('sd-' + instanceId)?.value;
+  if (!name) { showSigResult(instanceId, 'Signal name required', false); return; }
+  try { JSON.parse(data); } catch(e) { showSigResult(instanceId, 'Invalid JSON: '+e.message, false); return; }
+  await sendSignalAPI(instanceId, name, data);
+}
+
+async function sendSignalAPI(instanceId, signalName, signalData) {
+  showSigResult(instanceId, 'Sending…', true);
+  try {
+    const res = await fetch(API+'/api/signal', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({instance_id: instanceId, signal_name: signalName, signal_data: signalData}) });
+    const result = await res.json();
+    if (result.error) showSigResult(instanceId, '✗ '+result.error, false);
+    else { showSigResult(instanceId, '✓ Signal sent', true); setTimeout(loadAll, 1500); }
+  } catch(e) { showSigResult(instanceId, '✗ '+e.message, false); }
+}
+
+function showSigResult(id, msg, ok) {
+  const el = document.getElementById('sr-'+id);
+  if (el) el.innerHTML = `<div class="signal-result ${ok?'success':'error'}">${esc(msg)}</div>`;
+}
+
+function updateBulkCount() {
+  const checks = document.querySelectorAll('.approval-card .bulk-check:checked');
+  bulkSelected = new Set([...checks].map(c => ({id: c.dataset.id, signal: c.dataset.signal})));
+  document.getElementById('bulkLabel').textContent = checks.length + ' selected';
+}
+
+function toggleBulkAll(checked) {
+  document.querySelectorAll('.approval-card .bulk-check').forEach(c => c.checked = checked);
+  updateBulkCount();
+}
+
+async function bulkApprove() {
+  for (const item of bulkSelected) await doSignal(item.id, item.signal, true);
+}
+
+async function bulkReject() {
+  for (const item of bulkSelected) await doSignal(item.id, item.signal, false);
+}
+
+// ══════════════════════════════════
+// NODE DETAIL MODAL
+// ══════════════════════════════════
+
+function showNodeModal(nodeId) {
+  const n = _dagNodes[nodeId];
+  if (!n) return;
+  const modal = document.getElementById('nodeModal');
+
+  let queryRaw = n.query || '(no query)', queryExtra = '';
+  try {
+    const qObj = JSON.parse(n.query);
+    if (qObj.sql) queryRaw = qObj.sql;
+    const extras = Object.keys(qObj).filter(k => k !== 'sql');
+    if (extras.length) queryExtra = extras.map(k => `<div class="sec-label">${esc(k)}</div><pre>${esc(typeof qObj[k]==='object'?JSON.stringify(qObj[k],null,2):String(qObj[k]))}</pre>`).join('');
+  } catch(e) {}
+
+  let resultHtml = '';
+  if (n.result && n.result !== '{"rows": [], "row_count": 0}') {
+    try {
+      const r = JSON.parse(n.result);
+      if (r.rows && r.rows.length) {
+        const cols = Object.keys(r.rows[0]);
+        resultHtml = `<div class="sec-label">Result</div><div class="result-table-wrap">
+          <div class="result-table-hdr"><span>${r.row_count||r.rows.length} row(s)</span></div>
+          <table class="result-table"><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>
+          ${r.rows.slice(0,30).map(row=>`<tr>${cols.map(c=>`<td>${esc(String(row[c]??'NULL'))}</td>`).join('')}</tr>`).join('')}
+          </tbody></table></div>`;
+      } else {
+        resultHtml = `<div class="sec-label">Result</div><pre class="result-pre">${esc(JSON.stringify(r,null,2))}</pre>`;
+      }
+    } catch(e) { resultHtml = `<div class="sec-label">Result</div><pre class="result-pre">${esc(n.result)}</pre>`; }
+  }
+
+  let errorHtml = n.error ? `<div class="sec-label">Error</div><pre class="error-pre">${esc(n.error)}</pre>` : '';
+  let timingHtml = '';
+  if (n.created_at || n.updated_at) {
+    timingHtml = `<div class="sec-label">Timing</div><pre>Created: ${esc(n.created_at||'—')}\nUpdated: ${esc(n.updated_at||'—')}\nDuration: ${esc(n.duration_secs ? formatDuration(n.duration_secs) : '—')}</pre>`;
+  }
+
+  modal.innerHTML = `<div class="modal-overlay" onclick="closeModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <h3><span class="n-type ${n.node_type}" style="font-size:10px;">${n.node_type}</span> ${esc(n.result_name ? '$'+n.result_name : nodeId)}</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-meta">
+        <div><span class="mm-label">Node:</span> ${esc(nodeId)}</div>
+        <div><span class="mm-label">Type:</span> ${esc(n.node_type)}</div>
+        <div><span class="mm-label">Status:</span> <span class="badge ${(n.status||'').toLowerCase()}" style="font-size:10px;padding:1px 6px;">${esc(n.status||'')}</span></div>
+        ${n.result_name?`<div><span class="mm-label">Result:</span> $${esc(n.result_name)}</div>`:''}
+      </div>
+      <div class="modal-body">
+        <div class="sec-label">Query / SQL</div>
+        <pre id="modalQuery">${highlightSQL(queryRaw)}</pre>
+        ${queryExtra}${timingHtml}${resultHtml}${errorHtml}
+      </div>
+      <div class="modal-foot">
+        <button id="btnCopy" onclick="copyQuery()">📋 Copy Query</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function closeModal(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('nodeModal').innerHTML = '';
+}
+
+function copyQuery() {
+  const el = document.getElementById('modalQuery');
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    const btn = document.getElementById('btnCopy');
+    btn.textContent = '✓ Copied!'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 Copy Query'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+function highlightSQL(sql) {
+  let h = esc(sql);
+  h = h.replace(/'([^']*?)'/g, '<span class="str">\'$1\'</span>');
+  h = h.replace(/\b(\d+\.?\d*)\b/g, '<span class="num">$1</span>');
+  const kws = 'SELECT|FROM|WHERE|AND|OR|NOT|IN|IS|NULL|AS|ON|JOIN|LEFT|RIGHT|INNER|GROUP BY|ORDER BY|HAVING|LIMIT|OFFSET|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|ALTER|DROP|TABLE|TEMP|WITH|RETURNING|CASE|WHEN|THEN|ELSE|END|EXISTS|BETWEEN|LIKE|DISTINCT|VACUUM|ANALYZE|PERFORM|BEGIN|DECLARE|LOOP|EXIT';
+  h = h.replace(new RegExp('\\b('+kws+')\\b','gi'), m => `<span class="kw">${m.toUpperCase()}</span>`);
+  h = h.replace(/\b([a-z_]\w*(?:\.\w+)?)\s*\(/gi, (m,fn) => `<span class="fn">${fn}</span>(`);
+  return h;
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// ── Context Menu ──
+function showCtxMenu(e, id, label) {
+  e.preventDefault();
+  const menu = document.getElementById('ctxMenu');
+  const inst = instances.find(i => i.id === id);
+  const isInstance = !!inst;
+  menu.innerHTML = `
+    ${isInstance ? `<div class="ctx-item" onclick="openInstanceFromDash('${esc(id)}')">🔍 View Graph</div>` : ''}
+    ${isInstance ? `<div class="ctx-item" onclick="selectedTlId='${esc(id)}';switchView('timeline');loadTimelineForInstance('${esc(id)}')">📊 View Timeline</div>` : ''}
+    <div class="ctx-item" onclick="navigator.clipboard.writeText('${esc(id)}');hideCtxMenu()">📋 Copy ID</div>
+    ${isInstance && inst.status === 'Running' ? `<div class="ctx-sep"></div><div class="ctx-item" style="color:var(--red);" onclick="cancelInstance('${esc(id)}')">✗ Cancel</div>` : ''}
+  `;
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.style.display = 'block';
+}
+document.addEventListener('click', hideCtxMenu);
+function hideCtxMenu() { document.getElementById('ctxMenu').style.display = 'none'; }
+
+async function cancelInstance(id) {
+  await fetch(API+'/api/cancel', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({instance_id: id}) });
+  setTimeout(loadAll, 1000);
+}
+
+// ══════════════════════════════════
+// LOAD & REFRESH
+// ══════════════════════════════════
+
+async function loadAll() {
+  await Promise.all([loadInstances(), loadWaiting()]);
+  await loadStats();
+  renderInstanceTable();
+  renderGraphInstanceList();
+  renderTimelineInstanceList();
+  // Re-render active sub-view if selected
+  if (selectedGraphId && document.getElementById('view-graph').classList.contains('active') && graphMode === 'graph') {
+    const nodes = await fetchJSON(`/api/nodes?instance_id=${selectedGraphId}`);
+    if (!nodes.error) { allNodes[selectedGraphId] = nodes; renderDAG(document.getElementById('graphContainer'), nodes); }
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (document.getElementById('autoRefreshCheck').checked) {
+    refreshTimer = setInterval(loadAll, 5000);
+  }
+}
+function stopAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
+document.getElementById('autoRefreshCheck').addEventListener('change', startAutoRefresh);
+
+loadAll();
+startAutoRefresh();
+</script>
+</body>
+</html>
