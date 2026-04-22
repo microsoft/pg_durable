@@ -17,9 +17,10 @@ use crate::types::{short_id, validate_result_name, Durofut, FunctionInput};
 fn is_in_workflow_context() -> bool {
     // Check the session variable set by the background worker
     // current_setting with missing_ok=true returns NULL if not set
-    let result: Option<String> = Spi::get_one("SELECT current_setting('df.in_workflow', true)")
-        .ok()
-        .flatten();
+    let result: Option<String> =
+        Spi::get_one("SELECT pg_catalog.current_setting('df.in_workflow', true)")
+            .ok()
+            .flatten();
 
     result.as_deref() == Some("true")
 }
@@ -82,7 +83,7 @@ fn installed_extension_version() -> String {
         drop(cached);
 
         let version = Spi::get_one::<String>(
-            "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'",
+            "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
         )
         .ok()
         .flatten()
@@ -633,7 +634,7 @@ pub fn start(
     // Validate that the target database exists (if specified)
     if let Some(db) = database {
         let exists: bool = match Spi::get_one_with_args(
-            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1)",
             &[db.into()],
         ) {
             Ok(Some(v)) => v,
@@ -656,7 +657,7 @@ pub fn start(
 
     // Validate current_user has LOGIN privilege
     let has_login: bool = match Spi::get_one_with_args(
-        "SELECT rolcanlogin FROM pg_roles WHERE oid = $1",
+        "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE oid = $1",
         &[current_user_oid.into()],
     ) {
         Ok(Some(has_login)) => has_login,
@@ -931,7 +932,7 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
     // Update the instance status to 'cancelled' via SPI.
     // User has column-level UPDATE on (status, updated_at) with RLS restricting to own rows.
     Spi::run_with_args(
-        "UPDATE df.instances SET status = 'cancelled', updated_at = now() WHERE id = $1",
+        "UPDATE df.instances SET status = 'cancelled', updated_at = pg_catalog.now() WHERE id = $1",
         &[instance_id.into()],
     )
     .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
