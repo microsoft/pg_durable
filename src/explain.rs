@@ -205,18 +205,25 @@ fn explain_expression(expr: &str) -> String {
         return build_tree_visualization(&root_id, &nodes, false);
     }
 
-    // If it looks like plain SQL (not a DSL expression), wrap it directly as a SQL node
-    // This prevents the "SELECT SELECT ..." problem when users pass plain SQL to explain
-    if looks_like_plain_sql(expr) && !looks_like_dsl_expression(expr) {
-        let sql_node = Durofut {
-            node_type: "SQL".to_string(),
-            query: Some(expr.to_string()),
-            ..Default::default()
-        };
-        let mut nodes = HashMap::new();
-        let mut id_counter = 0;
-        let root_id = collect_nodes(&sql_node, &mut nodes, &mut id_counter);
-        return build_tree_visualization(&root_id, &nodes, false);
+    // Require DSL markers (df.* calls or operators like ~>, |=>) before evaluating via SPI.
+    // This prevents arbitrary SQL from being interpolated into the query below, even though
+    // SPI executes as the calling user (SECURITY INVOKER) and grants no privilege escalation.
+    if !looks_like_dsl_expression(expr) {
+        // Plain SQL without DSL operators gets wrapped directly as a SQL node
+        // (prevents the "SELECT SELECT ..." problem)
+        if looks_like_plain_sql(expr) {
+            let sql_node = Durofut {
+                node_type: "SQL".to_string(),
+                query: Some(expr.to_string()),
+                ..Default::default()
+            };
+            let mut nodes = HashMap::new();
+            let mut id_counter = 0;
+            let root_id = collect_nodes(&sql_node, &mut nodes, &mut id_counter);
+            return build_tree_visualization(&root_id, &nodes, false);
+        }
+        return "Cannot explain input: not a valid Durofut JSON, instance ID, SQL statement, or DSL expression.\n\
+             Hint: DSL expressions use df.*() functions and operators like ~>, |=>, &, |.".to_string();
     }
 
     // DSL expression - evaluate it to build the graph
