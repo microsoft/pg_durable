@@ -80,6 +80,10 @@ pub async fn execute(
 
     let mut conn = connect_as_user(&input.submitted_by, input.database.as_deref()).await?;
 
+    // SECURITY: Dynamic SQL is intentional. The query is authored by the submitting
+    // user via df.sql() and executes under their own role via connect_as_user().
+    // This is equivalent to the user running SQL directly.
+    // See docs/spec-security-model.md §4 for the full threat model.
     match sqlx::query(&input.query).fetch_all(&mut conn).await {
         Ok(rows) => {
             let mut result_rows: Vec<serde_json::Value> = Vec::new();

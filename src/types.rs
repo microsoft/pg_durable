@@ -678,6 +678,11 @@ pub fn substitute_all_with_options(
     result = result.replace("{sys_instance_id}", &sys_vars.instance_id);
     result = result.replace("{sys_label}", sys_vars.label.as_deref().unwrap_or(""));
 
+    // SECURITY: Raw substitution of user vars is by design — variables are
+    // intended for SQL fragments (table names, expressions), not just values.
+    // The user controls both the variable content and the query template, and
+    // SQL executes under their own role via connect_as_user().
+    // See docs/spec-security-model.md §4.3, T10.
     // 2. Substitute user vars: {name} (inserted as-is, no quoting)
     for (name, value) in vars {
         let pattern = format!("{{{name}}}");

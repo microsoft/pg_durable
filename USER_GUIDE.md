@@ -809,6 +809,8 @@ These read-only variables are automatically available during durable function ex
 
 ### Variable Substitution
 
+> **Security note**: All `{...}` substitutions — including `{varname}`, `{sys_label}`, and `{sys_instance_id}` — perform **raw text substitution**. The value is inserted directly into the SQL string without escaping or parameterization. This is by design so that variables can hold SQL fragments like table names or expressions. Since you control both the variable value and the query template, and SQL executes under your own role, this is safe for configuration values you set yourself. Do **not** store untrusted external input in variables that get substituted into SQL. For passing query *results* between steps, use `$name` (via `|=>`), which applies proper SQL escaping.
+
 Use `{varname}` in SQL queries to substitute variable values:
 
 ```sql
