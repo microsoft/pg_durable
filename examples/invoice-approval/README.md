@@ -100,7 +100,8 @@ examples/invoice-approval/
 │   ├── configure_pg.sh
 │   ├── cleanup_azure.sh
 │   ├── feed_invoices.sh      ← insert random invoices mid-demo
-│   └── smoke_check.sh
+│   ├── smoke_check.sh        ← offline syntax/config validation
+│   └── live_smoke_check.sh   ← deployed Azure Function check
 └── sql/
     ├── 01_schema.sql         ← tables + truncate
     ├── 02_set_vars.sql       ← df.setvar for URL/key
@@ -141,7 +142,7 @@ chmod +x scripts/*.sh
 ### 3) Smoke-check the function
 
 ```bash
-./scripts/smoke_check.sh
+./scripts/live_smoke_check.sh
 ```
 
 ### 4) Create demo schema

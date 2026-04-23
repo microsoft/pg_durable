@@ -1,0 +1,5 @@
+# Environment file with secrets (SAS tokens, API keys, endpoints)
+.azure-http-domains.env
+
+# Temporary files
+*.tmp
