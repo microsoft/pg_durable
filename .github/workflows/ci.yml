@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   azure_example_smoke:
-    name: Azure Example Smoke
+    name: Example Smoke Checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +40,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Run Azure Functions example smoke checks
-        run: ./examples/azure-functions/scripts/smoke_check.sh
+      - name: Run example smoke checks
+        run: |
+          for smoke_check in examples/*/scripts/smoke_check.sh; do
+            echo "Running $smoke_check"
+            bash "$smoke_check"
+          done
 
   format:
     name: Format Check

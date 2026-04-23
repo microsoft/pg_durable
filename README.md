@@ -166,6 +166,7 @@ See [tests/e2e/](tests/e2e/) for details.
 
 - [User Guide](USER_GUIDE.md) — Complete usage guide with examples
 - [MVP Guide](docs/pg_durable_mvp.md) — Implementation details and internals
+- [Examples](examples/README.md) — Example conventions and smoke-check guidance
 
 ## Architecture
 
