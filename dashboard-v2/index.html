@@ -582,9 +582,9 @@ function instanceRow(i) {
 }
 
 function openInstanceFromDash(id) {
-  selectedGraphId = id;
-  switchView('graph');
-  loadGraphForInstance(id);
+  selectedTlId = id;
+  switchView('timeline');
+  loadTimelineForInstance(id);
 }
 
 // ══════════════════════════════════
@@ -910,6 +910,9 @@ async function loadTimelineForInstance(id) {
   const nodes = await fetchJSON(`/api/nodes?instance_id=${id}`);
   if (nodes.error) { container.innerHTML = `<div class="loading" style="color:var(--red);">${esc(nodes.error)}</div>`; return; }
   allNodes[id] = nodes;
+  // Populate _dagNodes so showNodeModal works from timeline bar clicks
+  _dagNodes = {};
+  nodes.forEach(n => { _dagNodes[n.id] = n; });
   renderTimeline(container, nodes, inst);
 }
 
@@ -918,15 +921,44 @@ function renderTimeline(container, nodes, inst) {
   const leafNodes = nodes.filter(n => LEAF_TYPES.includes(n.node_type));
   if (!leafNodes.length) { container.innerHTML = '<div class="loading">No executable nodes found</div>'; return; }
 
-  // Parse timestamps
-  const instanceStart = inst?.created_at ? new Date(inst.created_at.replace(' ','T')+'Z').getTime() : null;
+  // Build DAG-aware timing: all nodes share the same created_at (graph insertion time),
+  // so we derive each node's actual execution start from its predecessor in the THEN chain.
+  const nodeMap = {};
+  nodes.forEach(n => { nodeMap[n.id] = n; });
+
+  // Map each node to the THEN that has it as right_node (i.e. its predecessor relationship)
+  const predecessorMap = {};
+  nodes.forEach(n => {
+    if (n.node_type === 'THEN' && n.right_node) {
+      predecessorMap[n.right_node] = n;
+    }
+  });
+
+  function parseTs(ts) { return ts ? new Date(ts.replace(' ','T')+'Z').getTime() : null; }
+
+  // Compute actual execution start: if a node is the right_node of a THEN,
+  // it started when the THEN's left_node finished (updated_at).
+  function getActualStart(nodeId) {
+    const thenNode = predecessorMap[nodeId];
+    if (thenNode && thenNode.left_node) {
+      const leftNode = nodeMap[thenNode.left_node];
+      if (leftNode && leftNode.updated_at) return parseTs(leftNode.updated_at);
+    }
+    const node = nodeMap[nodeId];
+    return parseTs(node?.created_at);
+  }
+
+  // Parse timestamps with DAG-aware start times
   let minT = Infinity, maxT = -Infinity;
   const parsed = leafNodes.map(n => {
-    const start = n.created_at ? new Date(n.created_at.replace(' ','T')+'Z').getTime() : null;
-    const end = n.updated_at ? new Date(n.updated_at.replace(' ','T')+'Z').getTime() : null;
-    if (start) { minT = Math.min(minT, start); if (end) maxT = Math.max(maxT, end); else maxT = Math.max(maxT, Date.now()); }
+    const start = getActualStart(n.id);
+    const end = parseTs(n.updated_at);
+    if (start != null) { minT = Math.min(minT, start); if (end) maxT = Math.max(maxT, end); else maxT = Math.max(maxT, Date.now()); }
     return { ...n, _start: start, _end: end || (n.status==='Running' ? Date.now() : start) };
   });
+
+  // Sort by actual start time so the Gantt reads top-to-bottom chronologically
+  parsed.sort((a, b) => (a._start || 0) - (b._start || 0));
 
   // If no timestamps, use synthetic positions
   if (minT === Infinity) {
@@ -1054,6 +1086,9 @@ function toggleSignalForm(id) {
 }
 
 async function doSignal(instanceId, signalName, approved) {
+  const card = document.getElementById('ap-' + instanceId);
+  const btns = card?.querySelectorAll('.btn-approve, .btn-reject');
+  btns?.forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
   const data = JSON.stringify({ approved, reviewer: 'dashboard-user', notes: approved ? 'Approved from dashboard' : 'Rejected from dashboard' });
   await sendSignalAPI(instanceId, signalName, data);
 }
@@ -1071,14 +1106,31 @@ async function sendSignalAPI(instanceId, signalName, signalData) {
   try {
     const res = await fetch(API+'/api/signal', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({instance_id: instanceId, signal_name: signalName, signal_data: signalData}) });
     const result = await res.json();
-    if (result.error) showSigResult(instanceId, '✗ '+result.error, false);
-    else { showSigResult(instanceId, '✓ Signal sent', true); setTimeout(loadAll, 1500); }
-  } catch(e) { showSigResult(instanceId, '✗ '+e.message, false); }
+    if (result.error) { showSigResult(instanceId, '✗ '+result.error, false); enableButtons(instanceId); }
+    else {
+      showSigResult(instanceId, '✓ Signal sent', true);
+      const card = document.getElementById('ap-' + instanceId);
+      if (card) { card.style.opacity = '0.4'; card.style.transition = 'opacity 0.3s'; }
+      setTimeout(loadAll, 1500);
+    }
+  } catch(e) { showSigResult(instanceId, '✗ '+e.message, false); enableButtons(instanceId); }
+}
+
+function enableButtons(instanceId) {
+  const card = document.getElementById('ap-' + instanceId);
+  card?.querySelectorAll('.btn-approve, .btn-reject').forEach(b => { b.disabled = false; b.style.opacity = '1'; });
 }
 
 function showSigResult(id, msg, ok) {
+  // Show result both in custom form and as a visible banner on the card
   const el = document.getElementById('sr-'+id);
   if (el) el.innerHTML = `<div class="signal-result ${ok?'success':'error'}">${esc(msg)}</div>`;
+  const card = document.getElementById('ap-'+id);
+  if (card) {
+    let banner = card.querySelector('.signal-banner');
+    if (!banner) { banner = document.createElement('div'); banner.className = 'signal-banner'; card.appendChild(banner); }
+    banner.innerHTML = `<div style="padding:8px 12px;margin-top:8px;border-radius:6px;font-size:13px;font-weight:600;${ok?'background:rgba(63,185,80,0.15);color:var(--green);':'background:rgba(248,81,73,0.15);color:var(--red);'}">${esc(msg)}</div>`;
+  }
 }
 
 function updateBulkCount() {

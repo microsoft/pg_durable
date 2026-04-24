@@ -20,7 +20,7 @@ No external orchseration. No glue code. just Postgres.
 
 ---
 
-## ACT 1 — RAG Pipeline in Seconds (55 seconds)
+## ACT 1 — RAG Pipeline in Seconds (60 seconds)
 
 **[Screen: show pipeline definition]**
 
@@ -89,31 +89,28 @@ And one more:
 SELECT ai.run('rag_pipeline');
 ```
 
-That’s it. Behind the scenes, our docs just got chunked, embedded, and dropped into a vector-ready sink table. We can run a similarity search against it right now.
+That’s it. Behind the scenes, our docs just got chunked, embedded, and dropped into a vector-ready sink table. Using the Durable Functions from pg_durable to ensure these pipeline as fault tolerant and long running.
+
+To make it easier to see, I created a custom dashboard to visualize the pipelines and the steps. Let's check it out. 
+
+As you can see here, a pipeline was kicked off to do several steps. Let me just click into one of the boxes here. You can see it has a chunk in and where it got chunked to and everything got processed. Let's go back into VS Code and do a vector search. 
+
+Already now let see if it worked
 
 ```sql
 -- Semantic search: embed the user's question, then find the closest chunks
-WITH query AS (
-    SELECT azure_openai.create_embeddings(
-        'text-embedding-3-small',
-        'How does pg_durable handle crash recovery?',
-        dimensions => 1536
-    )::vector(1536) AS embedding
-)
-SELECT
-    dv.doc_id,
-    dv.chunk_index,
-    dv.chunk_text,
-    1 - (dv.embedding <=> q.embedding) AS similarity
-FROM demo_rag_pipeline_output dv, query q
-ORDER BY dv.embedding <=> q.embedding
-LIMIT 5;
 
+SELECT doc_id, title, content, chunk_index
+     from documents
+     order by embeddings <=> azure_openai.create_embeddings(
+                                'text-embedding-3-small',
+                                'wireless headphones for travel and focused work')::vector asc
+     limit 5;
 ```
 
 ---
 
-## ACT 2 — Auto-Embedding on New Rows (40 seconds)
+## ACT 2 — Auto-Embedding on New Rows (30 seconds)
 
 **[Screen: insert new row, then query sink/checkpoint]**
 
@@ -136,7 +133,7 @@ So think about what we’ve actually built here: a self-maintaining vector index
 
 ---
 
-## ACT 3 — What Else Can Pipelines Do? (25 seconds)
+## ACT 3 — What Else Can Pipelines Do? (45 seconds)
 
 **[Screen: quick list of step options]**
 
@@ -148,6 +145,8 @@ And RAG is honestly just the opening move. Because each step is just an entry in
 - Wire it to a **schedule** or an **event** so it just runs itself.
 
 Same SQL. Same durable graph. Same crash safety. You’re just adding lines to an array.
+
+Let me quickly show you. 
 
 ---
 

@@ -195,19 +195,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         )
 
     def get_waiting_instances(self):
-        """Find Running/pending instances with SIGNAL nodes."""
+        """Find Running/pending instances with SIGNAL nodes that haven't completed."""
         return query_to_dicts(
             """SELECT 
                    i.id as instance_id,
                    i.label,
                    i.status as instance_status,
                    to_char(i.created_at, 'YYYY-MM-DD HH24:MI:SS') as created_at,
-                   COALESCE(sig.signal_name, '') as signal_name,
-                   COALESCE(sig.signal_status, '') as signal_status,
+                   sig.signal_name,
+                   sig.signal_status,
                    COALESCE(sig.timeout_seconds, '') as timeout_seconds,
-                   COALESCE(sig.node_id, '') as signal_node_id
+                   sig.node_id as signal_node_id
                FROM df.instances i
-               LEFT JOIN LATERAL (
+               INNER JOIN LATERAL (
                    SELECT 
                        n.id as node_id,
                        n.status as signal_status,
@@ -216,6 +216,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                    FROM df.nodes n 
                    WHERE n.instance_id = i.id 
                      AND n.node_type = 'SIGNAL'
+                     AND n.status NOT IN ('completed', 'failed')
                    ORDER BY n.created_at DESC
                    LIMIT 1
                ) sig ON true

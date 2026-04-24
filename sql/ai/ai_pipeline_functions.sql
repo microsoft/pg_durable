@@ -1370,6 +1370,17 @@ DECLARE
 BEGIN
     pipe_name := TG_ARGV[0];
 
+    -- Sync stale pipeline_runs: if df.instances shows completed/failed/canceled
+    -- but pipeline_runs still says 'running', update it so the debounce works.
+    UPDATE ai.pipeline_runs pr
+    SET status = lower(i.status),
+        completed_at = COALESCE(i.completed_at, now())
+    FROM df.instances i
+    WHERE pr.pipeline_name = pipe_name
+      AND pr.status = 'running'
+      AND pr.instance_id = i.id
+      AND lower(i.status) IN ('completed', 'failed', 'canceled');
+
     -- Queue a pipeline run (debounced: only if not already running)
     IF NOT EXISTS (
         SELECT 1 FROM ai.pipeline_runs pr
