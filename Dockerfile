@@ -75,6 +75,7 @@ RUN mkdir -p /docker-entrypoint-initdb.d && \
 RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.enable_superuser_instances = on" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "logging_collector = on" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "log_directory = 'log'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "log_filename = 'postgresql.log'" >> /usr/share/postgresql/postgresql.conf.sample && \

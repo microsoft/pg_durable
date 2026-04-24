@@ -26,6 +26,7 @@ IMAGE_NAME="pg_durable:latest"
 # Tests that require a PostgreSQL mode Docker does not manage in this script
 SKIP_TESTS=(
     "00_requires_shared_preload"
+    "17_superuser_guc"
     "44_connection_limit_backpressure"
     "45_connection_limit_timeout"
     "46_connection_limit_startup_validation"
