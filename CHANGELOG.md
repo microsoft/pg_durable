@@ -2,8 +2,21 @@
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## v0.2.0 (in development)
+## v0.2.1 (in development)
 
+- Dependency: upgrade duroxide `0.1.26→0.1.28` and duroxide-pg-opt `v0.1.23→v0.1.26`; adds cached-plan retryability, instance stats API, and error propagation fixes; switches TLS backend to `native-tls`, removing the `ring` crate entirely (#116)
+- Dependency: `cargo update` to refresh transitive dependencies (#116)
+- Security: harden `df.explain()` to reject non-DSL input before SPI evaluation (#112)
+- Security: harden SPI queries against search_path poisoning (#114)
+- Security: add annotations for raw variable substitution (#111)
+- Fix: improvements and fixes to `df.grant_usage()` / `df.revoke_usage()` helpers (#109)
+- Fix: enable `superuser_instances` GUC in Docker CI (#117)
+- New: Azure HTTP domains validation example (#115)
+
+## v0.2.0 (Released)
+
+- Tag: [v0.2.0](https://github.com/microsoft/pg_durable/releases/tag/v0.2.0)
+- Commit: `f5607fb`
 - Breaking change: `df.vars` now uses per-user scoping via RLS. After upgrading from `v0.1.1`, all pre-existing variables are re-homed to the role that ran `ALTER EXTENSION pg_durable UPDATE`; other users will lose access to any variables they had set before the upgrade.
 - Security: harden SQL execution against injection (#51)
 - Fix: `is_truthy` now correctly treats "false", "no", and "f" as falsy (#57)
