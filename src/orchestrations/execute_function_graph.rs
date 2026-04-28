@@ -93,6 +93,20 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         graph.root_node_id
     ));
 
+    // Mark the instance as running now that we have loaded the graph and are
+    // about to execute.  This call is idempotent: on continue_as_new the
+    // instance is already 'running', so re-issuing the update is harmless.
+    let running_input = serde_json::json!({
+        "instance_id": input.instance_id,
+        "status": "running"
+    });
+    let _ = ctx
+        .schedule_activity(
+            activities::update_instance_status::NAME,
+            running_input.to_string(),
+        )
+        .await;
+
     let mut results: HashMap<String, String> = HashMap::new();
 
     // Create execution context with vars

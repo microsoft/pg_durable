@@ -34,6 +34,17 @@ pub async fn execute(
         .bind(status)
         .bind(json_result)
         .bind(node_id)
+    } else if status == "running" {
+        // When marking as running, clear any stale result from a previous
+        // loop iteration to satisfy the constraint:
+        // (result IS NULL OR status IN ('completed', 'failed'))
+        sqlx::query(
+            "UPDATE df.nodes
+             SET status = $1, result = NULL, updated_at = now()
+             WHERE id = $2",
+        )
+        .bind(status)
+        .bind(node_id)
     } else {
         sqlx::query(
             "UPDATE df.nodes

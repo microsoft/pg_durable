@@ -199,5 +199,60 @@ END $$;
 DROP TABLE _test3_state;
 DROP TABLE test_break_log;
 
+-- === Test: running_status_during_loop ===
+-- Verify that df.status() reports 'running' while a loop is actively executing
+-- (regression test for: loops reporting 'pending' instead of 'running')
+
+DROP TABLE IF EXISTS test_running_status_log;
+CREATE TABLE test_running_status_log (id SERIAL, ts TIMESTAMP DEFAULT now());
+
+CREATE TEMP TABLE _test_running_state AS
+SELECT df.start(
+    df.loop(
+        'INSERT INTO test_running_status_log DEFAULT VALUES'
+        ~> df.sleep(1)
+    ),
+    'test-running-status'
+) AS instance_id;
+
+DO $$
+DECLARE
+    v_instance_id TEXT;
+    v_status TEXT;
+    v_cnt INT;
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO v_instance_id FROM _test_running_state;
+    RAISE NOTICE 'Test running_status_during_loop: instance %', v_instance_id;
+
+    -- Wait until at least one iteration has completed so the worker has
+    -- clearly started executing the loop body.
+    LOOP
+        SELECT COUNT(*) INTO v_cnt FROM test_running_status_log;
+        EXIT WHEN v_cnt >= 1 OR attempts > 100;
+        PERFORM pg_sleep(0.2);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF v_cnt < 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [running_status]: loop body never executed';
+    END IF;
+
+    -- The instance must now report 'running', not 'pending'
+    SELECT s INTO v_status FROM df.status(v_instance_id) s;
+
+    IF lower(v_status) != 'running' THEN
+        RAISE EXCEPTION 'TEST FAILED [running_status]: expected running, got %', v_status;
+    END IF;
+
+    RAISE NOTICE 'PASSED: running_status_during_loop - status is running while loop executes';
+
+    -- Cancel to clean up
+    PERFORM df.cancel(v_instance_id, 'Test complete');
+END $$;
+
+DROP TABLE _test_running_state;
+DROP TABLE test_running_status_log;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;
