@@ -29,6 +29,14 @@ struct ExecutionContext {
     label: Option<String>,
 }
 
+/// Envelope returned by `execute_subtree` containing the SQL result and the updated
+/// named-results map so the parent orchestration can merge any new entries after join/race.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SubtreeEnvelope {
+    result: String,
+    results: HashMap<String, String>,
+}
+
 /// Execute a complete function graph
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
     let input: FunctionInput = serde_json::from_str(&input_json)
@@ -168,7 +176,12 @@ pub async fn execute_subtree(
         execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await?;
 
     ctx.trace_info(format!("ExecuteSubtree: node {node_id} completed"));
-    Ok(result)
+
+    // Return an envelope with both the result and the updated results map so the parent
+    // orchestration can merge any named results produced inside this subtree.
+    let envelope = SubtreeEnvelope { result, results };
+    serde_json::to_string(&envelope)
+        .map_err(|e| format!("Failed to serialize subtree envelope: {e}"))
 }
 
 /// Recursively execute function nodes with vars support
@@ -593,6 +606,19 @@ async fn execute_if_node(
     }
 }
 
+/// Parse the JSON envelope returned by `execute_subtree`, extract the SQL result string,
+/// and merge the branch's named results into `parent_results`.
+fn parse_subtree_envelope(
+    raw: &str,
+    context: &str,
+    parent_results: &mut HashMap<String, String>,
+) -> Result<String, String> {
+    let envelope: SubtreeEnvelope =
+        serde_json::from_str(raw).map_err(|e| format!("{context} envelope parse error: {e}"))?;
+    parent_results.extend(envelope.results);
+    Ok(envelope.result)
+}
+
 async fn execute_join_node(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -671,11 +697,17 @@ async fn execute_join_node(
     // Use ctx.join() - Duroxide's proper join method for parallel execution
     let results_vec = ctx.join(durable_futures).await;
 
-    // Process results - join now returns Vec<Result<String, String>> directly
+    // Process results - join now returns Vec<Result<String, String>> directly.
+    // Each Ok value is a JSON envelope {"result": "...", "results": {...}} produced by
+    // execute_subtree; unwrap it and merge the branch's named results into the parent map.
     let mut join_results = Vec::new();
     for (i, result) in results_vec.into_iter().enumerate() {
         match result {
-            Ok(r) => join_results.push(r),
+            Ok(r) => {
+                let context = format!("JOIN branch {}", i + 1);
+                let branch_result = parse_subtree_envelope(&r, &context, results)?;
+                join_results.push(branch_result);
+            }
             Err(e) => {
                 return Err(format!("JOIN branch {} failed: {}", i + 1, e));
             }
@@ -748,7 +780,7 @@ async fn execute_race_node(
 
     // Use ctx.select2() - first to complete wins
     // select2 now returns Either2<Left, Right> instead of (winner_idx, DurableOutput)
-    let result = match ctx.select2(left_fut, right_fut).await {
+    let raw = match ctx.select2(left_fut, right_fut).await {
         duroxide::Either2::First(Ok(r)) => {
             ctx.trace_info("RACE completed - left branch won");
             Ok(r)
@@ -760,6 +792,10 @@ async fn execute_race_node(
         }
         duroxide::Either2::Second(Err(e)) => Err(format!("RACE right branch failed: {e}")),
     }?;
+
+    // Parse the subtree output envelope produced by execute_subtree and merge any named
+    // results from the winning branch into the parent results map.
+    let result = parse_subtree_envelope(&raw, "RACE branch", results)?;
 
     // Store result if named
     if let Some(name) = &node.result_name {
