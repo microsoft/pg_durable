@@ -15,10 +15,30 @@
 //!
 //! Connection count is gated by a semaphore sized from the
 //! pg_durable.max_user_connections GUC.
+//!
+//! ## Result JSON contract
+//!
+//! Each column value is serialized based on its PostgreSQL type:
+//!
+//! | Postgres Type        | JSON Representation                  |
+//! |----------------------|--------------------------------------|
+//! | bool                 | JSON boolean                         |
+//! | int2/int4/int8       | JSON integer                         |
+//! | float4/float8        | JSON number (NaN/Inf → error)        |
+//! | text/varchar/bpchar  | JSON string                          |
+//! | numeric/decimal      | JSON string (exact, preserves scale) |
+//! | uuid                 | JSON string (canonical)              |
+//! | timestamptz          | JSON string (RFC3339)                |
+//! | timestamp            | JSON string (RFC3339, no timezone)   |
+//! | date                 | JSON string (YYYY-MM-DD)             |
+//! | jsonb/json           | Native JSON value                    |
+//! | void                 | JSON null (e.g. pg_sleep)            |
+//! | SQL NULL             | JSON null (for any type above)       |
+//! | other/unsupported    | Error (fail loudly)                  |
 
 use duroxide::ActivityContext;
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, Row};
+use sqlx::{Column, Row, TypeInfo};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -35,6 +55,127 @@ pub struct ExecuteSqlInput {
     /// Target database (None = extension database)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+}
+
+/// Decode a single column value from a PostgreSQL row into a `serde_json::Value`.
+///
+/// Dispatches based on the column's declared PostgreSQL type name. Returns an
+/// error for unsupported types or non-finite float values rather than silently
+/// producing `null`.
+fn decode_column(
+    row: &sqlx::postgres::PgRow,
+    col: &sqlx::postgres::PgColumn,
+) -> Result<serde_json::Value, String> {
+    let col_name = col.name();
+    let type_name = col.type_info().name();
+
+    match type_name {
+        "BOOL" => match row.try_get::<Option<bool>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::Bool(v)),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode BOOL column '{col_name}': {e}")),
+        },
+        "INT2" => match row.try_get::<Option<i16>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::Number(v.into())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode INT2 column '{col_name}': {e}")),
+        },
+        "INT4" => match row.try_get::<Option<i32>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::Number(v.into())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode INT4 column '{col_name}': {e}")),
+        },
+        "INT8" => match row.try_get::<Option<i64>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::Number(v.into())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode INT8 column '{col_name}': {e}")),
+        },
+        "FLOAT4" => match row.try_get::<Option<f32>, _>(col_name) {
+            Ok(Some(v)) => {
+                if v.is_nan() || v.is_infinite() {
+                    Err(format!(
+                        "FLOAT4 column '{col_name}' contains non-finite value (NaN or Inf)"
+                    ))
+                } else if let Some(n) = serde_json::Number::from_f64(v as f64) {
+                    Ok(serde_json::Value::Number(n))
+                } else {
+                    Err(format!(
+                        "FLOAT4 column '{col_name}': value cannot be represented as JSON number"
+                    ))
+                }
+            }
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode FLOAT4 column '{col_name}': {e}")),
+        },
+        "FLOAT8" => match row.try_get::<Option<f64>, _>(col_name) {
+            Ok(Some(v)) => {
+                if v.is_nan() || v.is_infinite() {
+                    Err(format!(
+                        "FLOAT8 column '{col_name}' contains non-finite value (NaN or Inf)"
+                    ))
+                } else if let Some(n) = serde_json::Number::from_f64(v) {
+                    Ok(serde_json::Value::Number(n))
+                } else {
+                    Err(format!(
+                        "FLOAT8 column '{col_name}': value cannot be represented as JSON number"
+                    ))
+                }
+            }
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode FLOAT8 column '{col_name}': {e}")),
+        },
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => {
+            match row.try_get::<Option<String>, _>(col_name) {
+                Ok(Some(v)) => Ok(serde_json::Value::String(v)),
+                Ok(None) => Ok(serde_json::Value::Null),
+                Err(e) => Err(format!("Failed to decode text column '{col_name}': {e}")),
+            }
+        }
+        "NUMERIC" => match row.try_get::<Option<bigdecimal::BigDecimal>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::String(v.to_string())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode NUMERIC column '{col_name}': {e}")),
+        },
+        "UUID" => match row.try_get::<Option<uuid::Uuid>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::String(v.to_string())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode UUID column '{col_name}': {e}")),
+        },
+        "TIMESTAMPTZ" => match row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::String(v.to_rfc3339())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!(
+                "Failed to decode TIMESTAMPTZ column '{col_name}': {e}"
+            )),
+        },
+        "TIMESTAMP" => match row.try_get::<Option<chrono::NaiveDateTime>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::String(
+                v.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+            )),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!(
+                "Failed to decode TIMESTAMP column '{col_name}': {e}"
+            )),
+        },
+        "DATE" => match row.try_get::<Option<chrono::NaiveDate>, _>(col_name) {
+            Ok(Some(v)) => Ok(serde_json::Value::String(v.to_string())),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode DATE column '{col_name}': {e}")),
+        },
+        "JSONB" | "JSON" => match row.try_get::<Option<serde_json::Value>, _>(col_name) {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => Ok(serde_json::Value::Null),
+            Err(e) => Err(format!("Failed to decode JSON column '{col_name}': {e}")),
+        },
+        // VOID-returning functions (e.g. pg_sleep, perform_*) have no meaningful
+        // value; represent them as JSON null.
+        "VOID" => Ok(serde_json::Value::Null),
+        other => Err(format!(
+            "Unsupported column type '{other}' for column '{col_name}'. \
+             Supported types: bool, int2, int4, int8, float4, float8, \
+             text, varchar, numeric, uuid, timestamptz, timestamp, date, jsonb, json, void."
+        )),
+    }
 }
 
 /// Execute a SQL query as the submitting user and return results as JSON
@@ -87,27 +228,14 @@ pub async fn execute(
     match sqlx::query(&input.query).fetch_all(&mut conn).await {
         Ok(rows) => {
             let mut result_rows: Vec<serde_json::Value> = Vec::new();
-            for row in rows {
+            for row in &rows {
                 let columns = row.columns();
                 let mut row_obj = serde_json::Map::new();
 
                 for col in columns {
-                    let col_name = col.name();
-                    if let Ok(val) = row.try_get::<String, _>(col_name) {
-                        row_obj.insert(col_name.to_string(), serde_json::Value::String(val));
-                    } else if let Ok(val) = row.try_get::<i64, _>(col_name) {
-                        row_obj.insert(col_name.to_string(), serde_json::Value::Number(val.into()));
-                    } else if let Ok(val) = row.try_get::<i32, _>(col_name) {
-                        row_obj.insert(col_name.to_string(), serde_json::Value::Number(val.into()));
-                    } else if let Ok(val) = row.try_get::<bool, _>(col_name) {
-                        row_obj.insert(col_name.to_string(), serde_json::Value::Bool(val));
-                    } else if let Ok(val) = row.try_get::<f64, _>(col_name) {
-                        if let Some(n) = serde_json::Number::from_f64(val) {
-                            row_obj.insert(col_name.to_string(), serde_json::Value::Number(n));
-                        }
-                    } else {
-                        row_obj.insert(col_name.to_string(), serde_json::Value::Null);
-                    }
+                    let col_name = col.name().to_string();
+                    let value = decode_column(row, col)?;
+                    row_obj.insert(col_name, value);
                 }
                 result_rows.push(serde_json::Value::Object(row_obj));
             }
