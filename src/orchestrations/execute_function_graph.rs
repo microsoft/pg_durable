@@ -152,13 +152,17 @@ pub async fn execute_subtree(
     let mut results: HashMap<String, String> = serde_json::from_str(results_json)
         .map_err(|e| format!("Failed to parse results in ExecuteSubtree: {e}"))?;
 
+    let vars: HashMap<String, String> = if let Some(vars_json) = input["vars"].as_str() {
+        serde_json::from_str(vars_json)
+            .map_err(|e| format!("Failed to parse vars in ExecuteSubtree: {e}"))?
+    } else {
+        HashMap::new()
+    };
+    let label: Option<String> = input["label"].as_str().map(|s| s.to_string());
+
     ctx.trace_info(format!("ExecuteSubtree: executing node {node_id}"));
 
-    // Use empty execution context for subtrees (vars not passed to subtrees currently)
-    let exec_ctx = ExecutionContext {
-        vars: HashMap::new(),
-        label: None,
-    };
+    let exec_ctx = ExecutionContext { vars, label };
 
     let result =
         execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await?;
@@ -254,8 +258,8 @@ async fn execute_node_inner(
         "wait_schedule" => execute_wait_schedule_node(ctx, node, node_id).await,
         "loop" => execute_loop_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "if" => execute_if_node(ctx, graph, node, node_id, results, exec_ctx).await,
-        "join" => execute_join_node(ctx, graph, node, node_id, results).await,
-        "race" => execute_race_node(ctx, graph, node, node_id, results).await,
+        "join" => execute_join_node(ctx, graph, node, node_id, results, exec_ctx).await,
+        "race" => execute_race_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
@@ -595,6 +599,7 @@ async fn execute_join_node(
     node: &FunctionNode,
     node_id: &str,
     results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
 ) -> Result<String, String> {
     let left_id = node
         .left_node
@@ -611,18 +616,24 @@ async fn execute_join_node(
         serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
     let results_json =
         serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+    let vars_json = serde_json::to_string(&exec_ctx.vars)
+        .map_err(|e| format!("Failed to serialize vars: {e}"))?;
 
     let left_input = serde_json::json!({
         "graph": graph_json,
         "node_id": left_id,
-        "results": results_json
+        "results": results_json,
+        "vars": vars_json,
+        "label": exec_ctx.label
     })
     .to_string();
 
     let right_input = serde_json::json!({
         "graph": graph_json,
         "node_id": right_id,
-        "results": results_json
+        "results": results_json,
+        "vars": vars_json,
+        "label": exec_ctx.label
     })
     .to_string();
 
@@ -638,7 +649,9 @@ async fn execute_join_node(
                         let extra_input = serde_json::json!({
                             "graph": graph_json,
                             "node_id": extra_id,
-                            "results": results_json
+                            "results": results_json,
+                            "vars": vars_json,
+                            "label": exec_ctx.label
                         })
                         .to_string();
                         branch_inputs.push(extra_input);
@@ -691,6 +704,7 @@ async fn execute_race_node(
     node: &FunctionNode,
     node_id: &str,
     results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
 ) -> Result<String, String> {
     let left_id = node
         .left_node
@@ -707,18 +721,24 @@ async fn execute_race_node(
         serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
     let results_json =
         serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+    let vars_json = serde_json::to_string(&exec_ctx.vars)
+        .map_err(|e| format!("Failed to serialize vars: {e}"))?;
 
     let left_input = serde_json::json!({
         "graph": graph_json,
         "node_id": left_id,
-        "results": results_json
+        "results": results_json,
+        "vars": vars_json,
+        "label": exec_ctx.label
     })
     .to_string();
 
     let right_input = serde_json::json!({
         "graph": graph_json,
         "node_id": right_id,
-        "results": results_json
+        "results": results_json,
+        "vars": vars_json,
+        "label": exec_ctx.label
     })
     .to_string();
 
