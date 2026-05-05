@@ -96,8 +96,9 @@ fn decode_column(
                     Ok(serde_json::Value::Null)
                 } else {
                     Ok(serde_json::Value::Number(
-                        serde_json::Number::from_f64(v as f64)
-                            .expect("finite f32 must convert to JSON number"),
+                        serde_json::Number::from_f64(v as f64).unwrap_or_else(|| {
+                            panic!("finite f32 {v} must convert to JSON number")
+                        }),
                     ))
                 }
             }
@@ -110,8 +111,9 @@ fn decode_column(
                     Ok(serde_json::Value::Null)
                 } else {
                     Ok(serde_json::Value::Number(
-                        serde_json::Number::from_f64(v)
-                            .expect("finite f64 must convert to JSON number"),
+                        serde_json::Number::from_f64(v).unwrap_or_else(|| {
+                            panic!("finite f64 {v} must convert to JSON number")
+                        }),
                     ))
                 }
             }
