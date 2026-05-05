@@ -701,6 +701,58 @@ pub fn start(
         }
     }
 
+    // Rate limiting: skip checks for superusers (consistent with I-8).
+    let is_superuser = crate::types::is_role_superuser_oid(current_user_oid).unwrap_or(false);
+    if !is_superuser {
+        // Check concurrency cap (pending + running instances for this user).
+        let max_concurrent = crate::types::get_max_concurrent_per_user();
+        if max_concurrent > 0 {
+            let active_count: i64 = match Spi::get_one_with_args::<i64>(
+                "SELECT count(*) FROM df.instances \
+                 WHERE submitted_by = $1::oid::regrole \
+                   AND lower(status) IN ('pending', 'running')",
+                &[current_user_oid.into()],
+            ) {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(e) => pgrx::error!("df.start: failed to count active instances: {}", e),
+            };
+            if active_count >= max_concurrent as i64 {
+                pgrx::error!(
+                    "df.start rejected: user \"{}\" has {} active instance(s) (limit {}). \
+                     Wait for in-flight instances to complete or ask a superuser to raise \
+                     df.max_concurrent_per_user.",
+                    current_user_name,
+                    active_count,
+                    max_concurrent
+                );
+            }
+        }
+
+        // Check total instance quota (all statuses for this user).
+        let max_total = crate::types::get_max_instances_per_user();
+        if max_total > 0 {
+            let total_count: i64 = match Spi::get_one_with_args::<i64>(
+                "SELECT count(*) FROM df.instances WHERE submitted_by = $1::oid::regrole",
+                &[current_user_oid.into()],
+            ) {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(e) => pgrx::error!("df.start: failed to count total instances: {}", e),
+            };
+            if total_count >= max_total as i64 {
+                pgrx::error!(
+                    "df.start rejected: user \"{}\" has {} total instance(s) (limit {}). \
+                     Remove old instances to reclaim quota (a future df.purge() helper will \
+                     automate this) or ask a superuser to raise df.max_instances_per_user.",
+                    current_user_name,
+                    total_count,
+                    max_total
+                );
+            }
+        }
+    }
+
     // Insert all nodes from the nested graph into df.nodes, returning root node ID
     fn insert_nodes(
         node: &Durofut,

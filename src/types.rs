@@ -58,6 +58,16 @@ pub fn superuser_instances_enabled() -> bool {
     crate::ENABLE_SUPERUSER_INSTANCES.get()
 }
 
+/// Returns the maximum number of concurrently active instances per user (0 = unlimited).
+pub fn get_max_concurrent_per_user() -> i32 {
+    crate::MAX_CONCURRENT_PER_USER.get()
+}
+
+/// Returns the maximum total instances per user across all statuses (0 = unlimited).
+pub fn get_max_instances_per_user() -> i32 {
+    crate::MAX_INSTANCES_PER_USER.get()
+}
+
 /// Returns `true` if the role identified by `role_oid` is a PostgreSQL superuser.
 /// Runs a SPI query against `pg_catalog.pg_roles`.  Must be called from a
 /// backend context (not the background worker).

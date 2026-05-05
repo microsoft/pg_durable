@@ -25,6 +25,12 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// role is a PostgreSQL superuser. Set to `true` only when superuser durable
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// Maximum number of concurrently active (pending + running) instances per user.
+/// 0 means unlimited. Only superusers can change this GUC (PGC_SUSET).
+pub static MAX_CONCURRENT_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(100);
+/// Maximum total instances (all statuses) per user. 0 means unlimited.
+/// Only superusers can change this GUC (PGC_SUSET).
+pub static MAX_INSTANCES_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(10000);
 
 // Module declarations
 pub mod activities;
@@ -130,6 +136,28 @@ pub extern "C-unwind" fn _PG_init() {
         &ENABLE_SUPERUSER_INSTANCES,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
+    );
+
+    GucRegistry::define_int_guc(
+        c"df.max_concurrent_per_user",
+        c"Maximum number of concurrently active (pending + running) df.start() instances per user",
+        c"0 = unlimited. Only superusers can change this setting.",
+        &MAX_CONCURRENT_PER_USER,
+        0,
+        i32::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"df.max_instances_per_user",
+        c"Maximum total df.instances rows (all statuses) per user",
+        c"0 = unlimited. Use df.purge() to reclaim quota. Only superusers can change this setting.",
+        &MAX_INSTANCES_PER_USER,
+        0,
+        i32::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
     );
 
     worker::register_background_worker();
