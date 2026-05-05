@@ -53,17 +53,19 @@ BEGIN
         -- Cancel the loop
         PERFORM df.cancel(rec.instance_id, 'Test complete');
         
-        -- Wait for cancellation (may show as Failed with canceled output)
+        -- df.cancel immediately marks df.instances.status = 'cancelled'.
+        -- Poll until df.status() reflects that (should be instant, but allow a short window
+        -- in case an in-flight update_instance_status activity hasn't been guarded yet).
         attempts := 0;
         LOOP
             SELECT s INTO status FROM df.status(rec.instance_id) s;
-            EXIT WHEN lower(status) IN ('canceled', 'cancelled', 'failed') OR attempts > 100;
+            EXIT WHEN lower(status) = 'cancelled' OR attempts > 100;
             PERFORM pg_sleep(0.2);
             attempts := attempts + 1;
         END LOOP;
         
-        IF lower(status) NOT IN ('canceled', 'cancelled', 'failed') THEN
-            RAISE EXCEPTION 'TEST FAILED [%]: expected Canceled, got %', rec.variant, status;
+        IF lower(status) != 'cancelled' THEN
+            RAISE EXCEPTION 'TEST FAILED [%]: expected cancelled, got %', rec.variant, status;
         END IF;
         
         RAISE NOTICE 'PASSED: loop_cancel [%]', rec.variant;

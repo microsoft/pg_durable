@@ -37,18 +37,21 @@ pub fn list_instances(
     let pg_conn_str = postgres_connection_string();
 
     // Query df.instances via SPI first — RLS filters to calling user's rows only.
-    // This gives us the user's own instance IDs and labels.
-    let user_instances: Vec<(String, Option<String>)> = Spi::connect(|client| {
+    // We also fetch status here so that all three monitoring APIs (df.status(),
+    // df.list_instances(), df.instance_info()) share the same authoritative source
+    // for the status column, eliminating the vocabulary mismatch between
+    // df.instances.status ('cancelled') and duroxide executions.status ('Failed').
+    let user_instances: Vec<(String, Option<String>, String)> = Spi::connect(|client| {
         use pgrx::datum::DatumWithOid;
 
         let (sql, args): (&str, Vec<DatumWithOid>) = if let Some(status) = status_filter {
             (
-                "SELECT id, label FROM df.instances WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                "SELECT id, label, status FROM df.instances WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
                 vec![status.into(), (limit_count as i64).into()],
             )
         } else {
             (
-                "SELECT id, label FROM df.instances ORDER BY created_at DESC LIMIT $1",
+                "SELECT id, label, status FROM df.instances ORDER BY created_at DESC LIMIT $1",
                 vec![(limit_count as i64).into()],
             )
         };
@@ -57,7 +60,8 @@ pub fn list_instances(
             for row in table {
                 if let Ok(Some(id)) = row.get::<String>(1) {
                     let label: Option<String> = row.get(2).ok().flatten();
-                    instances.push((id, label));
+                    let status: String = row.get(3).ok().flatten().unwrap_or_default();
+                    instances.push((id, label, status));
                 }
             }
         }
@@ -87,14 +91,16 @@ pub fn list_instances(
         let client = Client::new(store);
 
         let mut rows = Vec::new();
-        // Only query duroxide for the user's own instance IDs
-        for (id, label) in &user_instances {
+        // Only query duroxide for function_name, execution_count, and output.
+        // Status is read from df.instances (already fetched above) to ensure all
+        // monitoring APIs agree on the status value.
+        for (id, label, df_status) in &user_instances {
             if let Ok(info) = client.get_instance_info(id).await {
                 rows.push((
                     info.instance_id,
                     label.clone(),
                     info.orchestration_name,
-                    info.status,
+                    df_status.clone(),
                     info.current_execution_id as i64,
                     info.output,
                 ));
@@ -126,25 +132,29 @@ pub fn instance_info(
     let instance_id_str = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, returning NULL for non-owned instances.
-    let label: Option<String> = Spi::get_one_with_args(
-        "SELECT label FROM df.instances WHERE id = $1",
-        &[instance_id.into()],
-    )
-    .ok()
-    .flatten();
+    // Also fetch status here so that df.instance_info() uses df.instances as the
+    // authoritative status source, consistent with df.status() and df.list_instances().
+    let row: Option<(Option<String>, String)> = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT label, status FROM df.instances WHERE id = $1",
+                Some(1),
+                &[instance_id.into()],
+            )
+            .ok()
+            .and_then(|table| {
+                table.into_iter().next().map(|row| {
+                    let label: Option<String> = row.get(1).ok().flatten();
+                    let status: String = row.get(2).ok().flatten().unwrap_or_default();
+                    (label, status)
+                })
+            })
+    });
 
-    // Check if the instance exists for this user (RLS-filtered)
-    let exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
-        &[instance_id.into()],
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(false);
-
-    if !exists {
-        return TableIterator::new(vec![]);
-    }
+    let (label, df_status) = match row {
+        Some(r) => r,
+        None => return TableIterator::new(vec![]),
+    };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -171,7 +181,7 @@ pub fn instance_info(
                 info.orchestration_name,
                 info.orchestration_version,
                 info.current_execution_id as i64,
-                info.status,
+                df_status,
                 info.output,
             )],
             Err(_) => vec![],

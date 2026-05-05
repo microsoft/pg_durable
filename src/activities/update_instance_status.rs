@@ -23,11 +23,14 @@ pub async fn execute(
         "Updating instance {instance_id} status to {status}"
     ));
 
+    // Never overwrite a terminal state ('completed', 'failed', 'cancelled') with any status.
+    // This prevents a race where an in-flight activity (scheduled just before cancel was
+    // processed) tries to flip the status back from 'cancelled' to 'running'/'completed'.
     let query = if status == "completed" {
         sqlx::query(
             "UPDATE df.instances
              SET status = $1, completed_at = now(), updated_at = now()
-             WHERE id = $2",
+             WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled')",
         )
         .bind(status)
         .bind(instance_id)
@@ -35,7 +38,7 @@ pub async fn execute(
         sqlx::query(
             "UPDATE df.instances
              SET status = $1, updated_at = now()
-             WHERE id = $2",
+             WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled')",
         )
         .bind(status)
         .bind(instance_id)
