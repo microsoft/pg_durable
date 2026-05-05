@@ -134,7 +134,8 @@ BEGIN
       FROM df.instances
      WHERE submitted_by = 'rl_test_user'::regrole;
 
-    EXECUTE format('SET df.max_instances_per_user = %s', current_count + 1);
+    -- Use explicit bigint-to-text cast to avoid any injection risk.
+    EXECUTE 'SET df.max_instances_per_user = ' || (current_count + 1)::bigint::text;
 END $$;
 
 -- This start should succeed (fills the quota exactly).

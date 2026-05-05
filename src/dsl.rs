@@ -743,8 +743,10 @@ pub fn start(
             if total_count >= max_total as i64 {
                 pgrx::error!(
                     "df.start rejected: user \"{}\" has {} total instance(s) (limit {}). \
-                     Remove old instances to reclaim quota (a future df.purge() helper will \
-                     automate this) or ask a superuser to raise df.max_instances_per_user.",
+                     Delete old instances (DELETE FROM df.instances WHERE submitted_by = \
+                     current_user::regrole AND lower(status) IN \
+                     ('completed','failed','cancelled')) or ask a superuser to raise \
+                     df.max_instances_per_user.",
                     current_user_name,
                     total_count,
                     max_total

@@ -152,7 +152,7 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_int_guc(
         c"df.max_instances_per_user",
         c"Maximum total df.instances rows (all statuses) per user",
-        c"0 = unlimited. Use df.purge() to reclaim quota. Only superusers can change this setting.",
+        c"0 = unlimited. Delete old instances to reclaim quota. Only superusers can change this setting.",
         &MAX_INSTANCES_PER_USER,
         0,
         i32::MAX,

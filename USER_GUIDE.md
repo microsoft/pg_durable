@@ -1870,18 +1870,21 @@ When the limit is reached, `df.start()` raises:
 
 ```
 ERROR: df.start rejected: user "alice" has 10000 total instance(s) (limit 10000).
-       Remove old instances to reclaim quota (a future df.purge() helper will
-       automate this) or ask a superuser to raise df.max_instances_per_user.
+       Delete old instances (DELETE FROM df.instances WHERE submitted_by =
+       current_user::regrole AND lower(status) IN ('completed','failed','cancelled'))
+       or ask a superuser to raise df.max_instances_per_user.
 ```
 
-**Quota reclamation:** Completed, failed, and cancelled instances count against the quota. A future `df.purge()` function will automate cleanup. For now, delete old rows manually:
+**Quota reclamation:** Completed, failed, and cancelled instances count against the quota. Delete old rows manually to reclaim quota:
 
 ```sql
--- As a superuser or instance owner — deletes all completed instances for alice
+-- As a superuser or instance owner — deletes all finished instances for alice
 DELETE FROM df.instances
   WHERE submitted_by = 'alice'::regrole
     AND lower(status) IN ('completed', 'failed', 'cancelled');
 ```
+
+> **Note:** A `df.purge()` helper function is planned for a future release to automate this cleanup.
 
 ### Setting Limits in `postgresql.conf`
 
