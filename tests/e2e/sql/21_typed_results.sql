@@ -1,5 +1,5 @@
 -- Tests: Typed column result serialization (numeric, uuid, timestamptz, timestamp, date, jsonb,
---        int2, float4, float8, NULL handling, unsupported-type error, NaN/Inf error).
+--        int2, float4, float8, NULL handling, unsupported-type error, NaN/Inf → null).
 --
 -- Each SELECT query runs through execute_sql, which must encode each PostgreSQL type
 -- into the result JSON correctly.  Tests verify the encoded JSON by reading the
@@ -442,12 +442,12 @@ END $$;
 DROP TABLE _t10;
 
 -- ===========================================================================
--- Test 11: NaN float → workflow fails loudly
+-- Test 11: NaN / Infinity float → JSON null (column present, value null)
 -- ===========================================================================
 
 CREATE TEMP TABLE _t11 (instance_id TEXT);
 INSERT INTO _t11 SELECT df.start(
-    $$SELECT 'NaN'::float8 AS v$$,
+    df.as($$SELECT 'NaN'::float8 AS nan_col, 'Infinity'::float8 AS inf_col, 1 AS normal$$, 'r'),
     'test-typed-nan'
 );
 
@@ -455,23 +455,34 @@ DO $$
 DECLARE
     inst_id    TEXT;
     wf_status  TEXT;
-    node_error TEXT;
+    raw_res    JSONB;
+    row0       JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t11;
     SELECT df.wait_for_completion(inst_id) INTO wf_status;
 
-    IF wf_status != 'failed' THEN
-        RAISE EXCEPTION 'TEST FAILED [typed-nan]: expected failed, got %', wf_status;
+    IF wf_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [typed-nan]: expected completed, got %', wf_status;
     END IF;
 
-    SELECT error INTO node_error FROM df.nodes
-    WHERE instance_id = inst_id AND df.nodes.status = 'failed' LIMIT 1;
+    SELECT result INTO raw_res FROM df.nodes
+    WHERE instance_id = inst_id AND result_name = 'r' AND node_type = 'SQL';
 
-    IF node_error NOT LIKE '%non-finite%' AND node_error NOT LIKE '%NaN%' AND node_error NOT LIKE '%Inf%' THEN
-        RAISE EXCEPTION 'TEST FAILED [typed-nan]: expected NaN/Inf error, got: %', node_error;
+    row0 := raw_res->'rows'->0;
+
+    -- nan_col and inf_col must be present in the row (key exists) with a JSON null value
+    IF NOT (row0 ? 'nan_col' AND row0->'nan_col' = 'null'::jsonb) THEN
+        RAISE EXCEPTION 'TEST FAILED [typed-nan]: NaN not stored as null. row=%', row0;
+    END IF;
+    IF NOT (row0 ? 'inf_col' AND row0->'inf_col' = 'null'::jsonb) THEN
+        RAISE EXCEPTION 'TEST FAILED [typed-nan]: Infinity not stored as null. row=%', row0;
+    END IF;
+    -- The finite column must still be a number
+    IF jsonb_typeof(row0->'normal') != 'number' THEN
+        RAISE EXCEPTION 'TEST FAILED [typed-nan]: finite column not a number. row=%', row0;
     END IF;
 
-    RAISE NOTICE 'PASSED: NaN float → explicit error';
+    RAISE NOTICE 'PASSED: NaN/Infinity float → JSON null';
 END $$;
 
 DROP TABLE _t11;

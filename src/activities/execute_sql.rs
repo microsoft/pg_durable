@@ -24,7 +24,7 @@
 //! |----------------------|--------------------------------------|
 //! | bool                 | JSON boolean                         |
 //! | int2/int4/int8       | JSON integer                         |
-//! | float4/float8        | JSON number (NaN/Inf → error)        |
+//! | float4/float8        | JSON number (NaN/Inf → null)         |
 //! | text/varchar/bpchar  | JSON string                          |
 //! | numeric/decimal      | JSON string (exact, preserves scale) |
 //! | uuid                 | JSON string (canonical)              |
@@ -60,8 +60,8 @@ pub struct ExecuteSqlInput {
 /// Decode a single column value from a PostgreSQL row into a `serde_json::Value`.
 ///
 /// Dispatches based on the column's declared PostgreSQL type name. Returns an
-/// error for unsupported types or non-finite float values rather than silently
-/// producing `null`.
+/// error for unsupported types. Non-finite float values (NaN / ±Infinity) are
+/// represented as JSON `null` since JSON has no representation for them.
 fn decode_column(
     row: &sqlx::postgres::PgRow,
     col: &sqlx::postgres::PgColumn,
@@ -93,9 +93,7 @@ fn decode_column(
         "FLOAT4" => match row.try_get::<Option<f32>, _>(col_name) {
             Ok(Some(v)) => {
                 if v.is_nan() || v.is_infinite() {
-                    Err(format!(
-                        "FLOAT4 column '{col_name}' contains non-finite value (NaN or Inf)"
-                    ))
+                    Ok(serde_json::Value::Null)
                 } else if let Some(n) = serde_json::Number::from_f64(v as f64) {
                     Ok(serde_json::Value::Number(n))
                 } else {
@@ -110,9 +108,7 @@ fn decode_column(
         "FLOAT8" => match row.try_get::<Option<f64>, _>(col_name) {
             Ok(Some(v)) => {
                 if v.is_nan() || v.is_infinite() {
-                    Err(format!(
-                        "FLOAT8 column '{col_name}' contains non-finite value (NaN or Inf)"
-                    ))
+                    Ok(serde_json::Value::Null)
                 } else if let Some(n) = serde_json::Number::from_f64(v) {
                     Ok(serde_json::Value::Number(n))
                 } else {
