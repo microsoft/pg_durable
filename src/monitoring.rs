@@ -144,6 +144,7 @@ pub fn instance_info(
             .ok()
             .and_then(|table| {
                 table.into_iter().next().map(|row| {
+                    // SPI row columns are 1-based: col 1 = label, col 2 = status
                     let label: Option<String> = row.get(1).ok().flatten();
                     let status: String = row.get(2).ok().flatten().unwrap_or_default();
                     (label, status)

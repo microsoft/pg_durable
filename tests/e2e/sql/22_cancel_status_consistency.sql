@@ -81,7 +81,7 @@ DROP TABLE _t_complete;
 
 CREATE TEMP TABLE _t_fail (instance_id TEXT);
 INSERT INTO _t_fail SELECT df.start(
-    'SELECT 1/0',   -- division by zero → forces failure
+    'SELECT 1/0',   -- division by zero --> forces failure
     'cancel-consistency-fail'
 );
 
