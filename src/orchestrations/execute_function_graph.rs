@@ -760,7 +760,7 @@ async fn execute_join_node(
                     return Ok(branch_result);
                 }
                 let parsed = serde_json::from_str::<serde_json::Value>(&branch_result)
-                    .unwrap_or(serde_json::Value::String(branch_result));
+                    .map_err(|e| format!("JOIN branch {} result parse error: {}", i + 1, e))?;
                 join_results.push(parsed);
             }
             Err(e) => {
