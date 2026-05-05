@@ -418,15 +418,22 @@ async fn execute_wait_schedule_node(
 /// Sentinel key used to signal a break from within a loop
 const BREAK_SENTINEL: &str = "__break__";
 
-/// Minimum per-iteration delay (seconds) enforced before every `continue_as_new`.
-/// Prevents loops with zero-duration (or no) sleep from busy-spinning and
-/// generating unbounded history entries at full CPU speed.
-const LOOP_MIN_ITER_DELAY_SECS: u64 = 1;
+/// Minimum guaranteed sleep (seconds) that every loop iteration must accumulate
+/// before `continue_as_new` is called.  When the loop body's statically-computed
+/// minimum sleep falls below this threshold a compensating timer is inserted so
+/// that every `continue_as_new` is gated by at least this many seconds of
+/// real-clock time.  Loops whose body already guarantees ≥ this value (e.g.
+/// `df.loop(df.sleep(30))`) are unaffected.
+const LOOP_MIN_GUARANTEED_SLEEP_SECS: u64 = 1;
 
 /// Compute the minimum guaranteed sleep duration (seconds) reachable from `node_id`
 /// by statically walking the graph.  Returns the smallest possible sleep time
 /// across *all* execution paths so that we only skip the rate-limit timer when
 /// every path through the body is guaranteed to pause long enough.
+///
+/// This is **pure static analysis**: no I/O, no side effects, no access to
+/// runtime state.  It must remain deterministic to satisfy the orchestration
+/// replay requirements of this file.
 ///
 /// Conservative rules:
 /// * SLEEP / WAIT_SCHEDULE – their configured duration.
@@ -591,11 +598,11 @@ async fn execute_loop_node(
     // compensating timer so that every continue_as_new is gated by at least
     // LOOP_MIN_ITER_DELAY_SECS seconds of real-clock time.
     let min_sleep = compute_min_guaranteed_sleep(graph, body_id);
-    if min_sleep < LOOP_MIN_ITER_DELAY_SECS {
-        let deficit = LOOP_MIN_ITER_DELAY_SECS - min_sleep;
+    if min_sleep < LOOP_MIN_GUARANTEED_SLEEP_SECS {
+        let deficit = LOOP_MIN_GUARANTEED_SLEEP_SECS - min_sleep;
         ctx.trace_info(format!(
             "Loop body minimum sleep ({min_sleep}s) is below threshold \
-             ({LOOP_MIN_ITER_DELAY_SECS}s); adding {deficit}s rate-limit delay"
+             ({LOOP_MIN_GUARANTEED_SLEEP_SECS}s); adding {deficit}s rate-limit delay"
         ));
         ctx.schedule_timer(Duration::from_secs(deficit)).await;
     }

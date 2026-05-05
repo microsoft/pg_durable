@@ -275,6 +275,7 @@ SELECT df.start(
 DO $$
 DECLARE
     v_instance_id TEXT;
+    v_status      TEXT;
     v_cnt         INT;
     attempts      INT := 0;
 BEGIN
@@ -293,9 +294,20 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED [zero-sleep]: loop body never executed';
     END IF;
 
+    -- Confirm the loop is still running (not failed/errored after the first iteration).
+    SELECT s INTO v_status FROM df.status(v_instance_id) s;
+    IF lower(v_status) != 'running' THEN
+        RAISE EXCEPTION 'TEST FAILED [zero-sleep]: expected running before observation window, got %', v_status;
+    END IF;
+
     -- Let it run for ~3 more seconds and count iterations.
     PERFORM pg_sleep(3);
     SELECT COUNT(*) INTO v_cnt FROM test_zero_sleep_log;
+
+    -- Lower bound: the loop must have made meaningful progress.
+    IF v_cnt < 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [zero-sleep]: only % iterations in ~3s; rate-limit may be too aggressive', v_cnt;
+    END IF;
 
     -- With a 1-second minimum delay per continue_as_new, the loop cannot
     -- complete more than ~4 iterations in 3 seconds (generous upper bound of
