@@ -418,6 +418,95 @@ async fn execute_wait_schedule_node(
 /// Sentinel key used to signal a break from within a loop
 const BREAK_SENTINEL: &str = "__break__";
 
+/// Minimum per-iteration delay (seconds) enforced before every `continue_as_new`.
+/// Prevents loops with zero-duration (or no) sleep from busy-spinning and
+/// generating unbounded history entries at full CPU speed.
+const LOOP_MIN_ITER_DELAY_SECS: u64 = 1;
+
+/// Compute the minimum guaranteed sleep duration (seconds) reachable from `node_id`
+/// by statically walking the graph.  Returns the smallest possible sleep time
+/// across *all* execution paths so that we only skip the rate-limit timer when
+/// every path through the body is guaranteed to pause long enough.
+///
+/// Conservative rules:
+/// * SLEEP / WAIT_SCHEDULE – their configured duration.
+/// * THEN – sum of both branches (both always execute).
+/// * IF – minimum of then-branch and else-branch (we can't know which runs).
+/// * JOIN – maximum of both parallel branches (both must complete).
+/// * RACE – minimum of both branches (the faster one wins).
+/// * LOOP – 0 (nested loop; it manages its own rate-limiting).
+/// * Everything else (SQL, HTTP, SIGNAL, BREAK, …) – 0.
+fn compute_min_guaranteed_sleep(graph: &FunctionGraph, node_id: &str) -> u64 {
+    let node = match graph.nodes.get(node_id) {
+        Some(n) => n,
+        None => return 0,
+    };
+
+    match node.node_type.to_lowercase().as_str() {
+        "sleep" => node
+            .query
+            .as_ref()
+            .and_then(|q| q.parse::<u64>().ok())
+            .unwrap_or(0),
+        "wait_schedule" => node
+            .query
+            .as_ref()
+            .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
+            .and_then(|v| v["wait_seconds"].as_u64())
+            .unwrap_or(0),
+        "then" => {
+            // Both branches always execute in sequence.
+            let left = node
+                .left_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            let right = node
+                .right_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            left.saturating_add(right)
+        }
+        "if" => {
+            // Either then (left_node) or else (right_node) executes – take the minimum.
+            let then_sleep = node
+                .left_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            let else_sleep = node
+                .right_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            then_sleep.min(else_sleep)
+        }
+        "join" => {
+            // Both branches run in parallel and both must complete.
+            let left = node
+                .left_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            let right = node
+                .right_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            left.max(right)
+        }
+        "race" => {
+            // The first branch to finish wins.
+            let left = node
+                .left_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            let right = node
+                .right_node
+                .as_ref()
+                .map_or(0, |id| compute_min_guaranteed_sleep(graph, id));
+            left.min(right)
+        }
+        // Nested loops manage their own rate-limiting; SQL/HTTP/signal/break add no delay.
+        _ => 0,
+    }
+}
+
 /// Check if a result contains a break signal
 fn is_break_signal(result: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(result)
@@ -495,6 +584,22 @@ async fn execute_loop_node(
     }
 
     ctx.trace_info("Continuing as new for next loop iteration");
+
+    // Enforce a minimum per-iteration delay to prevent busy-looping.
+    // Statically analyse the body graph to find the shortest guaranteed sleep
+    // across all execution paths.  If that is below the threshold, schedule a
+    // compensating timer so that every continue_as_new is gated by at least
+    // LOOP_MIN_ITER_DELAY_SECS seconds of real-clock time.
+    let min_sleep = compute_min_guaranteed_sleep(graph, body_id);
+    if min_sleep < LOOP_MIN_ITER_DELAY_SECS {
+        let deficit = LOOP_MIN_ITER_DELAY_SECS - min_sleep;
+        ctx.trace_info(format!(
+            "Loop body minimum sleep ({min_sleep}s) is below threshold \
+             ({LOOP_MIN_ITER_DELAY_SECS}s); adding {deficit}s rate-limit delay"
+        ));
+        ctx.schedule_timer(Duration::from_secs(deficit)).await;
+    }
+
     // Preserve vars in continue_as_new input
     let new_input = FunctionInput {
         instance_id: graph.instance_id.clone(),

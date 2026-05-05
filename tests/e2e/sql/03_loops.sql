@@ -254,5 +254,64 @@ END $$;
 DROP TABLE _test_running_state;
 DROP TABLE test_running_status_log;
 
+-- === Test: zero_sleep_loop_rate_limited ===
+-- Regression test for: df.loop(df.sleep(0)) busy-spin (issue #13).
+-- A loop whose body contains only a zero-duration sleep must NOT spin at full
+-- CPU speed.  With the 1-second minimum-iteration delay enforced by the loop
+-- handler, at most a handful of iterations should complete in 3 seconds.
+
+DROP TABLE IF EXISTS test_zero_sleep_log;
+CREATE TABLE test_zero_sleep_log (id SERIAL, ts TIMESTAMP DEFAULT now());
+
+CREATE TEMP TABLE _test_zero_sleep_state AS
+SELECT df.start(
+    df.loop(
+        'INSERT INTO test_zero_sleep_log DEFAULT VALUES'
+        ~> df.sleep(0)
+    ),
+    'test-loop-zero-sleep'
+) AS instance_id;
+
+DO $$
+DECLARE
+    v_instance_id TEXT;
+    v_cnt         INT;
+    attempts      INT := 0;
+BEGIN
+    SELECT instance_id INTO v_instance_id FROM _test_zero_sleep_state;
+    RAISE NOTICE 'Test zero_sleep_loop_rate_limited: instance %', v_instance_id;
+
+    -- Wait until at least 1 iteration has run so the loop is clearly started.
+    LOOP
+        SELECT COUNT(*) INTO v_cnt FROM test_zero_sleep_log;
+        EXIT WHEN v_cnt >= 1 OR attempts > 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF v_cnt < 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [zero-sleep]: loop body never executed';
+    END IF;
+
+    -- Let it run for ~3 more seconds and count iterations.
+    PERFORM pg_sleep(3);
+    SELECT COUNT(*) INTO v_cnt FROM test_zero_sleep_log;
+
+    -- With a 1-second minimum delay per continue_as_new, the loop cannot
+    -- complete more than ~4 iterations in 3 seconds (generous upper bound of
+    -- 15 to accommodate slow CI environments).  Without the fix it would run
+    -- hundreds of times in the same window.
+    IF v_cnt > 15 THEN
+        RAISE EXCEPTION 'TEST FAILED [zero-sleep]: % iterations in ~3s (expected <= 15); minimum rate-limit may not be working', v_cnt;
+    END IF;
+
+    RAISE NOTICE 'PASSED: zero_sleep_loop_rate_limited - % iterations in ~3s (within expected range)', v_cnt;
+
+    PERFORM df.cancel(v_instance_id, 'Test complete');
+END $$;
+
+DROP TABLE _test_zero_sleep_state;
+DROP TABLE test_zero_sleep_log;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;
