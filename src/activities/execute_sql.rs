@@ -94,11 +94,10 @@ fn decode_column(
             Ok(Some(v)) => {
                 if v.is_nan() || v.is_infinite() {
                     Ok(serde_json::Value::Null)
-                } else if let Some(n) = serde_json::Number::from_f64(v as f64) {
-                    Ok(serde_json::Value::Number(n))
                 } else {
-                    Err(format!(
-                        "FLOAT4 column '{col_name}': value cannot be represented as JSON number"
+                    Ok(serde_json::Value::Number(
+                        serde_json::Number::from_f64(v as f64)
+                            .expect("finite f32 must convert to JSON number"),
                     ))
                 }
             }
@@ -109,11 +108,10 @@ fn decode_column(
             Ok(Some(v)) => {
                 if v.is_nan() || v.is_infinite() {
                     Ok(serde_json::Value::Null)
-                } else if let Some(n) = serde_json::Number::from_f64(v) {
-                    Ok(serde_json::Value::Number(n))
                 } else {
-                    Err(format!(
-                        "FLOAT8 column '{col_name}': value cannot be represented as JSON number"
+                    Ok(serde_json::Value::Number(
+                        serde_json::Number::from_f64(v)
+                            .expect("finite f64 must convert to JSON number"),
                     ))
                 }
             }
