@@ -745,7 +745,7 @@ async fn execute_join_node(
     // Process results - join now returns Vec<Result<String, String>> directly.
     // Each Ok value is a JSON envelope {"result": "...", "results": {...}} produced by
     // execute_subtree; unwrap it and merge the branch's named results into the parent map.
-    let mut join_results = Vec::new();
+    let mut join_results: Vec<serde_json::Value> = Vec::new();
     for (i, result) in results_vec.into_iter().enumerate() {
         match result {
             Ok(r) => {
@@ -759,7 +759,9 @@ async fn execute_join_node(
                     ));
                     return Ok(branch_result);
                 }
-                join_results.push(branch_result);
+                let parsed = serde_json::from_str::<serde_json::Value>(&branch_result)
+                    .unwrap_or(serde_json::Value::String(branch_result));
+                join_results.push(parsed);
             }
             Err(e) => {
                 return Err(format!("JOIN branch {} failed: {}", i + 1, e));
