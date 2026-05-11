@@ -117,3 +117,4 @@ SELECT ai.drop('rag_pipeline');
 SELECT ai.drop('rag_pipeline_plus');
 DROP TABLE IF EXISTS documents CASCADE;
 DROP TABLE IF EXISTS rag_pipeline_output CASCADE;
+DROP TABLE IF EXISTS rag_pipeline_plus_output CASCADE;

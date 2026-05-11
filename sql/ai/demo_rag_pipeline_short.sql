@@ -17,7 +17,13 @@ SELECT ai.create_pipeline(
 -- Run it once to backfill the existing rows.
 SELECT ai.run('rag_pipeline');
 
+-- ---------------------------------------------------------------------------
+-- ACT 1B — Monitor Pipeline 
+-- ---------------------------------------------------------------------------
 
+SELECT ai.explain()
+SELECT ai.status('product_rag_pipeline');
+SELECT ai.list_pipelines()
 
 -- ---------------------------------------------------------------------------
 -- ACT 1B — Vector Search

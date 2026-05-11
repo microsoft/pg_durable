@@ -1,8 +1,8 @@
 # pg_durable for AI Workloads
 
-**Durable orchestration patterns for AI/ML pipelines in PostgreSQL**
+**Declarative AI/ML pipelines in PostgreSQL, backed by durable execution**
 
-This folder contains patterns and scenarios specifically designed for AI workloads. pg_durable provides fault-tolerant execution that's essential for AI pipelines involving external API calls, long-running computations, and human-in-the-loop workflows.
+This folder contains patterns and scenarios specifically designed for AI workloads. The `ai.*` pipeline API lets you describe sources, AI steps, sinks, and triggers in SQL; pg_durable turns those definitions into fault-tolerant durable executions.
 
 ---
 
@@ -15,7 +15,7 @@ This folder contains patterns and scenarios specifically designed for AI workloa
 | **Rate limiting** | Built-in delays and scheduling |
 | **Human review workflows** | Signal-based pausing and resumption |
 | **Audit requirements** | Complete execution history in `df.nodes` |
-| **Multi-step pipelines** | Sequential, parallel, and conditional orchestration |
+| **Multi-step pipelines** | Declarative `ai.create_pipeline()` definitions translated into durable graphs |
 
 ---
 
@@ -29,7 +29,7 @@ This folder contains patterns and scenarios specifically designed for AI workloa
 document → chunk → generate embedding (Azure AI) → store vectors → update metadata
 ```
 
-**Key features:** Sequential pipeline, Azure AI extension for embeddings, blob storage ingestion, variable passing
+**Key features:** `ai.create_pipeline()`, table source, `ai.chunk()`, `ai.embed()`, incremental checkpointing
 
 ---
 
@@ -41,23 +41,19 @@ document → chunk → generate embedding (Azure AI) → store vectors → updat
 validate → classify → route to model → call LLM → extract → score
 ```
 
-**Key features:** Conditional routing, external API calls, multi-stage processing
+**Key features:** Filtered table sources, multiple model-specific pipelines, `ai.generate()`, `ai.extract()`
 
 ---
 
-### [Scenario 3: Evaluation Loop with Human Review](SCENARIOS.md#scenario-3-evaluation-loop-with-human-review)
+### [Scenario 3: Human Approval — Triage with Review Gate](SCENARIOS.md#scenario-3-human-approval---triage-with-review-gate)
 
 > *"I want automated evaluation that pauses for human approval when confidence is low."*
 
 ```
-loop(
-  evaluate → score
-    ?> high confidence → approve → exit
-    !> low confidence → wait for human signal → process decision
-)
+extract triage → request approval → generate draft → embed → work queue
 ```
 
-**Key features:** Loops, signals, human-in-the-loop workflows
+**Key features:** `ai.request_approval()`, signal-based resume, durable human-in-the-loop workflows
 
 ---
 
@@ -66,12 +62,10 @@ loop(
 > *"I need AI results treated like first-class product data — versioned, governed, and auditable — not disposable one-shot responses."*
 
 ```
-generate → version → log provenance → apply governance policy
-  ?> confidence ≥ threshold → auto-approve → publish
-  !> needs review → wait for human → approve / reject / rollback
+generate candidate → extract governance metadata → request approval → promote version → audit
 ```
 
-**Key features:** Immutable versioning, provenance tracking, governance policies, rollback, audit trails
+**Key features:** `ai.generate()`, `ai.extract()`, `ai.request_approval()`, immutable version tables, rollback, audit trails
 
 ---
 
@@ -87,15 +81,31 @@ CREATE EXTENSION IF NOT EXISTS vector;
 SELECT azure_ai.set_setting('azure_openai.endpoint', 'https://YOUR_RESOURCE.openai.azure.com');
 SELECT azure_ai.set_setting('azure_openai.subscription_key', 'YOUR_API_KEY');
 
--- Simple AI pipeline: get document → generate embedding → store
-SELECT df.start(
-    'SELECT id, content FROM documents WHERE status = ''pending'' LIMIT 1' |=> 'doc'
-    ~> 'UPDATE documents 
-        SET embedding = azure_openai.create_embeddings(''text-embedding-3-small'', ($doc::jsonb->>''content''))::vector,
-            status = ''done''
-        WHERE id = ($doc::jsonb->>''id'')::int',
-    'ai-pipeline'
+-- Load the pipeline API once per database
+\i sql/ai/ai_pipeline_functions.sql
+
+CREATE TABLE documents (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Simple AI pipeline: documents -> chunks -> embeddings -> auto-created sink
+SELECT ai.create_pipeline(
+    name   => 'rag_pipeline',
+    source => ai.table_source('documents', incremental_column => 'updated_at'),
+    steps  => ARRAY[
+        ai.chunk(input_column => 'content'),
+        ai.embed(model => 'text-embedding-3-small', input_column => 'chunk_text', dimensions => 1536)
+    ],
+    trigger => 'on_change'
+);
+
+SELECT ai.run('rag_pipeline');
+SELECT ai.wait_for_completion('rag_pipeline', 300);
+SELECT doc_id, chunk_index, left(chunk_text, 80) AS preview
+FROM rag_pipeline_output;
 ```
 
 ---
@@ -127,7 +137,7 @@ SELECT df.start(
 
 ## Learn More
 
-- **[Full AI Scenarios Guide](SCENARIOS.md)** — Complete code samples for all 3 patterns
+- **[Full AI Scenarios Guide](SCENARIOS.md)** — Complete code samples for all 4 patterns
 - **[Main Scenarios Guide](../SCENARIOS.md)** — All 8 scenarios (database + AI)
 - **[User Guide](../../USER_GUIDE.md)** — Complete DSL reference
 
@@ -151,34 +161,32 @@ CREATE TABLE document_chunks (
     id SERIAL PRIMARY KEY,
     content TEXT,
     embedding VECTOR(1536),  -- text-embedding-3-small dimension
-    metadata JSONB
+    metadata JSONB,
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 ```
 
-### Generating Embeddings with Azure AI
+### Generating Embeddings with an AI Pipeline
 
 ```sql
--- Generate embedding directly in SQL (no HTTP needed!)
-UPDATE document_chunks 
-SET embedding = azure_openai.create_embeddings(
-    'text-embedding-3-small',  -- your Azure OpenAI deployment name
-    content
-)::vector
-WHERE id = $chunk_id;
+SELECT ai.create_pipeline(
+    name   => 'document_vectors_pipeline',
+    source => ai.table_source('document_chunks', incremental_column => 'updated_at'),
+    steps  => ARRAY[
+        ai.embed(model => 'text-embedding-3-small', input_column => 'content', dimensions => 1536)
+    ],
+    trigger => 'on_change'
+);
 
--- Or inline in a durable function step:
-~> 'UPDATE document_chunks 
-    SET embedding = azure_openai.create_embeddings(''text-embedding-3-small'', content)::vector
-    WHERE id = ($chunk::jsonb->>''id'')::int'
+-- Auto-creates: public.document_vectors_pipeline_output
 ```
 
-### Rate Limiting with Delays
+### Backfill After Pipeline Changes
 
 ```sql
--- Add delay between embedding calls to respect rate limits
-'UPDATE chunks SET embedding = azure_openai.create_embeddings(...) WHERE id = 1' 
-~> df.sleep(1)  -- 1 second delay
-~> 'UPDATE chunks SET embedding = azure_openai.create_embeddings(...) WHERE id = 2'
+-- Reprocess all source rows after changing model, chunking, or sink schema.
+SELECT ai.backfill('document_vectors_pipeline');
+SELECT ai.wait_for_completion('document_vectors_pipeline', 300);
 ```
 
 ### Handling Failures

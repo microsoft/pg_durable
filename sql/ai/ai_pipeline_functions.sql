@@ -492,6 +492,79 @@ BEGIN
 END;
 $$;
 
+
+-- =============================================================================
+-- 6b. Internal: incremental embed + sink (processes one row at a time)
+-- Uses dblink for autonomous transactions so each row is immediately visible
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION ai._embed_and_flush(
+    source_table  TEXT,
+    sink_table    TEXT,
+    model         TEXT,
+    col           TEXT,
+    dimensions    INT,
+    pipeline_name TEXT DEFAULT NULL
+)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    r RECORD;
+    row_count INT := 0;
+    conn_str TEXT;
+BEGIN
+    -- Build connection string for dblink (connect to same database via TCP)
+    conn_str := format('dbname=%s host=localhost port=%s',
+        current_database(),
+        current_setting('port')
+    );
+
+    FOR r IN EXECUTE format(
+        'SELECT s.ctid FROM %s s WHERE s.embedding IS NULL AND NOT EXISTS (SELECT 1 FROM %s o WHERE o.doc_id = s.doc_id AND o.chunk_index = s.chunk_index)',
+        source_table, sink_table
+    ) LOOP
+        -- Check if pipeline was paused — use dblink to see latest committed state
+        -- (the current transaction's snapshot won't see changes from other sessions)
+        IF pipeline_name IS NOT NULL THEN
+            IF EXISTS (
+                SELECT 1 FROM dblink(conn_str,
+                    format('SELECT 1 FROM ai.pipelines WHERE name = %L AND paused = true', pipeline_name)
+                ) AS t(x int)
+            ) THEN
+                RETURN format('Pipeline paused after %s rows', row_count);
+            END IF;
+        END IF;
+
+        -- Embed + flush in a single dblink call (autonomous transaction):
+        -- UPDATE computes the embedding, RETURNING * feeds into INSERT so the
+        -- sink row gets the embedding value (dblink can't see uncommitted changes
+        -- from the main transaction, so both must happen inside dblink).
+        PERFORM dblink_exec(conn_str, format(
+            'WITH updated AS (
+                UPDATE %s SET embedding = azure_openai.create_embeddings(%L, %I, dimensions => %s)::vector
+                WHERE ctid = %L
+                RETURNING *
+            )
+            INSERT INTO %s SELECT * FROM updated',
+            source_table, model, col, dimensions, r.ctid,
+            sink_table
+        ));
+
+        row_count := row_count + 1;
+
+        -- Update total_processed so ai.status() reflects incremental progress
+        IF pipeline_name IS NOT NULL THEN
+            PERFORM dblink_exec(conn_str, format(
+                'UPDATE ai.pipeline_checkpoints SET total_processed = %s WHERE pipeline_name = %L',
+                row_count, pipeline_name
+            ));
+        END IF;
+    END LOOP;
+
+    RETURN format('Embedded and flushed %s rows incrementally', row_count);
+END;
+$$;
+
 -- =============================================================================
 -- 7. Core: ai.create_pipeline() — register pipeline and build df graph
 -- =============================================================================
@@ -669,6 +742,7 @@ DECLARE
     batch_suffix    TEXT;
     step_labels     TEXT[] := ARRAY[]::TEXT[];  -- parallel to step_sqls: 'infra','chunk','embed','extract','generate','rank','approval'
     target_table    TEXT;  -- where AI steps read/write (batch or chunks table)
+    sink_flushed    BOOLEAN := false;  -- whether sink was already written inline (after embed)
 BEGIN
     -- Load pipeline definition
     SELECT * INTO p FROM ai.pipelines WHERE name = pipeline_name;
@@ -809,6 +883,10 @@ BEGIN
     -- Determine the target table for AI steps (chunks table or batch table)
     target_table := CASE WHEN has_chunks THEN batch_table || '_chunks' ELSE batch_table END;
 
+    -- Resolve sink table early so embed can use it for incremental flush
+    sink_table  := snk_config->>'table_name';
+    sink_schema := COALESCE(snk_config->>'schema_name', 'public');
+
     -- Second pass: build step SQL with labels
     FOR i IN 1..array_length(p.steps, 1) LOOP
         step_config := p.steps[i];
@@ -818,6 +896,19 @@ BEGIN
             -- This will be handled as a df.wait_for_signal in the graph
             step_sqls := array_append(step_sqls, 'APPROVAL_SIGNAL_PLACEHOLDER');
             step_labels := array_append(step_labels, 'approval');
+        -- Embed step: use incremental embed+flush function
+        ELSIF step_config->>'step' = 'embed' THEN
+            step_sqls := step_sqls || format(
+                'SELECT ai._embed_and_flush(%L, %L, %L, %L, %s, %L)',
+                target_table,
+                format('%I.%I', sink_schema, sink_table),
+                step_config->>'model',
+                step_config->>'column',
+                COALESCE(step_config->>'dimensions', '1536'),
+                pipeline_name
+            );
+            step_labels := array_append(step_labels, 'embed');
+            sink_flushed := true;
         ELSE
             step_sqls := step_sqls || ai._step_sql(step_config, pipeline_name, batch_table, has_chunks);
             step_labels := array_append(step_labels, step_config->>'step');
@@ -829,8 +920,6 @@ BEGIN
     -- For no-chunk pipelines, we must explicitly list sink columns
     -- because batch table column order may differ from sink table.
     -- ----------------------------------------------------------------
-    sink_table  := snk_config->>'table_name';
-    sink_schema := COALESCE(snk_config->>'schema_name', 'public');
 
     IF has_chunks THEN
         sink_sql := format(
@@ -925,9 +1014,10 @@ BEGIN
                         batch_table
                     ));
                 WHEN 'embed' THEN
+                    -- Preview: show what's in the output table after incremental embed+flush
                     df_graph := df_graph || ' ~> ' || quote_literal(format(
-                        'SELECT doc_id, chunk_index, left(chunk_text, 60) AS chunk_text, left(embedding::text, 40) AS embedding_preview FROM %s ORDER BY 1, 2 LIMIT 10',
-                        target_table
+                        'SELECT * FROM %I.%I ORDER BY 1 DESC LIMIT 10',
+                        sink_schema, sink_table
                     ));
                 WHEN 'extract' THEN
                     df_graph := df_graph || ' ~> ' || quote_literal(format(
@@ -954,24 +1044,39 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Add sink
-    df_graph := df_graph || ' ~> ' || quote_literal(sink_sql);
+    -- Add sink (skip if already flushed inline after embed)
+    IF NOT sink_flushed THEN
+        df_graph := df_graph || ' ~> ' || quote_literal(sink_sql);
 
-    -- Sink preview: show what was written to the destination
-    df_graph := df_graph || ' ~> ' || quote_literal(format(
-        'SELECT * FROM %I.%I ORDER BY 1 DESC LIMIT 10',
-        sink_schema, sink_table
-    ));
+        -- Sink preview: show what was written to the destination
+        df_graph := df_graph || ' ~> ' || quote_literal(format(
+            'SELECT * FROM %I.%I ORDER BY 1 DESC LIMIT 10',
+            sink_schema, sink_table
+        ));
+    END IF;
 
     -- Add checkpoint update
     IF src_incr IS NOT NULL THEN
-        df_graph := df_graph || ' ~> ' || quote_literal(format(
-            'UPDATE ai.pipeline_checkpoints SET last_value = (SELECT max(%I)::text FROM %I.%I), last_run_at = now(), total_processed = total_processed + (SELECT count(*) FROM %s) WHERE pipeline_name = %L',
-            src_incr,
-            src_schema, src_table,
-            batch_table,
-            pipeline_name
-        ));
+        IF sink_flushed THEN
+            -- Embed step already updates total_processed incrementally via dblink.
+            -- Only advance last_value if the pipeline is NOT paused (i.e. full batch completed).
+            -- If paused, leave last_value unchanged so resume re-fetches remaining rows.
+            df_graph := df_graph || ' ~> ' || quote_literal(format(
+                'UPDATE ai.pipeline_checkpoints SET last_run_at = now(), last_value = CASE WHEN (SELECT paused FROM ai.pipelines WHERE name = %L) THEN last_value ELSE (SELECT max(%I)::text FROM %I.%I) END WHERE pipeline_name = %L',
+                pipeline_name,
+                src_incr,
+                src_schema, src_table,
+                pipeline_name
+            ));
+        ELSE
+            df_graph := df_graph || ' ~> ' || quote_literal(format(
+                'UPDATE ai.pipeline_checkpoints SET last_value = (SELECT max(%I)::text FROM %I.%I), last_run_at = now(), total_processed = total_processed + (SELECT count(*) FROM %s) WHERE pipeline_name = %L',
+                src_incr,
+                src_schema, src_table,
+                batch_table,
+                pipeline_name
+            ));
+        END IF;
     END IF;
 
     -- Add staging table cleanup
@@ -1113,12 +1218,29 @@ $$;
 CREATE OR REPLACE FUNCTION ai.pause(pipeline_name TEXT)
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
+DECLARE
+    _instance_id TEXT;
+    _df_status   TEXT;
 BEGIN
     UPDATE ai.pipelines SET paused = true, updated_at = now()
     WHERE name = pipeline_name;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Pipeline "%" not found', pipeline_name;
     END IF;
+
+    -- Cancel the currently running instance (if any)
+    SELECT pr.instance_id INTO _instance_id
+    FROM ai.pipeline_runs pr
+    WHERE pr.pipeline_name = pause.pipeline_name
+    ORDER BY pr.started_at DESC LIMIT 1;
+
+    IF _instance_id IS NOT NULL THEN
+        SELECT s INTO _df_status FROM df.status(_instance_id) s;
+        IF lower(_df_status) = 'running' THEN
+            PERFORM df.cancel(_instance_id, 'Paused by ai.pause()');
+        END IF;
+    END IF;
+
     RETURN format('Pipeline "%s" paused', pipeline_name);
 END;
 $$;
@@ -1127,13 +1249,19 @@ $$;
 CREATE OR REPLACE FUNCTION ai.resume(pipeline_name TEXT)
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
+DECLARE
+    _instance_id TEXT;
 BEGIN
     UPDATE ai.pipelines SET paused = false, updated_at = now()
     WHERE name = pipeline_name;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Pipeline "%" not found', pipeline_name;
     END IF;
-    RETURN format('Pipeline "%s" resumed', pipeline_name);
+
+    -- Kick off a new run to continue processing remaining rows
+    _instance_id := ai.run(pipeline_name);
+
+    RETURN format('Pipeline "%s" resumed (instance %s)', pipeline_name, _instance_id);
 END;
 $$;
 

@@ -42,6 +42,9 @@ def run_query(sql):
         return {"error": str(e)}
 
 
+csv.field_size_limit(10 * 1024 * 1024)  # 10 MB
+
+
 def query_to_dicts(sql, columns):
     """Run query and convert to list of dicts."""
     result = run_query(sql)
@@ -168,9 +171,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         safe_id = ''.join(c for c in instance_id if c in '0123456789abcdef-')
         return query_to_dicts(
             f"""SELECT id, instance_id, node_type, 
-                       query,
+                       left(query, 2000) as query,
                        result_name, left_node, right_node, status,
-                       result::text as result, error,
+                       left(result::text, 2000) as result, error,
                        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS.MS') as created_at,
                        to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.MS') as updated_at,
                        COALESCE(

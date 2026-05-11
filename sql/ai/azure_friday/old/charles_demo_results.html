@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zava Designer Agent — Search Results</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f3ef; color: #2c2c2c; padding: 2rem; }
+  h1 { text-align: center; font-size: 1.6rem; margin-bottom: .3rem; }
+  .subtitle { text-align: center; color: #777; font-size: .85rem; margin-bottom: 2rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; max-width: 1200px; margin: 0 auto; }
+  .card { background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.08); transition: transform .15s; }
+  .card:hover { transform: translateY(-4px); box-shadow: 0 6px 16px rgba(0,0,0,.12); }
+  .card img { width: 100%; height: 220px; object-fit: contain; background: #fafafa; padding: 1rem; }
+  .card-body { padding: 1rem; }
+  .badge { display: inline-block; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: .25rem .6rem; border-radius: 20px; margin-bottom: .5rem; color: #fff; }
+  .badge-seating { background: #4a7c59; }
+  .badge-tables { background: #8b6914; }
+  .badge-lighting { background: #b8860b; }
+  .badge-rugs { background: #9b4d6a; }
+  .badge-storage { background: #5b7fa5; }
+  .badge-decor { background: #a0522d; }
+  .card-title { font-size: .95rem; font-weight: 600; line-height: 1.3; margin-bottom: .5rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .meta { display: flex; justify-content: space-between; align-items: center; font-size: .85rem; color: #555; }
+  .price { font-weight: 700; color: #2c2c2c; font-size: 1.05rem; }
+  .rating { color: #e6a817; }
+  .store { font-size: .75rem; color: #999; margin-top: .4rem; }
+  .id { font-size: .7rem; color: #bbb; }
+</style>
+</head>
+<body>
+
+<h1>🏠 Zava Designer Agent — Room Picks</h1>
+<p class="subtitle">Mid-century modern furniture for a Brooklyn loft with exposed brick and warm wood tones</p>
+
+<div class="grid">
+
+  <!-- 1. Seating -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/41SU6jPDJFL._AC_.jpg" alt="DHP Mid Century Modern Chair">
+    <div class="card-body">
+      <span class="badge badge-seating">Seating</span>
+      <div class="card-title">DHP Mid Century Modern Chair with Wood Legs, White</div>
+      <div class="meta">
+        <span class="price">$129.99</span>
+        <span class="rating">★ 4.6</span>
+      </div>
+      <div class="store">DHP <span class="id">· #74793</span></div>
+    </div>
+  </div>
+
+  <!-- 2. Tables -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/51KvnfaCNsL._AC_.jpg" alt="Walker Edison Marble Gold Coffee Table">
+    <div class="card-body">
+      <span class="badge badge-tables">Tables</span>
+      <div class="card-title">Walker Edison Mid Century Modern Marble Gold Rectangle Coffee Table, 42 Inch</div>
+      <div class="meta">
+        <span class="price">$137.99</span>
+        <span class="rating">—</span>
+      </div>
+      <div class="store">Walker Edison <span class="id">· #40868</span></div>
+    </div>
+  </div>
+
+  <!-- 3. Lighting -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/41c8oVJMDBL._AC_.jpg" alt="HUGOAI LED Bedside Lamp">
+    <div class="card-body">
+      <span class="badge badge-lighting">Lighting</span>
+      <div class="card-title">LED Lamps for Bedroom, HUGOAI Bedside Lamp, Tunable Warm to Cool White, Dimmable &amp; RGB Color Changing</div>
+      <div class="meta">
+        <span class="price">$36.99</span>
+        <span class="rating">—</span>
+      </div>
+      <div class="store">HUGOAI <span class="id">· #3522</span></div>
+    </div>
+  </div>
+
+  <!-- 4. Rugs -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/617zCHGUZqL._AC_.jpg" alt="Brumlow Mills Bohemian Area Rug">
+    <div class="card-body">
+      <span class="badge badge-rugs">Rugs</span>
+      <div class="card-title">Brumlow Mills Rustic Abstract Bohemian Colorful Area Rug, 7'6" x 10', Brown</div>
+      <div class="meta">
+        <span class="price">$259.99</span>
+        <span class="rating">★ 4.5</span>
+      </div>
+      <div class="store">Brumlow MILLS <span class="id">· #42143</span></div>
+    </div>
+  </div>
+
+  <!-- 5a. Storage #1 -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/41OTZUxMbdL._AC_.jpg" alt="VASAGLE Retro Bookshelf">
+    <div class="card-body">
+      <span class="badge badge-storage">Storage #1</span>
+      <div class="card-title">VASAGLE 2-Tier Retro Bookshelf with Doors, Mid-Century Style, Rustic Brown</div>
+      <div class="meta">
+        <span class="price">$88.99</span>
+        <span class="rating">★ 4.6</span>
+      </div>
+      <div class="store">VASAGLE <span class="id">· #25174</span></div>
+    </div>
+  </div>
+
+  <!-- 5b. Storage #2 -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/413RI9fB4oL._AC_.jpg" alt="Nathan James Theo 5-Shelf Bookcase">
+    <div class="card-body">
+      <span class="badge badge-storage">Storage #2</span>
+      <div class="card-title">Nathan James Theo 5-Shelf Modern Bookcase, Open Wall Mount Ladder Bookshelf with Industrial Metal Frame, Gray Oak Wood/White</div>
+      <div class="meta">
+        <span class="price">$109.99</span>
+        <span class="rating">★ 4.7</span>
+      </div>
+      <div class="store">Nathan James <span class="id">· #5201</span></div>
+    </div>
+  </div>
+
+  <!-- 6. Decor -->
+  <div class="card">
+    <img src="https://m.media-amazon.com/images/I/41SPSGColML._AC_.jpg" alt="HAUS AND HUES Mid Century Wall Art">
+    <div class="card-body">
+      <span class="badge badge-decor">Decor &amp; Art</span>
+      <div class="card-title">HAUS AND HUES Mid Century Modern Wall Art Boho Wall Decor - Set of 3 Sun Art Print, Beige Framed</div>
+      <div class="meta">
+        <span class="price">$49.99</span>
+        <span class="rating">★ 4.5</span>
+      </div>
+      <div class="store">HAUS AND HUES <span class="id">· #74586</span></div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
