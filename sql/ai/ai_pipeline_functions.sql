@@ -20,11 +20,15 @@
 --
 --   SELECT * FROM ai.status('rag_pipeline');
 --
--- Requires: pg_durable extension, azure_ai extension (for embedding/LLM calls)
+-- Requires: pg_durable extension, azure_ai extension (for embedding/LLM calls),
+--           dblink extension (for autonomous transactions in incremental embed)
 -- =============================================================================
 
 -- Schema
 CREATE SCHEMA IF NOT EXISTS ai;
+
+-- dblink is used by ai._embed_and_flush() for autonomous transactions
+CREATE EXTENSION IF NOT EXISTS dblink;
 
 -- Drop azure_ai extension functions whose signatures conflict with pg_durable
 -- pipeline functions (same arg types but different param names or return types).
