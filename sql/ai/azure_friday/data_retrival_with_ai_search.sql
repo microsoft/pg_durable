@@ -9,8 +9,3 @@ FROM ai.search(
     filter => 'category = ''Chairs'''
     ) search
 JOIN product_rag_pipeline_output output ON output.id = search.id;
-
--- The app does it for others,
--- we need a talk track on the joins and other queries
--- talk about the built in models and the index detection
--- New test search with new BM25, Full textsearch on HorizonDB
