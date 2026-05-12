@@ -26,6 +26,61 @@
 -- Schema
 CREATE SCHEMA IF NOT EXISTS ai;
 
+-- Drop azure_ai extension functions whose signatures conflict with pg_durable
+-- pipeline functions (same arg types but different param names or return types).
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.chunk(text,text,integer,integer);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.embed(text,text,integer,integer);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.list_pipelines();
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.drop_pipeline(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.result(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.status(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.run(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.pause(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.resume(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.backfill(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.explain(text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.table_source(text,text,text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER EXTENSION azure_ai DROP FUNCTION ai.table_sink(text,text,text[],text);
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DROP FUNCTION IF EXISTS ai.chunk(text,text,integer,integer);
+DROP FUNCTION IF EXISTS ai.embed(text,text,integer,integer);
+DROP FUNCTION IF EXISTS ai.list_pipelines();
+DROP FUNCTION IF EXISTS ai.drop_pipeline(text);
+DROP FUNCTION IF EXISTS ai.result(text);
+DROP FUNCTION IF EXISTS ai.status(text);
+DROP FUNCTION IF EXISTS ai.run(text);
+DROP FUNCTION IF EXISTS ai.pause(text);
+DROP FUNCTION IF EXISTS ai.resume(text);
+DROP FUNCTION IF EXISTS ai.backfill(text);
+DROP FUNCTION IF EXISTS ai.explain(text);
+DROP FUNCTION IF EXISTS ai.table_source(text,text,text);
+DROP FUNCTION IF EXISTS ai.table_sink(text,text,text[],text);
+
 -- =============================================================================
 -- 1. Pipeline registry table
 -- =============================================================================
@@ -55,6 +110,10 @@ CREATE TABLE IF NOT EXISTS ai.pipeline_runs (
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at    TIMESTAMPTZ
 );
+-- Ensure columns exist when table was pre-created by azure_ai extension
+ALTER TABLE ai.pipeline_runs ADD COLUMN IF NOT EXISTS instance_id TEXT;
+ALTER TABLE ai.pipeline_runs ADD COLUMN IF NOT EXISTS batch_start TIMESTAMPTZ;
+ALTER TABLE ai.pipeline_runs ADD COLUMN IF NOT EXISTS batch_end TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS ai.pipeline_checkpoints (
     pipeline_name   TEXT PRIMARY KEY REFERENCES ai.pipelines(name) ON DELETE CASCADE,
@@ -116,7 +175,7 @@ $$;
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION ai.chunk(
-    input_column TEXT,
+    input        TEXT,
     method       TEXT DEFAULT 'recursive',
     chunk_size   INT DEFAULT 512,
     overlap      INT DEFAULT 64
@@ -125,7 +184,7 @@ RETURNS JSONB
 LANGUAGE sql IMMUTABLE AS $$
     SELECT jsonb_build_object(
         'step',         'chunk',
-        'column',       input_column,
+        'column',       input,
         'method',       method,
         'chunk_size',   chunk_size,
         'overlap',      overlap
