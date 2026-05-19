@@ -751,6 +751,14 @@ async fn execute_join_node(
             Ok(r) => {
                 let context = format!("JOIN branch {}", i + 1);
                 let branch_result = parse_subtree_envelope(&r, &context, results)?;
+                // Propagate break signals from any branch immediately
+                if is_break_signal(&branch_result) {
+                    ctx.trace_info(format!(
+                        "JOIN branch {} returned a break signal, propagating",
+                        i + 1
+                    ));
+                    return Ok(branch_result);
+                }
                 join_results.push(branch_result);
             }
             Err(e) => {
@@ -841,6 +849,12 @@ async fn execute_race_node(
     // Parse the subtree output envelope produced by execute_subtree and merge any named
     // results from the winning branch into the parent results map.
     let result = parse_subtree_envelope(&raw, "RACE branch", results)?;
+
+    // Propagate break signals from the winning branch immediately
+    if is_break_signal(&result) {
+        ctx.trace_info("RACE winning branch returned a break signal, propagating");
+        return Ok(result);
+    }
 
     // Store result if named
     if let Some(name) = &node.result_name {
