@@ -113,6 +113,10 @@ fn legacy_login_role_schema() -> bool {
     !owner_scoped_vars_enabled()
 }
 
+fn non_future_helper_sentinel(function_name: &str) -> String {
+    serde_json::json!({ "__pg_durable_non_future__": function_name }).to_string()
+}
+
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -133,7 +137,7 @@ pub fn setvar(name: &str, value: &str) -> String {
     if let Err(e) = Spi::run_with_args(sql, &[name.into(), value.into()]) {
         pgrx::error!("Failed to set variable: {:?}", e);
     }
-    "OK".to_string()
+    non_future_helper_sentinel("df.setvar")
 }
 
 /// Gets a workflow variable value.
@@ -167,7 +171,7 @@ pub fn unsetvar(name: &str) -> String {
     if let Err(e) = Spi::run_with_args(sql, &[name.into()]) {
         pgrx::error!("Failed to unset variable: {:?}", e);
     }
-    "OK".to_string()
+    non_future_helper_sentinel("df.unsetvar")
 }
 
 /// Clears all workflow variables owned by the current user.
@@ -187,7 +191,7 @@ pub fn clearvars() -> String {
     if let Err(e) = Spi::run(sql) {
         pgrx::error!("Failed to clear variables: {:?}", e);
     }
-    "OK".to_string()
+    non_future_helper_sentinel("df.clearvars")
 }
 
 // ============================================================================

@@ -1443,9 +1443,10 @@ mod tests {
     // ========================================================================
 
     #[pg_test]
-    fn test_setvar_returns_ok() {
-        let result = crate::dsl::setvar("test_var", "test_value");
-        assert_eq!(result, "OK");
+    fn test_setvar_sets_value() {
+        crate::dsl::setvar("test_var", "test_value");
+        let value = crate::dsl::getvar("test_var");
+        assert_eq!(value, Some("test_value".to_string()));
     }
 
     #[pg_test]
@@ -1480,10 +1481,7 @@ mod tests {
 
     #[pg_test]
     fn test_setvar_via_sql() {
-        let result = Spi::get_one::<String>("SELECT df.setvar('sql_var', 'sql_value')")
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, "OK");
+        Spi::run("SELECT df.setvar('sql_var', 'sql_value')").unwrap();
 
         let value = Spi::get_one::<String>("SELECT df.getvar('sql_var')").unwrap();
         assert_eq!(value, Some("sql_value".to_string()));
@@ -1508,8 +1506,7 @@ mod tests {
     fn test_setvar_works_in_user_session() {
         // In a normal user session, df.in_workflow is not set
         // so setvar should work
-        let result = crate::dsl::setvar("user_session_var", "works");
-        assert_eq!(result, "OK");
+        crate::dsl::setvar("user_session_var", "works");
 
         // Verify the value was set
         let value = crate::dsl::getvar("user_session_var");
@@ -1523,8 +1520,82 @@ mod tests {
         let _ = crate::dsl::start(&fut, None, None);
 
         // setvar should work fine after start returns
-        let result = crate::dsl::setvar("after_start_var", "works");
-        assert_eq!(result, "OK");
+        crate::dsl::setvar("after_start_var", "works");
+    }
+
+    #[pg_test]
+    fn test_setvar_cannot_be_used_in_seq_composition() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            "SELECT pg_temp.capture_error($$SELECT df.seq(df.setvar('bad_var', 'x'), df.sql('SELECT 1'))$$)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("df.setvar cannot be used as a workflow step"),
+            "Unexpected error: {msg}"
+        );
+    }
+
+    #[pg_test]
+    fn test_unsetvar_cannot_be_used_in_seq_composition() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            "SELECT pg_temp.capture_error($$SELECT df.seq(df.unsetvar('bad_var'), df.sql('SELECT 1'))$$)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("df.unsetvar cannot be used as a workflow step"),
+            "Unexpected error: {msg}"
+        );
+    }
+
+    #[pg_test]
+    fn test_clearvars_cannot_be_used_in_seq_composition() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            "SELECT pg_temp.capture_error($$SELECT df.seq(df.clearvars(), df.sql('SELECT 1'))$$)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("df.clearvars cannot be used as a workflow step"),
+            "Unexpected error: {msg}"
+        );
     }
 
     // Note: Testing that setvar fails in workflow context requires E2E test

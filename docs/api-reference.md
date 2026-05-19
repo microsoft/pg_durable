@@ -345,6 +345,7 @@ SELECT df.result('a1b2c3d4');
 ### df.setvar(name, value)
 
 Sets a workflow variable for the current user (before `df.start()`). Each user has their own variable namespace — variables set by one user are invisible to others.
+`df.setvar` is a setup helper, not a workflow node: do not use it inside `df.seq`, `df.join`, `df.race`, etc.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
@@ -374,6 +375,7 @@ SELECT df.getvar('api_url');
 ### df.unsetvar(name)
 
 Removes a workflow variable owned by the current user.
+`df.unsetvar` is a setup helper, not a workflow node.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
@@ -388,6 +390,7 @@ SELECT df.unsetvar('api_url');
 ### df.clearvars()
 
 Clears all workflow variables owned by the current user.
+`df.clearvars` is a setup helper, not a workflow node.
 
 ```sql
 SELECT df.clearvars();
