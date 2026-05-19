@@ -547,6 +547,11 @@ async fn execute_loop_node(
         .as_ref()
         .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
 
+    // Pre-compute the minimum guaranteed sleep for the body once per invocation;
+    // the body graph is immutable for the lifetime of this orchestration call,
+    // so there's no need to recompute it after running the body.
+    let body_min_sleep = compute_min_guaranteed_sleep(graph, body_id);
+
     ctx.trace_info("Executing loop iteration");
     let body_result = Box::pin(execute_function_node_with_vars(
         ctx, graph, body_id, results, exec_ctx,
@@ -593,15 +598,15 @@ async fn execute_loop_node(
     ctx.trace_info("Continuing as new for next loop iteration");
 
     // Enforce a minimum per-iteration delay to prevent busy-looping.
-    // Statically analyse the body graph to find the shortest guaranteed sleep
-    // across all execution paths.  If that is below the threshold, schedule a
-    // compensating timer so that every continue_as_new is gated by at least
-    // LOOP_MIN_ITER_DELAY_SECS seconds of real-clock time.
-    let min_sleep = compute_min_guaranteed_sleep(graph, body_id);
-    if min_sleep < LOOP_MIN_GUARANTEED_SLEEP_SECS {
-        let deficit = LOOP_MIN_GUARANTEED_SLEEP_SECS - min_sleep;
+    // `body_min_sleep` (computed at the top of this function) is the shortest
+    // guaranteed sleep across all execution paths of the body.  If that is
+    // below the threshold, schedule a compensating timer so that every
+    // continue_as_new is gated by at least LOOP_MIN_GUARANTEED_SLEEP_SECS
+    // seconds of real-clock time.
+    if body_min_sleep < LOOP_MIN_GUARANTEED_SLEEP_SECS {
+        let deficit = LOOP_MIN_GUARANTEED_SLEEP_SECS - body_min_sleep;
         ctx.trace_info(format!(
-            "Loop body minimum sleep ({min_sleep}s) is below threshold \
+            "Loop body minimum sleep ({body_min_sleep}s) is below threshold \
              ({LOOP_MIN_GUARANTEED_SLEEP_SECS}s); adding {deficit}s rate-limit delay"
         ));
         ctx.schedule_timer(Duration::from_secs(deficit)).await;
