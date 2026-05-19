@@ -180,7 +180,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.loop(body)` | Repeat forever | `df.loop(body)` |
 | `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
 | `df.break()` | Exit enclosing loop | `df.break()` |
-| `df.break(value)` | Exit loop with return value | `df.break('{"done": true}')` |
+| `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
@@ -1014,7 +1014,16 @@ SELECT df.start(
 );
 ```
 
-`df.break(value)` exits the loop and returns the value as the loop's final result.
+`df.break(value)` exits the loop and returns `value` as the loop's final result.
+
+> **Note:** Unlike most DSL functions, `df.break()` does **not** auto-wrap its argument as SQL. The string you pass is returned verbatim as a literal value (typically JSON or text). To break with the result of a SQL query, run the query first and reference the result via variable substitution:
+>
+> ```sql
+> df.loop(
+>     'SELECT summary FROM report' |=> 'r'
+>     ~> df.break('$r.summary')
+> )
+> ```
 
 ### Stopping a Loop Externally
 
@@ -2089,7 +2098,7 @@ SELECT df.start(df.loop(body, 'SELECT count(*) > 0 FROM queue'));
 
 -- Break out of loop
 df.break()                               -- exit loop
-df.break('{"done": true}')               -- exit with return value
+df.break('{"done": true}')               -- exit with literal return value (not SQL)
 
 -- Timers
 df.sleep(60)                             -- 60 seconds

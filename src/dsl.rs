@@ -328,12 +328,18 @@ pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String 
 ///
 /// When executed, the loop terminates and returns the provided value (or null).
 ///
+/// Unlike most DSL functions, `df.break()` does **not** auto-wrap its argument
+/// as SQL — the string is returned verbatim as a literal value (typically JSON
+/// or text). To break with the result of a SQL query, run the query first and
+/// reference the result via variable substitution, e.g.
+/// `'SELECT summary FROM r' |=> 'r' ~> df.break('$r.summary')`.
+///
 /// # Examples
 /// ```sql
 /// -- Break with no value
 /// df.break()
 ///
-/// -- Break with a return value
+/// -- Break with a literal return value (NOT executed as SQL)
 /// df.break('{"status": "complete"}')
 /// ```
 #[pg_extern(name = "break", schema = "df")]
