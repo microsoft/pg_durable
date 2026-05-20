@@ -54,6 +54,17 @@ BEGIN
             jsonb_typeof(elem1), raw_res;
     END IF;
 
+    -- Verify actual content (guards against regression producing empty objects)
+    IF (elem0->>'a')::int != 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [join2-shape]: element 0.a expected 1, got % — raw=%',
+            elem0->>'a', raw_res;
+    END IF;
+
+    IF (elem1->>'b')::int != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [join2-shape]: element 1.b expected 2, got % — raw=%',
+            elem1->>'b', raw_res;
+    END IF;
+
     RAISE NOTICE 'PASSED: df.join result is a JSON array of objects';
 END $$;
 
@@ -117,10 +128,73 @@ BEGIN
             jsonb_typeof(elem2), raw_res;
     END IF;
 
+    -- Verify actual content
+    IF (elem0->>'x')::int != 10 OR (elem1->>'y')::int != 20 OR (elem2->>'z')::int != 30 THEN
+        RAISE EXCEPTION 'TEST FAILED [join3-shape]: values mismatch — raw=%', raw_res;
+    END IF;
+
     RAISE NOTICE 'PASSED: df.join3 result is a JSON array of objects';
 END $$;
 
 DROP TABLE _t_join3;
+
+-- === Test 3: nested join — (a & b) & c — inner array must nest inside outer ===
+
+CREATE TEMP TABLE _t_nested (instance_id TEXT);
+INSERT INTO _t_nested SELECT df.start(
+    ('SELECT 1 AS a' & 'SELECT 2 AS b') & 'SELECT 3 AS c',
+    'test-join-nested-shape'
+);
+
+DO $$
+DECLARE
+    inst_id  TEXT;
+    status   TEXT;
+    raw_res  JSONB;
+    inner_arr JSONB;
+    outer_c  JSONB;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _t_nested;
+    SELECT df.wait_for_completion(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: status = %', status;
+    END IF;
+
+    raw_res := (df.result(inst_id))::jsonb;
+
+    -- Outer must be a 2-element array: [ [inner_a, inner_b], c_obj ]
+    IF jsonb_typeof(raw_res) != 'array' OR jsonb_array_length(raw_res) != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: expected 2-element array, got % len=% — raw=%',
+            jsonb_typeof(raw_res), jsonb_array_length(raw_res), raw_res;
+    END IF;
+
+    -- First element is the inner join result: must itself be an array, not a string
+    inner_arr := raw_res->0;
+    IF jsonb_typeof(inner_arr) != 'array' THEN
+        RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: inner element type is %, expected array (double-encoding regression) — raw=%',
+            jsonb_typeof(inner_arr), raw_res;
+    END IF;
+
+    IF jsonb_array_length(inner_arr) != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: inner array length expected 2, got % — raw=%',
+            jsonb_array_length(inner_arr), raw_res;
+    END IF;
+
+    IF (inner_arr->0->>'a')::int != 1 OR (inner_arr->1->>'b')::int != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: inner values mismatch — raw=%', raw_res;
+    END IF;
+
+    -- Second element is the c branch result (an object)
+    outer_c := raw_res->1;
+    IF jsonb_typeof(outer_c) != 'object' OR (outer_c->>'c')::int != 3 THEN
+        RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: outer.c element wrong — raw=%', raw_res;
+    END IF;
+
+    RAISE NOTICE 'PASSED: nested join result preserves array nesting (no double-encoding)';
+END $$;
+
+DROP TABLE _t_nested;
 
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;
