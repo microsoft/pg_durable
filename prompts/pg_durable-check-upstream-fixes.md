@@ -1,6 +1,6 @@
 # Check Upstream Fixes and Update Dependencies
 
-**Purpose:** Check if fixes for tracked blockers have been released in upstream dependencies (duroxide-pg-opt) and guide updating pg_durable.
+**Purpose:** Check if fixes for tracked blockers have been released in upstream dependencies (duroxide-pg) and guide updating pg_durable.
 
 ---
 
@@ -16,7 +16,7 @@ For each active blocker, check if the GitHub issue has been closed/resolved:
 
 ```bash
 # Check issue status (replace ISSUE_NUMBER with actual number)
-gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide-pg-opt --json state,title,closedAt
+gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide-pg --json state,title,closedAt
 ```
 
 If the issue is still open, stop here - no action needed.
@@ -27,10 +27,10 @@ If an issue is closed, check if it's included in a release:
 
 ```bash
 # List recent releases
-gh release list --repo microsoft/duroxide-pg-opt --limit 10
+gh release list --repo microsoft/duroxide-pg --limit 10
 
 # Check what version we currently use
-grep 'duroxide-pg-opt' Cargo.toml
+grep 'duroxide-pg' Cargo.toml
 ```
 
 Compare the release date with the issue close date. If there's a release after the issue was closed, the fix is likely available.
@@ -39,7 +39,7 @@ Compare the release date with the issue close date. If there's a release after t
 
 ```bash
 # View specific release notes (replace TAG with version like v0.1.7)
-gh release view <TAG> --repo microsoft/duroxide-pg-opt
+gh release view <TAG> --repo microsoft/duroxide-pg
 ```
 
 Confirm the fix is mentioned in the release notes.
@@ -48,9 +48,10 @@ Confirm the fix is mentioned in the release notes.
 
 If a fix is available in a new release:
 
-1. **Update submodule** - point to the new version:
+1. **Bump the `duroxide-pg` tag** in `Cargo.toml` to the new version, then refresh the lockfile:
    ```bash
-   cd duroxide-pg-opt && git fetch && git checkout v0.1.X && cd ..
+   # Edit Cargo.toml: duroxide-pg = { git = "...", tag = "v0.1.X", package = "duroxide-pg" }
+   cargo update -p duroxide-pg
    ```
 
 2. **Also update duroxide if needed** (check compatibility):
@@ -101,10 +102,10 @@ Present the changes to the user for review before committing. Include:
 
 ```bash
 # Check all tracked issues at once
-gh issue view 6 --repo microsoft/duroxide-pg-opt --json state,title
+gh issue view 6 --repo microsoft/duroxide-pg --json state,title
 
 # Current dependency versions
-grep -E 'duroxide|duroxide-pg-opt' Cargo.toml
+grep -E 'duroxide|duroxide-pg' Cargo.toml
 
 # Find all workarounds in codebase
 grep -rn "STOPGAP\|BLOCKED on duroxide\|TODO.*duroxide" --include="*.rs" .
@@ -117,6 +118,6 @@ grep -rn "STOPGAP\|BLOCKED on duroxide\|TODO.*duroxide" --include="*.rs" .
 
 ## Notes
 
-- We depend on `microsoft/duroxide-pg-opt`, not `microsoft/duroxide-pg`. Only act on fixes released in duroxide-pg-opt.
+- We depend on `microsoft/duroxide-pg`. Only act on fixes released in duroxide-pg.
 - The `--clean` flag is important when testing dependency updates to ensure fresh schema creation.
-- Always check the Version Compatibility Matrix to ensure duroxide and duroxide-pg-opt versions are compatible.
+- Always check the Version Compatibility Matrix to ensure duroxide and duroxide-pg versions are compatible.

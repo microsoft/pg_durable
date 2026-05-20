@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::runtime;
-use duroxide_pg_opt::PostgresProvider;
+use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
 use crate::registry::{create_activity_registry, create_orchestration_registry};
@@ -407,7 +407,7 @@ async fn initialize_duroxide_runtime(
     log!("pg_durable: initializing duroxide runtime...");
 
     // Control duroxide provider pool size via env var (the only mechanism
-    // without modifying duroxide-pg-opt). BGW is single-threaded so no
+    // without modifying duroxide-pg). BGW is single-threaded so no
     // concurrent readers. Note: std::env::set_var becomes unsafe in Rust 2024 edition.
     std::env::set_var(
         "DUROXIDE_PG_POOL_MAX",
@@ -457,18 +457,23 @@ async fn initialize_duroxide_runtime(
             }
         }
 
-        let store =
-            match PostgresProvider::new_with_config(pg_conn_str, worker_provider_config()).await {
-                Ok(s) => Arc::new(s),
-                Err(e) => {
-                    log!(
-                        "pg_durable: failed to create PostgreSQL store (will retry): {}",
-                        e
-                    );
-                    tokio::time::sleep(retry_interval).await;
-                    continue;
-                }
-            };
+        let store = match PostgresProvider::new_with_schema_and_config(
+            pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            worker_provider_config(),
+        )
+        .await
+        {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                log!(
+                    "pg_durable: failed to create PostgreSQL store (will retry): {}",
+                    e
+                );
+                tokio::time::sleep(retry_interval).await;
+                continue;
+            }
+        };
 
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no

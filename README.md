@@ -33,7 +33,6 @@ SELECT df.start(
 - PostgreSQL 17
 - Rust (nightly)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
-- Access to `microsoft/duroxide-pg-opt` (private submodule; handled automatically in Codespaces)
 
 ## Development Installation
 
@@ -49,27 +48,14 @@ The main branch prebuild installs PostgreSQL 17, builds `pg_durable`, and prepar
 ~/.pgrx/17.*/pgrx-install/bin/psql -h localhost -p 28817 -d postgres
 ```
 
-On a branch without a ready prebuild, initialize the submodule first, then run `pg-start.sh` — it will build and install the extension on first run (expect a few minutes):
+On a branch without a ready prebuild, run `pg-start.sh` — it will build and install the extension on first run (expect a few minutes):
 
 ```bash
-git submodule update --init --recursive
 ./scripts/pg-start.sh
 ```
 
 ### Other environments
 
-#### Submodule Access (Prerequisite)
-
-This project requires access to `microsoft/duroxide-pg-opt`, a private submodule:
-
-1. **Create a fine-grained GitHub PAT** with read-only `Contents` and `Metadata` access scoped to `microsoft/duroxide-pg-opt`: [GitHub docs](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
-2. **Configure git** and initialize the submodule:
-
-```bash
-git config --global url."https://<YOUR_PAT>@github.com/".insteadOf "https://github.com/"
-
-git submodule update --init --recursive
-```
 #### Local and Dev Container
 
 A VS Code Dev Container (`.devcontainer/`) provides Rust, cargo-pgrx, and PostgreSQL 17 pre-installed. For a bare local machine, install the toolchain first by following the steps in `.devcontainer/onCreateCommand.sh`.

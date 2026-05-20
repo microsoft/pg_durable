@@ -5,7 +5,7 @@
 
 ## Motivation
 
-Previously, `CREATE EXTENSION pg_durable` included the full duroxide-pg-opt schema DDL via `extension_sql_file!("../sql/duroxide_install.sql")`, creating all duroxide tables, functions, indexes, and triggers as extension-owned objects. This change moved schema migration responsibility from the extension to the background worker (BGW).
+Previously, `CREATE EXTENSION pg_durable` included the full duroxide-pg schema DDL via `extension_sql_file!("../sql/duroxide_install.sql")`, creating all duroxide tables, functions, indexes, and triggers as extension-owned objects. This change moved schema migration responsibility from the extension to the background worker (BGW).
 
 Three concrete motivations:
 
@@ -13,7 +13,7 @@ Three concrete motivations:
 
 2. **Future provider flexibility**: pg_durable may use a different duroxide provider in the future. If DDL lives in the BGW rather than the extension SQL, swapping providers does not require touching extension install/upgrade scripts.
 
-3. **Backward compatibility relief**: duroxide-pg-opt does not offer binary compatibility with old schema versions. With BGW-managed migrations, new duroxide migrations are applied automatically at BGW startup — no extension upgrade involvement needed, no `.so` compatibility burden.
+3. **Backward compatibility relief**: duroxide-pg does not offer binary compatibility with old schema versions. With BGW-managed migrations, new duroxide migrations are applied automatically at BGW startup — no extension upgrade involvement needed, no `.so` compatibility burden.
 
 ## Architecture
 
@@ -74,9 +74,9 @@ After the ownership check passes, the BGW releases extension ownership of any ob
 
 - **Fresh 0.2.0 install**: schema is empty → BGW creates all duroxide tables, functions, indexes, triggers, and records all migrations in `_duroxide_migrations` (5 as of 0.2.0).
 - **Upgraded from 0.1.1**: all migrations already recorded in `_duroxide_migrations` → `ApplyAll` detects no pending work → no-ops → starts runtime normally.
-- **Future duroxide-pg-opt upgrade**: new migration files embedded in the binary are applied automatically without any `ALTER EXTENSION` involvement.
+- **Future duroxide-pg upgrade**: new migration files embedded in the binary are applied automatically without any `ALTER EXTENSION` involvement.
 
-Unknown-migration rejection is always enforced: `duroxide-pg-opt` unconditionally calls `check_no_unknown_migrations()` after both `ApplyAll` and `VerifyOnly`. If the database has a migration row the binary does not recognize, initialization fails with an error (schema is newer than code — indicates a downgrade scenario).
+Unknown-migration rejection is always enforced: `duroxide-pg` unconditionally calls `check_no_unknown_migrations()` after both `ApplyAll` and `VerifyOnly`. If the database has a migration row the binary does not recognize, initialization fails with an error (schema is newer than code — indicates a downgrade scenario).
 
 #### Step 5: readiness record via `duroxide._worker_ready`
 
@@ -98,7 +98,7 @@ After `ApplyAll` succeeds, the BGW writes a row with the current `WORKER_SCHEMA_
 ```rust
 /// Monotonically increasing schema version written to duroxide._worker_ready
 /// after successful BGW initialization. Increment whenever a new binary
-/// introduces new duroxide-pg-opt migration scripts or any other BGW-applied
+/// introduces new duroxide-pg migration scripts or any other BGW-applied
 /// duroxide schema change.
 const WORKER_SCHEMA_VERSION: i32 = 1;
 ```
@@ -217,13 +217,13 @@ Call `wait_for_ready` after any `CREATE EXTENSION` in scenarios that subsequentl
 | `docs/upgrade-testing.md` | Add duroxide ownership entry to the v0.1.1→v0.2.0 version-specific changes section. Note that both paths converge (objects not extension-owned after BGW runs). Note `wait_for_ready()` requirement in upgrade test infrastructure. |
 | `USER_GUIDE.md` | Add note that `DROP EXTENSION pg_durable CASCADE` is always required. Update readiness polling to use `duroxide._worker_ready` directly. |
 
-The `duroxide-pg-opt/` submodule and `submodules: true` in CI remain — the submodule is still a Rust code dependency.
+The `duroxide-pg/` submodule and `submodules: true` in CI remain — the submodule is still a Rust code dependency.
 
 ## What this enables going forward
 
 To summarize the benefits outlined in Motivation:
 
-- **Duroxide upgrades decouple from pg_durable releases**: adding a new migration to `duroxide-pg-opt` requires no changes to pg_durable extension SQL, upgrade scripts, or the migration-copy sync scripts. The BGW applies it on next startup.
-- **Provider swap path**: swapping `duroxide-pg-opt` for a different provider means changing BGW initialization code, not extension DDL.
+- **Duroxide upgrades decouple from pg_durable releases**: adding a new migration to `duroxide-pg` requires no changes to pg_durable extension SQL, upgrade scripts, or the migration-copy sync scripts. The BGW applies it on next startup.
+- **Provider swap path**: swapping `duroxide-pg` for a different provider means changing BGW initialization code, not extension DDL.
 - **No extension upgrade required for engine fixes**: duroxide bug fixes that involve schema changes are applied automatically by the BGW after the `.so` is updated, even for customers who never run `ALTER EXTENSION UPDATE`.
 - **Cleaner `pg_dump`**: duroxide schema objects are not extension-owned (on any install path), so they do not appear as extension members in `pg_dump` output.

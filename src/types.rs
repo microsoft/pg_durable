@@ -219,13 +219,11 @@ pub const DUROXIDE_SCHEMA: &str = "duroxide";
 
 /// Create a `ProviderConfig` for backend (request/response) operations.
 ///
-/// - `VerifyOnly`: never create schema/tables, reject unknown migrations
-/// - `long_poll` disabled: avoid a dedicated listener connection per backend session
-pub fn backend_provider_config() -> duroxide_pg_opt::ProviderConfig {
-    let mut config = duroxide_pg_opt::ProviderConfig::default();
-    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
-    config.migration_policy = duroxide_pg_opt::MigrationPolicy::VerifyOnly;
-    config.long_poll.enabled = false;
+/// - `VerifyOnly`: never create schema/tables, reject unknown migrations.
+///   Backend sessions must not run DDL — the BGW owns schema lifecycle.
+pub fn backend_provider_config() -> duroxide_pg::ProviderConfig {
+    let mut config = duroxide_pg::ProviderConfig::default();
+    config.migration_policy = duroxide_pg::MigrationPolicy::VerifyOnly;
     config
 }
 
@@ -233,13 +231,11 @@ pub fn backend_provider_config() -> duroxide_pg_opt::ProviderConfig {
 ///
 /// - `ApplyAll`: applies pending duroxide migrations at startup; creates tables
 ///   inside the extension-owned `duroxide` schema. Safe because the BGW verifies
-///   schema ownership via `pg_depend` before calling `PostgresProvider::new_with_config`.
-/// - Long-polling intentionally left enabled (default) for the BGW runtime,
-///   unlike backend sessions where it's disabled to save resources.
-pub fn worker_provider_config() -> duroxide_pg_opt::ProviderConfig {
-    let mut config = duroxide_pg_opt::ProviderConfig::default();
-    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
-    config.migration_policy = duroxide_pg_opt::MigrationPolicy::ApplyAll;
+///   schema ownership via `pg_depend` before calling
+///   `PostgresProvider::new_with_schema_and_config`.
+pub fn worker_provider_config() -> duroxide_pg::ProviderConfig {
+    let mut config = duroxide_pg::ProviderConfig::default();
+    config.migration_policy = duroxide_pg::MigrationPolicy::ApplyAll;
     config
 }
 

@@ -94,7 +94,7 @@ The new `.so` must work against **all** previous versions' schemas (same major v
 
 For Scenario A, treat the upgrade path as the contract for already-shipped versions: before release, fresh install for the new version should match what an existing customer gets by installing the previous version and applying the upgrade chain.
 
-**Updating duroxide-pg-opt dependency**: Update the submodule (`cd duroxide-pg-opt && git fetch && git checkout <new-ref>`), then rebuild. The BGW's embedded migration files update automatically via `include_dir!`. No changes to extension SQL, upgrade scripts, or any checked-in SQL copies are needed.
+**Updating duroxide-pg dependency**: Update the `tag = "..."` value for `duroxide-pg` in [`Cargo.toml`](../Cargo.toml), then `cargo update -p duroxide-pg` and rebuild. The BGW's embedded migration files update automatically via `include_dir!`. No changes to extension SQL, upgrade scripts, or any checked-in SQL copies are needed.
 
 **Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](../docs/upgrade-testing.md) for the full upgrade testing strategy.
 
@@ -102,7 +102,7 @@ For Scenario A, treat the upgrade path as the contract for already-shipped versi
 
 - **pgrx 0.16.1**: PostgreSQL extension framework (pinned version)
 - **duroxide**: Durable execution runtime
-- **duroxide-pg-opt**: duroxide provider/stores engine state in PostgreSQL (git submodule)
+- **duroxide-pg**: duroxide provider/stores engine state in PostgreSQL (cargo git dependency, pinned by tag in [`Cargo.toml`](../Cargo.toml))
 - **sqlx**: Async PostgreSQL from background worker
 - **tokio**: Async runtime for background worker
 

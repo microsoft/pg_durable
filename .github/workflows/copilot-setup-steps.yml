@@ -24,14 +24,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          submodules: false
-
-      - name: Initialize private submodule duroxide-pg-opt
-        run: |
-          test -n "${{ secrets.DUROXIDE_PG_OPT_TOKEN }}"
-          git -c url."https://x-access-token:${{ secrets.DUROXIDE_PG_OPT_TOKEN }}@github.com/".insteadOf="https://github.com/" \
-            submodule update --init --recursive
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable

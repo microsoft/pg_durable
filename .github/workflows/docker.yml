@@ -43,9 +43,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-          token: ${{ secrets.GH_PAT }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -101,7 +98,6 @@ jobs:
 
       - name: Run E2E tests in Docker
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           PG_DURABLE_LOG_DIR: /tmp/docker-logs
         run: ./scripts/test-e2e-docker.sh
 

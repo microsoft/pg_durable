@@ -6,8 +6,8 @@ use duroxide::Client;
 use pgrx::prelude::*;
 use std::sync::Arc;
 
-use crate::types::{backend_provider_config, postgres_connection_string};
-use duroxide_pg_opt::PostgresProvider;
+use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
+use duroxide_pg::PostgresProvider;
 
 // ============================================================================
 // Monitoring Functions
@@ -81,8 +81,12 @@ pub fn list_instances(
     };
 
     let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
+        let store = match PostgresProvider::new_with_schema_and_config(
+            &pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            backend_provider_config(),
+        )
+        .await
         {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
@@ -166,8 +170,12 @@ pub fn instance_info(
     };
 
     let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
+        let store = match PostgresProvider::new_with_schema_and_config(
+            &pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            backend_provider_config(),
+        )
+        .await
         {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
@@ -232,8 +240,12 @@ pub fn instance_executions(
     };
 
     let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
+        let store = match PostgresProvider::new_with_schema_and_config(
+            &pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            backend_provider_config(),
+        )
+        .await
         {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
@@ -297,8 +309,12 @@ pub fn metrics() -> TableIterator<
     };
 
     let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
+        let store = match PostgresProvider::new_with_schema_and_config(
+            &pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            backend_provider_config(),
+        )
+        .await
         {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],
@@ -399,8 +415,12 @@ pub fn instance_nodes(
     };
 
     let results = rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
+        let store = match PostgresProvider::new_with_schema_and_config(
+            &pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            backend_provider_config(),
+        )
+        .await
         {
             Ok(s) => Arc::new(s),
             Err(_) => return vec![],

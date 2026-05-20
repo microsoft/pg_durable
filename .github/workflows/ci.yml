@@ -21,7 +21,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  GITHUB_TOKEN: ${{ secrets.GH_PAT }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
@@ -59,7 +58,6 @@ jobs:
           rustup default nightly
 
       - name: Check formatting
-        # --all includes path dependencies; limit to our package to skip submodules
         run: cargo fmt --package pg_durable -- --check
 
   prepare:
@@ -96,9 +94,6 @@ jobs:
     continue-on-error: ${{ matrix.pg_version == 18 }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-          token: ${{ secrets.GH_PAT }}
 
       - name: Free disk space and show usage
         run: |

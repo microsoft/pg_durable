@@ -2,9 +2,9 @@
 
 **Status:** Implemented  
 **Last Updated:** 2026-03-01  
-**Dependencies:** duroxide-pg-opt (git submodule)
+**Dependencies:** duroxide-pg (git submodule)
 
-> **Note:** This document describes the extension lifecycle management, background worker behavior, and duroxide-pg-opt schema integration in pg_durable.
+> **Note:** This document describes the extension lifecycle management, background worker behavior, and duroxide-pg schema integration in pg_durable.
 
 ## Problem Statement
 
@@ -109,7 +109,7 @@ See [bgw-applies-migrations.md](bgw-applies-migrations.md) for the full design.
 
 ### 2. Background Worker: `MigrationPolicy::ApplyAll`
 
-duroxide-pg-opt provides `MigrationPolicy::ApplyAll` which:
+duroxide-pg provides `MigrationPolicy::ApplyAll` which:
 - Applies pending migrations from the embedded migration files
 - Creates the schema tables if they don't yet exist
 - Records applied migrations in `_duroxide_migrations`
@@ -396,7 +396,7 @@ Because the Duroxide schema DDL runs inside `CREATE EXTENSION` as extension SQL,
 
 ### Where this is intentionally non-idiomatic (trade-off)
 
-- Duroxide provider DDL is applied by the BGW at startup (`ApplyAll`) rather than embedded in extension SQL. This decouples the duroxide schema lifecycle from `ALTER EXTENSION UPDATE`, allowing duroxide-pg-opt upgrades without extension upgrade scripts.
+- Duroxide provider DDL is applied by the BGW at startup (`ApplyAll`) rather than embedded in extension SQL. This decouples the duroxide schema lifecycle from `ALTER EXTENSION UPDATE`, allowing duroxide-pg upgrades without extension upgrade scripts.
 
 ### Rationale for Polling in MVP
 
@@ -406,13 +406,13 @@ While processUtility hooks are the "correct" PostgreSQL approach, polling is acc
 - Simpler implementation = faster time to value
 - Can be upgraded to hooks post-MVP without changing client-facing behavior
 
-### Trade-offs with duroxide-pg-opt
+### Trade-offs with duroxide-pg
 
 The duroxide schema is extension-owned but its contents are BGW-managed:
 
 - ✅ PostgreSQL-native lifecycle: install/upgrade/drop go through extension scripts (for `df.*` schema) and BGW-applied migrations (for `duroxide.*` schema).
 - ✅ Clear ownership: the `duroxide` schema is extension-owned; objects inside it are BGW-managed.
-- ✅ Decoupled: duroxide-pg-opt upgrades do not require changes to extension SQL or upgrade scripts.
+- ✅ Decoupled: duroxide-pg upgrades do not require changes to extension SQL or upgrade scripts.
 
 ### Known Limitations (future work)
 
@@ -449,7 +449,7 @@ The duroxide schema is extension-owned but its contents are BGW-managed:
     - **New behavior:** BGW waits for extension existence, and also stays in "waiting" when migrations are missing/behind (VerifyOnly fails).
 
 3. **Backend sessions disable long-polling**
-    - **Default behavior (upstream):** `duroxide_pg_opt::PostgresProvider` can enable long-polling by default.
+    - **Default behavior (upstream):** `duroxide_pg::PostgresProvider` can enable long-polling by default.
     - **pg_durable behavior:** For backend request/response operations (start/cancel/signal, monitoring), we disable long-polling to avoid a dedicated listener connection and notifier task.
     - **Impact:** Resource savings for installations with many backends.
     - **Compatibility:** No user-visible changes expected.
@@ -458,8 +458,8 @@ The duroxide schema is extension-owned but its contents are BGW-managed:
 
 ### Resolved
 
-1. **Should duroxide-pg-opt provide a "don't create schema" mode?**
-   - ✅ **RESOLVED:** duroxide-pg-opt 0.1.18 provides `MigrationPolicy::VerifyOnly` which never executes DDL
+1. **Should duroxide-pg provide a "don't create schema" mode?**
+   - ✅ **RESOLVED:** duroxide-pg 0.1.18 provides `MigrationPolicy::VerifyOnly` which never executes DDL
    - No need for upstream changes or manual schema checks
 
 2. **How should pg_durable avoid implicit schema creation?**
@@ -504,7 +504,7 @@ The duroxide schema is extension-owned but its contents are BGW-managed:
 
 - PostgreSQL Extension Documentation: https://www.postgresql.org/docs/current/extend-extensions.html
 - pgrx Background Worker Documentation: https://github.com/pgcentralfoundation/pgrx/blob/develop/pgrx-examples/bgworker/src/lib.rs
-- duroxide-pg-opt: https://github.com/microsoft/duroxide-pg-opt
+- duroxide-pg: https://github.com/microsoft/duroxide-pg
 - pg_durable current architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Timeline Estimate

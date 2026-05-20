@@ -16,7 +16,7 @@ model:
   externalDependencies:
     - "PostgreSQL 17 (host database engine)"
     - "duroxide (durable execution runtime, embedded Rust crate)"
-    - "duroxide-pg-opt (PostgreSQL persistence provider for duroxide)"
+    - "duroxide-pg (PostgreSQL persistence provider for duroxide)"
     - "sqlx (async PostgreSQL driver for background worker connections)"
     - "reqwest (HTTP client for df.http() activity)"
     - "pgrx 0.16.1 (PostgreSQL extension framework)"

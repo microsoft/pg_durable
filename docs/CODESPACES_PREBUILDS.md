@@ -19,42 +19,11 @@ Pre-builds must be enabled by a repository administrator:
    - **Reduce prebuild available to specific regions**: Optional
 4. Click **Create**
 
-### Private Submodule Access
+### Submodule Access
 
-The `duroxide-pg-opt` submodule is a **private repository**. There are two relevant access paths:
+The `duroxide-pg` submodule is a **public repository**, so no PAT or Codespaces secret is required for prebuilds or interactive Codespaces. The default Codespaces credentials are sufficient for `git submodule update --init --recursive`.
 
-**1. Prebuild phase** — A GitHub PAT stored as a Codespaces secret is used during `onCreateCommand.sh`:
-
-1. Create a **fine-grained PAT** with **read-only** access to `microsoft/duroxide-pg-opt`:
-   - Repository access: only `microsoft/duroxide-pg-opt`
-   - Permissions: `Contents: Read`, `Metadata: Read`
-2. Go to repository **Settings** → **Secrets and variables** → **Codespaces**
-3. Click **New repository secret**
-4. Name: `GH_PAT`, Value: the PAT from step 1
-5. Click **Add secret**
-
-`onCreateCommand.sh` uses that PAT via a git `insteadOf` rewrite so `git submodule update --init --recursive` can fetch the private submodule during prebuild.
-
-**2. Interactive Codespaces** — `devcontainer.json` also grants the built-in Codespaces token read access:
-
-```json
-"codespaces": {
-  "repositories": {
-    "microsoft/duroxide-pg-opt": {
-      "permissions": { "contents": "read" }
-    }
-  }
-}
-```
-
-This is still useful when users open a Codespace directly, especially on branches without a warm prebuild, because the built-in Codespaces token can satisfy normal repository access without depending on PAT-based git configuration.
-
-**Security notes:**
-- The `GH_PAT` Codespaces secret is exposed as an environment variable to Codespaces, including existing Codespaces after a reload. Because of that, removing temporary git config entries during `onCreateCommand.sh` does not meaningfully hide the token from the user environment.
-- `onCreateCommand.sh` still removes the temporary PAT-based `insteadOf` rewrite after submodule initialization. This avoids forcing PAT-based URL rewriting for later interactive git usage, so post-start interactions can rely on `devcontainer.json` repository permissions and the default Codespaces credential helper.
-- The prebuild image is still a **filesystem snapshot**. The secret itself is not baked into the image just because it was present in the environment during prebuild.
-- Users who open a Codespace from the prebuild get the submodule files already present, and the same `GH_PAT` secret is available in their environment if the repository is configured with it.
-- Use a fine-grained PAT scoped only to `duroxide-pg-opt` with read-only `Contents` and `Metadata` permissions to minimize exposure.
+> If you maintain a fork that points the submodule at a private alternative (for example `microsoft/duroxide-pg-opt`), you will need to add your own auth (Codespaces secret + `insteadOf` rewrite, or repository permission in `devcontainer.json`).
 
 ## How It Works
 
@@ -70,7 +39,7 @@ Codespaces has two distinct phases:
      - System dependencies (libssl, clang, bison, etc.)
      - cargo-pgrx 0.16.1
      - PostgreSQL 17 (downloaded and compiled via pgrx)
-     - `duroxide-pg-opt` submodule (via `GH_PAT` Codespace secret)
+     - `duroxide-pg` submodule (public, no auth required)
     - Builds and installs pg_durable
     - Recreates the local `~/.pgrx/data-17` cluster with `initdb -U postgres`
     - Pre-creates the `pg_durable` extension and verifies it
@@ -162,13 +131,7 @@ This means the prebuild did not run or failed. There is no automatic fallback �
 
 ### User Can See `GH_PAT` In Their Codespace Environment
 
-This is expected for a repository-level Codespaces secret.
-
-- Repository Codespaces secrets are made available to Codespaces as environment variables.
-- That includes existing Codespaces after a reload.
-- Because the PAT is already present in the user environment, removing temporary git config entries during prebuild does not materially change visibility.
-
-The mitigation here is scope, not concealment: keep `GH_PAT` fine-grained, repository-scoped to `microsoft/duroxide-pg-opt`, and read-only.
+No longer applicable — the `duroxide-pg` submodule is public and `GH_PAT` is no longer used by the prebuild. If you see a `GH_PAT` secret configured at the repo level, you can safely remove it.
 
 ## Cost Considerations
 

@@ -6,11 +6,11 @@
 use std::sync::{Arc, OnceLock};
 
 use duroxide::Client;
-use duroxide_pg_opt::PostgresProvider;
+use duroxide_pg::PostgresProvider;
 use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::types::{backend_provider_config, postgres_connection_string};
+use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
 
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -82,9 +82,13 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
         std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
 
         let store = Arc::new(
-            PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-                .await
-                .map_err(|e| format!("Failed to connect to duroxide store: {e}"))?,
+            PostgresProvider::new_with_schema_and_config(
+                &pg_conn_str,
+                Some(DUROXIDE_SCHEMA),
+                backend_provider_config(),
+            )
+            .await
+            .map_err(|e| format!("Failed to connect to duroxide store: {e}"))?,
         );
 
         let _ = DUROXIDE_CLIENT.set(Client::new(store));

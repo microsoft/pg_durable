@@ -121,9 +121,9 @@ fn explain_instance(instance_id: &str) -> String {
 
 /// Get instance info from Duroxide store
 fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
-    use crate::types::{backend_provider_config, postgres_connection_string};
+    use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
     use duroxide::Client;
-    use duroxide_pg_opt::PostgresProvider;
+    use duroxide_pg::PostgresProvider;
     use std::sync::Arc;
 
     let pg_conn_str = postgres_connection_string();
@@ -137,8 +137,12 @@ fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
     };
 
     rt.block_on(async {
-        let store = match PostgresProvider::new_with_config(&pg_conn_str, backend_provider_config())
-            .await
+        let store = match PostgresProvider::new_with_schema_and_config(
+            &pg_conn_str,
+            Some(DUROXIDE_SCHEMA),
+            backend_provider_config(),
+        )
+        .await
         {
             Ok(s) => Arc::new(s),
             Err(_) => return (String::new(), None),

@@ -36,7 +36,7 @@ This directory contains structured prompts for LLMs working on the pg_durable co
 ### Release
 
 5. **[pg_durable-release.md](pg_durable-release.md)**
-   - Check for duroxide/duroxide-pg-opt dependency updates
+   - Check for duroxide/duroxide-pg dependency updates
    - Build, clippy, and clean warnings
    - Update documentation and tests
    - Run unit and E2E tests
@@ -92,7 +92,7 @@ These prompts follow consistent patterns:
 ### Release Workflow
 ```
 1. @pg_durable-release.md            - Full release checklist:
-   - Check dependency updates (duroxide, duroxide-pg-opt)
+   - Check dependency updates (duroxide, duroxide-pg)
    - Build, clippy, clean warnings
    - Update docs and tests
    - Run unit + E2E tests

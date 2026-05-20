@@ -76,6 +76,5 @@ jobs:
           # Exercise script entrypoints without running heavy setup.
           export SKIP_APT_UPDATE=1
           export PG_DURABLE_SMOKE=1
-          export GH_PAT="smoke-test-token"
 
           bash .devcontainer/onCreateCommand.sh

@@ -1,23 +1,23 @@
 # Dependency Issues & Blockers
 
-**Purpose:** Track duroxide-pg-opt issues/limitations that require workarounds in pg_durable.
+**Purpose:** Track duroxide-pg issues/limitations that require workarounds in pg_durable.
 
 **Last Updated:** 2026-01-06
 
-**GitHub Query:** [All pg_durable issues in duroxide-pg-opt](https://github.com/microsoft/duroxide-pg-opt/issues?q=is%3Aissue+label%3Apg_durable)
+**GitHub Query:** [All pg_durable issues in duroxide-pg](https://github.com/microsoft/duroxide-pg/issues?q=is%3Aissue+label%3Apg_durable)
 
 ---
 
 ## How to Check for Fixes
 
-1. **Check duroxide-pg-opt releases:**
+1. **Check duroxide-pg releases:**
    ```bash
-   gh release list --repo microsoft/duroxide-pg-opt --limit 10
+   gh release list --repo microsoft/duroxide-pg --limit 10
    ```
 
 2. **Check specific issue status:**
    ```bash
-   gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide-pg-opt
+   gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide-pg
    ```
 
 3. **Check current duroxide version in use:**
@@ -44,21 +44,21 @@ _No active blockers at this time._
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [microsoft/duroxide-pg-opt#6](https://github.com/microsoft/duroxide-pg-opt/issues/6) |
+| **Issue** | [microsoft/duroxide-pg#6](https://github.com/microsoft/duroxide-pg/issues/6) |
 | **Also filed** | [microsoft/duroxide-pg#1](https://github.com/microsoft/duroxide-pg/issues/1) (FYI only) |
 | **Status** | ✅ Resolved |
-| **Fixed In** | duroxide-pg-opt v0.1.9 (requires duroxide 0.1.11) |
+| **Fixed In** | duroxide-pg v0.1.9 (requires duroxide 0.1.11) |
 
 **Resolution Date:** 2026-01-06
 
 **Problem (was):**
-When upgrading `duroxide` or `duroxide-pg-opt` versions, the PostgreSQL schema in the `duroxide` schema may change (new columns, changed function signatures, etc.). This caused runtime errors:
+When upgrading `duroxide` or `duroxide-pg` versions, the PostgreSQL schema in the `duroxide` schema may change (new columns, changed function signatures, etc.). This caused runtime errors:
 - `function duroxide.XXX does not exist` (function signature changed)
 - `column index out of bounds` (table columns changed)
 - `cached plan must not change result type` (prepared statement cache invalidated)
 
 **Resolution:**
-The duroxide-pg-opt v0.1.9 release includes ProviderAdmin lifecycle management which handles schema versioning. No workarounds were needed in pg_durable codebase at the time of the fix.
+The duroxide-pg v0.1.9 release includes ProviderAdmin lifecycle management which handles schema versioning. No workarounds were needed in pg_durable codebase at the time of the fix.
 
 ---
 
@@ -80,7 +80,7 @@ When updating the duroxide dependency, run through this checklist:
 
 ## Version Compatibility Matrix
 
-| pg_durable | duroxide | duroxide-pg-opt | Notes |
+| pg_durable | duroxide | duroxide-pg | Notes |
 |------------|----------|-----------------|-------|
 | 0.1.1 | 0.1.11 | 0.1.9 | Current - schema versioning fix |
 | 0.1.0 | 0.1.6 | 0.1.6 | Legacy |

@@ -9,7 +9,7 @@ Prepare and release a new version of pg_durable with quality checks, documentati
 
 The project uses these duroxide dependencies from `Cargo.toml`:
 - `duroxide` (crates.io version)
-- `duroxide-pg-opt` (GitHub tag)
+- `duroxide-pg` (GitHub tag)
 
 **Check for new duroxide version:**
 ```bash
@@ -20,10 +20,10 @@ grep "duroxide" Cargo.toml
 cargo search duroxide --limit 5
 ```
 
-**Check for new duroxide-pg-opt tag:**
+**Check for new duroxide-pg tag:**
 ```bash
-# List recent tags from the duroxide-pg-opt submodule
-cd duroxide-pg-opt && git fetch --tags && git tag --sort=-v:refname | head -10 && cd ..
+# List recent tags from the duroxide-pg repo
+gh api repos/microsoft/duroxide-pg/tags --jq '.[].name' | head -10
 ```
 
 ### 1.2 Ask User About Updates
@@ -35,29 +35,26 @@ If new versions are available, present them to the user:
 
 Current versions:
   - duroxide: 0.1.6
-  - duroxide-pg-opt: v0.1.1
+  - duroxide-pg: v0.1.1
 
 New versions available:
   - duroxide: [new_version] ✨
-  - duroxide-pg-opt: [new_tag] ✨
+  - duroxide-pg: [new_tag] ✨
 
 Would you like to update to the new versions? (y/n)
 ```
 
 **If user approves updates:**
 
-Update `Cargo.toml` duroxide version and update the submodule:
-```bash
-# Update duroxide in Cargo.toml
+Update the dependency versions in `Cargo.toml`:
+```toml
 # duroxide = "NEW_VERSION"
-
-# Update submodule to new tag
-cd duroxide-pg-opt && git checkout NEW_TAG && cd ..
+# duroxide-pg = { git = "...", tag = "NEW_TAG", package = "duroxide-pg" }
 ```
 
-Then run:
+Then refresh `Cargo.lock`:
 ```bash
-cargo update -p duroxide
+cargo update -p duroxide -p duroxide-pg
 ```
 
 ## Step 2: Update Package Version (if releasing)
@@ -323,7 +320,7 @@ Suggested message based on changes:
 
   - Bump version from X.Y.Z to X.Y.Z+1
   - Upgrade duroxide from vA.B.C to vX.Y.Z
-  - Upgrade duroxide-pg-opt from vA.B.C to vX.Y.Z
+  - Upgrade duroxide-pg from vA.B.C to vX.Y.Z
   - [other changes]"
 
 Would you like to:
@@ -432,7 +429,7 @@ docker inspect pg_durable:latest --format '{{.Created}}'
 ## Checklist Summary
 
 ### Pre-Release Checklist
-- [ ] Check for dependency updates (duroxide, duroxide-pg-opt)
+- [ ] Check for dependency updates (duroxide, duroxide-pg)
 - [ ] Update dependencies if user approves
 - [ ] Bump version in Cargo.toml if releasing
 - [ ] `cargo build --features pg17` - no errors
