@@ -707,7 +707,7 @@ dependencies = [
 [[package]]
 name = "duroxide-pg"
 version = "0.1.33"
-source = "git+https://github.com/pinodeca/duroxide-pg.git?branch=feat%2Fmigration-policy#715ec60abcd61c06be7c2de77b79a52e27a05f6a"
+source = "git+https://github.com/pinodeca/duroxide-pg.git?branch=feat%2Fmigration-policy#d5d16192a0d09dfbc4c2c48c195f6dca33d0a9d2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3098,7 +3098,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

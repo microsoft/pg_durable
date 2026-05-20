@@ -457,23 +457,18 @@ async fn initialize_duroxide_runtime(
             }
         }
 
-        let store = match PostgresProvider::new_with_schema_and_config(
-            pg_conn_str,
-            Some(DUROXIDE_SCHEMA),
-            worker_provider_config(),
-        )
-        .await
-        {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                log!(
-                    "pg_durable: failed to create PostgreSQL store (will retry): {}",
-                    e
-                );
-                tokio::time::sleep(retry_interval).await;
-                continue;
-            }
-        };
+        let store =
+            match PostgresProvider::new_with_config(worker_provider_config(pg_conn_str)).await {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    log!(
+                        "pg_durable: failed to create PostgreSQL store (will retry): {}",
+                        e
+                    );
+                    tokio::time::sleep(retry_interval).await;
+                    continue;
+                }
+            };
 
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no

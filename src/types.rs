@@ -221,8 +221,9 @@ pub const DUROXIDE_SCHEMA: &str = "duroxide";
 ///
 /// - `VerifyOnly`: never create schema/tables, reject unknown migrations.
 ///   Backend sessions must not run DDL — the BGW owns schema lifecycle.
-pub fn backend_provider_config() -> duroxide_pg::ProviderConfig {
-    let mut config = duroxide_pg::ProviderConfig::default();
+pub fn backend_provider_config(database_url: &str) -> duroxide_pg::ProviderConfig {
+    let mut config = duroxide_pg::ProviderConfig::url(database_url);
+    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::VerifyOnly;
     config
 }
@@ -232,9 +233,10 @@ pub fn backend_provider_config() -> duroxide_pg::ProviderConfig {
 /// - `ApplyAll`: applies pending duroxide migrations at startup; creates tables
 ///   inside the extension-owned `duroxide` schema. Safe because the BGW verifies
 ///   schema ownership via `pg_depend` before calling
-///   `PostgresProvider::new_with_schema_and_config`.
-pub fn worker_provider_config() -> duroxide_pg::ProviderConfig {
-    let mut config = duroxide_pg::ProviderConfig::default();
+///   `PostgresProvider::new_with_config`.
+pub fn worker_provider_config(database_url: &str) -> duroxide_pg::ProviderConfig {
+    let mut config = duroxide_pg::ProviderConfig::url(database_url);
+    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::ApplyAll;
     config
 }

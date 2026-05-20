@@ -809,16 +809,10 @@ mod tests {
             let start = Instant::now();
             let timeout = Duration::from_secs(10);
 
-            let config = backend_provider_config();
+            let config = backend_provider_config(&pg_conn_str);
 
             loop {
-                match PostgresProvider::new_with_schema_and_config(
-                    &pg_conn_str,
-                    Some(DUROXIDE_SCHEMA),
-                    config.clone(),
-                )
-                .await
-                {
+                match PostgresProvider::new_with_config(config.clone()).await {
                     Ok(_) => return Ok(format!("{pg_conn_str} (schema: {DUROXIDE_SCHEMA})")),
                     Err(e) => {
                         if start.elapsed() > timeout {
@@ -856,13 +850,9 @@ mod tests {
 
         rt.block_on(async {
             let store = Arc::new(
-                PostgresProvider::new_with_schema_and_config(
-                    &pg_conn_str,
-                    Some(DUROXIDE_SCHEMA),
-                    backend_provider_config(),
-                )
-                .await
-                .map_err(|e| format!("Failed to connect to store: {e}"))?,
+                PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str))
+                    .await
+                    .map_err(|e| format!("Failed to connect to store: {e}"))?,
             );
             let client = Client::new(store);
 
@@ -917,13 +907,9 @@ mod tests {
 
         rt.block_on(async {
             let store = Arc::new(
-                PostgresProvider::new_with_schema_and_config(
-                    &pg_conn_str,
-                    Some(DUROXIDE_SCHEMA),
-                    backend_provider_config(),
-                )
-                .await
-                .ok()?,
+                PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str))
+                    .await
+                    .ok()?,
             );
             let client = Client::new(store);
             client
