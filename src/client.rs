@@ -94,6 +94,42 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
     })
 }
 
+async fn list_running_descendants(client: &Client, root_instance_id: &str) -> Vec<String> {
+    let tree = match client.get_instance_tree(root_instance_id).await {
+        Ok(tree) => tree,
+        Err(e) => {
+            warning!(
+                "pg_durable: failed to inspect instance tree for signal fan-out (root={}): {:?}",
+                root_instance_id,
+                e
+            );
+            return vec![];
+        }
+    };
+
+    let mut descendants = Vec::new();
+    for child_instance_id in tree.all_ids {
+        if child_instance_id == root_instance_id {
+            continue;
+        }
+
+        match client.get_instance_info(&child_instance_id).await {
+            Ok(info) if info.status.eq_ignore_ascii_case("running") => {
+                descendants.push(child_instance_id);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warning!(
+                    "pg_durable: failed to inspect child instance status for signal fan-out (child={}): {:?}",
+                    child_instance_id, e
+                );
+            }
+        }
+    }
+
+    descendants
+}
+
 /// Start a durable function via the shared PostgreSQL store.
 pub fn start_durable_function(
     function_name: &str,
@@ -141,6 +177,21 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
             .raise_event(instance_id, event_name, data)
             .await
             .map_err(|e| format!("Failed to raise event: {e:?}"))?;
+
+        for child_instance_id in list_running_descendants(client, instance_id).await {
+            if let Err(e) = client
+                .raise_event(&child_instance_id, event_name, data)
+                .await
+            {
+                warning!(
+                    "pg_durable: failed to fan out signal '{}' to child instance {}: {:?}",
+                    event_name,
+                    child_instance_id,
+                    e
+                );
+            }
+        }
+
         Ok(())
     })
 }
