@@ -1136,6 +1136,12 @@ mod tests {
     }
 
     #[test]
+    fn normalize_role_name_keeps_mixed_case_rolname() {
+        let normalized = normalize_role_name_for_connection("labUser").unwrap();
+        assert_eq!(normalized.as_ref(), "labUser");
+    }
+
+    #[test]
     fn normalize_role_name_unquotes_regrole_text_output() {
         let normalized = normalize_role_name_for_connection("\"Role Name\"").unwrap();
         assert_eq!(normalized.as_ref(), "Role Name");
