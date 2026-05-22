@@ -1945,7 +1945,7 @@ When a durable function fails or produces unexpected results, use these steps to
 
 ```sql
 SELECT df.status('a1b2c3d4');
--- Returns: Completed, Failed, Running, Pending, or Canceled
+-- Returns: 'pending', 'running', 'completed', 'failed', or 'cancelled'
 ```
 
 If the status is `Failed`, proceed to the next steps. If it's `Completed` but results are wrong, skip to Step 3.

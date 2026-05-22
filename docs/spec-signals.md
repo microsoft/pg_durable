@@ -436,7 +436,7 @@ BEGIN
     
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 100;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled') OR attempts > 100;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
@@ -485,7 +485,7 @@ BEGIN
     
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 50;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled') OR attempts > 50;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
@@ -544,7 +544,7 @@ BEGIN
     
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 100;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled') OR attempts > 100;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;

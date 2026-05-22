@@ -157,8 +157,8 @@ BEGIN
 
     SELECT df.wait_for_completion(inst_id, 10) INTO status;
 
-    IF status NOT IN ('canceled', 'cancelled', 'failed') THEN
-        RAISE EXCEPTION 'TEST FAILED: cross-connection cancel status = % (expected canceled/cancelled/failed)', status;
+    IF lower(status) != 'cancelled' THEN
+        RAISE EXCEPTION 'TEST FAILED: cross-connection cancel status = % (expected cancelled)', status;
     END IF;
     
     RAISE NOTICE 'TEST PASSED: cross_connection_cancel';

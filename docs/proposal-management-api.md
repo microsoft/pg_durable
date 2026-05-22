@@ -250,7 +250,7 @@ CREATE FUNCTION df.reset_system(
     cancel_timeout_secs INTEGER DEFAULT 5
 ) RETURNS TABLE (
     orchestration_name TEXT,
-    action_taken TEXT,      -- 'canceled', 'force_deleted', 'restarted', 'failed'
+    action_taken TEXT,      -- 'cancelled', 'force_deleted', 'restarted', 'failed'
     success BOOLEAN
 );
 ```
@@ -493,7 +493,7 @@ pub fn reset_system(
 
             if is_running {
                 // Step 2: Try graceful cancel
-                action = "canceled";
+                action = "cancelled";
                 if let Err(_) = client.cancel_instance(instance_id, "system reset").await {
                     // Cancel failed, will force delete
                 }
@@ -506,7 +506,7 @@ pub fn reset_system(
                     }
                     match client.get_instance(instance_id).await {
                         Ok(info) if !matches!(info.status, InstanceStatus::Running | InstanceStatus::Pending) => {
-                            break; // Successfully canceled
+                            break; // Successfully cancelled
                         }
                         _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
                     }

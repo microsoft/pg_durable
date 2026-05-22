@@ -364,7 +364,7 @@ BEGIN
 
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled') OR attempts > 300;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;

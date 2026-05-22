@@ -88,7 +88,7 @@ BEGIN
     -- Wait for completion (with timeout)
     LOOP
         SELECT s INTO inst_status FROM df.status(inst_id) s;
-        EXIT WHEN lower(inst_status) IN ('completed', 'failed', 'canceled') OR attempts > 300;
+        EXIT WHEN lower(inst_status) IN ('completed', 'failed', 'cancelled') OR attempts > 300;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
@@ -215,7 +215,7 @@ SELECT 'TEST PASSED' AS result;
 - Use mock functions that return deterministic results
 
 ### 3. Comprehensive Assertions
-- Check status is 'completed' (or 'canceled' for loops)
+- Check status is 'completed' (or 'cancelled' for loops)
 - Verify data was processed correctly
 - Check expected side effects (table updates, etc.)
 
@@ -226,8 +226,8 @@ SELECT 'TEST PASSED' AS result;
 
 ### 5. Handle Loop Cancellation
 ```sql
--- For loop tests, cancellation may show as Failed with "canceled" in output
-IF lower(inst_status) NOT IN ('canceled', 'cancelled', 'failed') THEN
+-- df.cancel() sets df.instances.status = 'cancelled' (British spelling, lowercase).
+IF lower(inst_status) != 'cancelled' THEN
     RAISE EXCEPTION 'TEST FAILED: expected cancelled, got %', inst_status;
 END IF;
 ```

@@ -94,8 +94,8 @@ fn explain_instance(instance_id: &str) -> String {
         &pg_status
     };
     let status_icon = match status.to_lowercase().as_str() {
-        "completed" | "continuedabnew" => "✓",
-        "failed" | "canceled" => "✗",
+        "completed" | "continuedasnew" => "✓",
+        "failed" | "canceled" | "cancelled" => "✗",
         "running" => "⏳",
         _ => "○",
     };
