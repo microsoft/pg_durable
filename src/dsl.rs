@@ -935,10 +935,15 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
         return format!("Failed to cancel: {e}");
     }
 
-    // Update the instance status to 'cancelled' via SPI.
+    // Update the instance status to 'cancelled' via SPI only when the instance is not
+    // already in a terminal state.  This prevents two bugs:
+    // 1. Overwriting a 'completed' or 'failed' instance that finished before the cancel
+    //    signal was processed by duroxide.
+    // 2. Calling df.cancel twice in a row (idempotent by guard).
     // User has column-level UPDATE on (status, updated_at) with RLS restricting to own rows.
     Spi::run_with_args(
-        "UPDATE df.instances SET status = 'cancelled', updated_at = pg_catalog.now() WHERE id = $1",
+        "UPDATE df.instances SET status = 'cancelled', updated_at = pg_catalog.now() \
+         WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
         &[instance_id.into()],
     )
     .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
