@@ -809,6 +809,68 @@ pub const VALID_NODE_TYPES: &[&str] = &[
     "SIGNAL",
 ];
 
+/// Returns true when the text looks like a SQL statement or command body that can
+/// be safely auto-wrapped into a SQL node.
+pub fn looks_like_sql_statement(input: &str) -> bool {
+    let mut remaining = input.trim_start();
+
+    loop {
+        if remaining.is_empty() {
+            return false;
+        }
+
+        if let Some(rest) = remaining.strip_prefix("--") {
+            remaining = rest
+                .split_once('\n')
+                .map(|(_, tail)| tail)
+                .unwrap_or("")
+                .trim_start();
+            continue;
+        }
+
+        if let Some(rest) = remaining.strip_prefix("/*") {
+            remaining = rest
+                .split_once("*/")
+                .map(|(_, tail)| tail)
+                .unwrap_or("")
+                .trim_start();
+            continue;
+        }
+
+        break;
+    }
+
+    let token: String = remaining
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphabetic() || *ch == '_')
+        .collect();
+
+    matches!(
+        token.to_ascii_uppercase().as_str(),
+        "SELECT"
+            | "WITH"
+            | "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "MERGE"
+            | "VALUES"
+            | "DO"
+            | "CALL"
+            | "CREATE"
+            | "ALTER"
+            | "DROP"
+            | "TRUNCATE"
+            | "VACUUM"
+            | "EXPLAIN"
+            | "GRANT"
+            | "REVOKE"
+            | "COMMENT"
+            | "ANALYZE"
+            | "REFRESH"
+            | "COPY"
+    )
+}
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as nested structures, not stored as ID references.
 /// Node IDs are generated during insertion into df.nodes, not during graph construction.
@@ -906,6 +968,21 @@ impl Durofut {
                 self.node_type,
                 VALID_NODE_TYPES.join(", ")
             ));
+        }
+        if self.node_type == "SQL" {
+            let query = self
+                .query
+                .as_deref()
+                .ok_or_else(|| "SQL node must have a query".to_string())?;
+            if !looks_like_sql_statement(query) {
+                let preview = query.trim().replace('\n', " ");
+                let preview = preview.chars().take(60).collect::<String>();
+                return Err(format!(
+                    "SQL node query '{}' is plain text, not a SQL statement. \
+                     Functions that return text cannot be composed; did you mean df.sql(...) or a wait primitive?",
+                    preview
+                ));
+            }
         }
         if let Some(ref left) = self.left_node {
             left.validate_recursive()?;
@@ -1094,6 +1171,42 @@ mod tests {
         for (input, expected, label) in &cases {
             assert_eq!(is_truthy(input), *expected, "is_truthy failed for: {label}");
         }
+    }
+
+    #[test]
+    fn looks_like_sql_statement_accepts_common_statements() {
+        assert!(looks_like_sql_statement("SELECT 1"));
+        assert!(looks_like_sql_statement("  insert into t values (1)"));
+        assert!(looks_like_sql_statement(
+            "-- comment\nWITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
+        assert!(looks_like_sql_statement(
+            "/* block */ DO $$ BEGIN NULL; END $$;"
+        ));
+    }
+
+    #[test]
+    fn looks_like_sql_statement_rejects_plain_text_statuses() {
+        assert!(!looks_like_sql_statement("completed"));
+        assert!(!looks_like_sql_statement("failed"));
+        assert!(!looks_like_sql_statement("OK"));
+        assert!(!looks_like_sql_statement(""));
+    }
+
+    #[test]
+    fn validate_recursive_rejects_plain_text_sql_nodes() {
+        let durofut = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("completed".to_string()),
+            ..Default::default()
+        };
+
+        let err = durofut
+            .validate_recursive()
+            .expect_err("plain-text SQL node should be rejected");
+
+        assert!(err.contains("plain text"), "unexpected error: {err}");
+        assert!(err.contains("df.sql"), "unexpected error: {err}");
     }
 
     #[test]
