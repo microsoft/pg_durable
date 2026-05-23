@@ -5,6 +5,7 @@
 
 pub mod execute_http;
 pub mod execute_sql;
+pub mod get_instance_state;
 pub mod load_function_graph;
 pub mod update_instance_status;
 pub mod update_node_status;

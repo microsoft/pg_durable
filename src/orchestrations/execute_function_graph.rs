@@ -37,6 +37,13 @@ struct SubtreeEnvelope {
     results: HashMap<String, String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AwaitedInstanceState {
+    instance_id: String,
+    status: String,
+    result: Option<String>,
+}
+
 /// Execute a complete function graph
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
     let input: FunctionInput = serde_json::from_str(&input_json)
@@ -289,6 +296,9 @@ async fn execute_node_inner(
         "race" => execute_race_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
+        "await_instance" => {
+            execute_await_instance_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await
+        }
         "break" => execute_break_node(ctx, node, node_id).await,
         other => Err(format!("Unknown node type: {other}")),
     }
@@ -1010,4 +1020,88 @@ async fn execute_signal_node(
     }
 
     Ok(result_str)
+}
+
+fn json_text_to_value(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+}
+
+async fn execute_await_instance_node(
+    ctx: &OrchestrationContext,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+    sys_vars: &SystemVars,
+) -> Result<String, String> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("AWAIT_INSTANCE node {node_id} has no config"))?;
+    let config: serde_json::Value = serde_json::from_str(config_str)
+        .map_err(|e| format!("Invalid AWAIT_INSTANCE config: {e}"))?;
+
+    let instance_template = config["instance_id"]
+        .as_str()
+        .ok_or_else(|| "AWAIT_INSTANCE missing instance_id".to_string())?;
+    let instance_id = substitute_all_raw(instance_template, results, &exec_ctx.vars, sys_vars)?;
+    if instance_id.is_empty() {
+        return Err("AWAIT_INSTANCE resolved to an empty instance_id".to_string());
+    }
+
+    let timeout_seconds = config["timeout_seconds"].as_u64();
+    let mut polls = 0u64;
+
+    loop {
+        let state_json = ctx
+            .schedule_activity(activities::get_instance_state::NAME, instance_id.clone())
+            .await?;
+        let state: AwaitedInstanceState = serde_json::from_str(&state_json)
+            .map_err(|e| format!("Failed to parse awaited instance state: {e}"))?;
+
+        match state.status.to_lowercase().as_str() {
+            "completed" => {
+                let envelope = serde_json::json!({
+                    "instance_id": state.instance_id,
+                    "status": "completed",
+                    "result": state
+                        .result
+                        .as_deref()
+                        .map(json_text_to_value)
+                        .unwrap_or(serde_json::Value::Null)
+                });
+                let result_str = envelope.to_string();
+                if let Some(name) = &node.result_name {
+                    results.insert(name.clone(), result_str.clone());
+                }
+                return Ok(result_str);
+            }
+            "failed" | "cancelled" => {
+                let detail = state
+                    .result
+                    .as_deref()
+                    .map(|raw| json_text_to_value(raw).to_string())
+                    .unwrap_or_else(|| "null".to_string());
+                return Err(format!(
+                    "Awaited instance {} ended with status {}: {}",
+                    state.instance_id, state.status, detail
+                ));
+            }
+            _ => {}
+        }
+
+        polls += 1;
+        if let Some(timeout) = timeout_seconds {
+            if polls >= timeout {
+                return Err(format!(
+                    "Timed out after {}s waiting for instance {}",
+                    timeout, instance_id
+                ));
+            }
+        }
+
+        ctx.schedule_timer(POLL_INTERVAL).await;
+    }
 }

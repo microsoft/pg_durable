@@ -807,6 +807,7 @@ pub const VALID_NODE_TYPES: &[&str] = &[
     "WAIT_SCHEDULE",
     "HTTP",
     "SIGNAL",
+    "AWAIT_INSTANCE",
 ];
 
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
