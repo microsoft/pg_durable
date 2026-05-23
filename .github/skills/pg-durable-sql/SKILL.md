@@ -115,8 +115,10 @@ df.cancel(instance_id TEXT, reason TEXT DEFAULT 'Cancelled by user') → TEXT
 df.signal(
     instance_id TEXT,                   -- Target instance
     signal_name TEXT,                   -- Must match df.wait_for_signal() name
-    signal_data TEXT DEFAULT '{}'       -- JSON payload
+    signal_data TEXT DEFAULT '{}'       -- Text payload; valid JSON remains structured, other text becomes a JSON string
 ) → TEXT
+
+Use a JSON object when workflow SQL expects structured fields; use plain text for simple opaque values.
 
 -- Query status
 df.status(instance_id TEXT) → TEXT      -- 'Running', 'Completed', 'Failed', 'Cancelled'
