@@ -21,12 +21,15 @@ df.wait_for_signal('signal_name', 3600)  -- 1 hour timeout
 ```sql
 -- Send signal to a running instance
 SELECT df.signal('instance_id', 'signal_name', '{"data": "value"}');
+SELECT df.signal('instance_id', 'signal_name', 'approve');
 ```
 
 **Parameters:**
 - `instance_id` - The durable function instance ID (labels not supported, not unique)
 - `signal_name` - Name of the signal to send
-- `signal_data` - JSON payload (optional, defaults to `'{}'`)
+- `signal_data` - Optional text payload (defaults to `'{}'`). Valid JSON is preserved as structured JSON; non-JSON text is delivered as a JSON string.
+
+Send a JSON object when workflow SQL expects structured fields such as `data.approved`. Send plain text for simple opaque values such as `approve`.
 
 ## Signal Result Format
 
@@ -38,6 +41,15 @@ The `df.wait_for_signal()` function returns a JSON object:
   "signal_name": "approval",
   "timed_out": false,
   "data": {"approved": true, "approver": "jane@acme.com"}
+}
+```
+
+**Signal received with plain text payload:**
+```json
+{
+    "signal_name": "approval",
+    "timed_out": false,
+    "data": "approve"
 }
 ```
 
