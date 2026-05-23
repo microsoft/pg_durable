@@ -1052,7 +1052,7 @@ async fn execute_await_instance_node(
     }
 
     let timeout_seconds = config["timeout_seconds"].as_u64();
-    let mut polls = 0u64;
+    let mut waited_seconds = 0u64;
 
     loop {
         let state_json = ctx
@@ -1092,9 +1092,8 @@ async fn execute_await_instance_node(
             _ => {}
         }
 
-        polls += 1;
         if let Some(timeout) = timeout_seconds {
-            if polls >= timeout {
+            if waited_seconds >= timeout {
                 return Err(format!(
                     "Timed out after {}s waiting for instance {}",
                     timeout, instance_id
@@ -1103,5 +1102,6 @@ async fn execute_await_instance_node(
         }
 
         ctx.schedule_timer(POLL_INTERVAL).await;
+        waited_seconds += POLL_INTERVAL.as_secs();
     }
 }
