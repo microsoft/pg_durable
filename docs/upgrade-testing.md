@@ -187,6 +187,14 @@ No additional fixture is needed for subsequent minors — intermediate versions 
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.1 → v0.2.2
+
+#### #162 quote_ident-wrapped `current_user::regrole` (fixes #161)
+- **DDL change:** The three RLS policies (`instances_user_isolation`, `nodes_user_isolation`, `vars_user_isolation`) are dropped and recreated to compare against `quote_ident(current_user)::regrole` instead of `current_user::regrole`. The `df.vars.owner` column default is changed the same way via `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT`. Casting `name → regrole` directly reparses the value as an unquoted SQL identifier and case-folds it, so a role like `labUser` resolved to `labuser`, raising `role "labuser" does not exist` at INSERT time on the `WITH CHECK` clause (and at variable read/write time on the policy). `quote_ident()` wraps the name in double quotes so `regrole_in` preserves casing and other reserved characters.
+- **Scenario A considerations:** Schema comparison must verify the three policy expressions and the `df.vars.owner` default text match the new `quote_ident(...)` form on both fresh installs and upgraded databases.
+- **Scenario B1 considerations:** The new `.so` continues to work against pre-0.2.2 schemas. The runtime SPI queries in `src/dsl.rs` that read/write `df.vars` now use `quote_ident(current_user)::regrole`; the comparison still resolves correctly against the older `owner REGROLE` column regardless of which expression the policy uses, because `regrole = regrole` is OID equality once both sides resolve. The pre-existing bug (policy lookup on the older schema for non-owner mixed-case roles) is not reintroduced by the new `.so` — it was always present in those schemas, and is only fixed by running `ALTER EXTENSION pg_durable UPDATE`.
+- **Scenario B2 considerations:** No data migration needed. The change is purely DDL on policies + a column default. Existing rows in `df.instances`, `df.nodes`, and `df.vars` are untouched.
+
 ### v0.1.1 → v0.2.0
 
 #### #51 security hardening (helper `search_path` pinning + SPI parameterization)

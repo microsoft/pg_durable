@@ -197,7 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
 CREATE TABLE IF NOT EXISTS df.vars (
     name TEXT NOT NULL,
     value TEXT,
-    owner REGROLE NOT NULL DEFAULT current_user::regrole,
+    owner REGROLE NOT NULL DEFAULT quote_ident(current_user)::regrole,
     PRIMARY KEY (owner, name)
 );
 
@@ -299,24 +299,24 @@ ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY instances_user_isolation ON df.instances
     FOR ALL
-    USING (submitted_by = current_user::regrole)
-    WITH CHECK (submitted_by = current_user::regrole);
+    USING (submitted_by = quote_ident(current_user)::regrole)
+    WITH CHECK (submitted_by = quote_ident(current_user)::regrole);
 
 -- Enable RLS on df.nodes
 ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY nodes_user_isolation ON df.nodes
     FOR ALL
-    USING (submitted_by = current_user::regrole)
-    WITH CHECK (submitted_by = current_user::regrole);
+    USING (submitted_by = quote_ident(current_user)::regrole)
+    WITH CHECK (submitted_by = quote_ident(current_user)::regrole);
 
 -- Enable RLS on df.vars (per-user variable isolation)
 ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY vars_user_isolation ON df.vars
     FOR ALL
-    USING (owner = current_user::regrole)
-    WITH CHECK (owner = current_user::regrole);
+    USING (owner = quote_ident(current_user)::regrole)
+    WITH CHECK (owner = quote_ident(current_user)::regrole);
 
 -- No automatic PUBLIC grants. Admins must explicitly grant privileges
 -- to application roles after CREATE EXTENSION.

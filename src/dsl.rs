@@ -141,7 +141,7 @@ pub fn setvar(name: &str, value: &str) -> String {
 #[pg_extern(schema = "df")]
 pub fn getvar(name: &str) -> Option<String> {
     let sql = if owner_scoped_vars_enabled() {
-        "SELECT value FROM df.vars WHERE name = $1 AND owner = current_user::regrole"
+        "SELECT value FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole"
     } else {
         "SELECT value FROM df.vars WHERE name = $1"
     };
@@ -160,7 +160,7 @@ pub fn unsetvar(name: &str) -> String {
     }
 
     let sql = if owner_scoped_vars_enabled() {
-        "DELETE FROM df.vars WHERE name = $1 AND owner = current_user::regrole"
+        "DELETE FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole"
     } else {
         "DELETE FROM df.vars WHERE name = $1"
     };
@@ -179,7 +179,7 @@ pub fn clearvars() -> String {
     }
 
     let sql = if owner_scoped_vars_enabled() {
-        "DELETE FROM df.vars WHERE owner = current_user::regrole"
+        "DELETE FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
     } else {
         "DELETE FROM df.vars"
     };
@@ -872,7 +872,7 @@ pub fn start(
     // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
     // owner-scoped vars.
     let vars_query = if owner_scoped_vars_enabled() {
-        "SELECT name, value FROM df.vars WHERE owner = current_user::regrole"
+        "SELECT name, value FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
     } else {
         "SELECT name, value FROM df.vars"
     };
