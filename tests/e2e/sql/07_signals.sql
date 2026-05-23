@@ -1,5 +1,5 @@
 -- From: 21_signals
--- Tests: basic signal send/receive, signal timeout, signal with data
+-- Tests: basic signal send/receive, signal timeout, signal payload handling
 SET SESSION AUTHORIZATION df_e2e_user;
 
 -- === Test: 21_signals ===
@@ -174,6 +174,56 @@ BEGIN
 END $$;
 
 DROP TABLE _test_signal_data;
+
+-- Test 4: Signal with Plain Text Data
+CREATE TEMP TABLE _test_signal_text (instance_id TEXT);
+
+INSERT INTO _test_signal_text SELECT df.start(
+    df.wait_for_signal('plain_text') |=> 'sig'
+    ~> 'INSERT INTO signal_test_log (msg, data)
+        VALUES (
+            ''plain_text_received'',
+            jsonb_build_object(
+                ''timed_out'', ($sig::jsonb->>''timed_out'')::boolean,
+                ''data_type'', jsonb_typeof($sig::jsonb->''data''),
+                ''data_text'', $sig::jsonb->>''data''
+            )
+        )',
+    'test-signal-text'
+);
+
+SELECT pg_sleep(1);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_signal_text;
+
+    PERFORM df.signal(inst_id, 'plain_text', 'approve');
+    RAISE NOTICE 'Testing signal with plain text data: %', inst_id;
+
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: signal plain text status = %', status;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM signal_test_log
+        WHERE msg = 'plain_text_received'
+        AND (data->>'timed_out')::boolean = false
+        AND data->>'data_type' = 'string'
+        AND data->>'data_text' = 'approve'
+    ) THEN
+        RAISE EXCEPTION 'TEST FAILED: plain text signal data not preserved';
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: signal_plain_text_data';
+END $$;
+
+DROP TABLE _test_signal_text;
 DROP TABLE signal_test_log;
 
 RESET SESSION AUTHORIZATION;

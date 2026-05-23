@@ -289,7 +289,7 @@ Sends a signal to a running instance.
 |-----------|------|-----------|-------------|
 | `instance_id` | TEXT | ❌ Literal | Target instance ID |
 | `signal_name` | TEXT | ❌ Literal | Signal name |
-| `signal_data` | TEXT | ❌ Literal | JSON payload (default: '{}') |
+| `signal_data` | TEXT | ❌ Literal | Optional signal payload text (default: '{}'). Valid JSON is preserved; other text is sent as a JSON string. |
 
 ```sql
 df.signal('a1b2c3d4', 'approval', '{"approved": true}')
@@ -486,5 +486,4 @@ SHOW pg_durable.enable_superuser_instances;
 ```
 
 **Security note:** Setting this GUC to `on` in a multi-tenant environment allows any role with `BYPASSRLS` to forge `submitted_by` to a superuser OID and execute arbitrary SQL as superuser. Keep `off` unless you have a specific need and understand the risk. See [docs/superuser_guc.md](superuser_guc.md) for the full threat analysis.
-
 

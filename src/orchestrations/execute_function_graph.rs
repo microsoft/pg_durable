@@ -942,6 +942,11 @@ async fn execute_signal_node(
     node_id: &str,
     results: &mut HashMap<String, String>,
 ) -> Result<String, String> {
+    let parse_signal_data = |data_str: &str| {
+        serde_json::from_str::<serde_json::Value>(data_str)
+            .unwrap_or_else(|_| serde_json::Value::String(data_str.to_string()))
+    };
+
     let config_str = node
         .query
         .as_ref()
@@ -972,8 +977,7 @@ async fn execute_signal_node(
         match ctx.select2(signal_fut, timeout_fut).await {
             duroxide::Either2::First(data_str) => {
                 // Signal received - data_str is String directly
-                let data: serde_json::Value =
-                    serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+                let data = parse_signal_data(&data_str);
                 serde_json::json!({
                     "signal_name": signal_name,
                     "timed_out": false,
@@ -992,8 +996,7 @@ async fn execute_signal_node(
     } else {
         // Wait forever - schedule_wait returns String directly now
         let data_str = ctx.schedule_wait(signal_name).await;
-        let data: serde_json::Value =
-            serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+        let data = parse_signal_data(&data_str);
         serde_json::json!({
             "signal_name": signal_name,
             "timed_out": false,

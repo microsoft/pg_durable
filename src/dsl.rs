@@ -572,7 +572,7 @@ pub fn wait_for_signal(name: &str, timeout_seconds: default!(Option<i32>, "NULL"
 /// # Arguments
 /// * `instance_id` - The durable function instance ID to signal
 /// * `signal_name` - Name of the signal (must match what the instance is waiting for)
-/// * `signal_data` - JSON payload to send with the signal (defaults to '{}')
+/// * `signal_data` - Optional signal payload text (defaults to '{}')
 ///
 /// # Returns
 /// 'OK' on success, raises error on failure
@@ -588,10 +588,9 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
         pgrx::error!("Signal name cannot be empty");
     }
 
-    // Validate signal_data is valid JSON
-    if serde_json::from_str::<serde_json::Value>(signal_data).is_err() {
-        pgrx::error!("Signal data must be valid JSON");
-    }
+    let signal_data = serde_json::from_str::<serde_json::Value>(signal_data)
+        .unwrap_or_else(|_| serde_json::Value::String(signal_data.to_string()))
+        .to_string();
 
     // Ownership check: SPI goes through RLS, so this returns false for
     // non-owned instances (the row is invisible to the calling user).
@@ -606,7 +605,7 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
         pgrx::error!("Instance not found or access denied: {}", instance_id);
     }
 
-    match raise_external_event(instance_id, signal_name, signal_data) {
+    match raise_external_event(instance_id, signal_name, &signal_data) {
         Ok(_) => "OK".to_string(),
         Err(e) => pgrx::error!("Failed to send signal: {}", e),
     }

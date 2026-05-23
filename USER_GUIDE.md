@@ -1069,7 +1069,7 @@ SELECT df.signal('instance_id', 'signal_name', '{"data": "value"}');
 **Parameters:**
 - `instance_id` - The durable function instance ID (required)
 - `signal_name` - Name of the signal (must match what the instance is waiting for)
-- `signal_data` - JSON payload (optional, defaults to `'{}'`)
+- `signal_data` - Optional signal payload text (defaults to `'{}'`). Valid JSON is preserved as JSON; other text is delivered as a JSON string.
 
 ### Signal Result Format
 
