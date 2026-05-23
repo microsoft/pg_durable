@@ -299,5 +299,46 @@ END $$;
 DROP TABLE _test_state2;
 DROP TABLE test_if_rows_dot;
 
+-- Test 4: named result on the IF node itself is accessible downstream
+DROP TABLE IF EXISTS test_if_named;
+CREATE TABLE test_if_named (id SERIAL, chosen INT);
+
+CREATE TEMP TABLE _test_if_named (instance_id TEXT);
+
+INSERT INTO _test_if_named SELECT df.start(
+    df.if(
+        'SELECT true',
+        'SELECT 41 AS chosen',
+        'SELECT 99 AS chosen'
+    ) |=> 'decision'
+    ~> $$INSERT INTO test_if_named (chosen) VALUES ($decision.chosen)$$,
+    'test-if-named-result'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    chosen_val INT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_if_named;
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [if-named]: status = %', status;
+    END IF;
+
+    SELECT chosen INTO chosen_val FROM test_if_named ORDER BY id DESC LIMIT 1;
+
+    IF chosen_val != 41 THEN
+        RAISE EXCEPTION 'TEST FAILED [if-named]: expected 41, got %', chosen_val;
+    END IF;
+
+    RAISE NOTICE 'PASSED: named IF result stored';
+END $$;
+
+DROP TABLE _test_if_named;
+DROP TABLE test_if_named;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

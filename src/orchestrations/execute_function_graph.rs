@@ -332,6 +332,19 @@ async fn execute_sql_node(
     Ok(result)
 }
 
+fn store_named_result(
+    ctx: &OrchestrationContext,
+    node: &FunctionNode,
+    result: &str,
+    results: &mut HashMap<String, String>,
+    node_label: &str,
+) {
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing {node_label} result as ${name}"));
+        results.insert(name.clone(), result.to_string());
+    }
+}
+
 async fn execute_then_node(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -363,6 +376,8 @@ async fn execute_then_node(
         ctx, graph, right_id, results, exec_ctx,
     ))
     .await?;
+
+    store_named_result(ctx, node, &right_result, results, "THEN");
 
     Ok(right_result)
 }
@@ -474,6 +489,7 @@ async fn execute_loop_node(
         ctx.trace_info(format!(
             "Loop terminated by break with value: {break_value}"
         ));
+        store_named_result(ctx, node, &break_value, results, "LOOP");
         return Ok(break_value);
     }
 
@@ -499,6 +515,7 @@ async fn execute_loop_node(
 
                 if !should_continue {
                     ctx.trace_info("Loop condition false, exiting loop");
+                    store_named_result(ctx, node, &body_result, results, "LOOP");
                     return Ok(body_result);
                 }
             }
@@ -639,15 +656,19 @@ async fn execute_if_node(
     ctx.trace_info(format!("Condition evaluated to: {is_true}"));
 
     if is_true {
-        Box::pin(execute_function_node_with_vars(
+        let result = Box::pin(execute_function_node_with_vars(
             ctx, graph, then_id, results, exec_ctx,
         ))
-        .await
+        .await?;
+        store_named_result(ctx, node, &result, results, "IF");
+        Ok(result)
     } else {
-        Box::pin(execute_function_node_with_vars(
+        let result = Box::pin(execute_function_node_with_vars(
             ctx, graph, else_id, results, exec_ctx,
         ))
-        .await
+        .await?;
+        store_named_result(ctx, node, &result, results, "IF");
+        Ok(result)
     }
 }
 
