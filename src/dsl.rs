@@ -10,7 +10,9 @@ use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::client::start_durable_function;
-use crate::types::{short_id, validate_result_name, Durofut, FunctionInput};
+use crate::types::{
+    mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
+};
 
 /// Check if we're running inside a workflow context (background worker connection).
 /// The background worker sets df.in_workflow='true' on all its connections.
@@ -113,10 +115,6 @@ fn legacy_login_role_schema() -> bool {
     !owner_scoped_vars_enabled()
 }
 
-fn non_future_helper_sentinel(function_name: &str) -> String {
-    serde_json::json!({ "__pg_durable_non_future__": function_name }).to_string()
-}
-
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -137,7 +135,8 @@ pub fn setvar(name: &str, value: &str) -> String {
     if let Err(e) = Spi::run_with_args(sql, &[name.into(), value.into()]) {
         pgrx::error!("Failed to set variable: {:?}", e);
     }
-    non_future_helper_sentinel("df.setvar")
+    mark_non_future_helper_call("df.setvar");
+    "OK".to_string()
 }
 
 /// Gets a workflow variable value.
@@ -171,7 +170,8 @@ pub fn unsetvar(name: &str) -> String {
     if let Err(e) = Spi::run_with_args(sql, &[name.into()]) {
         pgrx::error!("Failed to unset variable: {:?}", e);
     }
-    non_future_helper_sentinel("df.unsetvar")
+    mark_non_future_helper_call("df.unsetvar");
+    "OK".to_string()
 }
 
 /// Clears all workflow variables owned by the current user.
@@ -191,7 +191,8 @@ pub fn clearvars() -> String {
     if let Err(e) = Spi::run(sql) {
         pgrx::error!("Failed to clear variables: {:?}", e);
     }
-    non_future_helper_sentinel("df.clearvars")
+    mark_non_future_helper_call("df.clearvars");
+    "OK".to_string()
 }
 
 // ============================================================================

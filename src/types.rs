@@ -1,6 +1,6 @@
 //! Core types and configuration for pg_durable
 
-use pgrx::pg_extern;
+use pgrx::{pg_extern, Spi};
 
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
@@ -808,7 +808,16 @@ pub const VALID_NODE_TYPES: &[&str] = &[
     "HTTP",
     "SIGNAL",
 ];
-const NON_FUTURE_SENTINEL_KEY: &str = "__pg_durable_non_future__";
+const NON_FUTURE_HELPER_GUC: &str = "df.non_future_helper";
+
+pub fn mark_non_future_helper_call(function_name: &str) {
+    if let Err(e) = Spi::run_with_args(
+        "SELECT pg_catalog.set_config('df.non_future_helper', $1 || E'\n' || pg_catalog.statement_timestamp()::text, true)",
+        &[function_name.into()],
+    ) {
+        pgrx::error!("Failed to mark helper call: {:?}", e);
+    }
+}
 
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as nested structures, not stored as ID references.
@@ -827,14 +836,24 @@ pub struct Durofut {
 }
 
 impl Durofut {
-    fn non_future_helper_name(s: &str) -> Option<String> {
-        serde_json::from_str::<serde_json::Value>(s)
-            .ok()
-            .and_then(|v| {
-                v.get(NON_FUTURE_SENTINEL_KEY)
-                    .and_then(|h| h.as_str())
-                    .map(ToString::to_string)
-            })
+    fn same_statement_non_future_helper_name(s: &str) -> Option<String> {
+        if s != "OK" {
+            return None;
+        }
+
+        let marker = Spi::get_one::<String>(&format!(
+            "SELECT pg_catalog.current_setting('{}', true)",
+            NON_FUTURE_HELPER_GUC
+        ))
+        .ok()
+        .flatten()?;
+        let (helper_name, marker_timestamp) = marker.split_once('\n')?;
+        let statement_timestamp =
+            Spi::get_one::<String>("SELECT pg_catalog.statement_timestamp()::text")
+                .ok()
+                .flatten()?;
+
+        (marker_timestamp == statement_timestamp).then(|| helper_name.to_string())
     }
 
     fn non_future_helper_error(helper_name: &str) -> String {
@@ -862,7 +881,7 @@ impl Durofut {
     /// Ensure a string is a Durofut - if it's already one, parse it; if not, treat as SQL and create a node.
     /// Uses a single deserialization attempt to avoid redundant parsing.
     pub fn ensure(s: &str) -> Self {
-        if let Some(helper_name) = Self::non_future_helper_name(s) {
+        if let Some(helper_name) = Self::same_statement_non_future_helper_name(s) {
             pgrx::error!("{}", Self::non_future_helper_error(&helper_name));
         }
         match serde_json::from_str::<Durofut>(s) {
@@ -878,7 +897,7 @@ impl Durofut {
     /// Strict version of ensure - rejects JSON with unknown node_type instead of wrapping as SQL.
     /// Used by df.start() and other entrypoints where invalid node types should be caught early.
     pub fn ensure_strict(s: &str) -> Result<Self, String> {
-        if let Some(helper_name) = Self::non_future_helper_name(s) {
+        if let Some(helper_name) = Self::same_statement_non_future_helper_name(s) {
             return Err(Self::non_future_helper_error(&helper_name));
         }
         match serde_json::from_str::<Durofut>(s) {
