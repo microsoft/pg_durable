@@ -10,7 +10,9 @@ use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::client::start_durable_function;
-use crate::types::{short_id, validate_result_name, Durofut, FunctionInput};
+use crate::types::{
+    mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
+};
 
 /// Check if we're running inside a workflow context (background worker connection).
 /// The background worker sets df.in_workflow='true' on all its connections.
@@ -133,6 +135,7 @@ pub fn setvar(name: &str, value: &str) -> String {
     if let Err(e) = Spi::run_with_args(sql, &[name.into(), value.into()]) {
         pgrx::error!("Failed to set variable: {:?}", e);
     }
+    mark_non_future_helper_call("df.setvar");
     "OK".to_string()
 }
 
@@ -167,6 +170,7 @@ pub fn unsetvar(name: &str) -> String {
     if let Err(e) = Spi::run_with_args(sql, &[name.into()]) {
         pgrx::error!("Failed to unset variable: {:?}", e);
     }
+    mark_non_future_helper_call("df.unsetvar");
     "OK".to_string()
 }
 
@@ -187,6 +191,7 @@ pub fn clearvars() -> String {
     if let Err(e) = Spi::run(sql) {
         pgrx::error!("Failed to clear variables: {:?}", e);
     }
+    mark_non_future_helper_call("df.clearvars");
     "OK".to_string()
 }
 
