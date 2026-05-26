@@ -10,7 +10,9 @@ use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::client::start_durable_function;
-use crate::types::{short_id, validate_result_name, Durofut, FunctionInput};
+use crate::types::{
+    looks_like_sql_statement, short_id, validate_result_name, Durofut, FunctionInput,
+};
 
 /// Check if we're running inside a workflow context (background worker connection).
 /// The background worker sets df.in_workflow='true' on all its connections.
@@ -113,6 +115,40 @@ fn legacy_login_role_schema() -> bool {
     !owner_scoped_vars_enabled()
 }
 
+fn plain_text_composer_error(function_name: &str, argument_index: usize, value: &str) -> String {
+    let preview = value.trim().replace('\n', " ");
+    let preview = preview.chars().take(60).collect::<String>();
+    format!(
+        "argument {} to df.{} is plain text '{}', not a future envelope",
+        argument_index, function_name, preview
+    )
+}
+
+fn ensure_composable_argument(
+    function_name: &str,
+    argument_index: usize,
+    value: &str,
+) -> Result<Durofut, String> {
+    let fut = Durofut::ensure_strict(value).map_err(|e| {
+        format!(
+            "argument {} to df.{} is not a valid future envelope: {}",
+            argument_index, function_name, e
+        )
+    })?;
+
+    if fut.node_type == "SQL" {
+        let query = fut.query.as_deref().unwrap_or_default();
+        if !looks_like_sql_statement(query) {
+            return Err(format!(
+                "{}\nHINT:  functions that return text cannot be composed; did you mean df.sql(...) or a wait primitive?",
+                plain_text_composer_error(function_name, argument_index, query)
+            ));
+        }
+    }
+
+    Ok(fut)
+}
+
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -210,8 +246,8 @@ pub fn sql(query: &str) -> String {
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(name = "seq", schema = "df")]
 pub fn then_fn(a: &str, b: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
+    let a_fut = ensure_composable_argument("seq", 1, a).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let b_fut = ensure_composable_argument("seq", 2, b).unwrap_or_else(|e| pgrx::error!("{e}"));
 
     Durofut {
         node_type: "THEN".to_string(),
@@ -231,7 +267,8 @@ pub fn as_named(fut: &str, name: &str) -> String {
     if let Err(msg) = validate_result_name(name) {
         pgrx::error!("df.as: {msg}");
     }
-    let mut durofut = Durofut::ensure(fut);
+    let mut durofut =
+        ensure_composable_argument("as", 1, fut).unwrap_or_else(|e| pgrx::error!("{e}"));
     durofut.result_name = Some(name.to_string());
 
     durofut.to_json()
@@ -303,10 +340,12 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 /// ```
 #[pg_extern(name = "loop", schema = "df")]
 pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String {
-    let body_fut = Durofut::ensure(body);
+    let body_fut =
+        ensure_composable_argument("loop", 1, body).unwrap_or_else(|e| pgrx::error!("{e}"));
 
     let query = if let Some(cond) = condition {
-        let cond_fut = Durofut::ensure(cond);
+        let cond_fut =
+            ensure_composable_argument("loop", 2, cond).unwrap_or_else(|e| pgrx::error!("{e}"));
         let config = serde_json::json!({
             "condition_node": cond_fut
         });
@@ -360,9 +399,12 @@ pub fn break_fn(value: default!(Option<&str>, "NULL")) -> String {
 /// All arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(name = "if", schema = "df")]
 pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
-    let condition_fut = Durofut::ensure(condition);
-    let then_fut = Durofut::ensure(then_branch);
-    let else_fut = Durofut::ensure(else_branch);
+    let condition_fut =
+        ensure_composable_argument("if", 1, condition).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let then_fut =
+        ensure_composable_argument("if", 2, then_branch).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let else_fut =
+        ensure_composable_argument("if", 3, else_branch).unwrap_or_else(|e| pgrx::error!("{e}"));
 
     let config = serde_json::json!({
         "condition_node": condition_fut
@@ -383,8 +425,10 @@ pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
 /// in-memory result JSON for row_count > 0. Zero-cost, no activity scheduled.
 #[pg_extern(name = "if_rows", schema = "df")]
 pub fn if_rows_fn(result_name: &str, then_branch: &str, else_branch: &str) -> String {
-    let then_fut = Durofut::ensure(then_branch);
-    let else_fut = Durofut::ensure(else_branch);
+    let then_fut = ensure_composable_argument("if_rows", 2, then_branch)
+        .unwrap_or_else(|e| pgrx::error!("{e}"));
+    let else_fut = ensure_composable_argument("if_rows", 3, else_branch)
+        .unwrap_or_else(|e| pgrx::error!("{e}"));
 
     let config = serde_json::json!({
         "condition_type": "result_has_rows",
@@ -405,8 +449,8 @@ pub fn if_rows_fn(result_name: &str, then_branch: &str, else_branch: &str) -> St
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(schema = "df")]
 pub fn join(a: &str, b: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
+    let a_fut = ensure_composable_argument("join", 1, a).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let b_fut = ensure_composable_argument("join", 2, b).unwrap_or_else(|e| pgrx::error!("{e}"));
 
     Durofut {
         node_type: "JOIN".to_string(),
@@ -421,9 +465,9 @@ pub fn join(a: &str, b: &str) -> String {
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(name = "join3", schema = "df")]
 pub fn join3(a: &str, b: &str, c: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
-    let c_fut = Durofut::ensure(c);
+    let a_fut = ensure_composable_argument("join3", 1, a).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let b_fut = ensure_composable_argument("join3", 2, b).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let c_fut = ensure_composable_argument("join3", 3, c).unwrap_or_else(|e| pgrx::error!("{e}"));
 
     let config = serde_json::json!({
         "extra_nodes": [c_fut]
@@ -443,8 +487,8 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(schema = "df")]
 pub fn race(a: &str, b: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
+    let a_fut = ensure_composable_argument("race", 1, a).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let b_fut = ensure_composable_argument("race", 2, b).unwrap_or_else(|e| pgrx::error!("{e}"));
 
     Durofut {
         node_type: "RACE".to_string(),
@@ -625,10 +669,8 @@ pub fn start(
     label: default!(Option<&str>, "NULL"),
     database: default!(Option<&str>, "NULL"),
 ) -> String {
-    let durofut = match Durofut::ensure_strict(fut) {
-        Ok(d) => d,
-        Err(e) => pgrx::error!("Invalid durable function: {}", e),
-    };
+    let durofut = ensure_composable_argument("start", 1, fut)
+        .unwrap_or_else(|e| pgrx::error!("Invalid durable function: {e}"));
 
     // Validate the entire graph recursively before inserting
     if let Err(e) = durofut.validate_recursive() {
@@ -988,8 +1030,8 @@ pub fn result(instance_id: &str) -> Option<String> {
 /// Polls the instance status every 100ms until it reaches a terminal state
 /// (completed, failed, or cancelled) or the timeout is exceeded.
 ///
-/// This is a helper function for pg_regress tests to simplify polling logic
-/// and ensure deterministic test output.
+/// This is a blocking helper for pg_regress tests and app-side polling.
+/// It is not durable and must not be composed into df.seq/df.join/df.race/etc.
 ///
 /// # Arguments
 /// * `instance_id` - The durable function instance ID to wait for
@@ -1047,7 +1089,8 @@ pub fn wait_for_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_semver;
+    use super::{ensure_composable_argument, parse_semver};
+    use crate::types::Durofut;
 
     #[test]
     fn test_parse_semver_basic() {
@@ -1078,5 +1121,41 @@ mod tests {
         assert!(parse_semver("0.1.1").unwrap() < (0, 2, 0));
         assert!(parse_semver("0.3.0").unwrap() >= (0, 2, 0));
         assert!(parse_semver("1.0.0").unwrap() >= (0, 2, 0));
+    }
+
+    #[test]
+    fn test_ensure_composable_argument_accepts_plain_sql() {
+        let fut = ensure_composable_argument("seq", 1, "SELECT 1").expect("plain SQL should work");
+        assert_eq!(fut.node_type, "SQL");
+        assert_eq!(fut.query.as_deref(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn test_ensure_composable_argument_accepts_future_envelope() {
+        let sql = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        }
+        .to_json();
+
+        let fut = ensure_composable_argument("seq", 1, &sql).expect("future envelope should work");
+        assert_eq!(fut.node_type, "SQL");
+        assert_eq!(fut.query.as_deref(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn test_ensure_composable_argument_rejects_plain_text_status() {
+        let err = ensure_composable_argument("seq", 1, "completed")
+            .expect_err("plain text status should be rejected");
+        assert!(
+            err.contains("argument 1 to df.seq"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("plain text 'completed'"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("HINT:"), "unexpected error: {err}");
     }
 }
