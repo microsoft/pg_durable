@@ -9,27 +9,31 @@ pg_durable follows a two-phase upgrade model:
 
 This means the new `.so` **must be backward compatible** with the previous version's schema. The `.so` and the upgrade script are not atomic — there is an extended period where the new binary runs against the old schema.
 
+Compatibility is scoped to a **provider compatibility line**. A provider line is the set of pg_durable versions that use the same durable-state provider family and are expected to upgrade in place. The open-source line starts at v0.2.2, where pg_durable switches from `duroxide-pg-opt` to crates.io `duroxide-pg`. Versions before v0.2.2 used `duroxide-pg-opt`; they are not upgrade sources for the `duroxide-pg` line because the provider schemas and runtime state are different. Azure's fork owns upgrade testing for the `duroxide-pg-opt` line.
+
 We never downgrade. Downgrade scripts are not needed.
 
 ## Test Scenarios
 
 ### Chain tests vs. direct-contact tests
 
-Scenarios A and B2 are **chain tests**: PostgreSQL applies upgrade scripts sequentially (v0.1.1→v0.2.0→v0.3.0), so each step is validated transitively by its own version's CI. Testing the current upgrade script against the immediately previous version is sufficient.
+Scenarios A and B2 are **chain tests**: PostgreSQL applies upgrade scripts sequentially (v0.2.2→v0.2.3→v0.3.0 within the current provider line), so each step is validated transitively by its own version's CI. Testing the current upgrade script against the immediately previous compatible version is sufficient.
 
-Scenario B1 is a **direct-contact test**: the `.so` faces whatever raw schema the customer has, with no intermediate transformation. There is no chain — a customer on v0.1.1 who receives the v0.5.0 binary without ever upgrading has a v0.1.1 schema with a v0.5.0 `.so`. That's why B1 must test against all previous versions.
+Scenario B1 is a **direct-contact test**: the `.so` faces whatever raw schema the customer has, with no intermediate transformation. There is no chain — a customer on v0.2.2 who receives the v0.5.0 binary without ever upgrading has a v0.2.2 schema with a v0.5.0 `.so`. That's why B1 must test against all previous compatible versions in the same provider line.
 
-### Major version boundaries
+### Compatibility boundaries
 
-All three scenarios scope to versions within the same major version:
-- **B1**: A major version bump is the boundary where binary backward compatibility may be dropped. The new `.so` does not need to work with schemas from a previous major version.
-- **A and B2**: Upgrade scripts still need to work across a major version bump — customers must be able to upgrade their schema. However, the transitive chain property means testing only the immediately previous version is still sufficient.
+All three scenarios scope to versions within the same provider compatibility line. A provider-line boundary is stronger than a major-version boundary: the new `.so` does not need to execute against provider state from another line, and the upgrade tests should not treat that crossing as a required customer path.
+
+- **B1**: Tests all previous schemas in the current provider line. It skips versions before `PROVIDER_COMPAT_START_VERSION`.
+- **A and B2**: Test the immediately previous version only when that previous version is in the current provider line. If the current version is the first version in a provider line, A and B2 are skipped because there is no valid previous upgrade source for that line.
+- **Major versions**: A major version bump can still be used as a compatibility boundary. When no provider-line split is involved, the previous same-major rules continue to apply.
 
 ### Scenario A: Schema Upgrade Correctness
 
 **Goal:** Verify that `ALTER EXTENSION UPDATE` produces an identical schema to a fresh `CREATE EXTENSION`.
 
-**Contract:** For a not-yet-released version, the fresh-install schema is expected to match what an existing customer would get by starting from the immediately previous shipped version and applying the shipped upgrade chain to the new version. In other words, Scenario A treats the upgrade result as the reference shape for already-shipped versions. If fresh install and upgrade differ before release, prefer aligning the new version's fresh-install DDL with the upgrade path unless there is a deliberate reason to change the contract.
+**Contract:** For a not-yet-released version, the fresh-install schema is expected to match what an existing customer would get by starting from the immediately previous compatible shipped version and applying the shipped upgrade chain to the new version. In other words, Scenario A treats the upgrade result as the reference shape for already-shipped versions in the current provider line. If fresh install and upgrade differ before release, prefer aligning the new version's fresh-install DDL with the upgrade path unless there is a deliberate reason to change the contract.
 
 **Method:**
 1. Install current `.so` and all upgrade SQL files
@@ -42,21 +46,21 @@ All three scenarios scope to versions within the same major version:
 - Wrong column types, defaults, or constraint names
 - Ordering issues in upgrade SQL
 
-**Why only the immediately previous version?** Upgrade scripts are frozen once shipped. The chain of upgrades (v0.1.1 → v0.2.0 → v0.3.0) is validated transitively — each version's CI tests its own upgrade script. Only the current work-in-progress upgrade script might introduce an inconsistency, so testing it against the immediately previous version is sufficient.
+**Why only the immediately previous compatible version?** Upgrade scripts are frozen once shipped. The chain of upgrades (v0.2.2 → v0.2.3 → v0.3.0 within a provider line) is validated transitively — each version's CI tests its own upgrade script. Only the current work-in-progress upgrade script might introduce an inconsistency, so testing it against the immediately previous compatible version is sufficient.
 
 **Priority:** High — foundational test, catches the most common class of upgrade bugs.
 
 ### Scenario B1: Binary Backward Compatibility
 
-**Goal:** Verify that the new `.so` works correctly against **all** previous versions' schemas, not just the immediately previous one. Customers may never run `ALTER EXTENSION UPDATE`, so the new binary must work against any older schema.
+**Goal:** Verify that the new `.so` works correctly against **all** previous compatible versions' schemas, not just the immediately previous one. Customers may never run `ALTER EXTENSION UPDATE`, so the new binary must work against any older schema in the same provider line.
 
-This is the **most deployment-critical test** because the new binary may run against any older schema indefinitely. A customer on v0.1.1 who receives the v0.5.0 binary without ever upgrading must still be able to use the extension.
+This is the **most deployment-critical test** because the new binary may run against any older compatible schema indefinitely. A customer on v0.2.2 who receives the v0.5.0 binary without ever upgrading must still be able to use the extension.
 
-We test against all previous versions within the same major version. A major version bump is the boundary where backward compatibility may be dropped.
+We test against all previous versions in the same provider compatibility line. The line starts at `PROVIDER_COMPAT_START_VERSION` in `scripts/test-upgrade.sh`, which can be overridden by downstream forks or CI environments.
 
 **Method:**
 1. Install the new `.so`
-2. For each previous version (same major): create the extension with that version's install SQL
+2. For each previous compatible version: create the extension with that version's install SQL
 3. Exercise all SQL-callable functions against each schema
 4. Verify: no errors, correct results
 
@@ -80,9 +84,9 @@ We test against all previous versions within the same major version. A major ver
 
 ### Scenario B2: Data Compatibility After Upgrade
 
-**Goal:** Verify that data created under the previous version remains accessible and functional after `ALTER EXTENSION UPDATE`.
+**Goal:** Verify that data created under the previous compatible version remains accessible and functional after `ALTER EXTENSION UPDATE`.
 
-This is a **chain test** (like Scenario A) — upgrade scripts are applied sequentially, so testing against the immediately previous version is sufficient. Each intermediate upgrade was validated by its own version's CI.
+This is a **chain test** (like Scenario A) — upgrade scripts are applied sequentially within the provider compatibility line, so testing against the immediately previous compatible version is sufficient. Each intermediate upgrade was validated by its own version's CI.
 
 **Method:**
 1. Create extension at previous version
@@ -145,7 +149,7 @@ Returns the version that was last installed/updated. Compare against known thres
 
 - `sql/pg_durable--0.1.1.sql` — first install SQL for the current major version (only the first version per major needs a fixture; intermediate versions are reconstructed by chaining upgrade scripts)
 - `sql/pg_durable--0.1.1--0.2.0.sql` — upgrade script (initially empty, populated by subsequent PRs)
-- `scripts/test-upgrade.sh` — runs Scenarios A, B1, and B2
+- `scripts/test-upgrade.sh` — runs Scenarios A, B1, and B2. The `PROVIDER_COMPAT_START_VERSION` environment variable/default controls the first version in the current provider compatibility line. Versions before that boundary are excluded from B1 and cannot be used as A/B2 upgrade sources.
 - CI step in `.github/workflows/ci.yml`
 
 ### Per-version checklist
@@ -153,7 +157,7 @@ Returns the version that was last installed/updated. Compare against known thres
 Each PR that changes the extension schema or modifies SQL queries in Rust code should:
 
 1. Add the necessary DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`)
-2. Ensure the `.so` is backward compatible with **all** previous schemas within the same major version (Scenario B1)
+2. Ensure the `.so` is backward compatible with **all** previous schemas in the same provider compatibility line (Scenario B1)
 3. Add version-specific notes to this document under "Version-Specific Changes" below
 4. Pass upgrade tests in CI
 
@@ -166,11 +170,12 @@ Each PR that changes the extension schema or modifies SQL queries in Rust code s
 **Minor release** (e.g. 0.2.0 → 0.3.0):
 1. Create empty `sql/pg_durable--<N>--<N+1>.sql` upgrade script
 2. Bump `Cargo.toml` version to `<N+1>`
+3. If this release starts a new provider compatibility line, update the `PROVIDER_COMPAT_START_VERSION` default in `scripts/test-upgrade.sh` and document the boundary under "Version-Specific Changes". Downstream forks can instead override `PROVIDER_COMPAT_START_VERSION` in CI to keep the script shared.
 
 If this is the first minor after a new major (e.g. 1.0.0 → 1.1.0), also:
 
-3. Check in `sql/pg_durable--<major>.sql` as the first install SQL fixture for the new major (e.g. copy the generated `pg_durable--1.0.0.sql` from the extension directory)
-4. Optionally delete the previous major's install SQL fixture and upgrade scripts — they are no longer needed by any of A, B1, or B2
+4. Check in `sql/pg_durable--<major>.sql` as the first install SQL fixture for the new major (e.g. copy the generated `pg_durable--1.0.0.sql` from the extension directory)
+5. Optionally delete the previous major's install SQL fixture and upgrade scripts — they are no longer needed by any of A, B1, or B2
 
 No additional fixture is needed for subsequent minors — intermediate versions are reconstructed by chaining `ALTER EXTENSION UPDATE` from the first version's install SQL.
 
@@ -178,7 +183,7 @@ No additional fixture is needed for subsequent minors — intermediate versions 
 1. Create empty `sql/pg_durable--<N>--<1.0.0>.sql` upgrade script
 2. Bump `Cargo.toml` version to `<1.0.0>`
 
-`cargo pgrx package` generates the new major's install SQL. The previous major's install SQL and upgrade scripts are still needed for the A/B2 upgrade chain. B1 will be a no-op — there are no previous versions within the new major to test backward compatibility against.
+`cargo pgrx package` generates the new major's install SQL. The previous major's install SQL and upgrade scripts are still needed for the A/B2 upgrade chain when the provider line continues across the major bump. B1 will be a no-op if there are no previous compatible versions within the new major, or if `PROVIDER_COMPAT_START_VERSION` marks the new major as the start of a new provider line.
 
 ---
 
@@ -240,10 +245,11 @@ what the upgrade script handles, and any backward compatibility considerations.
 #### Switch to crates.io duroxide-pg 0.1.34 + duroxide 0.1.29
 - **DDL change (df schema):** None. This is a provider source and version update only.
 - **DDL change (duroxide schema):** No extension upgrade script DDL is required. The BGW continues to own provider migrations through `MigrationPolicy::ApplyAll`.
-- **Scenario A considerations:** The `df` schema equivalence contract is unchanged. The `duroxide` schema remains excluded from snapshot diffs because it is populated at runtime by the BGW.
-- **Scenario B1 considerations:** The new `.so` must continue to initialize against older provider schemas; any missing provider migrations are applied by the BGW at startup.
-- **Scenario B2 considerations:** No user data migration is needed. Existing `df.*` metadata and workflow state are unaffected by changing the provider dependency source from the local provider tree to crates.io.
-- **Current status:** Implemented — `Cargo.toml` exactly pins `duroxide = "=0.1.29"` and `duroxide-pg = "=0.1.34"`.
+- **Provider compatibility boundary:** v0.2.2 is the first version in the open-source `duroxide-pg` provider line. Earlier pg_durable versions used `duroxide-pg-opt`, whose SQL migrations and runtime state are not an upgrade source for this line. GitHub CI therefore sets `PROVIDER_COMPAT_START_VERSION=0.2.2` by default and skips A/B1/B2 coverage that would cross from `duroxide-pg-opt` to `duroxide-pg`. Azure's fork owns upgrade testing for the `duroxide-pg-opt` line.
+- **Scenario A considerations:** Skipped for the v0.2.1 → v0.2.2 boundary in GitHub CI because v0.2.1 is before the provider compatibility start. Future `duroxide-pg`-line releases resume the normal fresh-vs-upgraded `df` schema comparison against the immediately previous compatible version.
+- **Scenario B1 considerations:** The new `.so` is not required to execute against pre-v0.2.2 `duroxide-pg-opt` provider state. A failure pattern where basic `df.*` functions work but provider-backed execution remains pending is expected across that boundary and should not be treated as a GitHub CI regression. Future `duroxide-pg`-line releases must remain binary-compatible with v0.2.2+ schemas unless a later provider-line or major-version boundary explicitly changes that contract.
+- **Scenario B2 considerations:** Data compatibility is not tested across the `duroxide-pg-opt` → `duroxide-pg` split. Future `duroxide-pg`-line releases must preserve data created under the immediately previous compatible version.
+- **Current status:** Implemented — `Cargo.toml` exactly pins `duroxide = "=0.1.29"` and `duroxide-pg = "=0.1.34"`; `scripts/test-upgrade.sh` defaults `PROVIDER_COMPAT_START_VERSION` to `0.2.2` while allowing forks/CI to override it.
 
 #### Named Results v2 — df.if_rows
 - **DDL change:** Upgrade script adds `CREATE FUNCTION df.if_rows(result_name text, then_branch text, else_branch text)` — a new C-language function backed by the pgrx `#[pg_extern]` `if_rows_fn_wrapper` symbol.

@@ -79,6 +79,19 @@ EXTENSION_DIR=$("$PG_CONFIG" --sharedir)/extension
 CURRENT_VERSION=$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 CURRENT_MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
 
+# First pg_durable version in the current provider compatibility line.
+# Versions before this are not valid B1/B2 upgrade sources for this line.
+# Keep this environment-overridable so downstream forks can reuse this script
+# while testing their own provider lineage.
+PROVIDER_COMPAT_START_VERSION="${PROVIDER_COMPAT_START_VERSION:-0.2.2}"
+
+version_ge() {
+    local left="$1"
+    local right="$2"
+
+    [ "$(printf '%s\n%s\n' "$right" "$left" | sort -V | head -1)" = "$right" ]
+}
+
 first_fixture_for_major() {
     local target_major="$1"
     local version=""
@@ -125,19 +138,25 @@ fi
 
 # Discover all previous versions from upgrade scripts (for B1 generalized testing).
 # Each upgrade script pg_durable--FROM--TO.sql tells us FROM is a previous version.
-# B1 tests the current .so against ALL previous schemas, not just the immediately previous one.
+# B1 tests the current .so against all previous schemas in the current provider
+# compatibility line, not just the immediately previous one.
 ALL_PREV_VERSIONS=()
 for f in "$PROJECT_DIR"/sql/pg_durable--*--*.sql; do
     fname=$(basename "$f")
     if [[ "$fname" =~ ^pg_durable--([0-9]+\.[0-9]+\.[0-9]+)--([0-9]+\.[0-9]+\.[0-9]+)\.sql$ ]]; then
         from_ver="${BASH_REMATCH[1]}"
         from_major=$(echo "$from_ver" | cut -d. -f1)
-        if [ "$from_major" = "$CURRENT_MAJOR" ]; then
+        if [ "$from_major" = "$CURRENT_MAJOR" ] && version_ge "$from_ver" "$PROVIDER_COMPAT_START_VERSION"; then
             ALL_PREV_VERSIONS+=("$from_ver")
         fi
     fi
 done
 IFS=$'\n' ALL_PREV_VERSIONS=($(sort -V -u <<< "${ALL_PREV_VERSIONS[*]}")); unset IFS
+
+HAS_COMPAT_PREV=false
+if version_ge "$PREV_VERSION" "$PROVIDER_COMPAT_START_VERSION"; then
+    HAS_COMPAT_PREV=true
+fi
 
 # Test databases — must use the pg_durable.database (default: postgres)
 # since the extension enforces it can only be created in that database.
@@ -155,11 +174,16 @@ echo "================================================"
 echo "pg_durable Upgrade Tests"
 echo -e "PostgreSQL: ${CYAN}PG${PG_VERSION}${NC} (port ${PG_PORT})"
 echo -e "First version (major ${CURRENT_MAJOR}): ${CYAN}${FIRST_VERSION}${NC}"
-echo -e "Scenario A upgrade path: ${CYAN}${PREV_VERSION} → ${CURRENT_VERSION}${NC}"
+echo -e "Provider compat start: ${CYAN}${PROVIDER_COMPAT_START_VERSION}${NC}"
+if [ "$HAS_COMPAT_PREV" = true ]; then
+    echo -e "Scenario A upgrade path: ${CYAN}${PREV_VERSION} → ${CURRENT_VERSION}${NC}"
+else
+    echo -e "Scenario A upgrade path: ${YELLOW}(previous version ${PREV_VERSION} is before provider compat start; skipped)${NC}"
+fi
 if [ ${#ALL_PREV_VERSIONS[@]} -gt 0 ]; then
     echo -e "Scenario B1 compat versions: ${CYAN}${ALL_PREV_VERSIONS[*]}${NC}"
 else
-    echo -e "Scenario B1 compat versions: ${YELLOW}(none in major ${CURRENT_MAJOR}; B1 skipped)${NC}"
+    echo -e "Scenario B1 compat versions: ${YELLOW}(none in provider compat line; B1 skipped)${NC}"
 fi
 echo "================================================"
 echo ""
@@ -575,7 +599,11 @@ snapshot_schema() {
 
 echo ""
 echo -e "${CYAN}Scenario A: Schema Upgrade Correctness${NC}"
-echo "  Testing: CREATE EXTENSION VERSION '$PREV_VERSION' + ALTER EXTENSION UPDATE = fresh CREATE EXTENSION"
+if [ "$HAS_COMPAT_PREV" = true ]; then
+    echo "  Testing: CREATE EXTENSION VERSION '$PREV_VERSION' + ALTER EXTENSION UPDATE = fresh CREATE EXTENSION"
+else
+    echo "  Skipping: previous version $PREV_VERSION is before provider compatibility start $PROVIDER_COMPAT_START_VERSION"
+fi
 echo ""
 
 test_schema_upgrade() {
@@ -634,7 +662,9 @@ test_schema_upgrade() {
     fi
 }
 
-run_test "Schema comparison (upgrade vs fresh install)" test_schema_upgrade
+if [ "$HAS_COMPAT_PREV" = true ]; then
+    run_test "Schema comparison (upgrade vs fresh install)" test_schema_upgrade
+fi
 
 # ============================================================================
 # Scenario B1: Binary backward compatibility
@@ -778,7 +808,7 @@ test_b1_instance_info() {
 if [ ${#ALL_PREV_VERSIONS[@]} -eq 0 ]; then
     echo ""
     echo -e "${CYAN}Scenario B1: Binary Backward Compatibility${NC}"
-    echo "  No previous versions within major ${CURRENT_MAJOR}; skipping direct-contact compatibility checks"
+    echo "  No previous versions in provider compatibility line ${PROVIDER_COMPAT_START_VERSION}+; skipping direct-contact compatibility checks"
 else
     for B1_VERSION in "${ALL_PREV_VERSIONS[@]}"; do
         echo ""
@@ -815,7 +845,11 @@ fi
 
 echo ""
 echo -e "${CYAN}Scenario B2: Data Compatibility After Upgrade${NC}"
-echo "  Testing: data created under v${PREV_VERSION} remains accessible after ALTER EXTENSION UPDATE"
+if [ "$HAS_COMPAT_PREV" = true ]; then
+    echo "  Testing: data created under v${PREV_VERSION} remains accessible after ALTER EXTENSION UPDATE"
+else
+    echo "  Skipping: previous version $PREV_VERSION is before provider compatibility start $PROVIDER_COMPAT_START_VERSION"
+fi
 echo ""
 
 B2_PRE_INSTANCE_ID=""
@@ -875,10 +909,12 @@ test_b2_new_data_after_upgrade() {
     assert_sql_equals "SELECT msg FROM test_upgrade_b2_log WHERE kind = 'post' ORDER BY id DESC LIMIT 1;" "new_value"
 }
 
-run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
-run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
-run_test "B2: In-flight work completes after upgrade" test_b2_inflight_work_after_upgrade
-run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
+if [ "$HAS_COMPAT_PREV" = true ]; then
+    run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
+    run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
+    run_test "B2: In-flight work completes after upgrade" test_b2_inflight_work_after_upgrade
+    run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
+fi
 
 # ============================================================================
 # Results
