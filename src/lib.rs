@@ -785,7 +785,6 @@ CREATE OPERATOR @> (
 mod tests {
     use crate::Durofut;
     use pgrx::prelude::*;
-    use std::sync::Arc;
 
     // ========================================================================
     // Test Helpers for Integration Tests
@@ -793,8 +792,7 @@ mod tests {
 
     /// Ensure the Duroxide store exists and is ready
     fn ensure_store_ready() -> Result<String, String> {
-        use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
-        use duroxide_pg::PostgresProvider;
+        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
         use std::time::{Duration, Instant};
 
         let pg_conn_str = postgres_connection_string();
@@ -809,10 +807,8 @@ mod tests {
             let start = Instant::now();
             let timeout = Duration::from_secs(10);
 
-            let config = backend_provider_config(&pg_conn_str);
-
             loop {
-                match PostgresProvider::new_with_config(config.clone()).await {
+                match new_backend_provider(&pg_conn_str).await {
                     Ok(_) => return Ok(format!("{pg_conn_str} (schema: {DUROXIDE_SCHEMA})")),
                     Err(e) => {
                         if start.elapsed() > timeout {
@@ -831,9 +827,8 @@ mod tests {
 
     /// Wait for a durable function to complete, polling Duroxide status
     fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
-        use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
         use duroxide::Client;
-        use duroxide_pg::PostgresProvider;
         use std::time::{Duration, Instant};
 
         // Ensure store is ready first
@@ -849,11 +844,7 @@ mod tests {
             .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
         rt.block_on(async {
-            let store = Arc::new(
-                PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str))
-                    .await
-                    .map_err(|e| format!("Failed to connect to store: {e}"))?,
-            );
+            let store = new_backend_provider(&pg_conn_str).await?;
             let client = Client::new(store);
 
             loop {
@@ -893,9 +884,8 @@ mod tests {
 
     /// Get the current status from Duroxide
     fn get_duroxide_status(instance_id: &str) -> Option<String> {
-        use crate::types::{backend_provider_config, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
         use duroxide::Client;
-        use duroxide_pg::PostgresProvider;
 
         let _ = ensure_store_ready().ok()?;
         let pg_conn_str = postgres_connection_string();
@@ -906,11 +896,7 @@ mod tests {
             .ok()?;
 
         rt.block_on(async {
-            let store = Arc::new(
-                PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str))
-                    .await
-                    .ok()?,
-            );
+            let store = new_backend_provider(&pg_conn_str).await.ok()?;
             let client = Client::new(store);
             client
                 .get_instance_info(instance_id)

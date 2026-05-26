@@ -19,11 +19,9 @@ Pre-builds must be enabled by a repository administrator:
    - **Reduce prebuild available to specific regions**: Optional
 4. Click **Create**
 
-### Submodule Access
+### Provider Dependencies
 
-The `duroxide-pg` submodule is a **public repository**, so no PAT or Codespaces secret is required for prebuilds or interactive Codespaces. The default Codespaces credentials are sufficient for `git submodule update --init --recursive`.
-
-> If you maintain a fork that points the submodule at a private alternative (for example `microsoft/duroxide-pg-opt`), you will need to add your own auth (Codespaces secret + `insteadOf` rewrite, or repository permission in `devcontainer.json`).
+`duroxide` and `duroxide-pg` are crates.io dependencies. No provider checkout, provider PAT, or extra Codespaces repository permission is required.
 
 ## How It Works
 
@@ -39,7 +37,7 @@ Codespaces has two distinct phases:
      - System dependencies (libssl, clang, bison, etc.)
      - cargo-pgrx 0.16.1
      - PostgreSQL 17 (downloaded and compiled via pgrx)
-     - `duroxide-pg` submodule (public, no auth required)
+   - Rust dependencies from crates.io
     - Builds and installs pg_durable
     - Recreates the local `~/.pgrx/data-17` cluster with `initdb -U postgres`
     - Pre-creates the `pg_durable` extension and verifies it
@@ -131,7 +129,7 @@ This means the prebuild did not run or failed. There is no automatic fallback �
 
 ### User Can See `GH_PAT` In Their Codespace Environment
 
-No longer applicable — the `duroxide-pg` submodule is public and `GH_PAT` is no longer used by the prebuild. If you see a `GH_PAT` secret configured at the repo level, you can safely remove it.
+No longer applicable — provider dependencies come from crates.io and `GH_PAT` is not used by the prebuild. If you see a `GH_PAT` secret configured at the repo level, you can safely remove it.
 
 ## Cost Considerations
 

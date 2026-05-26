@@ -235,7 +235,15 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario A considerations:** The `df` schema equivalence contract is unchanged. The `duroxide` schema is excluded from snapshot diffs — fresh installs start with an empty `duroxide` schema (BGW fills it in at runtime) while upgrades carry forward the fully-populated schema from v0.1.1. This is expected and acceptable.
 - **Scenario B1 considerations:** The BGW uses `MigrationPolicy::ApplyAll`. A database that has only migrations 0001–0005 is handled gracefully: the BGW detects the gap and applies 0006–0010 at startup. No manual intervention is needed.
 - **Scenario B2 considerations:** All five new migrations are additive (new tables and columns with defaults or nullable). Existing `df.vars`, `df.nodes`, `df.instances`, and `df.graphs` data is untouched.
-- **Current status:** Implemented — submodule at `4a6bf6b`, `Cargo.toml` pinned to `duroxide = "=0.1.26"`.
+- **Historical status:** Implemented with the provider source at `4a6bf6b` and `Cargo.toml` pinned to `duroxide = "=0.1.26"`.
+
+#### Switch to crates.io duroxide-pg 0.1.34 + duroxide 0.1.29
+- **DDL change (df schema):** None. This is a provider source and version update only.
+- **DDL change (duroxide schema):** No extension upgrade script DDL is required. The BGW continues to own provider migrations through `MigrationPolicy::ApplyAll`.
+- **Scenario A considerations:** The `df` schema equivalence contract is unchanged. The `duroxide` schema remains excluded from snapshot diffs because it is populated at runtime by the BGW.
+- **Scenario B1 considerations:** The new `.so` must continue to initialize against older provider schemas; any missing provider migrations are applied by the BGW at startup.
+- **Scenario B2 considerations:** No user data migration is needed. Existing `df.*` metadata and workflow state are unaffected by changing the provider dependency source from the local provider tree to crates.io.
+- **Current status:** Implemented — `Cargo.toml` exactly pins `duroxide = "=0.1.29"` and `duroxide-pg = "=0.1.34"`.
 
 #### Named Results v2 — df.if_rows
 - **DDL change:** Upgrade script adds `CREATE FUNCTION df.if_rows(result_name text, then_branch text, else_branch text)` — a new C-language function backed by the pgrx `#[pg_extern]` `if_rows_fn_wrapper` symbol.

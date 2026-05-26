@@ -34,8 +34,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # duroxide integration
-duroxide = "0.1.29"
-duroxide-pg = "0.1.34"
+duroxide = "=0.1.29"
+duroxide-pg = "=0.1.34"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # For ExecuteSQL activity (connecting back to PostgreSQL)

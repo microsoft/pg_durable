@@ -57,7 +57,7 @@ else
 fi
 
 # ── Build pg_durable ────────────────────────────────────────────────
-# duroxide-pg is pulled as a cargo git dependency (see Cargo.toml).
+# duroxide-pg is pulled as a crates.io dependency (see Cargo.toml).
 echo "Building pg_durable..."
 if [ "$SMOKE_MODE" = "1" ]; then
     echo "Smoke mode: skipping cargo build"

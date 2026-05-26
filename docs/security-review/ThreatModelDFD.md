@@ -250,7 +250,7 @@ P-WORKER ──[sqlx pool (TCP localhost)]──> DS-DUROXIDE
 |---|---|---|---|
 | **T** Tampering | Poisoned work items cause code execution | Worker reads from duroxide tables it owns; data provenance is trusted | ✅ Mitigated |
 | **I** Information Disclosure | Worker role exposes all duroxide state | Worker role is superuser — acceptable for single-tenant; duroxide schema not granted to users | ✅ Mitigated |
-| **D** Denial of Service | Large backlog starves worker connections | Fixed pool of 5 connections; long-poll reduces overhead | ⚠️ Partial |
+| **D** Denial of Service | Large backlog starves worker connections | Fixed worker connection pool limits concurrent database work | ⚠️ Partial |
 
 ### DF-6: Graph Loading
 

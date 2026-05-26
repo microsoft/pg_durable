@@ -198,8 +198,8 @@ diagrams:
         to: "DS-DUROXIDE"
         description: >
           Background worker polls duroxide tables for pending orchestration
-          and activity work items. Uses long-polling with sqlx pool
-          (5 connections as worker role).
+          and activity work items using the worker sqlx pool (5 connections
+          as worker role).
         properties:
           Source Authenticated: "Yes"
           Provides Integrity: "Yes"

@@ -217,7 +217,7 @@ Call `wait_for_ready` after any `CREATE EXTENSION` in scenarios that subsequentl
 | `docs/upgrade-testing.md` | Add duroxide ownership entry to the v0.1.1→v0.2.0 version-specific changes section. Note that both paths converge (objects not extension-owned after BGW runs). Note `wait_for_ready()` requirement in upgrade test infrastructure. |
 | `USER_GUIDE.md` | Add note that `DROP EXTENSION pg_durable CASCADE` is always required. Update readiness polling to use `duroxide._worker_ready` directly. |
 
-The `duroxide-pg/` submodule and `submodules: true` in CI remain — the submodule is still a Rust code dependency.
+`duroxide-pg` is a crates.io dependency. No extra provider checkout or CI repository-recursion configuration is required.
 
 ## What this enables going forward
 

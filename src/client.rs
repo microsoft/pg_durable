@@ -3,14 +3,13 @@
 //! This module provides cached Tokio runtime and Duroxide client for efficient
 //! df.start(), df.signal(), and df.cancel() calls from user sessions.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use duroxide::Client;
-use duroxide_pg::PostgresProvider;
 use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::types::{backend_provider_config, postgres_connection_string};
+use crate::types::{new_backend_provider, postgres_connection_string};
 
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -81,11 +80,7 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
         // (new_current_thread). Note: std::env::set_var becomes unsafe in Rust 2024 edition.
         std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
 
-        let store = Arc::new(
-            PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str))
-                .await
-                .map_err(|e| format!("Failed to connect to duroxide store: {e}"))?,
-        );
+        let store = new_backend_provider(&pg_conn_str).await?;
 
         let _ = DUROXIDE_CLIENT.set(Client::new(store));
         DUROXIDE_CLIENT

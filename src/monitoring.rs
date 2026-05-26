@@ -4,10 +4,8 @@
 
 use duroxide::Client;
 use pgrx::prelude::*;
-use std::sync::Arc;
 
-use crate::types::{backend_provider_config, postgres_connection_string};
-use duroxide_pg::PostgresProvider;
+use crate::types::{new_backend_provider, postgres_connection_string};
 
 // ============================================================================
 // Monitoring Functions
@@ -81,11 +79,10 @@ pub fn list_instances(
     };
 
     let results = rt.block_on(async {
-        let store =
-            match PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str)).await {
-                Ok(s) => Arc::new(s),
-                Err(_) => return vec![],
-            };
+        let store = match new_backend_provider(&pg_conn_str).await {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
 
         let client = Client::new(store);
 
@@ -165,11 +162,10 @@ pub fn instance_info(
     };
 
     let results = rt.block_on(async {
-        let store =
-            match PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str)).await {
-                Ok(s) => Arc::new(s),
-                Err(_) => return vec![],
-            };
+        let store = match new_backend_provider(&pg_conn_str).await {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
 
         let client = Client::new(store);
 
@@ -230,11 +226,10 @@ pub fn instance_executions(
     };
 
     let results = rt.block_on(async {
-        let store =
-            match PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str)).await {
-                Ok(s) => Arc::new(s),
-                Err(_) => return vec![],
-            };
+        let store = match new_backend_provider(&pg_conn_str).await {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
 
         let client = Client::new(store);
 
@@ -294,11 +289,10 @@ pub fn metrics() -> TableIterator<
     };
 
     let results = rt.block_on(async {
-        let store =
-            match PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str)).await {
-                Ok(s) => Arc::new(s),
-                Err(_) => return vec![],
-            };
+        let store = match new_backend_provider(&pg_conn_str).await {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
 
         let client = Client::new(store);
 
@@ -395,11 +389,10 @@ pub fn instance_nodes(
     };
 
     let results = rt.block_on(async {
-        let store =
-            match PostgresProvider::new_with_config(backend_provider_config(&pg_conn_str)).await {
-                Ok(s) => Arc::new(s),
-                Err(_) => return vec![],
-            };
+        let store = match new_backend_provider(&pg_conn_str).await {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
 
         let client = Client::new(store);
 

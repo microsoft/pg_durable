@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -226,6 +227,16 @@ pub fn backend_provider_config(database_url: &str) -> duroxide_pg::ProviderConfi
     config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::VerifyOnly;
     config
+}
+
+/// Create a backend provider for request/response operations.
+pub async fn new_backend_provider(
+    database_url: &str,
+) -> Result<Arc<duroxide_pg::PostgresProvider>, String> {
+    duroxide_pg::PostgresProvider::new_with_config(backend_provider_config(database_url))
+        .await
+        .map(Arc::new)
+        .map_err(|e| format!("Failed to connect to duroxide store: {e}"))
 }
 
 /// Create a `ProviderConfig` for the background worker runtime.

@@ -23,7 +23,7 @@
 - figure out the right security model with least possible priveleges 
 - resource constraining the duroxide runtime
 - variable logging/tracing levels?
-- update to long polling PG provider 
+- evaluate provider work-dispatch latency under sustained load
 - error handling stratgy, impl and tests
 - rename ExecuteWorkflow orchestration to DurableFunction, add a version to list_instances.
 - think through SQL error handling in details
