@@ -224,6 +224,57 @@ BEGIN
 END $$;
 
 DROP TABLE _test_signal_text;
+DELETE FROM signal_test_log;
+
+-- Test 5: |=> applied after a THEN composite still captures the final result
+CREATE TEMP TABLE _test_signal_then_named (instance_id TEXT);
+
+INSERT INTO _test_signal_then_named SELECT df.start(
+    'INSERT INTO signal_test_log (msg) VALUES (''waiting-for-decision'')'
+    ~> df.wait_for_signal('test_approval_then', 60) |=> 'decision'
+    ~> df.if(
+        'SELECT ($decision::jsonb->''data''->>''approved'')::boolean',
+        $$INSERT INTO signal_test_log (msg, data) VALUES ('approved-after-then', $decision::jsonb)$$,
+        $$INSERT INTO signal_test_log (msg, data) VALUES ('rejected-after-then', $decision::jsonb)$$
+    ),
+    'test-signal-then-named'
+);
+
+SELECT pg_sleep(1);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_signal_then_named;
+    PERFORM df.signal(inst_id, 'test_approval_then', '{"approved": true}');
+END $$;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_signal_then_named;
+    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: composite THEN capture status = %', status;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM signal_test_log
+        WHERE msg = 'approved-after-then'
+          AND (data->'data'->>'approved')::boolean = true
+    ) THEN
+        RAISE EXCEPTION 'TEST FAILED: THEN composite capture did not substitute $decision';
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: composite THEN capture';
+END $$;
+
+DROP TABLE _test_signal_then_named;
 DROP TABLE signal_test_log;
 
 RESET SESSION AUTHORIZATION;

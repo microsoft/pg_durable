@@ -201,6 +201,44 @@ END $$;
 DROP TABLE _test3_state;
 DROP TABLE test_break_log;
 
+-- Test 4: named result on the LOOP node itself is accessible downstream
+DROP TABLE IF EXISTS test_loop_named;
+CREATE TABLE test_loop_named (id SERIAL, status TEXT);
+
+CREATE TEMP TABLE _test4_state AS
+SELECT df.start(
+    (df.loop(df.break('{"status": "done"}')) |=> 'loop_result')
+    ~> $$INSERT INTO test_loop_named (status) VALUES ($loop_result::jsonb->>'status')$$,
+    'test-loop-named-result'
+) AS instance_id;
+
+DO $$
+DECLARE
+    v_instance_id TEXT;
+    v_status TEXT;
+    v_loop_status TEXT;
+BEGIN
+    SELECT instance_id INTO v_instance_id FROM _test4_state;
+    RAISE NOTICE 'Test 4 - named loop result: instance %', v_instance_id;
+
+    SELECT df.wait_for_completion(v_instance_id, 20) INTO v_status;
+
+    IF v_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [loop-named]: expected Completed, got %', v_status;
+    END IF;
+
+    SELECT status INTO v_loop_status FROM test_loop_named ORDER BY id DESC LIMIT 1;
+
+    IF v_loop_status != 'done' THEN
+        RAISE EXCEPTION 'TEST FAILED [loop-named]: expected done, got %', v_loop_status;
+    END IF;
+
+    RAISE NOTICE 'PASSED: named LOOP result stored';
+END $$;
+
+DROP TABLE _test4_state;
+DROP TABLE test_loop_named;
+
 -- === Test: running_status_during_loop ===
 -- Verify that df.status() reports 'running' while a loop is actively executing
 -- (regression test for: loops reporting 'pending' instead of 'running')
