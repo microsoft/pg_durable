@@ -48,13 +48,16 @@ Confirm the fix is mentioned in the release notes.
 
 If a fix is available in a new release:
 
-1. **Bump the `duroxide-pg` tag** in `Cargo.toml` to the new version, then refresh the lockfile:
+1. **Check duroxide compatibility** before bumping `duroxide-pg`. Use the release notes or compatibility matrix to determine whether `duroxide` must also be updated, then refresh the lockfile for the package set you changed:
    ```bash
-   # Edit Cargo.toml: duroxide-pg = { git = "...", tag = "v0.1.X", package = "duroxide-pg" }
+   # Edit Cargo.toml: duroxide-pg = "0.1.X"
+   # If required, also edit Cargo.toml: duroxide = "0.1.Y"
    cargo update -p duroxide-pg
+   # Or, when both changed:
+   cargo update -p duroxide -p duroxide-pg
    ```
 
-2. **Also update duroxide if needed** (check compatibility):
+2. **If duroxide also needs to be updated**:
    ```toml
    duroxide = "0.1.X"
    ```

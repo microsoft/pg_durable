@@ -9,7 +9,7 @@ Prepare and release a new version of pg_durable with quality checks, documentati
 
 The project uses these duroxide dependencies from `Cargo.toml`:
 - `duroxide` (crates.io version)
-- `duroxide-pg` (GitHub tag)
+- `duroxide-pg` (crates.io version)
 
 **Check for new duroxide version:**
 ```bash
@@ -20,11 +20,13 @@ grep "duroxide" Cargo.toml
 cargo search duroxide --limit 5
 ```
 
-**Check for new duroxide-pg tag:**
+**Check for new duroxide-pg version:**
 ```bash
-# List recent tags from the duroxide-pg repo
-gh api repos/microsoft/duroxide-pg/tags --jq '.[].name' | head -10
+# Check latest version on crates.io
+cargo search duroxide-pg --limit 5
 ```
+
+Before proposing a `duroxide-pg` update, check its release notes or compatibility matrix to determine whether the `duroxide` crate must also be updated. Treat the two versions as a compatible pair, not independent choices.
 
 ### 1.2 Ask User About Updates
 
@@ -39,7 +41,7 @@ Current versions:
 
 New versions available:
   - duroxide: [new_version] ✨
-  - duroxide-pg: [new_tag] ✨
+  - duroxide-pg: [new_version] ✨
 
 Would you like to update to the new versions? (y/n)
 ```
@@ -49,11 +51,15 @@ Would you like to update to the new versions? (y/n)
 Update the dependency versions in `Cargo.toml`:
 ```toml
 # duroxide = "NEW_VERSION"
-# duroxide-pg = { git = "...", tag = "NEW_TAG", package = "duroxide-pg" }
+# duroxide-pg = "NEW_VERSION"
 ```
 
 Then refresh `Cargo.lock`:
 ```bash
+# If only duroxide-pg changed:
+cargo update -p duroxide-pg
+
+# If both changed:
 cargo update -p duroxide -p duroxide-pg
 ```
 

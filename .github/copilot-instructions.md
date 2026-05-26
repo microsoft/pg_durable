@@ -94,15 +94,15 @@ The new `.so` must work against **all** previous versions' schemas (same major v
 
 For Scenario A, treat the upgrade path as the contract for already-shipped versions: before release, fresh install for the new version should match what an existing customer gets by installing the previous version and applying the upgrade chain.
 
-**Updating duroxide-pg dependency**: Update the `tag = "..."` value for `duroxide-pg` in [`Cargo.toml`](../Cargo.toml), then `cargo update -p duroxide-pg` and rebuild. The BGW's embedded migration files update automatically via `include_dir!`. No changes to extension SQL, upgrade scripts, or any checked-in SQL copies are needed.
+**Updating duroxide-pg dependency**: Treat `duroxide` and `duroxide-pg` as a compatible pair. Before changing `duroxide-pg`, check the `duroxide-pg` release notes or compatibility matrix to determine whether `duroxide` must also be updated. Update the crates.io version(s) in [`Cargo.toml`](../Cargo.toml), then run `cargo update -p duroxide-pg` or `cargo update -p duroxide -p duroxide-pg` as appropriate and rebuild. The BGW's embedded migration files update automatically via `include_dir!`. No changes to extension SQL, upgrade scripts, or any checked-in SQL copies are needed.
 
 **Writing a spec or design doc:** Include an "Upgrade & Migration" section covering: backward compatibility impact (B1 — will the new `.so` work against all previous schemas?), upgrade script DDL needed, and any runtime schema detection required. See [docs/upgrade-testing.md](../docs/upgrade-testing.md) for the full upgrade testing strategy.
 
 ## Dependencies
 
 - **pgrx 0.16.1**: PostgreSQL extension framework (pinned version)
-- **duroxide**: Durable execution runtime
-- **duroxide-pg**: duroxide provider/stores engine state in PostgreSQL (cargo git dependency, pinned by tag in [`Cargo.toml`](../Cargo.toml))
+- **duroxide**: Durable execution runtime (crates.io dependency pinned in [`Cargo.toml`](../Cargo.toml))
+- **duroxide-pg**: duroxide provider/stores engine state in PostgreSQL (crates.io dependency pinned in [`Cargo.toml`](../Cargo.toml)); keep pinned with `duroxide` as a compatible pair
 - **sqlx**: Async PostgreSQL from background worker
 - **tokio**: Async runtime for background worker
 

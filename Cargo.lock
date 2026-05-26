@@ -706,8 +706,9 @@ dependencies = [
 
 [[package]]
 name = "duroxide-pg"
-version = "0.1.33"
-source = "git+https://github.com/pinodeca/duroxide-pg.git?branch=feat%2Fmigration-policy#d5d16192a0d09dfbc4c2c48c195f6dca33d0a9d2"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd3d51000bd6b0433be07bc2f4ba5dd7d8fc4336fc90ff2321f527cd51a3eac"
 dependencies = [
  "anyhow",
  "async-trait",
