@@ -120,8 +120,12 @@ df.signal(
 
 Use a JSON object when workflow SQL expects structured fields; use plain text for simple opaque values.
 
--- Query status
+-- Query status by instance ID (returned by df.start())
 df.status(instance_id TEXT) → TEXT      -- 'Running', 'Completed', 'Failed', 'Cancelled'
+
+-- Query status by label (most recently started instance with that label)
+-- NOTE: df.status() requires an instance_id, NOT a label — use df.status_by_label() when you only have the label
+df.status_by_label(label TEXT) → TEXT   -- 'Running', 'Completed', 'Failed', 'Cancelled', or NULL
 
 -- Get result
 df.result(instance_id TEXT) → TEXT      -- JSON result from final node

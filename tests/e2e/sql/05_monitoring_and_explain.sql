@@ -1,5 +1,5 @@
 -- Merged from: 09_monitoring, 10_explain, 31_explain_plain_sql
--- Tests: list_instances, instance_info, status, result, df.explain() on live and dry-run,
+-- Tests: list_instances, instance_info, status, status_by_label, result, df.explain() on live and dry-run,
 --        df.explain() on plain SQL auto-wrap
 SET SESSION AUTHORIZATION df_e2e_user;
 
@@ -16,6 +16,8 @@ DECLARE
     found BOOLEAN;
     info_status TEXT;
     result TEXT;
+    label_status TEXT;
+    missing_status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing instance: %', inst_id;
@@ -47,6 +49,23 @@ BEGIN
     SELECT r INTO result FROM df.result(inst_id) r;
     IF result NOT LIKE '%123%' THEN
         RAISE EXCEPTION 'TEST FAILED: result should contain 123, got %', result;
+    END IF;
+
+    -- Test status_by_label returns the same status as df.status()
+    SELECT df.status_by_label('test-monitoring-label') INTO label_status;
+    IF label_status IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: status_by_label returned NULL for known label';
+    END IF;
+    IF lower(label_status) != lower(status) THEN
+        RAISE EXCEPTION 'TEST FAILED: status_by_label (%) != status (%) for same instance',
+            label_status, status;
+    END IF;
+
+    -- Test status_by_label returns NULL for an unknown label
+    SELECT df.status_by_label('__nonexistent_label_xyz__') INTO missing_status;
+    IF missing_status IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: status_by_label should return NULL for unknown label, got %',
+            missing_status;
     END IF;
     
     RAISE NOTICE 'TEST PASSED: monitoring';

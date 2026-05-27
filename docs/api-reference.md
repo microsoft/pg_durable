@@ -320,8 +320,35 @@ Gets instance status.
 |-----------|------|-----------|-------------|
 | `instance_id` | TEXT | ❌ Literal | Target instance ID |
 
+> **Note:** `df.status()` requires an `instance_id` (the 8-character hex value returned by
+> `df.start()`), **not** a label. Passing a label returns `NULL` because no instance ID
+> matches that string. Use `df.status_by_label()` to look up status by label instead.
+
 ```sql
 SELECT df.status('a1b2c3d4');  -- Returns: 'Running', 'Completed', etc.
+```
+
+---
+
+### df.status_by_label(label)
+
+Gets the status of the **most recently started** instance with the given label.
+Returns `NULL` when no matching instance exists or is visible to the calling user.
+
+Labels are not unique — if multiple instances share the same label, only the
+status of the most recently created one is returned. To target a specific run,
+capture the `instance_id` from `df.start()` and use `df.status()` instead.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `label` | TEXT | ❌ Literal | Label passed to `df.start()` |
+
+```sql
+-- Start a labeled workflow
+SELECT df.start('SELECT 1', 'my-workflow');
+
+-- Check its status by label
+SELECT df.status_by_label('my-workflow');  -- Returns: 'Running', 'Completed', etc.
 ```
 
 ---
