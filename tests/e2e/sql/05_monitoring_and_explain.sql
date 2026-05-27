@@ -1,6 +1,6 @@
 -- Merged from: 09_monitoring, 10_explain, 31_explain_plain_sql
 -- Tests: list_instances, instance_info, status, result, df.explain() on live and dry-run,
---        df.explain() on plain SQL auto-wrap, list_instances filter_label
+--        df.explain() on plain SQL auto-wrap, list_instances with filter_label
 SET SESSION AUTHORIZATION df_e2e_user;
 
 -- === Test: 09_monitoring ===
