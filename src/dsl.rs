@@ -280,6 +280,8 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
         None => pgrx::error!("No upcoming schedule found for '{}'", cron_expr),
     };
 
+    // RFC 3339 format is stored so the compute_cron_wait activity can parse it
+    // back reliably with chrono::DateTime::parse_from_rfc3339().
     let target_timestamp = next.to_rfc3339();
 
     let config = serde_json::json!({

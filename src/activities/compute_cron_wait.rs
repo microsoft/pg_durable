@@ -44,7 +44,7 @@ pub async fn execute(ctx: ActivityContext, input_json: String) -> Result<String,
     let target: DateTime<Utc> = input
         .target_timestamp
         .parse()
-        .map_err(|e| format!("Invalid target_timestamp '{}': {e}", input.target_timestamp))?;
+        .map_err(|e| format!("Invalid target_timestamp '{}' (expected RFC 3339): {e}", input.target_timestamp))?;
 
     let now = Utc::now();
     let wait_seconds = (target - now).num_seconds().max(0) as u64;
