@@ -2,7 +2,7 @@
 name = "pg_durable"
 version = "0.2.2"
 edition = "2021"
-license = "MIT"
+license = "PostgreSQL"
 repository = "https://github.com/Azure/pg_durable"
 description = "Durable SQL Functions for PostgreSQL"
 
