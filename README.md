@@ -188,4 +188,4 @@ The runtime is powered by [duroxide](https://github.com/microsoft/duroxide), a d
 
 ## License
 
-MIT
+PostgreSQL License
