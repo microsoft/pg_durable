@@ -192,6 +192,14 @@ No additional fixture is needed for subsequent minors — intermediate versions 
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.2 → v0.2.3
+
+#### Race loser node cancellation (fixes df.instance_nodes ghost nodes)
+- **DDL change:** `nodes_status_chk` on `df.nodes` is dropped and recreated to include `'cancelled'` in the allowed status set. The existing `nodes_result_status_chk` (`result IS NULL OR status IN ('completed', 'failed')`) is unchanged — cancelled nodes carry no result. Upgrade DDL is in `sql/pg_durable--0.2.2--0.2.3.sql`.
+- **Scenario A considerations:** Schema comparison must verify that `nodes_status_chk` now allows `'cancelled'` on both fresh installs and upgraded databases.
+- **Scenario B1 considerations:** The new `.so` continues to work against v0.2.2 schemas (the constraint is `NOT VALID`, so pre-existing rows are unaffected). The new `cancel_subtree_nodes` activity that writes `'cancelled'` will fail the constraint only on schemas that have not been upgraded; for those deployments the activity will error and the orchestrator will log a warning, but existing workflows are otherwise unaffected. The ghost-node symptom remains until the schema is upgraded.
+- **Scenario B2 considerations:** No data migration needed. All existing `df.nodes` rows have status in `('pending', 'running', 'completed', 'failed')` and continue to satisfy the widened constraint.
+
 ### v0.2.1 → v0.2.2
 
 #### #162 quote_ident-wrapped `current_user::regrole` (fixes #161)

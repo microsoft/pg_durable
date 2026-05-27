@@ -4,6 +4,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## Unreleased
 
+- Fix: `df.instance_nodes` no longer shows losing-branch nodes as `running` or `pending` after a `df.race` completes. The orchestrator now marks all non-terminal nodes in the losing branch as `cancelled` once the winning branch is decided. Schema change: `nodes_status_chk` is widened to include `'cancelled'`; upgrade DDL is in `sql/pg_durable--0.2.2--0.2.3.sql`.
 - Fix: `df.signal()` now propagates the event to running sub-orchestrations spawned by `df.race` / `df.join` / `df.join3`, so `df.wait_for_signal` inside a parallel branch wakes as expected. Known limitation: signals raised before the target sub-orchestration is in the `Running` state are not yet redelivered when it starts; a proper fix requires unmatched-event forwarding in duroxide (#154).
 - Fix: `df.start()`, RLS policies on `df.instances` / `df.nodes` / `df.vars`, and `df.vars` reads/writes no longer fail with `role "..." does not exist` when `current_user` requires quoting (mixed case, spaces, embedded quotes). All `current_user::regrole` casts are now wrapped with `quote_ident()` so the role lookup preserves the original identifier casing (#161, #162). Schema upgrade DDL is in `sql/pg_durable--0.2.1--0.2.2.sql`.
 

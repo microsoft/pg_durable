@@ -806,6 +806,57 @@ async fn execute_join_node(
     Ok(result)
 }
 
+/// Collect all node IDs in the subtree rooted at `root_id` by depth-first traversal.
+///
+/// Handles the full node structure:
+/// - `left_node` / `right_node` for THEN, IF, JOIN, RACE, LOOP
+/// - `condition_node` embedded in `query` JSON for IF and LOOP nodes
+/// - `extra_nodes` array embedded in `query` JSON for JOIN nodes (join3, etc.)
+fn collect_subtree_node_ids(graph: &FunctionGraph, root_id: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut stack = vec![root_id.to_string()];
+
+    while let Some(node_id) = stack.pop() {
+        // Guard against visiting the same node twice (not expected in valid graphs,
+        // but prevents any potential infinite loop).
+        if ids.contains(&node_id) {
+            continue;
+        }
+        let Some(node) = graph.nodes.get(&node_id) else {
+            continue;
+        };
+        ids.push(node_id.clone());
+
+        // Follow structural children
+        if let Some(left) = &node.left_node {
+            stack.push(left.clone());
+        }
+        if let Some(right) = &node.right_node {
+            stack.push(right.clone());
+        }
+
+        // Follow children embedded in the query config JSON
+        if let Some(config_str) = &node.query {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(config_str) {
+                // IF and LOOP: condition_node is a plain node ID string
+                if let Some(cond_id) = config["condition_node"].as_str() {
+                    stack.push(cond_id.to_string());
+                }
+                // JOIN (join3, etc.): extra_nodes is an array of node ID strings
+                if let Some(extras) = config["extra_nodes"].as_array() {
+                    for extra in extras {
+                        if let Some(id) = extra.as_str() {
+                            stack.push(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ids
+}
+
 async fn execute_race_node(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -856,18 +907,48 @@ async fn execute_race_node(
 
     // Use ctx.select2() - first to complete wins
     // select2 now returns Either2<Left, Right> instead of (winner_idx, DurableOutput)
-    let raw = match ctx.select2(left_fut, right_fut).await {
+    let (raw, loser_root_id) = match ctx.select2(left_fut, right_fut).await {
         duroxide::Either2::First(Ok(r)) => {
             ctx.trace_info("RACE completed - left branch won");
-            Ok(r)
+            (Ok(r), right_id.clone())
         }
-        duroxide::Either2::First(Err(e)) => Err(format!("RACE left branch failed: {e}")),
+        duroxide::Either2::First(Err(e)) => (Err(format!("RACE left branch failed: {e}")), right_id.clone()),
         duroxide::Either2::Second(Ok(r)) => {
             ctx.trace_info("RACE completed - right branch won");
-            Ok(r)
+            (Ok(r), left_id.clone())
         }
-        duroxide::Either2::Second(Err(e)) => Err(format!("RACE right branch failed: {e}")),
-    }?;
+        duroxide::Either2::Second(Err(e)) => (Err(format!("RACE right branch failed: {e}")), left_id.clone()),
+    };
+
+    // Cancel all non-terminal nodes in the losing branch so that df.instance_nodes
+    // does not show ghost running/pending work after the race has been decided.
+    let loser_node_ids = collect_subtree_node_ids(graph, &loser_root_id);
+    if !loser_node_ids.is_empty() {
+        ctx.trace_info(format!(
+            "Cancelling {} losing-branch node(s) (root: {})",
+            loser_node_ids.len(),
+            loser_root_id
+        ));
+        let cancel_input = serde_json::json!({ "node_ids": loser_node_ids });
+        // Best-effort: a failure here does not affect the race result but will
+        // leave losing-branch nodes in a non-terminal state.  Log so operators
+        // can observe the problem without failing the workflow.
+        match ctx
+            .schedule_activity(
+                activities::cancel_subtree_nodes::NAME,
+                cancel_input.to_string(),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => ctx.trace_info(format!(
+                "Warning: failed to cancel losing-branch nodes (root: {}): {e}",
+                loser_root_id
+            )),
+        }
+    }
+
+    let raw = raw?;
 
     // Parse the subtree output envelope produced by execute_subtree and merge any named
     // results from the winning branch into the parent results map.

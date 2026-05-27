@@ -240,7 +240,7 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_result_name_chk
         CHECK (result_name IS NULL OR result_name ~ '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
     ADD CONSTRAINT nodes_status_chk
-        CHECK (status IN ('pending', 'running', 'completed', 'failed')) NOT VALID,
+        CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT VALID,
     ADD CONSTRAINT nodes_result_status_chk
         CHECK (result IS NULL OR status IN ('completed', 'failed')) NOT VALID,
     ADD CONSTRAINT nodes_structure_chk

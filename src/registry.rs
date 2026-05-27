@@ -15,6 +15,7 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
     let graph_pool = pool.clone();
     let status_pool = pool.clone();
     let node_status_pool = pool.clone();
+    let cancel_subtree_pool = pool.clone();
     let http_pool = pool.clone();
 
     ActivityRegistry::builder()
@@ -33,6 +34,10 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
         .register(activities::update_node_status::NAME, move |ctx: ActivityContext, input_json: String| {
             let pool = node_status_pool.clone();
             async move { activities::update_node_status::execute(ctx, pool, input_json).await }
+        })
+        .register(activities::cancel_subtree_nodes::NAME, move |ctx: ActivityContext, input_json: String| {
+            let pool = cancel_subtree_pool.clone();
+            async move { activities::cancel_subtree_nodes::execute(ctx, pool, input_json).await }
         })
         .register(activities::execute_http::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = http_pool.clone();
