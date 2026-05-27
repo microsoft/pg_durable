@@ -59,6 +59,14 @@ pub fn superuser_instances_enabled() -> bool {
     crate::ENABLE_SUPERUSER_INSTANCES.get()
 }
 
+/// Returns `true` when `df.start()` should capture `session_user` instead of
+/// `current_user` as the execution identity. When enabled, calls from inside a
+/// `SECURITY DEFINER` wrapper use the caller's login role rather than the
+/// function owner's identity.
+pub fn start_use_session_user() -> bool {
+    crate::START_USE_SESSION_USER.get()
+}
+
 /// Returns `true` if the role identified by `role_oid` is a PostgreSQL superuser.
 /// Runs a SPI query against `pg_catalog.pg_roles`.  Must be called from a
 /// backend context (not the background worker).

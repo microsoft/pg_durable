@@ -26,6 +26,13 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// When `true`, `df.start()` captures `session_user` (the authenticated login
+/// role) instead of `current_user` (the effective role). This prevents a
+/// `SECURITY DEFINER` wrapper from silently escalating the submitted identity
+/// to the function owner's privileges. Defaults to `false` for backward
+/// compatibility. See USER_GUIDE.md § "SECURITY DEFINER Warning".
+pub static START_USE_SESSION_USER: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -129,6 +136,18 @@ pub extern "C-unwind" fn _PG_init() {
         c"Disabled by default to prevent superuser execution-identity forgery via RLS-bypassing roles. Requires server restart to change.",
         &ENABLE_SUPERUSER_INSTANCES,
         GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY,
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_durable.start_use_session_user",
+        c"Capture session_user instead of current_user in df.start()",
+        c"When on, df.start() records session_user (the authenticated login role) as the \
+          execution identity rather than current_user. This prevents SECURITY DEFINER \
+          wrappers from silently granting the definer's privileges to durable SQL nodes \
+          submitted by unprivileged callers. Off by default for backward compatibility.",
+        &START_USE_SESSION_USER,
+        GucContext::Suset,
         GucFlags::SUPERUSER_ONLY,
     );
 
