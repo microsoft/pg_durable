@@ -1,6 +1,6 @@
 -- Merged from: 09_monitoring, 10_explain, 31_explain_plain_sql
 -- Tests: list_instances, instance_info, status, result, df.explain() on live and dry-run,
---        df.explain() on plain SQL auto-wrap
+--        df.explain() on plain SQL auto-wrap, list_instances filter_label
 SET SESSION AUTHORIZATION df_e2e_user;
 
 -- === Test: 09_monitoring ===
@@ -30,6 +30,36 @@ BEGIN
     
     IF NOT found THEN
         RAISE EXCEPTION 'TEST FAILED: instance not found in list_instances()';
+    END IF;
+
+    -- Test list_instances with filter_label (matching label)
+    SELECT EXISTS (
+        SELECT 1 FROM df.list_instances(filter_label => 'test-monitoring-label')
+        WHERE list_instances.instance_id = inst_id
+    ) INTO found;
+
+    IF NOT found THEN
+        RAISE EXCEPTION 'TEST FAILED: instance not found in list_instances(filter_label => ''test-monitoring-label'')';
+    END IF;
+
+    -- Test list_instances with filter_label (non-matching label returns nothing)
+    SELECT EXISTS (
+        SELECT 1 FROM df.list_instances(filter_label => 'no-such-label')
+        WHERE list_instances.instance_id = inst_id
+    ) INTO found;
+
+    IF found THEN
+        RAISE EXCEPTION 'TEST FAILED: instance should not appear in list_instances with non-matching filter_label';
+    END IF;
+
+    -- Test list_instances with both status_filter and filter_label
+    SELECT EXISTS (
+        SELECT 1 FROM df.list_instances('completed', filter_label => 'test-monitoring-label')
+        WHERE list_instances.instance_id = inst_id
+    ) INTO found;
+
+    IF NOT found THEN
+        RAISE EXCEPTION 'TEST FAILED: instance not found in list_instances with status_filter and filter_label';
     END IF;
     
     -- Test instance_info

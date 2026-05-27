@@ -11,11 +11,12 @@ use crate::types::{new_backend_provider, postgres_connection_string};
 // Monitoring Functions
 // ============================================================================
 
-/// List all durable function instances, optionally filtered by status.
+/// List all durable function instances, optionally filtered by status and/or label.
 #[pg_extern(schema = "df")]
 pub fn list_instances(
     status_filter: default!(Option<&str>, "NULL"),
     limit_count: default!(i32, "100"),
+    filter_label: default!(Option<&str>, "NULL"),
 ) -> TableIterator<
     'static,
     (
@@ -42,16 +43,23 @@ pub fn list_instances(
     let user_instances: Vec<(String, Option<String>, String)> = Spi::connect(|client| {
         use pgrx::datum::DatumWithOid;
 
-        let (sql, args): (&str, Vec<DatumWithOid>) = if let Some(status) = status_filter {
-            (
+        let (sql, args): (&str, Vec<DatumWithOid>) = match (status_filter, filter_label) {
+            (Some(status), Some(label)) => (
+                "SELECT id, label, status FROM df.instances WHERE status = $1 AND label = $2 ORDER BY created_at DESC LIMIT $3",
+                vec![status.into(), label.into(), (limit_count as i64).into()],
+            ),
+            (Some(status), None) => (
                 "SELECT id, label, status FROM df.instances WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
                 vec![status.into(), (limit_count as i64).into()],
-            )
-        } else {
-            (
+            ),
+            (None, Some(label)) => (
+                "SELECT id, label, status FROM df.instances WHERE label = $1 ORDER BY created_at DESC LIMIT $2",
+                vec![label.into(), (limit_count as i64).into()],
+            ),
+            (None, None) => (
                 "SELECT id, label, status FROM df.instances ORDER BY created_at DESC LIMIT $1",
                 vec![(limit_count as i64).into()],
-            )
+            ),
         };
         let mut instances = Vec::new();
         if let Ok(table) = client.select(sql, None, &args) {
