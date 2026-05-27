@@ -6,6 +6,7 @@ CREATE TEMP TABLE _payload_cancel_instance (instance_id TEXT);
 
 INSERT INTO _payload_cancel_instance
 SELECT df.start(
+    -- Long sleep keeps the instance running long enough for deterministic cancellation.
     df.sleep(300),
     'cancel-history-payload-ids'
 );

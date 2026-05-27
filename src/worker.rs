@@ -530,9 +530,9 @@ async fn ensure_history_event_payload_identifiers(pool: &sqlx::PgPool) -> Result
             END IF;
 
             v_execution_text := v_data->>'execution_id';
-            IF v_execution_text IS NULL
-               OR v_execution_text !~ '^[0-9]+$'
-               OR v_execution_text::BIGINT = 0 THEN
+            IF v_execution_text IS NULL OR v_execution_text !~ '^[0-9]+$' THEN
+                v_data := JSONB_SET(v_data, '{execution_id}', TO_JSONB(NEW.execution_id), true);
+            ELSIF v_execution_text::BIGINT = 0 THEN
                 v_data := JSONB_SET(v_data, '{execution_id}', TO_JSONB(NEW.execution_id), true);
             END IF;
 
