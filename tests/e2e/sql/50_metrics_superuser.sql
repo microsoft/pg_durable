@@ -54,10 +54,14 @@ BEGIN
         RAISE EXCEPTION 'SECURITY FAILURE: non-superuser was able to call df.metrics()';
     EXCEPTION
         WHEN insufficient_privilege THEN
+            -- User lacks EXECUTE privilege — PostgreSQL ACL check fires before
+            -- the function body is reached.
             RAISE NOTICE 'TEST 2 PASSED: non-superuser blocked from df.metrics() (insufficient_privilege)';
         WHEN OTHERS THEN
             IF SQLERRM ILIKE '%permission denied%'
                OR SQLERRM ILIKE '%restricted to superusers%' THEN
+                -- Defense-in-depth path: EXECUTE was manually granted but the
+                -- in-function superuser check raised the error.
                 RAISE NOTICE 'TEST 2 PASSED: non-superuser blocked from df.metrics() (%)', SQLERRM;
             ELSE
                 RAISE EXCEPTION 'TEST 2 UNEXPECTED ERROR: %', SQLERRM;

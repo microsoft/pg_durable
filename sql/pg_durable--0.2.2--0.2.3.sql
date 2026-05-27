@@ -26,19 +26,24 @@
 -- Revoke from any role that previously received EXECUTE via df.grant_usage()
 -- or a direct manual GRANT.  Superusers are excluded because they bypass ACL
 -- checks and do not need an explicit EXECUTE grant.
+-- Materialize the superuser name set once to avoid re-scanning pg_roles per
+-- iteration.
 DO $$
 DECLARE
     r TEXT;
+    superuser_names TEXT[];
 BEGIN
+    -- Collect all superuser role names once.
+    SELECT ARRAY(SELECT rolname FROM pg_catalog.pg_roles WHERE rolsuper = true)
+      INTO superuser_names;
+
     FOR r IN
         SELECT DISTINCT grantee::text
         FROM information_schema.role_routine_grants
         WHERE specific_schema = 'df'
           AND routine_name = 'metrics'
           AND privilege_type = 'EXECUTE'
-          AND grantee NOT IN (
-              SELECT rolname FROM pg_catalog.pg_roles WHERE rolsuper = true
-          )
+          AND grantee <> ALL (superuser_names)
     LOOP
         EXECUTE format('REVOKE EXECUTE ON FUNCTION df.metrics() FROM %I', r);
     END LOOP;
