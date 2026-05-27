@@ -257,8 +257,12 @@ pub fn sleep(seconds: i64) -> String {
 }
 
 /// Creates a wait-for-schedule node that waits until the next cron match.
-/// The wait duration is computed at DSL time (when this function is called)
-/// to ensure deterministic replay in the orchestration.
+/// The cron expression is validated eagerly at DSL time to fail fast on
+/// invalid expressions, and the target timestamp of the next cron tick is
+/// captured now so the orchestration remains deterministic. The actual
+/// remaining wait is computed at execution time inside the `compute_cron_wait`
+/// activity, which correctly accounts for any delay between `df.start()` and
+/// when the background worker processes this node.
 #[pg_extern(schema = "df")]
 pub fn wait_for_schedule(cron_expr: &str) -> String {
     let cron_with_seconds = format!("0 {cron_expr}");
@@ -267,19 +271,20 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
         Err(e) => pgrx::error!("Invalid cron expression '{}': {}", cron_expr, e),
     };
 
-    // Compute wait duration NOW (at DSL time) for deterministic orchestration replay
-    let now = Utc::now();
+    // Compute the target timestamp at DSL time so it is stable across replays.
+    // The actual wait duration is computed at execution time by the
+    // compute_cron_wait activity to avoid waking too early when there is a
+    // delay between df.start() and when the background worker runs this node.
     let next = match schedule.upcoming(Utc).next() {
         Some(t) => t,
         None => pgrx::error!("No upcoming schedule found for '{}'", cron_expr),
     };
 
-    let duration_secs = (next - now).num_seconds().max(0) as u64;
+    let target_timestamp = next.to_rfc3339();
 
-    // Store pre-computed seconds, not the cron expression
     let config = serde_json::json!({
         "cron_expr": cron_expr,
-        "wait_seconds": duration_secs
+        "target_timestamp": target_timestamp
     });
 
     Durofut {
