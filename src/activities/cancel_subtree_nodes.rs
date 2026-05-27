@@ -34,9 +34,9 @@ pub async fn execute(
 
     ctx.trace_info(format!("Cancelling {} losing-branch nodes", node_ids.len()));
 
-    // Bulk-update only nodes that are still in a non-terminal state so we
-    // never overwrite a 'completed' or 'failed' result from a branch that
-    // happened to finish before the race was decided.
+    // Bulk-update only nodes that are still in a non-terminal state so we never
+    // overwrite a 'completed', 'failed', or already-'cancelled' node — any of these
+    // are terminal and must not be disturbed.
     let result = sqlx::query(
         "UPDATE df.nodes
          SET status = 'cancelled', updated_at = now()

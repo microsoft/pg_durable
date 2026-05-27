@@ -930,12 +930,22 @@ async fn execute_race_node(
             loser_root_id
         ));
         let cancel_input = serde_json::json!({ "node_ids": loser_node_ids });
-        let _ = ctx
+        // Best-effort: a failure here does not affect the race result but will
+        // leave losing-branch nodes in a non-terminal state.  Log so operators
+        // can observe the problem without failing the workflow.
+        match ctx
             .schedule_activity(
                 activities::cancel_subtree_nodes::NAME,
                 cancel_input.to_string(),
             )
-            .await;
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => ctx.trace_info(format!(
+                "Warning: failed to cancel losing-branch nodes (root: {}): {e}",
+                loser_root_id
+            )),
+        }
     }
 
     let raw = raw?;

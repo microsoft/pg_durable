@@ -27,6 +27,7 @@ DECLARE
     inst_id TEXT;
     v_status TEXT;
     ghost_count INT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _race_loser_cancelled_state;
     RAISE NOTICE 'Testing race loser cancellation for instance: %', inst_id;
@@ -37,14 +38,19 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED [race-loser-cancelled]: expected completed, got %', v_status;
     END IF;
 
-    -- Allow a short settle window for the cancel activity to write through
-    PERFORM pg_sleep(2);
+    -- Poll until all nodes reach a terminal state (or time out after ~10 s).
+    -- The cancel activity is scheduled asynchronously so there may be a short
+    -- lag between the instance completing and the losing-branch nodes being
+    -- written to 'cancelled'.
+    LOOP
+        SELECT COUNT(*) INTO ghost_count
+        FROM df.instance_nodes(inst_id)
+        WHERE status IN ('running', 'pending');
 
-    -- No node in the instance should remain 'running' or 'pending' after the
-    -- race has been decided.
-    SELECT COUNT(*) INTO ghost_count
-    FROM df.instance_nodes(inst_id)
-    WHERE status IN ('running', 'pending');
+        EXIT WHEN ghost_count = 0 OR attempts >= 50;
+        PERFORM pg_sleep(0.2);
+        attempts := attempts + 1;
+    END LOOP;
 
     IF ghost_count > 0 THEN
         RAISE EXCEPTION
@@ -87,6 +93,7 @@ DECLARE
     inst_id TEXT;
     v_status TEXT;
     ghost_count INT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _race_loser_seq_state;
     RAISE NOTICE 'Testing race loser cancellation (multi-node) for instance: %', inst_id;
@@ -97,11 +104,16 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED [race-loser-seq]: expected completed, got %', v_status;
     END IF;
 
-    PERFORM pg_sleep(2);
+    -- Poll until all nodes reach a terminal state (or time out after ~10 s).
+    LOOP
+        SELECT COUNT(*) INTO ghost_count
+        FROM df.instance_nodes(inst_id)
+        WHERE status IN ('running', 'pending');
 
-    SELECT COUNT(*) INTO ghost_count
-    FROM df.instance_nodes(inst_id)
-    WHERE status IN ('running', 'pending');
+        EXIT WHEN ghost_count = 0 OR attempts >= 50;
+        PERFORM pg_sleep(0.2);
+        attempts := attempts + 1;
+    END LOOP;
 
     IF ghost_count > 0 THEN
         RAISE EXCEPTION
