@@ -117,6 +117,10 @@ pub fn list_instances(
 ///
 /// To check the status of a specific run, use `df.status(instance_id)` with
 /// the `instance_id` returned by `df.start()`.
+///
+/// Note: SPI errors are mapped to `NULL` (same behaviour as `df.status()`).
+/// A `NULL` return means either "no matching instance" or an internal error;
+/// use `df.list_instances()` when you need to distinguish the two.
 #[pg_extern(schema = "df")]
 pub fn status_by_label(label: &str) -> Option<String> {
     Spi::get_one_with_args::<String>(

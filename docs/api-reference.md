@@ -320,7 +320,7 @@ Gets instance status.
 |-----------|------|-----------|-------------|
 | `instance_id` | TEXT | ❌ Literal | Target instance ID |
 
-> **Note:** `df.status()` requires an `instance_id` (the 8-character hex value returned by
+> **Note:** `df.status()` requires an `instance_id` (the unique identifier returned by
 > `df.start()`), **not** a label. Passing a label returns `NULL` because no instance ID
 > matches that string. Use `df.status_by_label()` to look up status by label instead.
 

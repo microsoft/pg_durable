@@ -52,6 +52,7 @@ BEGIN
     END IF;
 
     -- Test status_by_label returns the same status as df.status()
+    -- (uses the same label passed to df.start() above: 'test-monitoring-label')
     SELECT df.status_by_label('test-monitoring-label') INTO label_status;
     IF label_status IS NULL THEN
         RAISE EXCEPTION 'TEST FAILED: status_by_label returned NULL for known label';
