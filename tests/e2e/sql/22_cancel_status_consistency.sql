@@ -155,6 +155,39 @@ BEGIN
     PERFORM df_e2e_assert_status_consistent(inst_id, 'cancelled', 'cancel_running_instance');
 END $$;
 
+-- Verify duroxide execution status is also cancellation (not Failed).
+RESET SESSION AUTHORIZATION;
+DO $$
+DECLARE
+    inst_id      TEXT;
+    exec_status  TEXT;
+    attempts     INT := 0;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _t_cancel;
+
+    LOOP
+        SELECT e.status INTO exec_status
+        FROM duroxide.executions e
+        WHERE e.instance_id = inst_id
+        ORDER BY e.execution_id DESC
+        LIMIT 1;
+
+        EXIT WHEN lower(coalesce(exec_status, '')) IN ('canceled', 'cancelled')
+              OR attempts > 300;
+
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF lower(coalesce(exec_status, '')) NOT IN ('canceled', 'cancelled') THEN
+        RAISE EXCEPTION 'FAILED [cancel_running_instance_duroxide]: executions.status returned %, expected canceled/cancelled',
+            exec_status;
+    END IF;
+
+    RAISE NOTICE 'PASSED [cancel_running_instance_duroxide]: executions.status = %', exec_status;
+END $$;
+SET SESSION AUTHORIZATION df_e2e_user;
+
 DROP TABLE _t_cancel;
 DROP TABLE _cancel_log;
 

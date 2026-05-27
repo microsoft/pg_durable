@@ -45,7 +45,7 @@ pub use types::Durofut;
 /// by the background worker after successful initialization. Increment whenever
 /// a new binary introduces new duroxide-pg migration scripts or any other
 /// BGW-applied duroxide schema change.
-pub const WORKER_SCHEMA_VERSION: i32 = 1;
+pub const WORKER_SCHEMA_VERSION: i32 = 2;
 
 ::pgrx::pg_module_magic!(name, version);
 
