@@ -9,6 +9,8 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 - Behavior change (bug fix): `df.join` / `df.join3` results are now a proper JSON array of objects instead of an array of double-encoded JSON strings. Consumers that previously unescaped each element (e.g. `(elem #>> '{}')::jsonb`) must now read the element directly (#143)
 
+- Monitoring: add `idx_instances_created_at_desc_id` on `df.instances(created_at DESC, id)` to support efficient chronological listing; extend `df.list_instances` to return `created_at` and `completed_at`; add `df.list_instances_paginated(status_filter, limit_count, after_cursor)` with keyset cursor pagination and `total_count` / `next_cursor`.
+
 ## v0.2.1 (Released)
 
 - Dependency: upgrade duroxide `0.1.26→0.1.28` and duroxide-pg-opt `v0.1.23→v0.1.26`; adds cached-plan retryability, instance stats API, and error propagation fixes; switches TLS backend to `native-tls`, removing the `ring` crate entirely (#116)

@@ -1391,9 +1391,17 @@ SELECT * FROM df.list_instances('Failed');
 
 -- With limit
 SELECT * FROM df.list_instances(NULL, 10);
+
+-- Cursor-based pagination (first page)
+SELECT * FROM df.list_instances_paginated(NULL, 20, NULL);
+
+-- Cursor-based pagination (next page)
+SELECT * FROM df.list_instances_paginated(NULL, 20, '2026-01-01 12:00:00+00:00|a1b2c3d4');
 ```
 
-**Columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`
+**df.list_instances columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`, `created_at`, `completed_at`
+
+**df.list_instances_paginated columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`, `created_at`, `completed_at`, `total_count`, `next_cursor`
 
 ### Instance Details
 
@@ -1626,6 +1634,7 @@ GRANT EXECUTE ON FUNCTION df.cancel(text, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.wait_for_completion(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.run(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.list_instances(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.list_instances_paginated(text, integer, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_info(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_nodes(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_executions(text, integer) TO app_role;
