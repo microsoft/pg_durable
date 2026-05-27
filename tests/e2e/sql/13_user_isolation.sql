@@ -355,7 +355,7 @@ BEGIN
 
     SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
 
-    -- With start_use_session_user=on, the identity is alice (session_user), who
+    -- With start_use_session_user = on, the identity is alice (session_user), who
     -- cannot access iso_superuser_secrets → the SQL node must fail.
     IF final_status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 6c - start_use_session_user): expected failed (alice has no access), got %', final_status;

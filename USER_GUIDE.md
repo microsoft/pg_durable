@@ -1498,7 +1498,7 @@ SELECT df.start('SELECT * FROM bob_data');
 
 When you call `df.start()`, pg_durable captures your **effective role** (`current_user`) as the execution identity. This is the role under whose privileges all SQL nodes in the workflow will run.
 
-> **Default behaviour:** `df.start()` calls `GetUserId()`, which returns `current_user` — the effective PostgreSQL role at the moment of the call. If you have issued `SET ROLE analysts`, the captured identity is `analysts`, not your login role.
+> **Default behavior:** `df.start()` calls `GetUserId()`, which returns `current_user` — the effective PostgreSQL role at the moment of the call. If you have issued `SET ROLE analysts`, the captured identity is `analysts`, not your login role.
 
 The background worker then connects to PostgreSQL as the captured identity and runs all SQL nodes with that role's privileges.
 
