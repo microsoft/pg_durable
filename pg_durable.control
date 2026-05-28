@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 comment = 'pg_durable: SQL-native durable orchestrations for PostgreSQL'
 default_version = '@CARGO_VERSION@'
 module_pathname = 'pg_durable'

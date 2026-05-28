@@ -4,6 +4,16 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.2] - 2026-05-28
 
+First open-source release of `pg_durable` on GitHub under the PostgreSQL License.
+
+### Open Source Release
+
+- **License:** changed project licensing from MIT to PostgreSQL License (#187).
+- **Repository:** moved to `github.com/microsoft/pg_durable` and updated crate metadata accordingly.
+- **Community files:** added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `NOTICE` (direct third-party dependency inventory). `README.md` now includes Support, Code of Conduct, Security, Privacy & Telemetry (no telemetry), and Trademarks sections.
+- **Source headers:** added PostgreSQL License headers to Microsoft-authored Rust, SQL, shell, Python, Makefile, Dockerfile, and config files; pre-existing notices preserved.
+- **Sanitized internal references:** removed internal Azure Container Registry defaults from `Makefile`, `.env.example`, `scripts/deploy-acr.sh`, `docs/TESTING.md`, and release prompts; `ACR_REGISTRY` is now caller-provided.
+
 ### Breaking Changes
 
 - **Provider compatibility boundary:** `pg_durable` now uses the crates.io `duroxide-pg` provider instead of the `duroxide-pg-opt` submodule. This is the first open-source release in the `duroxide-pg` provider line. Upgrade testing treats `v0.2.2` as the compatibility start for this line; Azure's fork owns upgrade compatibility for the earlier `duroxide-pg-opt` line (#158).
@@ -17,7 +27,6 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 ### Changed
 
 - **Dependencies:** switched from `duroxide-pg-opt` to crates.io `duroxide-pg = 0.1.34` and bumped `duroxide` to `0.1.29` (#158).
-- **License:** changed project licensing from MIT to PostgreSQL License (#187).
 - **Cancel status spelling:** status handling and documentation now consistently use `cancelled` (#145, #160).
 - **Signal payloads:** `df.signal(text)` now accepts non-JSON text payloads as its SQL signature implies (#173).
 
