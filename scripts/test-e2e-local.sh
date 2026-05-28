@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # BEGIN_USAGE
 # test-e2e-local.sh - Run local E2E tests across all required PostgreSQL modes.
 #

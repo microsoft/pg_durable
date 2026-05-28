@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Final verification: show all invoices and their audit trail.
 
 SELECT '=== INVOICES ===' AS section;

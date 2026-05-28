@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Invoice Approval Pipeline — start the workflow
 --
 -- Prerequisites:

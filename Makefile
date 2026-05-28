@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # pg_durable Makefile
 
 # PostgreSQL major version for pgrx (override with: make ... PG_VERSION=pg16)

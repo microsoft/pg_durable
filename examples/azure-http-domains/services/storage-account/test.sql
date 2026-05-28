@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Azure Storage Account domain tests
 --
 -- Covers: .blob.core.windows.net, .blob.storage.azure.net,

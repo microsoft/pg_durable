@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 37_rls, 38_rls_vars
 -- Tests: RLS enforcement on df.instances and df.nodes (per-user isolation),
 --        cross-user cancel/signal blocked, monitoring functions respect RLS,

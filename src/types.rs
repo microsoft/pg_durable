@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Core types and configuration for pg_durable
 
 use pgrx::{pg_extern, Spi};

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Provision Azure Function App for domain tests.
 # Covers: .azurewebsites.net
 set -euo pipefail

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! SSRF protection for df.http() — dataplane IP blocklist + endpoint allow-list
 //!
 //! Three Cargo features control outbound HTTP access (from most to least

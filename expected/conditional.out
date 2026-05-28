@@ -1,3 +1,5 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
 -- Test: Conditional execution using df.if() and ?> !> operators
 SET ROLE df_regress_user;
 DROP TABLE IF EXISTS test_cond_log;

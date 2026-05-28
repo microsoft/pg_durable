@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Invoice Approval Pipeline — main durable function
 --
 -- This starts an infinite-loop workflow that:

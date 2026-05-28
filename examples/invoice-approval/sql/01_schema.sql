@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Invoice Approval Pipeline — demo schema
 -- Run once to create tables. Safe to re-run (uses IF NOT EXISTS + TRUNCATE).
 

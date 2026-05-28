@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Azure Service Bus domain test
 -- Covers: .servicebus.windows.net
 --

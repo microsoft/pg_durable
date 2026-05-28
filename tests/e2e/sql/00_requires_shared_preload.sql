@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Test: pg_durable requires shared_preload_libraries
 --
 -- This test verifies that pg_durable refuses to initialize unless it is loaded

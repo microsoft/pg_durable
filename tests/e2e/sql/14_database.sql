@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 29_database_validation, 34_multi_database
 -- Tests: CREATE EXTENSION rejected in wrong database, workflows execute in correct database,
 --        df.start() with explicit database parameter, invalid database rejection,

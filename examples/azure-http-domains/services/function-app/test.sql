@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Azure Function App domain test
 -- Covers: .azurewebsites.net
 --

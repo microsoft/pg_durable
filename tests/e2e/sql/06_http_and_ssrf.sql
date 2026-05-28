@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 18_http, 19_github_api, 36_ssrf_protection
 -- Tests: HTTP GET/POST/headers/sequence/parallel/4xx/delay/vars,
 --        GitHub API with loop and vars, SSRF protection for all blocked/allowed cases

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 30_graph_reuse, 32_invalid_node_type
 -- Tests: graph storage and reuse, identical DSL produces identical JSON,
 --        invalid node_type rejection by df.start() and df.explain()

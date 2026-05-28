@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Monitoring functions for pg_durable - using Duroxide Client Management API
 
 #![allow(clippy::type_complexity)] // Required for pgrx TableIterator return types

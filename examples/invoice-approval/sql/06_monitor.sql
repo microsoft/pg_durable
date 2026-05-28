@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Monitor the invoice approval pipeline.
 -- Run this repeatedly to observe progress.
 

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Phase 2 example schema for Azure Functions + pg_durable
 
 CREATE EXTENSION IF NOT EXISTS pg_durable;

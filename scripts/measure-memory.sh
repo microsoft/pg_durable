@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # measure-memory.sh - Measure duroxide runtime memory and CPU consumption
 #
 # Creates 10 long-running durable functions with staggered starts (5s apart).

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Build script to embed build timestamp
 
 use std::process::Command;

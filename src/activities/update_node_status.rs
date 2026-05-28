@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! UpdateNodeStatus activity - updates df.nodes status and result
 
 use duroxide::ActivityContext;

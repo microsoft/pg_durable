@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! LoadFunctionGraph activity - loads graph from df.instances/df.nodes
 //!
 //! Includes retry logic to handle the race between df.start() enqueuing work

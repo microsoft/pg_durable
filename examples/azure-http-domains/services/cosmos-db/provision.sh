@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Provision Azure Cosmos DB (serverless, NoSQL) for domain tests.
 # Covers: .documents.azure.com
 set -euo pipefail

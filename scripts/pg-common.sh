@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 
 resolve_pgrx_environment() {
     local pg_major="$1"

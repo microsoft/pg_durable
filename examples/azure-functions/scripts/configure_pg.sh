@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 set -euo pipefail
 
 usage() {

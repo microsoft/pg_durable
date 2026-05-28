@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Seed data: two invoices for the initial demo.
 -- One small (auto-approved), one large (needs human approval).
 

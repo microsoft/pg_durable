@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # E2E tests for pg_durable
 # Runs SQL test cases against a Docker container with full Duroxide runtime
 

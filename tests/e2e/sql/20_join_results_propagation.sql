@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: named results from JOIN branches are propagated to the parent orchestration
 -- Covers the bug where $left_val / $right_val were not accessible after a JOIN.
 SET SESSION AUTHORIZATION df_e2e_user;

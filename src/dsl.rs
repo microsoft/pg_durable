@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! DSL functions for defining durable SQL functions
 
 use chrono::Utc;

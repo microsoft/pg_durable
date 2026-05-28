@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Provision Azure Storage Account for domain tests.
 #
 # Covers: .blob.core.windows.net, .blob.storage.azure.net,

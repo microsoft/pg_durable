@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Azure Cognitive Services domain test
 -- Covers: .cognitiveservices.azure.com
 --

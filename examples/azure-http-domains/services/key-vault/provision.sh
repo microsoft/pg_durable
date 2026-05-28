@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Provision Azure Key Vault for domain tests.
 # Covers: .vault.azure.net
 set -euo pipefail

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # test-coverage.sh - Measure code coverage for pg_durable
 #
 # Builds the extension with coverage instrumentation, runs tests,

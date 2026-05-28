@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Show the live graph with execution status.
 --
 -- Usage: set the instance_id psql variable before running:

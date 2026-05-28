@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # test-upgrade.sh - Test extension upgrade paths
 #
 # Validates:

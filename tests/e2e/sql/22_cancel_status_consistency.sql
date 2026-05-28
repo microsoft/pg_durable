@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: Cancel status consistency across df.status(), df.list_instances(), df.instance_info()
 --
 -- Regression test for: "cancellation status mismatch between df.status() and df.list_instances()"

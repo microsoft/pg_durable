@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 05_conditional_true, 06_conditional_false, 33_malformed_condition_node, 40_if_rows
 -- Tests: conditional true branch, conditional false branch, malformed condition_node rejection,
 --        df.if_rows() branching on result row presence

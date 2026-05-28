@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- pg_durable upgrade: 0.1.1 → 0.2.0
 --
 -- Run with: ALTER EXTENSION pg_durable UPDATE TO '0.2.0';

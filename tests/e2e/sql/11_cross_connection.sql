@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 22_cross_connection, 23_transactions
 -- Tests: df.signal() and df.cancel() from a different backend connection (dblink),
 --        transaction semantics — committed txn executes, rolled-back txn does not

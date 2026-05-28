@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Background worker for pg_durable
 //!
 //! This module sets up and runs the Duroxide background worker that processes

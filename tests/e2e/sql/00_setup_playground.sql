@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Setup: Create playground schema and test data for scenario tests
 -- This file runs first (00_) to set up shared test infrastructure
 

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- pg_durable upgrade: 0.2.1 → 0.2.2
 --
 -- Fix: RLS policies and the `df.vars.owner` default cast `current_user::regrole`

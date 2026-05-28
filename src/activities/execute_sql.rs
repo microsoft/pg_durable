@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! ExecuteSQL activity - runs SQL queries against PostgreSQL
 //!
 //! Connects as the submitting user (submitted_by) for proper privilege isolation.

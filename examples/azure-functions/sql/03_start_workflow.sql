@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Start one workflow instance that:
 -- 1) Reads one pending document
 -- 2) Calls Azure Function via df.http()

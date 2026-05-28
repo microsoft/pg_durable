@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 03_variables, 20_vars, 39_named_results_dot, 41_row_set_expansion, 42_result_name_validation
 -- Tests: variable substitution (|=> / df.as()), workflow variables (df.setvar/getvar),
 --        named result dot-notation, null-safe accessor, row-set expansion, result name validation

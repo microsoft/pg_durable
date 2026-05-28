@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: vars and label propagation into JOIN and RACE subtrees
 -- Repro for: Bug: vars and label lost in JOIN/RACE subtrees
 SET SESSION AUTHORIZATION df_e2e_user;

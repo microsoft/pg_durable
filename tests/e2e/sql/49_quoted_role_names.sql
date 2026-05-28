@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Regression: df.start() works for roles whose names require quoting.
 
 DO $setup$

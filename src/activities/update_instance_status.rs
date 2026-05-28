@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! UpdateInstanceStatus activity - updates df.instances status
 
 use duroxide::ActivityContext;

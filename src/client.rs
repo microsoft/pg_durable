@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Cached client infrastructure for user session calls
 //!
 //! This module provides cached Tokio runtime and Duroxide client for efficient

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # test-all-local.sh - Run the full test suite locally (unit + E2E + pg_regress)
 #
 # Usage: ./scripts/test-all-local.sh [options]

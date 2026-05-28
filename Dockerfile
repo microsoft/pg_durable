@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Multi-stage build for pg_durable extension
 # Stage 1: Build the extension
 FROM rustlang/rust:nightly-bookworm AS builder

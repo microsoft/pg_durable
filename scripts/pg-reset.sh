@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # pg-reset.sh - Reset local PostgreSQL data (wipe everything)
 #
 # Usage: ./scripts/pg-reset.sh [pg_major_version]

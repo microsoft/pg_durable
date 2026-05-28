@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! ExecuteHTTP activity - makes HTTP requests
 //!
 //! Cargo features control what outbound HTTP(S) is allowed:

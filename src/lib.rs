@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! pg_durable - Durable SQL Functions for PostgreSQL
 //!
 //! This extension provides durable, fault-tolerant function execution within PostgreSQL

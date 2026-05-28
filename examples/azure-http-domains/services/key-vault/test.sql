@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Azure Key Vault domain test
 -- Covers: .vault.azure.net
 --

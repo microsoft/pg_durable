@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Provision Azure Service Bus namespace + queue for domain tests.
 # Covers: .servicebus.windows.net
 set -euo pipefail

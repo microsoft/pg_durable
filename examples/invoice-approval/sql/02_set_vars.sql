@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Set per-session variables before running the workflow.
 -- Preferred path: source .azure-functions.env then run this script with psql.
 --

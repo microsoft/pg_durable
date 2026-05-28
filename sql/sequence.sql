@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Test: Sequential execution using ~> operator and df.seq() function
 SET ROLE df_regress_user;
 DROP TABLE IF EXISTS test_sequence_log;

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Test: Connection limit timeout
 -- Requires: pg_durable.max_user_connections = 1, pg_durable.execution_acquire_timeout = 2
 -- Verifies that when the semaphore is held and a second SQL node can't acquire

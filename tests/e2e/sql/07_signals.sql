@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- From: 21_signals
 -- Tests: basic signal send/receive, signal timeout, signal payload handling
 SET SESSION AUTHORIZATION df_e2e_user;

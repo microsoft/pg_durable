@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Offline syntax validation for all scripts and SQL in this example.
 set -euo pipefail
 

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # test-unit.sh - Run pgrx unit tests
 #
 # Usage: ./scripts/test-unit.sh [options] [test_filter]

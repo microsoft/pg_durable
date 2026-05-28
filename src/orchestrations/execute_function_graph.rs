@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! ExecuteFunctionGraph orchestration - the main durable function executor
 //!
 //! ⚠️ DETERMINISTIC CODE ONLY in this file!

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- From: 43_connection_limit_defaults
 -- Tests: default GUC values allow concurrent workflows to succeed (standard phase)
 -- Runs as postgres; no special user context needed for this test

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- E2E Test: http-allow-all feature disables all domain restrictions.
 --
 -- This test runs in the "http-allow-all" phase, which builds pg_durable with the

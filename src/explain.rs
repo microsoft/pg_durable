@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Visual explain functionality for durable SQL functions
 
 use pgrx::prelude::*;

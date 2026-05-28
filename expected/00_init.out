@@ -1,3 +1,5 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
 -- Initialize pg_durable extension
 -- This must run first before any other tests
 CREATE EXTENSION IF NOT EXISTS pg_durable;

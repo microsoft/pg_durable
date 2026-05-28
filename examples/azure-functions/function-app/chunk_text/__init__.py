@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 import json
 from typing import Any
 

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 08_loop_cancel, 24_loop_break
 -- Tests: loop execution and cancellation, loop break via df.break(), while-loop condition
 SET SESSION AUTHORIZATION df_e2e_user;

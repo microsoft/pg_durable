@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # pg-start.sh - Start local PostgreSQL with pg_durable extension
 #
 # Usage: ./scripts/pg-start.sh [options]

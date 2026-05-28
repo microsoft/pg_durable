@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: df.signal propagation into wait_for_signal inside df.race branch
 SET SESSION AUTHORIZATION df_e2e_user;
 

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: Typed column result serialization (numeric, uuid, timestamptz, timestamp, date, jsonb,
 --        int2, float4, float8, NULL handling, unsupported-type error, NaN/Inf error).
 --

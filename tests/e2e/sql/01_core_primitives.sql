@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 01_simple_sql, 02_sequence, 04_parallel_join, 07_sleep, 16_scenario_join3, 17_race
 -- Tests: simple SQL execution, sequential steps, parallel join, sleep/timer,
 --        three-way parallel join, race/first-wins execution

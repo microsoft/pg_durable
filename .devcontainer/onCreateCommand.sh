@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

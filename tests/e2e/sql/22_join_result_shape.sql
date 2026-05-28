@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: df.join / df.join3 return a proper JSON array of objects, not an array of
 -- escaped JSON strings (double-encoding bug regression test).
 SET SESSION AUTHORIZATION df_e2e_user;

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Registry builders for activities and orchestrations
 
 use std::sync::Arc;

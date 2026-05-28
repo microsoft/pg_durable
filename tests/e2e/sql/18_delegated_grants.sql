@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: delegated grant_usage / revoke_usage via with_grant parameter
 --
 -- Scenario: PaaS operator (superuser) grants an admin role the ability to

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- From: 35_heartbeat_liveness
 -- Tests: worker heartbeat liveness (last_seen_at advances over time)
 -- Requires superuser: reads internal df._worker_epoch table

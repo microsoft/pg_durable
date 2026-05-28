@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # test-e2e-docker.sh - Run E2E tests in Docker (linux/amd64)
 #
 # Usage: ./scripts/test-e2e-docker.sh [options] [test_filter] [repeat_count]

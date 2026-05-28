@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 09_monitoring, 10_explain, 31_explain_plain_sql
 -- Tests: list_instances, instance_info, status, result, df.explain() on live and dry-run,
 --        df.explain() on plain SQL auto-wrap

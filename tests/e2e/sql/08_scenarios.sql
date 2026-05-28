@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 11_scenario_etl, 12_scenario_parallel_counts, 13_scenario_conditional_load,
 --              14_scenario_order_processing, 15_scenario_three_step
 -- Tests: multi-step ETL pipeline, parallel counting, conditional branching on task load,

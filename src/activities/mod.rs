@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Activities for pg_durable
 //!
 //! Each activity is in its own file with a co-located NAME constant.

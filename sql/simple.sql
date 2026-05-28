@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Test: Simple SQL execution
 -- Tests both auto-wrapped SQL and explicit df.sql() function
 SET ROLE df_regress_user;

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Tests: df.break() inside JOIN and RACE branches propagates correctly to enclosing loop
 -- Repro for: Bug: df.break() inside a JOIN branch is silently ignored
 SET SESSION AUTHORIZATION df_e2e_user;

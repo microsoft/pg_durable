@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Cancel the running pipeline instance.
 --
 -- Usage: replace <instance-id> with your actual instance ID.

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 28_bgw_lifecycle, 25_extension_creation_security
 -- Tests: BGW lifecycle (pre-extension wait, post-CREATE, post-DROP, post-recreate),
 --        extension creation security (non-superuser blocked, pre-existing df schema blocked,

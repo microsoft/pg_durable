@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- 17_superuser_guc.sql
 -- Tests: pg_durable.enable_superuser_instances GUC enforcement
 --

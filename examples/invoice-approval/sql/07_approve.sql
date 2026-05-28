@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Approve a high-value invoice that is waiting for a signal.
 --
 -- Automatically finds the running pipeline instance and sends the approval signal.

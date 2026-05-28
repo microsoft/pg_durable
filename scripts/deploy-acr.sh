@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # deploy-acr.sh - Deploy pg_durable to Azure Container Registry
 #
 # Usage: ./scripts/deploy-acr.sh [options]

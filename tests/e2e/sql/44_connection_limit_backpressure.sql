@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Test: Connection limit backpressure
 -- Requires: pg_durable.max_user_connections = 2
 -- Verifies that when more concurrent SQL nodes than the limit are running,

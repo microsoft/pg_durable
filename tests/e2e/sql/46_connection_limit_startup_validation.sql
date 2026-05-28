@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Test: Startup validation rejects invalid GUC values
 -- Requires: pg_durable.max_duroxide_connections = 1 (below minimum of 2)
 -- Verifies that the background worker refuses to start when duroxide

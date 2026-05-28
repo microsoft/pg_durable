@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Full reset: cancel all pipeline instances, clean duroxide state, reset demo tables.
 -- After running this, go back to 03_seed_data.sql (or feed_invoices.sh) then 05_start_workflow.sql.
 --

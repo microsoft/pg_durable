@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- E2E Test: df.http() raises an error at DSL call time when no http Cargo feature
 -- is compiled in.
 --

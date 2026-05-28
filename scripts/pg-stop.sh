@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # pg-stop.sh - Stop PostgreSQL servers
 #
 # Usage: ./scripts/pg-stop.sh [options]

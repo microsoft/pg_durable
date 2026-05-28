@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Azure Cosmos DB domain test
 -- Covers: .documents.azure.com
 --

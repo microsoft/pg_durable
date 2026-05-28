@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the PostgreSQL License.
+
 //! Orchestrations for pg_durable
 //!
 //! ⚠️ DETERMINISTIC CODE ONLY in orchestration files!

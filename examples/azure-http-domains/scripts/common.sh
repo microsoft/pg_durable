@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Common helpers for azure-http-domains tests.
 # Sourced by other scripts — do not run directly.
 

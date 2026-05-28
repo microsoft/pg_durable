@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
 # Provision Azure Cognitive Services (Language) for domain tests.
 # Covers: .cognitiveservices.azure.com
 set -euo pipefail

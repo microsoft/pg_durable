@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Poll for completion (up to ~30 seconds)
 DO $$
 DECLARE

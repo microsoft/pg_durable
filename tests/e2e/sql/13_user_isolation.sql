@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
 -- Merged from: 26_superuser_scenarios, 27_user_isolation
 -- Tests: superuser durable SQL (pg_authid access), per-user table isolation,
 --        NOLOGIN group role rejection, SECURITY DEFINER semantics, dropped role handling
