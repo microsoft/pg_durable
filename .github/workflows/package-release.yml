@@ -1,0 +1,229 @@
+name: Package Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag/version to package, for example v0.2.2'
+        required: true
+        type: string
+      publish_release:
+        description: 'Upload assets to the GitHub release'
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_PGRX_VERSION: 0.16.1
+  PACKAGE_HTTP_FEATURE: http-allow-azure-domains
+
+concurrency:
+  group: package-release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-packages:
+    name: Build PG${{ matrix.pg_version }} ${{ matrix.platform.type }} package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        platform:
+          - type: amd64
+            docker_platform: linux/amd64
+            file_pattern: x86-64
+          - type: arm64
+            docker_platform: linux/arm64
+            file_pattern: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pgrx package in Docker
+        run: |
+          docker run --rm \
+            --platform "${{ matrix.platform.docker_platform }}" \
+            -v "$PWD:/work" \
+            -w /work \
+            --user root \
+            rustlang/rust:nightly-bookworm \
+            bash -euxo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y \
+                ca-certificates \
+                curl \
+                gnupg \
+                lsb-release \
+                pkg-config \
+                libssl-dev \
+                libclang-dev \
+                clang \
+                build-essential \
+                bison \
+                flex \
+                libreadline-dev \
+                zlib1g-dev \
+                libxml2-dev \
+                libxslt1-dev \
+                libicu-dev \
+                file \
+                zip
+
+              install -d -m 0755 /usr/share/keyrings
+              curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+                | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+              echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+                > /etc/apt/sources.list.d/pgdg.list
+              apt-get update
+              apt-get install -y \
+                postgresql-${{ matrix.pg_version }} \
+                postgresql-server-dev-${{ matrix.pg_version }}
+
+              export PG_CONFIG="/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config"
+              export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
+              cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
+              cargo pgrx init --pg${{ matrix.pg_version }} "$PG_CONFIG"
+
+              FEATURES="pg${{ matrix.pg_version }}"
+              if [ -n "${{ env.PACKAGE_HTTP_FEATURE }}" ]; then
+                FEATURES="$FEATURES,${{ env.PACKAGE_HTTP_FEATURE }}"
+              fi
+
+              cargo pgrx package \
+                --pg-config "$PG_CONFIG" \
+                --no-default-features \
+                --features "$FEATURES"
+
+              scripts/package-deb.sh \
+                "$VERSION" \
+                "$PWD/target/release/pg_durable-pg${{ matrix.pg_version }}" \
+                "${{ matrix.platform.type }}" \
+                "${{ matrix.pg_version }}"
+            '
+
+      - name: Verify Debian package
+        run: |
+          sudo chown -R "$USER:$USER" dist target || true
+          deb_file=$(ls dist/pg-durable-postgresql-${{ matrix.pg_version }}_*_${{ matrix.platform.type }}.deb)
+          echo "Checking $deb_file"
+          dpkg-deb --info "$deb_file"
+          dpkg-deb --contents "$deb_file" | grep "usr/lib/postgresql/${{ matrix.pg_version }}/lib/pg_durable.so"
+          dpkg-deb --contents "$deb_file" | grep "usr/share/postgresql/${{ matrix.pg_version }}/extension/pg_durable.control"
+          rm -rf check-package
+          mkdir check-package
+          dpkg-deb -x "$deb_file" check-package
+          file "check-package/usr/lib/postgresql/${{ matrix.pg_version }}/lib/pg_durable.so" | grep -E "${{ matrix.platform.file_pattern }}"
+
+      - name: Create package archive
+        run: |
+          cd dist
+          zip "pg-durable-${VERSION}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}.zip" \
+            pg-durable-postgresql-${{ matrix.pg_version }}_*_${{ matrix.platform.type }}.deb
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-durable-${{ github.event.inputs.tag || github.ref_name }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
+          path: |
+            dist/*.deb
+            dist/*.zip
+          retention-days: 30
+
+  build-source:
+    name: Build source archives
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create source archives
+        run: |
+          clean_version="${VERSION#v}"
+          mkdir -p dist
+          git archive --format=tar --prefix="pg_durable-${clean_version}/" HEAD -o "dist/pg_durable-${clean_version}.tar"
+          gzip -c "dist/pg_durable-${clean_version}.tar" > "dist/pg_durable-${clean_version}.tar.gz"
+          bzip2 -k "dist/pg_durable-${clean_version}.tar"
+          rm "dist/pg_durable-${clean_version}.tar"
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-durable-source-${{ github.event.inputs.tag || github.ref_name }}
+          path: dist/pg_durable-*.tar.*
+          retention-days: 30
+
+  release:
+    name: Upload release assets
+    needs: [build-packages, build-source]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.publish_release == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" \
+              --title "Release $VERSION" \
+              --notes "Release $VERSION" \
+              --draft
+          fi
+
+          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.tar.bz2' \) -print0 \
+            | xargs -0 -I {} gh release upload "$VERSION" "{}" --clobber
