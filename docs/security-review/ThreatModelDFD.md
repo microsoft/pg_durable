@@ -370,7 +370,7 @@ P-BACKEND ──[PostgreSQL wire protocol]──> EE-USER
 
 ## 5. Threat Summary by Priority
 
-### ⛔ Critical / P0 — Address Before Production
+### ⛔ Critical / P0 — Preview Blockers
 
 | ID | Flow | Threat | STRIDE | Status |
 |---|---|---|---|---|
