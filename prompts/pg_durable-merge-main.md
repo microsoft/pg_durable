@@ -51,7 +51,7 @@ If deploying to ACR after merge:
 
 ```bash
 # Login to ACR (if not already)
-az acr login --name toygresacr
+az acr login --name ${ACR_REGISTRY%%.*}
 
 # Deploy
 ./scripts/deploy-acr.sh

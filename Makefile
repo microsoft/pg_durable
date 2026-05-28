@@ -2,6 +2,8 @@
 
 # PostgreSQL major version for pgrx (override with: make ... PG_VERSION=pg16)
 PG_VERSION ?= pg17
+ACR_REGISTRY ?= myregistry.azurecr.io
+ACR_IMAGE ?= pg_durable
 
 .PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install
 
@@ -30,9 +32,9 @@ docker-build:
 
 # Build and push to ACR
 docker-push: docker-build
-	docker tag pg_durable:latest toygresacr.azurecr.io/pg_durable:latest
-	az acr login --name toygresacr
-	docker push toygresacr.azurecr.io/pg_durable:latest
+	docker tag pg_durable:latest $(ACR_REGISTRY)/$(ACR_IMAGE):latest
+	REGISTRY_NAME="$(ACR_REGISTRY)"; az acr login --name "$${REGISTRY_NAME%%.*}"
+	docker push $(ACR_REGISTRY)/$(ACR_IMAGE):latest
 
 # Run local development server
 run:

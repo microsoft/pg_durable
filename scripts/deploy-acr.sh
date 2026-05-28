@@ -8,7 +8,7 @@
 #   --tag TAG    Tag to use (default: latest)
 #
 # Environment Variables (can also be set in .env):
-#   ACR_REGISTRY  Registry URL (default: toygresacr.azurecr.io)
+#   ACR_REGISTRY  Registry URL (required, for example: myregistry.azurecr.io)
 #   ACR_IMAGE     Image name (default: pg_durable)
 #
 # Prerequisites:
@@ -18,7 +18,7 @@
 #   ./scripts/deploy-acr.sh                    # Push existing image as :latest
 #   ./scripts/deploy-acr.sh --rebuild          # Force rebuild, push as :latest
 #   ./scripts/deploy-acr.sh --tag v0.1.0       # Push as :v0.1.0
-#   ACR_REGISTRY=myacr.azurecr.io ./scripts/deploy-acr.sh  # Custom registry
+#   ACR_REGISTRY=myregistry.azurecr.io ./scripts/deploy-acr.sh  # Custom registry
 
 set -e
 
@@ -31,9 +31,14 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 
 # Configuration (can be overridden via .env or environment)
-ACR_REGISTRY="${ACR_REGISTRY:-toygresacr.azurecr.io}"
+ACR_REGISTRY="${ACR_REGISTRY:-}"
 ACR_IMAGE="${ACR_IMAGE:-pg_durable}"
 LOCAL_IMAGE="pg_durable:latest"
+
+if [ -z "$ACR_REGISTRY" ]; then
+    echo "Error: ACR_REGISTRY is required (for example: myregistry.azurecr.io)"
+    exit 1
+fi
 
 # Defaults
 FORCE_REBUILD=false
@@ -89,7 +94,7 @@ echo -e "${YELLOW}Pushing to ACR...${NC}"
 if ! docker push "$ACR_FULL"; then
     echo ""
     echo -e "${RED}Push failed. Make sure you're logged in:${NC}"
-    # Extract registry name from URL (e.g., toygresacr.azurecr.io -> toygresacr)
+    # Extract registry name from URL (e.g., myregistry.azurecr.io -> myregistry)
     REGISTRY_NAME="${ACR_REGISTRY%%.*}"
     echo "  az acr login --name $REGISTRY_NAME"
     exit 1
