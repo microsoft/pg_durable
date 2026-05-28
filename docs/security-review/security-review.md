@@ -234,7 +234,7 @@ The extension demonstrates strong security design for its core threat model:
 
 ## 5. Recommendations
 
-### 5.1 Critical — Before Production (P0)
+### 5.1 Critical — Preview Blockers (P0)
 
 | # | Recommendation | Effort | Related Finding |
 |---|---|---|---|

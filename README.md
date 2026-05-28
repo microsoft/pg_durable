@@ -184,7 +184,7 @@ The runtime is powered by [duroxide](https://github.com/microsoft/duroxide), a d
 
 ## Status
 
-🚧 **Early Development** — Not yet ready for production use.
+**Preview** - This project is currently in preview.
 
 ## Support
 
