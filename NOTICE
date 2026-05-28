@@ -1,0 +1,74 @@
+pg_durable
+
+This project incorporates or depends on third-party open source software.
+The following list covers direct dependencies declared in this repository.
+Before final release, generate and review a complete transitive dependency
+inventory using the approved Microsoft tooling for NOTICE and SBOM compliance.
+
+Rust dependencies declared in Cargo.toml:
+
+- bigdecimal 0.4.10
+  License: MIT/Apache-2.0
+  Source: https://github.com/akubera/bigdecimal-rs
+
+- chrono 0.4.44
+  License: MIT OR Apache-2.0
+  Source: https://github.com/chronotope/chrono
+
+- cron 0.13.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/zslayton/cron
+
+- duroxide 0.1.29
+  License: MIT
+  Source: https://github.com/microsoft/duroxide
+
+- duroxide-pg 0.1.34
+  License: MIT
+  Source: https://github.com/microsoft/duroxide-pg
+
+- pgrx 0.16.1
+  License: MIT
+  Source: https://github.com/pgcentralfoundation/pgrx/
+
+- pgrx-tests 0.16.1
+  License: MIT
+  Source: https://github.com/pgcentralfoundation/pgrx/
+
+- reqwest 0.12.28
+  License: MIT OR Apache-2.0
+  Source: https://github.com/seanmonstar/reqwest
+
+- serde 1.0.228
+  License: MIT OR Apache-2.0
+  Source: https://github.com/serde-rs/serde
+
+- serde_json 1.0.149
+  License: MIT OR Apache-2.0
+  Source: https://github.com/serde-rs/json
+
+- sqlx 0.8.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/launchbadge/sqlx
+
+- tokio 1.52.1
+  License: MIT
+  Source: https://github.com/tokio-rs/tokio
+
+- tracing-subscriber 0.3.23
+  License: MIT
+  Source: https://github.com/tokio-rs/tracing
+
+- uuid 1.23.1
+  License: Apache-2.0 OR MIT
+  Source: https://github.com/uuid-rs/uuid
+
+Python dependencies declared by examples:
+
+- azure-functions
+  License: MIT License
+  Source: https://pypi.org/project/azure-functions/
+
+- tiktoken
+  License: MIT License
+  Source: https://pypi.org/project/tiktoken/
