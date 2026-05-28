@@ -193,7 +193,7 @@ After running Docker E2E tests, deploy the same image to Azure Container Registr
 
 ```bash
 # Login to ACR (one time)
-az acr login --name toygresacr
+az acr login --name ${ACR_REGISTRY%%.*}
 
 # Deploy existing image (fast - no rebuild)
 ./scripts/deploy-acr.sh

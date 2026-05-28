@@ -239,7 +239,7 @@ If Docker tests fail but local tests passed:
 ✅ Docker tests passed!
 
 Would you like to push the image to Azure Container Registry? (y/n)
-  - Registry: ${ACR_REGISTRY:-toygresacr.azurecr.io}
+  - Registry: ${ACR_REGISTRY:-myregistry.azurecr.io}
   - Image: ${ACR_IMAGE:-pg_durable}
   
 Options:
@@ -257,7 +257,7 @@ Enter version tag (e.g., v0.1.6):
 ### 7.2 Login to ACR (if needed)
 ```bash
 # Check if already logged in
-docker pull toygresacr.azurecr.io/pg_durable:latest 2>/dev/null && echo "Already logged in" || az acr login --name toygresacr
+docker pull ${ACR_REGISTRY:-myregistry.azurecr.io}/${ACR_IMAGE:-pg_durable}:latest 2>/dev/null && echo "Already logged in" || az acr login --name ${ACR_REGISTRY%%.*}
 ```
 
 ### 7.3 Deploy
@@ -275,7 +275,7 @@ docker pull toygresacr.azurecr.io/pg_durable:latest 2>/dev/null && echo "Already
 ### 7.4 Verify Deployment
 ```bash
 # List images in registry
-az acr repository show-tags --name toygresacr --repository pg_durable --output table
+az acr repository show-tags --name ${ACR_REGISTRY%%.*} --repository ${ACR_IMAGE:-pg_durable} --output table
 ```
 
 ## Step 8: Review, Commit, and Push
@@ -489,10 +489,10 @@ docker build --no-cache -t pg_durable_e2e_test .
 ### 4. ACR Push Fails
 ```bash
 # Re-authenticate
-az acr login --name toygresacr
+az acr login --name ${ACR_REGISTRY%%.*}
 
 # Check network/permissions
-az acr show --name toygresacr --query "loginServer"
+az acr show --name ${ACR_REGISTRY%%.*} --query "loginServer"
 ```
 
 ## ⚠️ IMPORTANT: User Approval Required
