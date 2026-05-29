@@ -49,21 +49,28 @@
               </div>
             </div>
 
-            <div class="flow-card" aria-label="Workflow flow example">
-              <div class="flow-node flow-node-green">fetchArticle <span class="flow-status">✓</span></div>
-              <svg width="280" height="50" viewBox="0 0 280 50" fill="none" style="display:block;margin:0 auto;">
-                <path d="M140 0 L80 50" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
-                <path d="M140 0 L200 50" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
+            <div class="flow-card" aria-label="Parallel aggregation workflow: a dashboard query that fans out to three parallel queries with the & operator, then joins into one result">
+              <div class="flow-caption">
+                <span class="flow-caption-title">Parallel aggregation</span>
+                <span class="flow-caption-op">df.start( a <code>&amp;</code> b <code>&amp;</code> c ~&gt; … )</span>
+              </div>
+              <div class="flow-node flow-node-green">df.start() <span class="flow-status">✓</span></div>
+              <svg width="300" height="46" viewBox="0 0 300 46" fill="none" style="display:block;margin:0 auto;">
+                <path d="M150 0 L55 46" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
+                <path d="M150 0 L150 46" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
+                <path d="M150 0 L245 46" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
               </svg>
               <div class="flow-branch">
-                <div class="flow-node flow-node-blue">summarize <span class="flow-status">▶</span></div>
-                <div class="flow-node flow-node-green">extractKeywords <span class="flow-status">✓</span></div>
+                <div class="flow-node flow-node-green">count users <span class="flow-status">✓</span></div>
+                <div class="flow-node flow-node-blue">count orders <span class="flow-status">▶</span></div>
+                <div class="flow-node flow-node-gray">sum revenue <span class="flow-status">···</span></div>
               </div>
-              <svg width="280" height="50" viewBox="0 0 280 50" fill="none" style="display:block;margin:0 auto;">
-                <path d="M80 0 L140 50" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
-                <path d="M200 0 L140 50" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
+              <svg width="300" height="46" viewBox="0 0 300 46" fill="none" style="display:block;margin:0 auto;">
+                <path d="M55 0 L150 46" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
+                <path d="M150 0 L150 46" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
+                <path d="M245 0 L150 46" stroke="#3a5070" stroke-width="2" stroke-dasharray="6 4"/>
               </svg>
-              <div class="flow-node flow-node-gray">publish <span class="flow-status">···</span></div>
+              <div class="flow-node flow-node-gray">dashboard ready <span class="flow-status">···</span></div>
             </div>
           </div>
         </div>

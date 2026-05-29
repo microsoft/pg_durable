@@ -309,6 +309,35 @@ main,
   animation: rise 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) 0.22s both;
 }
 
+.flow-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 1.4rem;
+  text-align: center;
+}
+
+.flow-caption-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--copper-light);
+}
+
+.flow-caption-op {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.flow-caption-op code {
+  color: var(--copper-light);
+  font-weight: 700;
+}
+
 .flow-node {
   border-radius: 0.9rem;
   padding: 0.9rem 2.2rem;
@@ -319,6 +348,12 @@ main,
   letter-spacing: -0.01em;
   color: #fff;
   position: relative;
+}
+
+.flow-branch .flow-node {
+  padding: 0.6rem 0.85rem;
+  font-size: 0.76rem;
+  border-radius: 0.7rem;
 }
 
 .flow-node-green {
@@ -384,7 +419,7 @@ main,
 
 .flow-branch {
   display: flex;
-  gap: 2rem;
+  gap: 0.55rem;
   justify-content: center;
 }
 
