@@ -3447,7 +3447,8 @@ SET LOCAL search_path TO @extschema@;
 -- pg_durable::monitoring::list_instances
 CREATE  FUNCTION df."list_instances"(
 	"status_filter" TEXT DEFAULT NULL, /* core::option::Option<&str> */
-	"limit_count" INT DEFAULT 100 /* i32 */
+	"limit_count" INT DEFAULT 100, /* i32 */
+	"filter_label" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS TABLE (
 	"instance_id" TEXT,  /* alloc::string::String */
 	"label" TEXT,  /* core::option::Option<alloc::string::String> */
