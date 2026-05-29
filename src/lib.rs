@@ -382,6 +382,8 @@ DECLARE
         'df.join3(text, text, text)',
         'df.race(text, text)',
         'df.wait_for_signal(text, integer)',
+        'df.await_instance(text, integer)',
+        'df.call_child(text, text, jsonb)',
         'df.signal(text, text, text)',
         'df.start(text, text, text)',
         'df.setvar(text, text)',
@@ -724,8 +726,8 @@ BEGIN
         node_type_val := (val::jsonb)->>'node_type';
         IF node_type_val IS NOT NULL THEN
             -- Has a node_type - validate it
-            IF node_type_val NOT IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL') THEN
-                RAISE EXCEPTION 'Unknown node_type ''%''. Valid types: SQL, THEN, IF, JOIN, LOOP, BREAK, RACE, SLEEP, WAIT_SCHEDULE, HTTP, SIGNAL', node_type_val;
+            IF node_type_val NOT IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL', 'AWAIT_INSTANCE') THEN
+                RAISE EXCEPTION 'Unknown node_type ''%''. Valid types: SQL, THEN, IF, JOIN, LOOP, BREAK, RACE, SLEEP, WAIT_SCHEDULE, HTTP, SIGNAL, AWAIT_INSTANCE', node_type_val;
             END IF;
             RETURN val;
         END IF;
@@ -975,6 +977,71 @@ mod tests {
         let json = crate::dsl::wait_for_schedule("*/5 * * * *");
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "WAIT_SCHEDULE");
+    }
+
+    #[pg_test]
+    fn test_await_instance_creates_valid_node() {
+        let json = crate::dsl::await_instance("abcd1234", Some(30));
+        let fut = Durofut::from_json(&json);
+        assert_eq!(fut.node_type, "AWAIT_INSTANCE");
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["instance_id"], "abcd1234");
+        assert_eq!(config["timeout_seconds"], 30);
+    }
+
+    #[pg_test]
+    fn test_call_child_builds_start_then_await_graph() {
+        let child_graph = crate::dsl::then_fn(
+            &crate::dsl::as_named(&crate::dsl::sql("SELECT 42 AS value"), "child_local"),
+            "SELECT $child_local.value",
+        );
+        let json = crate::dsl::call_child(
+            &child_graph,
+            Some("child-label"),
+            Some(pgrx::JsonB(serde_json::json!({"timeout_seconds": 15}))),
+        );
+        let json_again = crate::dsl::call_child(
+            &child_graph,
+            Some("child-label"),
+            Some(pgrx::JsonB(serde_json::json!({"timeout_seconds": 15}))),
+        );
+        assert_eq!(
+            json, json_again,
+            "call_child output should be deterministic"
+        );
+
+        let fut = Durofut::from_json(&json);
+        assert_eq!(fut.node_type, "THEN");
+
+        let start_node = fut.left_node.as_ref().expect("start node missing");
+        assert_eq!(start_node.node_type, "SQL");
+        let internal_name = start_node
+            .result_name
+            .as_ref()
+            .expect("internal name missing");
+        assert!(internal_name.starts_with("__df_call_child_"));
+        assert!(start_node
+            .query
+            .as_ref()
+            .expect("start query missing")
+            .contains("decode("));
+        assert!(
+            !start_node
+                .query
+                .as_ref()
+                .expect("start query missing")
+                .contains("$child_local"),
+            "child graph placeholders should be encoded before entering the parent SQL node"
+        );
+
+        let await_node = fut.right_node.as_ref().expect("await node missing");
+        assert_eq!(await_node.node_type, "AWAIT_INSTANCE");
+        assert!(await_node
+            .query
+            .as_ref()
+            .expect("await config missing")
+            .contains(&format!("${internal_name}.instance_id")));
     }
 
     #[pg_test]

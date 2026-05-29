@@ -819,6 +819,7 @@ pub const VALID_NODE_TYPES: &[&str] = &[
     "WAIT_SCHEDULE",
     "HTTP",
     "SIGNAL",
+    "AWAIT_INSTANCE",
 ];
 const NON_FUTURE_HELPER_GUC: &str = "df.non_future_helper";
 

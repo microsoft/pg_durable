@@ -257,6 +257,12 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario B1 considerations:** No backward compatibility concern. `df.if_rows` is a new function that doesn't exist in v0.1.1 schemas — it simply won't be callable until the customer runs `ALTER EXTENSION UPDATE`. The `.so` symbol exists but is never invoked from old schemas. All other changes (substitution engine rewrite, `Result` return type) are internal to orchestration code and don't touch any SQL queries or table schemas.
 - **Scenario B2 considerations:** No data migration needed. The change is purely additive (new function) with no table or column changes.
 
+#### Child orchestration helpers — df.await_instance / df.call_child
+- **DDL change:** Upgrade script adds `df.await_instance(text, integer)` and `df.call_child(text, text, jsonb)` and refreshes helper SQL definitions (`df.ensure_durofut`, `df.grant_usage`) so upgraded installations recognize the new `AWAIT_INSTANCE` node type and can grant the new functions.
+- **Scenario A considerations:** Fresh install picks up the new C-language functions from pgrx-generated SQL; the upgrade script must add matching `CREATE FUNCTION` entries and keep helper SQL bodies in sync.
+- **Scenario B1 considerations:** No binary-compatibility risk for pre-upgrade schemas. These are additive SQL entrypoints: older schemas simply cannot call them until `ALTER EXTENSION UPDATE`, while existing SQL queries and table shapes remain unchanged.
+- **Scenario B2 considerations:** No table/data migration is required. Existing instances continue to work, and upgraded roles should re-run `df.grant_usage(...)` if they rely on the helper to grant access to newly added functions.
+
 #### Connection Limits — GUC-controlled pool sizing and backpressure
 - **DDL change:** None. All changes are runtime-only (pool consolidation, semaphore backpressure, new GUCs).
 - **Scenario A considerations:** No schema changes — the `df` schema equivalence contract is unchanged.
