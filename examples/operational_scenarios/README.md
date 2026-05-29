@@ -23,10 +23,10 @@ Each scenario file is a standalone SQL script that can be run against a PostgreS
 psql -h <host> -U <user> -d <database>
 
 # Run the common prerequisite to check for blockers
-\i operational_scenarios/00_common_prerequisite.sql
+\i examples/operational_scenarios/00_common_prerequisite.sql
 
 # Then run the relevant scenario
-\i operational_scenarios/01_autovacuum_blocked.sql
+\i examples/operational_scenarios/01_autovacuum_blocked.sql
 ```
 
 ## Blocker Identification Reference

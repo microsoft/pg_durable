@@ -24,7 +24,7 @@ ORDER BY n_dead_tup DESC;
 
 -- STEP 2: Identify autovacuum blockers
 -- Run the common prerequisite query:
---   \i operational_scenarios/00_common_prerequisite.sql
+--   \i examples/operational_scenarios/00_common_prerequisite.sql
 
 -- STEP 3: Resolve blockers
 -- Based on the blocker source, take the appropriate action:

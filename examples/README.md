@@ -38,3 +38,4 @@ That keeps the CI contract clear:
 - `azure-functions/` — Call an Azure Function from `df.http()`
 - `azure-http-domains/` — Validate Azure allowlisted HTTP domains
 - `invoice-approval/` — Human approval workflow with an Azure Function
+- `operational_scenarios/` — Vacuum, bloat, and wraparound remediation scenarios
