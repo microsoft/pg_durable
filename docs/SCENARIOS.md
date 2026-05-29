@@ -71,9 +71,9 @@ SELECT df.start('SELECT ''Hello, durable world!'' as message');
 
 ```sql
 -- Check status of all recent functions
-SELECT instance_id, label, status, started_at, completed_at 
-FROM df.list_instances() 
-ORDER BY started_at DESC 
+-- df.list_instances() returns: instance_id, label, function_name, status, execution_count, output
+SELECT instance_id, label, function_name, status, execution_count
+FROM df.list_instances()
 LIMIT 5;
 
 -- Get result of a specific instance
@@ -153,7 +153,7 @@ SELECT COUNT(*) as loaded_records FROM target;
 
 -- View execution timeline
 SELECT * FROM df.nodes WHERE instance_id = (
-    SELECT instance_id FROM df.instances WHERE label = 'etl-pipeline'
+    SELECT id FROM df.instances WHERE label = 'etl-pipeline'
 );
 ```
 
@@ -220,9 +220,9 @@ SELECT status FROM df.instances WHERE label = 'process-order';
 SELECT * FROM orders WHERE status = 'completed' ORDER BY processed_at DESC LIMIT 1;
 
 -- View captured variables in execution log
-SELECT node_label, status, result 
+SELECT node_type, status, result 
 FROM df.nodes 
-WHERE instance_id = (SELECT instance_id FROM df.instances WHERE label = 'process-order');
+WHERE instance_id = (SELECT id FROM df.instances WHERE label = 'process-order');
 ```
 
 ### Variable Tips
@@ -284,13 +284,14 @@ SELECT df.start(
 1. The `&` operator runs steps **in parallel**
 2. Execution continues only after **all** parallel branches complete
 3. This is a "fan-out / fan-in" pattern
-4. Use `df.join()` function for more than 2 branches (cleaner syntax)
+4. Use `df.join3()` for 3 branches (`df.join()` handles exactly 2)
 
-### Alternative Syntax with df.join()
+### Alternative Syntax with df.join3()
 
 ```sql
+-- df.join() takes exactly 2 branches; use df.join3() for 3 branches.
 SELECT df.start(
-    df.join(
+    df.join3(
         'SELECT COUNT(*) FROM users',
         'SELECT COUNT(*) FROM orders', 
         'SELECT COUNT(*) FROM products'
@@ -306,11 +307,11 @@ SELECT df.start(
 -- Check status
 SELECT status FROM df.instances WHERE label = 'dashboard-parallel';
 
--- View parallel execution (notice same started_at for parallel branches)
-SELECT node_label, status, started_at, completed_at 
+-- View parallel execution (notice close created_at for parallel branches)
+SELECT node_type, status, created_at, updated_at 
 FROM df.nodes 
-WHERE instance_id = (SELECT instance_id FROM df.instances WHERE label = 'dashboard-parallel')
-ORDER BY started_at;
+WHERE instance_id = (SELECT id FROM df.instances WHERE label = 'dashboard-parallel')
+ORDER BY created_at;
 ```
 
 ### Related Patterns
@@ -389,7 +390,7 @@ SELECT COUNT(*) FROM external_data_sync;
 
 -- Cancel the scheduled job
 SELECT df.cancel(
-    (SELECT instance_id FROM df.instances WHERE label = 'scheduled-data-sync'),
+    (SELECT id FROM df.instances WHERE label = 'scheduled-data-sync'),
     'Stopping scheduled sync'
 );
 ```

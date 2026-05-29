@@ -96,8 +96,10 @@ INSERT INTO _scenario1_state SELECT df.start(
     'SELECT EXISTS(SELECT 1 FROM autovacuum_blockers_log)'
     ?>
         (
-            -- Blockers found: pause for user approval before remediation
-            df.wait_for_signal('approve-remediation')
+            -- Blockers found: pause for user approval before remediation.
+            -- Demo uses a timeout so the workflow auto-continues; in production
+            -- omit it and approve with df.signal(<instance_id>, 'approve-remediation').
+            df.wait_for_signal('approve-remediation', 30)
 
             ~>
 
@@ -149,7 +151,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _scenario1_state;
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
-        EXIT WHEN lower(status) IN ('completed', 'failed', 'canceled') OR attempts > 600;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled') OR attempts > 600;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;

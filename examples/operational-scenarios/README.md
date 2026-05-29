@@ -29,6 +29,11 @@ psql -h <host> -U <user> -d <database>
 \i examples/operational-scenarios/01_autovacuum_blocked.sql
 ```
 
+> ⚠️ **These scripts are illustrative.** Two things to keep in mind before running the `pg_durable` versions verbatim:
+>
+> - **`VACUUM` cannot run inside a transaction block.** The durable worker executes each node inside a transaction, so a bare `VACUUM` step will error at runtime. Treat the `VACUUM (...)` nodes as illustrative — in production, trigger vacuum from a separate maintenance connection (e.g. an out-of-band `psql` session or a scheduled job) once the durable workflow signals it's safe.
+> - **Approval steps pause the workflow.** Each remediation branch uses `df.wait_for_signal('approve-…')`. In these demo scripts a short `timeout_seconds` is supplied so the workflow auto-continues instead of hanging. In production, omit the timeout and have an operator approve explicitly with `df.signal('<instance_id>', 'approve-…')`.
+
 ## Blocker Identification Reference
 
 Before taking any manual vacuum action, always identify the oldest xmin holder, as it can prevent vacuum, freeze, and catalog cleanup.
