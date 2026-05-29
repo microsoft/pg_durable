@@ -1,14 +1,14 @@
 # pg_durable Operational Scenarios – Design & Behavior Spec
 
-> **Context:** Based on brainstorming session with Sarat Balijepalli (Azure PostgreSQL Support) and Pino de Candia. Captures real-world customer patterns and how pg_durable can automate them — with human-in-the-loop approval before destructive actions.
+> **Context:** Based on a brainstorming session with the Azure PostgreSQL Support team. Captures real-world customer patterns and how pg_durable can automate them — with human-in-the-loop approval before destructive actions.
 
 ---
 
-## Key Insight from Sarat
+## Key Insight
 
 Customers today get **troubleshooting guides** and **Azure Advisor** recommendations that show them what's wrong — but they have to fix it manually. pg_durable can **close the loop**: detect the problem, surface findings for review, wait for approval, then execute remediation durably.
 
-> *"They're perfectly OK if we do it or they want scripts to do it — but they don't want us to do it immediately without them having control."* — Sarat
+> *"They're perfectly OK if we do it or they want scripts to do it — but they don't want us to do it immediately without them having control."* — Azure PostgreSQL Support
 
 ---
 
@@ -83,7 +83,7 @@ SELECT df.start(
 
 ### Scheduling (Off-Hours Execution)
 
-Sarat confirmed customers often want remediation during **off-hours** (e.g., 7–9 AM before business starts, or weekends). pg_durable has **native scheduling** — no `pg_cron` dependency needed.
+Customers often want remediation during **off-hours** (e.g., 7–9 AM before business starts, or weekends). pg_durable has **native scheduling** — no `pg_cron` dependency needed.
 
 #### `@>` (Loop Operator) + `df.wait_for_schedule(cron_expr)`
 
@@ -178,7 +178,7 @@ SELECT df.cancel('<instance_id>');
 
 **Trigger:** Autovacuum cannot proceed — dead tuples accumulate, table bloat grows.
 
-### Expected Behavior (from Sarat)
+### Expected Behavior
 
 1. **Detect** — Run the blocker identification query, log results to `autovacuum_blockers_log`
 2. **Branch** — Check if any blockers were found:
@@ -250,7 +250,7 @@ SELECT df.signal('<instance_id>', 'approve-remediation');
 
 **Trigger:** Table bloat exceeds threshold — wasted disk, slow sequential scans.
 
-### Expected Behavior (from Sarat)
+### Expected Behavior
 
 1. **Detect** — Identify bloated tables (dead tuple ratio, table size), log to `bloat_detection_log`
 2. **Check blockers** — Log vacuum blockers
@@ -315,7 +315,7 @@ SELECT df.start(
 
 **Trigger:** Database approaching the ~2 billion XID limit — risk of emergency shutdown.
 
-### Expected Behavior (from Sarat)
+### Expected Behavior
 
 1. **Detect** — Check database-level transaction ages, identify tables closest to wraparound
 2. **Check blockers** — Log vacuum blockers
@@ -430,7 +430,7 @@ Since `VACUUM FREEZE` is expensive even without blockers, some customers may wan
 
 **Trigger:** Tables haven't been vacuumed (manually or by autovacuum) for a configurable threshold (default: 7 days).
 
-### Expected Behavior (from Sarat)
+### Expected Behavior
 
 1. **Detect** — Identify stale tables: `last_vacuum` and `last_autovacuum` older than X days
 2. **Check blockers** — Log vacuum blockers
@@ -598,5 +598,5 @@ Each scenario writes a final summary to its action log. VS Code can render this 
 1. **Signal discovery:** How does the VS Code extension discover which pipelines are waiting for signals? Does `df.status()` expose the signal name?
 2. **Partial approval:** Can users approve remediation for *some* blockers but not others (e.g., terminate idle sessions but keep the replication slot)?
 3. **Rollback:** If remediation causes issues (e.g., terminated session was important), what's the recovery path?
-4. **Multi-database:** Sarat's scenarios run per-database. How do we handle customers with many databases on one server?
+4. **Multi-database:** These scenarios run per-database. How do we handle customers with many databases on one server?
 5. **Permissions:** The pipeline needs superuser-like privileges (`pg_terminate_backend`, `pg_drop_replication_slot`). How do we handle least-privilege access?
