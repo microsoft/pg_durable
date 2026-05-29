@@ -336,6 +336,46 @@ END $$;
 
 DROP TABLE _test_state_6b;
 
+-- Test 6c: With start_use_session_user = on, SECURITY DEFINER captures session_user (alice), not definer
+-- Alice still cannot access the superuser-only table because the identity is now alice, not postgres.
+SET pg_durable.start_use_session_user = on;
+
+SET SESSION AUTHORIZATION iso_alice;
+CREATE TEMP TABLE _test_state_6c (instance_id TEXT);
+INSERT INTO _test_state_6c
+SELECT iso_submit_as_definer('SELECT value FROM iso_superuser_secrets LIMIT 1');
+RESET SESSION AUTHORIZATION;
+
+RESET pg_durable.start_use_session_user;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    final_status TEXT;
+    inst_submitted TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state_6c;
+
+    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+
+    -- With start_use_session_user = on, the identity is alice (session_user), who
+    -- cannot access iso_superuser_secrets → the SQL node must fail.
+    IF final_status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6c - start_use_session_user): expected failed (alice has no access), got %', final_status;
+    END IF;
+
+    SELECT submitted_by::text INTO inst_submitted
+      FROM df.instances WHERE id = inst_id;
+
+    IF inst_submitted != 'iso_alice' THEN
+        RAISE EXCEPTION 'TEST FAILED (Test 6c): expected submitted_by=iso_alice (session_user), got %', inst_submitted;
+    END IF;
+
+    RAISE NOTICE 'Test 6c PASSED: start_use_session_user captures session_user (iso_alice), not definer (postgres)';
+END $$;
+
+DROP TABLE _test_state_6c;
+
 DROP FUNCTION IF EXISTS iso_submit_as_definer(TEXT);
 DROP TABLE IF EXISTS iso_superuser_secrets CASCADE;
 

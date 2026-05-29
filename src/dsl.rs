@@ -659,8 +659,15 @@ pub fn start(
         }
     }
 
-    // Capture user identity for privilege isolation
-    let current_user_oid = unsafe { pgrx::pg_sys::GetUserId() };
+    // Capture user identity for privilege isolation.
+    // When pg_durable.start_use_session_user is on, capture session_user
+    // (the authenticated login role) so that SECURITY DEFINER wrappers cannot
+    // silently escalate the identity to the function owner's privileges.
+    let current_user_oid = if crate::types::start_use_session_user() {
+        unsafe { pgrx::pg_sys::GetSessionUserId() }
+    } else {
+        unsafe { pgrx::pg_sys::GetUserId() }
+    };
     let current_user_name = unsafe {
         let name_ptr = pgrx::pg_sys::GetUserNameFromId(current_user_oid, false);
         std::ffi::CStr::from_ptr(name_ptr)
