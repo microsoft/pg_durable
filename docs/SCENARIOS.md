@@ -5,8 +5,6 @@
 This guide presents practical scenarios showing when and how to use pg_durable. Each scenario includes a use case, copy-paste ready code, and verification steps.
 
 > 📖 **New to pg_durable?** See the [User Guide](../USER_GUIDE.md) for complete DSL reference and concepts.
->
-> 🤖 **Looking for AI patterns?** See the dedicated **[AI Scenarios folder](ai/)** for data ingestion, LLM orchestration, and human-in-the-loop workflows.
 
 ---
 
@@ -19,8 +17,7 @@ This guide presents practical scenarios showing when and how to use pg_durable. 
   - [Scenario 3: Order Processing with Variables](#scenario-3-order-processing-with-variables)
   - [Scenario 4: Parallel Aggregation](#scenario-4-parallel-aggregation)
   - [Scenario 5: Scheduled Data Sync](#scenario-5-scheduled-data-sync)
-- **Part 2: AI & Orchestration Patterns** → See [ai/](ai/) folder
-- **Part 3: Database Operations** → See [Sarat_scenarios/](../Sarat_scenarios/) folder
+- **Part 2: Database Operations** → See [Sarat_scenarios/](../Sarat_scenarios/) folder
 - [Next Steps](#next-steps)
 
 ---
@@ -162,7 +159,6 @@ SELECT * FROM df.nodes WHERE instance_id = (
 ### Related Patterns
 
 - Add **parallel steps** → [Scenario 4: Parallel Aggregation](#scenario-4-parallel-aggregation)
-- Add **conditional logic** → [AI Query Processing](ai/SCENARIOS.md#scenario-2-query-processing--prepost-llm-orchestration)
 
 ---
 
@@ -319,7 +315,6 @@ ORDER BY started_at;
 ### Related Patterns
 
 - Need **first to complete wins** instead of all? Use `|` (race) operator
-- Combine **parallel + sequential** → [AI Data Ingestion](ai/SCENARIOS.md#scenario-1-data-ingestion--chunking--embedding)
 
 ---
 
@@ -405,40 +400,7 @@ SELECT df.cancel(
 
 ---
 
-# Part 2: AI & Orchestration Patterns
-
-> 🤖 **Looking for AI-specific documentation?** See the dedicated **[AI Scenarios folder](ai/)** for detailed patterns, production examples, and best practices.
-
-pg_durable is ideal for AI/ML workloads that require fault-tolerant orchestration. The [ai/](ai/) folder contains 3 comprehensive scenarios:
-
-| Scenario | Use Case | Key Features |
-|----------|----------|--------------|
-| **[Data Ingestion](ai/SCENARIOS.md#scenario-1-data-ingestion--chunking--embedding)** | RAG pipelines, document processing | `~>` + Azure AI extension |
-| **[Query Processing](ai/SCENARIOS.md#scenario-2-query-processing--prepost-llm-orchestration)** | Pre/post LLM orchestration, model routing | Conditional routing, multi-stage processing |
-| **[Human-in-the-Loop](ai/SCENARIOS.md#scenario-3-evaluation-loop-with-human-review)** | Content moderation, compliance review | `df.loop()`, `df.wait_for_signal()` |
-
-### Quick Example: AI Pipeline
-
-```sql
--- Fault-tolerant embedding pipeline using Azure AI extension
--- Requires: CREATE EXTENSION azure_ai; CREATE EXTENSION vector;
-SELECT df.start(
-    'SELECT id, content FROM documents WHERE status = ''pending'' LIMIT 1' |=> 'doc'
-    ~> 'UPDATE documents 
-        SET embedding = azure_openai.create_embeddings(''text-embedding-3-small'', ($doc::jsonb->>''content''))::vector,
-            status = ''done'' 
-        WHERE id = ($doc::jsonb->>''id'')::int',
-    'ai-embed'
-);
-```
-
-For complete AI scenario details, see:
-- **[AI README](ai/README.md)** — Overview of AI use cases
-- **[AI Scenarios](ai/SCENARIOS.md)** — Full code samples with verification steps
-
----
-
-# Part 3: Database Operations Patterns
+# Part 2: Database Operations Patterns
 
 > 🔧 **Looking for database-maintenance workflows?** See the dedicated **[Sarat_scenarios/](../Sarat_scenarios/)** folder for vacuum, bloat, and wraparound remediation scenarios.
 
@@ -463,7 +425,6 @@ condition, remediate it, and verify the result — surviving restarts along the 
 ## Learn More
 
 - **[User Guide](../USER_GUIDE.md)** — Complete DSL reference, all operators and functions
-- **[AI Scenarios](ai/)** — Dedicated folder for AI/ML orchestration patterns
 - **[API Reference](api-reference.md)** — Detailed function signatures
 - **[Architecture](ARCHITECTURE.md)** — How pg_durable works under the hood
 

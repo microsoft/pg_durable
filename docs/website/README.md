@@ -27,7 +27,6 @@ Then open:
 The website content is based on:
 
 - `docs/SCENARIOS.md`
-- `docs/ai/SCENARIOS.md`
 - `examples/README.md`
 - `USER_GUIDE.md`
 - `README.md`
