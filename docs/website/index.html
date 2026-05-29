@@ -25,6 +25,7 @@
           <a href="#why">Why pg_durable</a>
           <a href="#use-cases">Use Cases</a>
           <a href="#ai-skill">AI Skill</a>
+          <a href="#horizondb">Cloud</a>
           <a href="https://github.com/microsoft/pg_durable">GitHub</a>
         </nav>
       </div>
@@ -701,6 +702,58 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
               run durable functions in your own PostgreSQL.
               <a href="https://github.com/microsoft/pg_durable">View the source on GitHub →</a>
             </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Azure HorizonDB (cloud) ───────────────────── -->
+      <section class="horizon" id="horizondb">
+        <div class="container">
+          <div class="horizon-box">
+            <div class="horizon-head">
+              <img
+                class="horizon-logo"
+                src="https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1374850-Icon-Hero-HorizonDB-24x24?resMode=sharp2&op_usm=1.5,0.65,15,0&wid=48&hei=48&qlt=100&fit=constrain"
+                alt="Azure HorizonDB logo"
+                width="44"
+                height="44"
+              />
+              <div>
+                <span class="horizon-eyebrow">Run it in the cloud <span class="horizon-badge">Preview</span></span>
+                <h2>pg_durable, fully managed on <span class="accent-azure">Azure HorizonDB</span></h2>
+              </div>
+            </div>
+            <p class="horizon-lede">
+              Azure HorizonDB is Microsoft's new PostgreSQL cloud service — engineered for performance and built
+              with pg_durable inside. Keep the durable workflows you write here, and add enterprise scale,
+              security, and AI without managing a single server.
+            </p>
+            <div class="horizon-grid">
+              <div class="horizon-feature">
+                <span class="hf-icon">⚡</span>
+                <h4>Up to 3× faster</h4>
+                <p>Outscales self-managed Postgres with auto-scaling storage to 128&nbsp;TB and scale-out compute up to 3,072 vCores.</p>
+              </div>
+              <div class="horizon-feature">
+                <span class="hf-icon">🛡️</span>
+                <h4>Enterprise protection</h4>
+                <p>Real-time threat detection with Microsoft Defender and identity management through Microsoft Entra ID.</p>
+              </div>
+              <div class="horizon-feature">
+                <span class="hf-icon">🧠</span>
+                <h4>Built for AI</h4>
+                <p>Filtered DiskANN vector search, semantic ranking, and a curated set of in-database AI models.</p>
+              </div>
+              <div class="horizon-feature">
+                <span class="hf-icon">🔗</span>
+                <h4>Azure-native</h4>
+                <p>Near-real-time mirroring to Microsoft Fabric, VS Code integration, and GitHub Copilot — one ecosystem.</p>
+              </div>
+            </div>
+            <div class="horizon-cta">
+              <a class="button-azure" href="https://aka.ms/horizondb_pg_durable">Explore Azure HorizonDB →</a>
+              <span class="horizon-note">Apply for the early preview.</span>
+            </div>
           </div>
         </div>
       </section>

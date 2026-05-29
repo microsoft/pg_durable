@@ -1164,3 +1164,150 @@ footer p {
     align-items: start;
   }
 }
+
+/* ── Azure HorizonDB (cloud upsell) ──────────────────────── */
+
+.horizon {
+  padding: 4rem 0;
+}
+
+.horizon-box {
+  position: relative;
+  border: 1px solid rgba(58, 160, 255, 0.28);
+  border-radius: var(--radius-lg);
+  padding: 2.6rem;
+  background:
+    radial-gradient(130% 150% at 0% 0%, rgba(58, 160, 255, 0.16), transparent 55%),
+    linear-gradient(180deg, rgba(19, 27, 45, 0.92), rgba(10, 14, 26, 0.94));
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.horizon-box::before {
+  content: "";
+  position: absolute;
+  top: -120px;
+  left: -120px;
+  width: 360px;
+  height: 360px;
+  background: radial-gradient(circle, rgba(58, 160, 255, 0.22), transparent 70%);
+  pointer-events: none;
+}
+
+.horizon-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.1rem;
+}
+
+.horizon-logo {
+  flex-shrink: 0;
+  border-radius: 10px;
+}
+
+.horizon-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7fbcff;
+}
+
+.horizon-badge {
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(58, 160, 255, 0.16);
+  border: 1px solid rgba(58, 160, 255, 0.4);
+  color: #aed6ff;
+}
+
+.horizon-head h2 {
+  margin: 0.35rem 0 0;
+  font-size: clamp(1.7rem, 3.2vw, 2.4rem);
+  line-height: 1.1;
+}
+
+.accent-azure {
+  background: linear-gradient(135deg, #8cc4ff, #2c8bff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.horizon-lede {
+  position: relative;
+  color: var(--text-secondary);
+  max-width: 66ch;
+  font-size: 1.08rem;
+  line-height: 1.7;
+}
+
+.horizon-grid {
+  position: relative;
+  display: grid;
+  gap: 1rem;
+  margin: 1.9rem 0 1.7rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.horizon-feature {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(13, 18, 30, 0.5);
+  padding: 1.15rem 1.25rem;
+}
+
+.hf-icon {
+  font-size: 1.35rem;
+}
+
+.horizon-feature h4 {
+  margin: 0.55rem 0 0.4rem;
+  font-family: var(--font-display);
+  font-size: 1.04rem;
+  font-weight: 700;
+}
+
+.horizon-feature p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.horizon-cta {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+
+.button-azure {
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 0.98rem;
+  color: #fff;
+  padding: 0.85rem 1.5rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #2c8bff, #0c66d6);
+  box-shadow: 0 10px 30px -10px rgba(44, 139, 255, 0.6);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.button-azure:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 38px -10px rgba(44, 139, 255, 0.75);
+}
+
+.horizon-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
