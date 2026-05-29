@@ -101,7 +101,10 @@
                   <button class="hide-btn" onclick="document.getElementById('boilerplate-panel').classList.remove('revealed')">
                     Hide boilerplate ↑
                   </button>
-                  <pre><code>-- 1. Set up job queues and state tables
+                  <pre><code>-- Goal: run 3 aggregations in parallel, then refresh a dashboard
+--       — with retries and crash recovery. Here's the plumbing.
+
+-- 1. Set up job queues and state tables
 CREATE TABLE job_queue (
     id SERIAL PRIMARY KEY,
     payload JSONB NOT NULL,
@@ -457,7 +460,23 @@ BEGIN
     ) SELECT count(*) INTO deleted FROM d;
     RETURN deleted;
 END;
-$$ LANGUAGE plpgsql;</code></pre>
+$$ LANGUAGE plpgsql;
+
+-- 11. ...and only NOW can you wire up the actual workflow
+WITH job AS (
+    INSERT INTO job_queue (payload)
+    VALUES ('{"name":"refresh-dashboard"}') RETURNING id
+)
+INSERT INTO workflow_steps
+    (job_id, step_order, step_name, step_query, depends_on)
+SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
+    (1, 'count_users',   'SELECT count(*) FROM users',          NULL),
+    (1, 'count_orders',  'SELECT count(*) FROM orders',         NULL),
+    (1, 'sum_revenue',   'SELECT sum(amount) FROM orders',      NULL),
+    (2, 'refresh_dash',  'REFRESH MATERIALIZED VIEW metrics',   ARRAY[1,2,3])
+) AS v(ord, name, query, deps);
+-- ...then schedule the worker, poll, coordinate the parallel
+-- steps, handle failures, recover crashes — see all of the above.</code></pre>
                 </div>
                 <div class="comparison-overlay" id="boilerplate-overlay">
                   <p class="big-text">300+ lines of boilerplate</p>
