@@ -728,9 +728,14 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
       <!-- ── AI Skill ──────────────────────────────────── -->
       <section class="callout" id="ai-skill">
         <div class="container">
-          <div class="callout-box">
+          <span class="section-eyebrow">🤖 AI-assisted authoring</span>
+          <h2>Let your AI assistant write the SQL</h2>
+          <p class="section-lede">
+            You describe the workflow in plain English — Copilot writes correct durable-function SQL.
+          </p>
+          <div class="callout-box callout-feature">
             <p>
-              🤖 <strong>Let your AI assistant write pg_durable SQL for you.</strong>
+              <strong>Skip the syntax. Just describe what you want.</strong>
             </p>
             <p>
               This repo ships a reusable agent skill, <code>pg-durable-sql</code>, that teaches
@@ -747,15 +752,23 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
       <!-- ── OSS Durable Functions ─────────────────────── -->
       <section class="install">
         <div class="container">
-          <div class="callout-box">
+          <span class="section-eyebrow">📦 100% open source</span>
+          <h2>Open-source durable functions for Postgres</h2>
+          <p class="section-lede">
+            No waitlist, no lock-in. Clone, build, and run durable functions in your own PostgreSQL today.
+          </p>
+          <div class="callout-box callout-feature">
             <p>
-              📦 <strong>OSS Durable Functions</strong> <span class="coming-soon-badge">Open source</span>
+              <strong>Bring durable orchestration to any PostgreSQL.</strong>
+              <span class="coming-soon-badge">Open source</span>
             </p>
             <p>
               pg_durable is fully open source today. Clone the repo, build the extension, and
-              run durable functions in your own PostgreSQL.
-              <a href="https://github.com/microsoft/pg_durable">View the source on GitHub →</a>
+              run durable functions in your own PostgreSQL — on your laptop, your server, or your cloud.
             </p>
+            <div class="callout-links">
+              <a href="https://github.com/microsoft/pg_durable">View the source on GitHub →</a>
+            </div>
           </div>
         </div>
       </section>

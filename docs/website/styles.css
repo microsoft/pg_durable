@@ -724,10 +724,59 @@ main,
   font-size: 0.88rem;
 }
 
+/* ── Section eyebrow (pill above headings) ───────────────── */
+
+.section-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--copper-light);
+  padding: 0.4rem 0.9rem;
+  border: 1px solid rgba(227, 164, 92, 0.32);
+  border-radius: 999px;
+  background: rgba(227, 164, 92, 0.07);
+}
+
 /* ── Callout ─────────────────────────────────────────────── */
 
 .callout {
   padding: 3.2rem 0;
+}
+
+/* Feature callout — stronger glow + accent for marquee sections */
+.callout-feature {
+  margin-top: 1.4rem;
+  padding: 2rem 2.2rem;
+  text-align: left;
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(120% 140% at 0% 0%, var(--copper-glow), transparent 55%),
+    linear-gradient(180deg, rgba(27, 35, 54, 0.92), rgba(14, 19, 32, 0.92));
+  box-shadow: var(--shadow-card), 0 0 0 1px rgba(227, 164, 92, 0.06);
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.callout-feature::before {
+  width: 5px;
+  background: linear-gradient(180deg, var(--pg-blue-light), var(--copper));
+}
+
+.callout-feature:hover {
+  transform: translateY(-3px);
+  border-color: var(--copper);
+}
+
+.callout-feature p:first-child strong {
+  font-family: var(--font-display);
+  font-size: 1.18rem;
+  font-weight: 700;
 }
 
 .callout-box {
