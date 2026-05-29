@@ -41,6 +41,9 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
             let pool = http_pool.clone();
             async move { activities::execute_http::execute(ctx, pool, config_json).await }
         })
+        .register(activities::compute_cron_wait::NAME, |ctx: ActivityContext, input_json: String| {
+            async move { activities::compute_cron_wait::execute(ctx, input_json).await }
+        })
         .build()
 }
 

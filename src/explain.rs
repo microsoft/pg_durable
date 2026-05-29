@@ -646,18 +646,18 @@ fn format_node_display(node: &ExplainNode) -> String {
             format!("SLEEP {seconds}s{name_suffix}")
         }
         "WAIT_SCHEDULE" => {
-            // Parse config to get cron expression and wait seconds
-            let (cron, secs) = node
+            // Parse config to get cron expression and target timestamp
+            let (cron, target) = node
                 .query
                 .as_ref()
                 .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
                 .map(|cfg| {
                     let c = cfg["cron_expr"].as_str().unwrap_or("?").to_string();
-                    let s = cfg["wait_seconds"].as_u64().unwrap_or(0);
-                    (c, s)
+                    let t = cfg["target_timestamp"].as_str().unwrap_or("?").to_string();
+                    (c, t)
                 })
-                .unwrap_or_else(|| ("?".to_string(), 0));
-            format!("WAIT '{cron}' ({secs}s){name_suffix}")
+                .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+            format!("WAIT '{cron}' (until {target}){name_suffix}")
         }
         "HTTP" => {
             // Parse config to get method and URL
