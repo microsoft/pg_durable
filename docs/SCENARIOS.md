@@ -17,7 +17,7 @@ This guide presents practical scenarios showing when and how to use pg_durable. 
   - [Scenario 3: Order Processing with Variables](#scenario-3-order-processing-with-variables)
   - [Scenario 4: Parallel Aggregation](#scenario-4-parallel-aggregation)
   - [Scenario 5: Scheduled Data Sync](#scenario-5-scheduled-data-sync)
-- **Part 2: Standard Operational Scenarios** → See [examples/operational_scenarios/](../examples/operational_scenarios/) folder
+- **Part 2: Standard Operational Scenarios** → See [examples/operational-scenarios/](../examples/operational-scenarios/) folder
 - **Part 3: Azure Integration Examples** → See [examples/](../examples/) folder
 - [Next Steps](#next-steps)
 
@@ -403,7 +403,7 @@ SELECT df.cancel(
 
 # Part 2: Standard Operational Scenarios
 
-> 🔧 **Looking for database-maintenance workflows?** See the dedicated **[examples/operational_scenarios/](../examples/operational_scenarios/)** folder for vacuum, bloat, and wraparound remediation scripts.
+> 🔧 **Looking for database-maintenance workflows?** See the dedicated **[examples/operational-scenarios/](../examples/operational-scenarios/)** folder for vacuum, bloat, and wraparound remediation scripts.
 
 pg_durable is well suited to durable database-operations workflows that must detect a
 condition, surface findings for review, wait for human approval, then remediate and verify
@@ -412,11 +412,11 @@ the loop on the most common PostgreSQL maintenance pain points.
 
 | Scenario | Use Case | Script |
 |----------|----------|--------|
-| **Common Prerequisite** | Identify autovacuum blockers before any manual action | [`00_common_prerequisite.sql`](../examples/operational_scenarios/00_common_prerequisite.sql) |
-| **Autovacuum Is Blocked** | Detect and resolve autovacuum blockers, then vacuum | [`01_autovacuum_blocked.sql`](../examples/operational_scenarios/01_autovacuum_blocked.sql) |
-| **Database Bloat > 80%** | Address excessive table bloat by clearing blockers and vacuuming | [`02_database_bloat.sql`](../examples/operational_scenarios/02_database_bloat.sql) |
-| **Wraparound Risk** | Identify and mitigate transaction ID wraparound risk | [`03_wraparound_risk.sql`](../examples/operational_scenarios/03_wraparound_risk.sql) |
-| **Tables Not Vacuumed for X Days** | Find stale tables and keep vacuum maintenance current | [`04_tables_not_vacuumed.sql`](../examples/operational_scenarios/04_tables_not_vacuumed.sql) |
+| **Common Prerequisite** | Identify autovacuum blockers before any manual action | [`00_common_prerequisite.sql`](../examples/operational-scenarios/00_common_prerequisite.sql) |
+| **Autovacuum Is Blocked** | Detect and resolve autovacuum blockers, then vacuum | [`01_autovacuum_blocked.sql`](../examples/operational-scenarios/01_autovacuum_blocked.sql) |
+| **Database Bloat > 80%** | Address excessive table bloat by clearing blockers and vacuuming | [`02_database_bloat.sql`](../examples/operational-scenarios/02_database_bloat.sql) |
+| **Wraparound Risk** | Identify and mitigate transaction ID wraparound risk | [`03_wraparound_risk.sql`](../examples/operational-scenarios/03_wraparound_risk.sql) |
+| **Tables Not Vacuumed for X Days** | Find stale tables and keep vacuum maintenance current | [`04_tables_not_vacuumed.sql`](../examples/operational-scenarios/04_tables_not_vacuumed.sql) |
 
 ### Scenario 0: Common Prerequisite
 
@@ -424,37 +424,37 @@ the loop on the most common PostgreSQL maintenance pain points.
 
 Identifies the oldest `xmin` holder — long-running transactions, logical/physical replication
 slots, or prepared transactions — that can block vacuum, freeze, and catalog cleanup. Always
-run this first so remediation targets the real blocker. → [`00_common_prerequisite.sql`](../examples/operational_scenarios/00_common_prerequisite.sql)
+run this first so remediation targets the real blocker. → [`00_common_prerequisite.sql`](../examples/operational-scenarios/00_common_prerequisite.sql)
 
 ### Scenario 1: Autovacuum Is Blocked
 
 > *"Autovacuum can't keep up — dead tuples are piling up and the table keeps growing."*
 
 Detects autovacuum blockers, surfaces them for review, waits for approval, then clears the
-blocker and runs `VACUUM (ANALYZE)` — all as a single durable, crash-safe pipeline. → [`01_autovacuum_blocked.sql`](../examples/operational_scenarios/01_autovacuum_blocked.sql)
+blocker and runs `VACUUM (ANALYZE)` — all as a single durable, crash-safe pipeline. → [`01_autovacuum_blocked.sql`](../examples/operational-scenarios/01_autovacuum_blocked.sql)
 
 ### Scenario 2: Database Bloat > 80%
 
 > *"A table is mostly dead tuples — disk is wasted and scans are slow."*
 
 Identifies bloated tables, branches on whether blockers exist (`?>` / `!>`), remediates with
-approval when needed, then vacuums to reclaim space and logs how much was recovered. → [`02_database_bloat.sql`](../examples/operational_scenarios/02_database_bloat.sql)
+approval when needed, then vacuums to reclaim space and logs how much was recovered. → [`02_database_bloat.sql`](../examples/operational-scenarios/02_database_bloat.sql)
 
 ### Scenario 3: Wraparound Risk
 
 > *"The database is approaching the ~2 billion XID limit and risks an emergency shutdown."*
 
 Detects tables at transaction-ID wraparound risk, escalates for approval, and runs a
-durable freeze/vacuum to pull the database back from the brink. → [`03_wraparound_risk.sql`](../examples/operational_scenarios/03_wraparound_risk.sql)
+durable freeze/vacuum to pull the database back from the brink. → [`03_wraparound_risk.sql`](../examples/operational-scenarios/03_wraparound_risk.sql)
 
 ### Scenario 4: Tables Not Vacuumed for X Days
 
 > *"Some tables haven't been vacuumed — manually or by autovacuum — for over a week."*
 
 Finds stale tables past a configurable threshold (default: 7 days) and keeps vacuum
-maintenance current, optionally on an off-hours schedule via `df.wait_for_schedule()`. → [`04_tables_not_vacuumed.sql`](../examples/operational_scenarios/04_tables_not_vacuumed.sql)
+maintenance current, optionally on an off-hours schedule via `df.wait_for_schedule()`. → [`04_tables_not_vacuumed.sql`](../examples/operational-scenarios/04_tables_not_vacuumed.sql)
 
-> 💡 Always start with the Common Prerequisite (Scenario 0) to identify autovacuum blockers before running any remediation. See the [operational scenarios README](../examples/operational_scenarios/README.md) and [design notes](../examples/operational_scenarios/SCENARIOS_DESIGN.md) for details.
+> 💡 Always start with the Common Prerequisite (Scenario 0) to identify autovacuum blockers before running any remediation. See the [operational scenarios README](../examples/operational-scenarios/README.md) and [design notes](../examples/operational-scenarios/SCENARIOS_DESIGN.md) for details.
 
 ---
 

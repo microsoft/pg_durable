@@ -7,7 +7,7 @@
 
 -- STEP 1: Identify autovacuum blockers
 -- Run the common prerequisite query first:
---   \i examples/operational_scenarios/00_common_prerequisite.sql
+--   \i examples/operational-scenarios/00_common_prerequisite.sql
 
 -- STEP 2: Resolve blockers
 -- Based on the blocker source, take the appropriate action:
