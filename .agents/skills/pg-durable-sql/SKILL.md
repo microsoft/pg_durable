@@ -11,7 +11,7 @@ Generate correct, idiomatic pg_durable durable function SQL using the `df.*` sch
 
 1. **All DSL expressions are TEXT.** Operators and functions return JSON-encoded TEXT strings representing a function graph. Only `df.start()` actually executes anything.
 2. **SQL strings are auto-wrapped.** Plain SQL strings like `'SELECT 1'` are automatically converted to SQL nodes — you do NOT need `df.sql()`.
-3. **Single-quote escaping.** Inside SQL string literals, single quotes must be doubled: `''value''` not `'value'`.
+3. **Single-quote escaping.** Each DSL node is itself a single-quoted SQL string, so any single quotes *inside* it must be doubled. To filter `status = 'pending'`, write the whole node as `'SELECT * FROM orders WHERE status = ''pending'''` (note the doubled quotes around `pending` and the closing `'''`).
 4. **Operators are SQL-level custom operators.** They work on `TEXT` operands. Parentheses control grouping.
 5. **`df.setvar()` must be called BEFORE `df.start()`.** Variables are captured at start time and are immutable during execution.
 6. **Two variable syntaxes:** `{varname}` for durable function variables (from `df.setvar`), `$name` for result captures (from `|=>`). Do NOT mix them up.
@@ -89,6 +89,10 @@ df.race(a TEXT, b TEXT) → TEXT
 -- Conditional branch (function variant of ?> !>)
 df.if(condition TEXT, then_branch TEXT, else_branch TEXT) → TEXT
 
+-- Conditional branch on whether a NAMED result has rows (no SQL re-run).
+-- result_name is a capture from |=> earlier in the graph.
+df.if_rows(result_name TEXT, then_branch TEXT, else_branch TEXT) → TEXT
+
 -- Loop — infinite or while-condition
 df.loop(body TEXT) → TEXT                            -- Infinite loop
 df.loop(body TEXT, condition TEXT) → TEXT             -- While-loop: repeats while condition is truthy
@@ -121,7 +125,7 @@ df.signal(
 Use a JSON object when workflow SQL expects structured fields; use plain text for simple opaque values.
 
 -- Query status
-df.status(instance_id TEXT) → TEXT      -- 'Running', 'Completed', 'Failed', 'Cancelled'
+df.status(instance_id TEXT) → TEXT      -- 'pending', 'running', 'completed', 'failed', 'cancelled' (lowercase)
 
 -- Get result
 df.result(instance_id TEXT) → TEXT      -- JSON result from final node
@@ -214,7 +218,7 @@ The first column of the first row is evaluated:
 |------|--------|-------|
 | Boolean | `true`, `t` | `false`, `f` |
 | Number | Any non-zero | `0`, `0.0` |
-| String | `'true'`, `'yes'`, `'1'`, non-empty | `'false'`, `'no'`, `'0'`, `''` |
+| String | `'true'`, `'t'`, `'yes'`, non-zero numeric strings, and any other non-empty string (e.g. `'hello'`) | `'false'`, `'f'`, `'no'`, `'0'`, `''` (empty/whitespace) |
 | Array | Non-empty `[1,2]` | Empty `[]` |
 | Object | Non-empty `{"a":1}` | Empty `{}` |
 | NULL | — | Always falsy |

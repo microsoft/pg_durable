@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pg_durable — Durable SQL workflows for PostgreSQL</title>
+    <meta
+      name="description"
+      content="Build durable, fault-tolerant workflows in pure SQL. Retries, scheduling, parallel execution, and conditional branching — all inside PostgreSQL."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container nav">
+        <a class="brand" href="#top">pg_durable</a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="#how-it-works">How It Works</a>
+          <a href="#why">Why pg_durable</a>
+          <a href="#use-cases">Use Cases</a>
+          <a href="#ai-skill">AI Skill</a>
+          <a href="#horizondb">Cloud</a>
+          <a href="https://github.com/microsoft/pg_durable">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+
+      <!-- ── Hero ──────────────────────────────────────── -->
+      <section class="hero">
+        <div class="container hero-inner">
+          <span class="hero-eyebrow">Open-source · durable functions for Postgres</span>
+          <h1>Durable, crash-proof workflows<br />built into <span class="accent">Postgres</span></h1>
+          <p class="subtitle">
+            Orchestrate retries, scheduling, parallel fan-out, and conditional branching with a tiny SQL DSL.
+            Built on Postgres&nbsp;+ a background worker — no containers, no external services, just Postgres.
+          </p>
+          <div class="cta-row">
+            <a class="button" href="#quickstart">Get Started →</a>
+            <a class="button-outline" href="#use-cases">Use Cases</a>
+            <a class="button-text" href="#how-it-works">How It Works?</a>
+          </div>
+
+          <!-- Live execution engine (animated) -->
+          <div class="engine" aria-label="Animated demo of a durable function executing">
+            <div class="engine-head">
+              <span class="engine-title"><span class="engine-rec"></span>live&nbsp;execution</span>
+              <button class="engine-toggle" id="engineToggle" type="button" aria-pressed="true">⏸&nbsp;Pause</button>
+            </div>
+            <div class="engine-body">
+              <div class="engine-terminal">
+                <div class="terminal-bar">
+                  <span class="terminal-dot"></span>
+                  <span class="terminal-dot"></span>
+                  <span class="terminal-dot"></span>
+                </div>
+                <pre class="engine-log" id="engineLog" aria-live="polite"></pre>
+              </div>
+
+              <div class="engine-graph" role="img" aria-label="df.start fans out to three parallel queries that join into a dashboard step">
+                <div class="gnode is-pending" data-node="start">
+                  <span class="glabel">df.start()</span><span class="gstatus">···</span>
+                </div>
+                <svg class="gwire" width="300" height="44" viewBox="0 0 300 44" fill="none" aria-hidden="true">
+                  <path d="M150 0 L55 44" /><path d="M150 0 L150 44" /><path d="M150 0 L245 44" />
+                </svg>
+                <div class="gbranch">
+                  <div class="gnode is-pending" data-node="u"><span class="glabel">count users</span><span class="gstatus">···</span></div>
+                  <div class="gnode is-pending" data-node="o"><span class="glabel">count orders</span><span class="gstatus">···</span></div>
+                  <div class="gnode is-pending" data-node="r"><span class="glabel">sum revenue</span><span class="gstatus">···</span></div>
+                </div>
+                <svg class="gwire" width="300" height="44" viewBox="0 0 300 44" fill="none" aria-hidden="true">
+                  <path d="M55 0 L150 44" /><path d="M150 0 L150 44" /><path d="M245 0 L150 44" />
+                </svg>
+                <div class="gnode is-pending" data-node="join">
+                  <span class="glabel">dashboard ready</span><span class="gstatus">···</span>
+                </div>
+              </div>
+            </div>
+            <p class="engine-caption">
+              Parallel aggregation · <code>df.start( a&nbsp;&amp;&nbsp;b&nbsp;&amp;&nbsp;c&nbsp;~&gt;&nbsp;… )</code> — three queries fan out, then join into one result.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Comparison ────────────────────────────────── -->
+      <section class="comparison" id="how-it-works">
+        <div class="container">
+          <div class="comparison-grid">
+            <div class="comparison-col">
+              <h3>🔧 Without pg_durable</h3>
+              <div class="comparison-without" id="boilerplate-panel">
+                <div class="comparison-blur-code">
+                  <button class="hide-btn" onclick="document.getElementById('boilerplate-panel').classList.remove('revealed')">
+                    Hide boilerplate ↑
+                  </button>
+                  <pre><code>-- Goal: run 3 aggregations in parallel, then refresh a dashboard
+--       — with retries and crash recovery. Here's the plumbing.
+
+-- 1. Set up job queues and state tables
+CREATE TABLE job_queue (
+    id SERIAL PRIMARY KEY,
+    payload JSONB NOT NULL,
+    status TEXT DEFAULT 'pending',
+    attempts INT DEFAULT 0,
+    max_attempts INT DEFAULT 3,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    locked_at TIMESTAMPTZ,
+    locked_by TEXT
+);
+
+CREATE TABLE job_results (
+    id SERIAL PRIMARY KEY,
+    job_id INT REFERENCES job_queue(id),
+    result JSONB,
+    error TEXT,
+    completed_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE job_state (
+    job_id INT PRIMARY KEY REFERENCES job_queue(id),
+    current_step INT DEFAULT 0,
+    step_data JSONB DEFAULT '{}',
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2. Write a polling worker function
+CREATE OR REPLACE FUNCTION poll_and_execute()
+RETURNS void AS $$
+DECLARE
+    job RECORD;
+BEGIN
+    SELECT * INTO job FROM job_queue
+    WHERE status = 'pending'
+      AND (locked_at IS NULL
+           OR locked_at &lt; now() - interval '5 min')
+    ORDER BY created_at
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED;
+
+    IF job IS NULL THEN RETURN; END IF;
+
+    UPDATE job_queue
+    SET status = 'running',
+        locked_at = now(),
+        locked_by = pg_backend_pid()::text
+    WHERE id = job.id;
+
+    -- 3. Execute with manual retry logic
+    BEGIN
+        PERFORM execute_step(job.id, job.payload);
+        UPDATE job_queue SET status = 'completed'
+        WHERE id = job.id;
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE job_queue
+        SET attempts = attempts + 1,
+            status = CASE
+              WHEN attempts + 1 >= max_attempts
+              THEN 'failed' ELSE 'pending' END,
+            locked_at = NULL
+        WHERE id = job.id;
+    END;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 4. Track step coordination manually
+CREATE TABLE workflow_steps (
+    id SERIAL PRIMARY KEY,
+    job_id INT REFERENCES job_queue(id),
+    step_order INT NOT NULL,
+    step_name TEXT NOT NULL,
+    step_query TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    result JSONB,
+    error TEXT,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    depends_on INT[]
+);
+
+CREATE OR REPLACE FUNCTION advance_workflow(p_job_id INT)
+RETURNS void AS $$
+DECLARE
+    step RECORD;
+    dep_id INT;
+    all_deps_done BOOLEAN;
+BEGIN
+    FOR step IN
+        SELECT * FROM workflow_steps
+        WHERE job_id = p_job_id AND status = 'pending'
+        ORDER BY step_order
+    LOOP
+        all_deps_done := true;
+        IF step.depends_on IS NOT NULL THEN
+            FOREACH dep_id IN ARRAY step.depends_on LOOP
+                IF NOT EXISTS (
+                    SELECT 1 FROM workflow_steps
+                    WHERE id = dep_id AND status = 'completed'
+                ) THEN
+                    all_deps_done := false;
+                    EXIT;
+                END IF;
+            END LOOP;
+        END IF;
+
+        IF NOT all_deps_done THEN CONTINUE; END IF;
+
+        UPDATE workflow_steps
+        SET status = 'running', started_at = now()
+        WHERE id = step.id;
+
+        BEGIN
+            EXECUTE step.step_query;
+            UPDATE workflow_steps
+            SET status = 'completed',
+                completed_at = now()
+            WHERE id = step.id;
+        EXCEPTION WHEN OTHERS THEN
+            UPDATE workflow_steps
+            SET status = 'failed',
+                error = SQLERRM,
+                completed_at = now()
+            WHERE id = step.id;
+            RETURN;
+        END;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 5. Build crash recovery from scratch
+CREATE OR REPLACE FUNCTION recover_crashed_jobs()
+RETURNS void AS $$
+DECLARE
+    crashed RECORD;
+BEGIN
+    FOR crashed IN
+        SELECT jq.* FROM job_queue jq
+        WHERE jq.status = 'running'
+          AND jq.locked_at &lt; now() - interval '10 min'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_stat_activity
+              WHERE pid = jq.locked_by::int
+          )
+    LOOP
+        UPDATE job_queue
+        SET status = 'pending',
+            locked_at = NULL,
+            locked_by = NULL,
+            attempts = attempts + 1
+        WHERE id = crashed.id;
+
+        UPDATE workflow_steps
+        SET status = 'pending',
+            started_at = NULL,
+            error = NULL
+        WHERE job_id = crashed.id
+          AND status = 'running';
+
+        INSERT INTO job_results (job_id, error)
+        VALUES (crashed.id,
+            'Recovered from crash at step ' ||
+            (SELECT step_name FROM workflow_steps
+             WHERE job_id = crashed.id
+               AND status = 'running'
+             LIMIT 1));
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 6. Custom status tracking and monitoring
+CREATE OR REPLACE FUNCTION get_job_status(p_job_id INT)
+RETURNS TABLE (
+    job_status TEXT,
+    total_steps INT,
+    completed_steps INT,
+    failed_steps INT,
+    current_step TEXT,
+    elapsed_time INTERVAL,
+    last_error TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        jq.status,
+        (SELECT count(*)::int FROM workflow_steps
+         WHERE job_id = p_job_id),
+        (SELECT count(*)::int FROM workflow_steps
+         WHERE job_id = p_job_id AND status = 'completed'),
+        (SELECT count(*)::int FROM workflow_steps
+         WHERE job_id = p_job_id AND status = 'failed'),
+        (SELECT ws.step_name FROM workflow_steps ws
+         WHERE ws.job_id = p_job_id
+           AND ws.status = 'running'
+         LIMIT 1),
+        now() - jq.created_at,
+        (SELECT ws.error FROM workflow_steps ws
+         WHERE ws.job_id = p_job_id
+           AND ws.status = 'failed'
+         ORDER BY ws.completed_at DESC LIMIT 1)
+    FROM job_queue jq
+    WHERE jq.id = p_job_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 7. Parallel execution coordinator
+CREATE OR REPLACE FUNCTION run_parallel_steps(
+    p_job_id INT,
+    p_step_ids INT[]
+) RETURNS void AS $$
+DECLARE
+    step_id INT;
+    step RECORD;
+    failed BOOLEAN := false;
+BEGIN
+    FOREACH step_id IN ARRAY p_step_ids LOOP
+        SELECT * INTO step FROM workflow_steps
+        WHERE id = step_id AND job_id = p_job_id;
+
+        UPDATE workflow_steps
+        SET status = 'running', started_at = now()
+        WHERE id = step_id;
+
+        BEGIN
+            EXECUTE step.step_query;
+            UPDATE workflow_steps
+            SET status = 'completed',
+                completed_at = now()
+            WHERE id = step_id;
+        EXCEPTION WHEN OTHERS THEN
+            UPDATE workflow_steps
+            SET status = 'failed',
+                error = SQLERRM,
+                completed_at = now()
+            WHERE id = step_id;
+            failed := true;
+        END;
+    END LOOP;
+
+    IF failed THEN
+        UPDATE job_queue SET status = 'failed'
+        WHERE id = p_job_id;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 8. Variable passing between steps
+CREATE TABLE step_variables (
+    job_id INT REFERENCES job_queue(id),
+    var_name TEXT NOT NULL,
+    var_value JSONB,
+    set_by_step INT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (job_id, var_name)
+);
+
+CREATE OR REPLACE FUNCTION set_step_var(
+    p_job_id INT, p_name TEXT,
+    p_value JSONB, p_step INT
+) RETURNS void AS $$
+BEGIN
+    INSERT INTO step_variables
+        (job_id, var_name, var_value, set_by_step)
+    VALUES (p_job_id, p_name, p_value, p_step)
+    ON CONFLICT (job_id, var_name)
+    DO UPDATE SET var_value = p_value,
+                  set_by_step = p_step;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION substitute_vars(
+    p_job_id INT, p_query TEXT
+) RETURNS TEXT AS $$
+DECLARE
+    v RECORD;
+    result TEXT := p_query;
+BEGIN
+    FOR v IN
+        SELECT var_name, var_value
+        FROM step_variables
+        WHERE job_id = p_job_id
+    LOOP
+        result := replace(result,
+            '$' || v.var_name,
+            v.var_value::text);
+    END LOOP;
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 9. Scheduling and cron support
+CREATE TABLE scheduled_jobs (
+    id SERIAL PRIMARY KEY,
+    cron_expr TEXT NOT NULL,
+    job_payload JSONB NOT NULL,
+    last_run TIMESTAMPTZ,
+    next_run TIMESTAMPTZ,
+    enabled BOOLEAN DEFAULT true
+);
+
+CREATE OR REPLACE FUNCTION check_scheduled_jobs()
+RETURNS void AS $$
+DECLARE
+    sched RECORD;
+BEGIN
+    FOR sched IN
+        SELECT * FROM scheduled_jobs
+        WHERE enabled = true
+          AND (next_run IS NULL
+               OR next_run &lt;= now())
+    LOOP
+        INSERT INTO job_queue (payload)
+        VALUES (sched.job_payload);
+
+        UPDATE scheduled_jobs
+        SET last_run = now()
+        WHERE id = sched.id;
+        -- next_run calculation requires
+        -- external cron parser library...
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 10. Cleanup and maintenance
+CREATE OR REPLACE FUNCTION cleanup_old_jobs(
+    p_retention INTERVAL DEFAULT '30 days'
+) RETURNS INT AS $$
+DECLARE
+    deleted INT;
+BEGIN
+    DELETE FROM step_variables
+    WHERE job_id IN (
+        SELECT id FROM job_queue
+        WHERE status IN ('completed', 'failed')
+          AND created_at &lt; now() - p_retention
+    );
+    DELETE FROM workflow_steps
+    WHERE job_id IN (
+        SELECT id FROM job_queue
+        WHERE status IN ('completed', 'failed')
+          AND created_at &lt; now() - p_retention
+    );
+    DELETE FROM job_results
+    WHERE job_id IN (
+        SELECT id FROM job_queue
+        WHERE status IN ('completed', 'failed')
+          AND created_at &lt; now() - p_retention
+    );
+    WITH d AS (
+        DELETE FROM job_queue
+        WHERE status IN ('completed', 'failed')
+          AND created_at &lt; now() - p_retention
+        RETURNING id
+    ) SELECT count(*) INTO deleted FROM d;
+    RETURN deleted;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 11. ...and only NOW can you wire up the actual workflow
+WITH job AS (
+    INSERT INTO job_queue (payload)
+    VALUES ('{"name":"refresh-dashboard"}') RETURNING id
+)
+INSERT INTO workflow_steps
+    (job_id, step_order, step_name, step_query, depends_on)
+SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
+    (1, 'count_users',   'SELECT count(*) FROM users',          NULL),
+    (1, 'count_orders',  'SELECT count(*) FROM orders',         NULL),
+    (1, 'sum_revenue',   'SELECT sum(amount) FROM orders',      NULL),
+    (2, 'refresh_dash',  'REFRESH MATERIALIZED VIEW metrics',   ARRAY[1,2,3])
+) AS v(ord, name, query, deps);
+-- ...then schedule the worker, poll, coordinate the parallel
+-- steps, handle failures, recover crashes — see all of the above.</code></pre>
+                </div>
+                <div class="comparison-overlay" id="boilerplate-overlay">
+                  <p class="big-text">300+ lines of boilerplate</p>
+                  <ul>
+                    <li>🔧 Queue setup &amp; configuration</li>
+                    <li>🔄 Worker management &amp; polling</li>
+                    <li>📊 Message handling &amp; state tracking</li>
+                    <li>❌ Error handling &amp; retries</li>
+                    <li>🔗 Manual step coordination</li>
+                  </ul>
+                  <button class="reveal-btn" onclick="document.getElementById('boilerplate-panel').classList.toggle('revealed')">
+                    Show me the boilerplate code ↓
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="comparison-col">
+              <h3>⚡ With pg_durable</h3>
+              <div class="comparison-with">
+                <pre><code><span class="cm">-- Parallel aggregation: 3 queries fan out, then refresh the dashboard</span>
+<span class="kw">SELECT</span> <span class="fn">df.start</span>(
+    <span class="str">'SELECT count(*) FROM users'</span>     <span class="op">&</span>
+    <span class="str">'SELECT count(*) FROM orders'</span>    <span class="op">&</span>
+    <span class="str">'SELECT sum(amount) FROM orders'</span>
+
+    <span class="op">~></span> <span class="str">'refresh dashboard'</span>,
+
+    <span class="str">'metrics'</span>
+);</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Callout ───────────────────────────────────── -->
+      <section class="callout">
+        <div class="container">
+          <div class="callout-box">
+            <p>
+              ✏️ <strong>You write the SQL. pg_durable handles everything else.</strong>
+            </p>
+            <p>
+              Queue management, state tracking, crash recovery, step coordination, and retries —
+              <strong>pg_durable is the orchestration engine.</strong>
+            </p>
+            <div class="callout-links">
+              <a href="https://github.com/microsoft/pg_durable/blob/main/USER_GUIDE.md">Full DSL reference →</a>
+              <a href="https://github.com/microsoft/pg_durable/blob/main/docs/ARCHITECTURE.md">Architecture deep dive →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Install ───────────────────────────────────── -->
+      <section class="install" id="quickstart">
+        <div class="terminal">
+          <div class="terminal-bar">
+            <span class="terminal-dot"></span>
+            <span class="terminal-dot"></span>
+            <span class="terminal-dot"></span>
+          </div>
+          <pre><code>CREATE EXTENSION pg_durable;</code></pre>
+        </div>
+        <p class="install-caption">
+          Enable in any PostgreSQL 17 database. <a href="https://github.com/microsoft/pg_durable/blob/main/README.md">View full setup guide →</a>
+        </p>
+      </section>
+
+      <!-- ── Why pg_durable ────────────────────────────── -->
+      <section id="why">
+        <div class="container">
+          <h2>Why pg_durable</h2>
+          <div class="grid">
+            <article class="card">
+              <span class="card-emoji">🛡️</span>
+              <h3>Durable by default</h3>
+              <p>
+                Every step checkpoints state to PostgreSQL. Workflows survive crashes,
+                restarts, and connection drops. Resume exactly where you left off.
+              </p>
+              <a class="card-link" href="https://github.com/microsoft/pg_durable/blob/main/docs/SCENARIOS.md#scenario-1-getting-started">Learn more →</a>
+            </article>
+            <article class="card">
+              <span class="card-emoji">🔁</span>
+              <h3>Automatic retries</h3>
+              <p>
+                Built-in retry logic for flaky operations. When a step fails,
+                only that step retries — the rest of your workflow continues.
+                No manual error handling code needed.
+              </p>
+              <a class="card-link" href="https://github.com/microsoft/pg_durable/blob/main/USER_GUIDE.md">Learn more →</a>
+            </article>
+            <article class="card">
+              <span class="card-emoji">🔎</span>
+              <h3>Full observability in SQL</h3>
+              <p>
+                All workflow state lives in Postgres tables. Query execution history,
+                inspect step outputs, and debug failures with standard SQL.
+                No external dashboards.
+              </p>
+              <a class="card-link" href="https://github.com/microsoft/pg_durable/blob/main/docs/SCENARIOS.md#verify-it-worked">Learn more →</a>
+            </article>
+            <article class="card">
+              <span class="card-emoji">⚡</span>
+              <h3>Parallel execution</h3>
+              <p>
+                Fan out independent work with the <code>&amp;</code> operator or <code>df.join()</code>.
+                Run aggregations, API calls, or ETL steps concurrently with automatic coordination.
+              </p>
+              <a class="card-link" href="https://github.com/microsoft/pg_durable/blob/main/docs/SCENARIOS.md#scenario-4-parallel-aggregation">Learn more →</a>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Use Cases ─────────────────────────────────── -->
+      <section class="use-cases" id="use-cases">
+        <div class="container">
+          <h2>What you can build</h2>
+          <p class="section-lede">
+            From data pipelines to database maintenance to cloud-connected workflows —
+            here are the patterns pg_durable handles, each backed by a copy-paste-ready scenario.
+          </p>
+
+          <a class="scenarios-banner" href="https://github.com/microsoft/pg_durable/blob/main/docs/SCENARIOS.md">
+            <div class="scenarios-banner-text">
+              <span class="scenarios-banner-eyebrow">📚 Full Scenarios &amp; Use Cases Guide</span>
+              <h3>Every pattern below, written out end to end</h3>
+              <p>
+                One consolidated guide: <strong>core orchestration patterns</strong> (ETL, parallel
+                aggregation, scheduling, branching), <strong>standard operational scenarios</strong>
+                (vacuum, bloat &amp; wraparound remediation), and <strong>Azure integration examples</strong>
+                (Functions, HTTP, human approval) — all with runnable SQL.
+              </p>
+            </div>
+            <span class="arrow">→</span>
+          </a>
+
+          <div class="use-case-grid">
+            <article class="use-case-card">
+              <h3>🔗 ETL Pipelines</h3>
+              <p class="use-case-desc">
+                Chain cleanup → transform → load with sequential guarantees.
+                Each step waits for the previous one. Failures stop the pipeline cleanly.
+              </p>
+              <div class="use-case-operators">
+                <span>~> sequence</span>
+                <span>|=> variables</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>📊 Parallel Aggregation</h3>
+              <p class="use-case-desc">
+                Count users + sum revenue + check inventory simultaneously.
+                Fan out to multiple queries and wait for all to complete.
+              </p>
+              <div class="use-case-operators">
+                <span>&amp; parallel</span>
+                <span>df.join()</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>📦 Order Processing</h3>
+              <p class="use-case-desc">
+                Capture an order ID, pass it through validation, processing, and completion steps.
+                Variables flow between steps automatically.
+              </p>
+              <div class="use-case-operators">
+                <span>|=> capture</span>
+                <span>$var substitution</span>
+                <span>df.sleep()</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>⏰ Scheduled Jobs</h3>
+              <p class="use-case-desc">
+                Poll APIs, archive records, or sync data on a cron schedule.
+                Loops run forever and survive restarts.
+              </p>
+              <div class="use-case-operators">
+                <span>@> loop</span>
+                <span>df.wait_for_schedule()</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>🔀 Conditional Branching</h3>
+              <p class="use-case-desc">
+                Check pending jobs, row counts, or flags — then process or skip based on the result.
+                Branch logic lives in SQL, not application code.
+              </p>
+              <div class="use-case-operators">
+                <span>df.if()</span>
+                <span>?> conditional</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>✅ Multi-step Validation</h3>
+              <p class="use-case-desc">
+                Fetch data, validate schema, check business rules, then approve or reject.
+                Each step is checkpointed — failures don't lose progress.
+              </p>
+              <div class="use-case-operators">
+                <span>~> sequence</span>
+                <span>df.if()</span>
+                <span>|=> variables</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>🧹 Database Maintenance</h3>
+              <p class="use-case-desc">
+                Detect autovacuum blockers, table bloat, or wraparound risk, surface findings for
+                review, wait for approval, then remediate — durably, even across restarts.
+              </p>
+              <div class="use-case-operators">
+                <span>?> conditional</span>
+                <span>df.wait_for_signal()</span>
+                <span>@> loop</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>☁️ Azure Functions &amp; HTTP</h3>
+              <p class="use-case-desc">
+                Call Azure Functions or any allowlisted HTTPS endpoint straight from SQL with
+                <code>df.http()</code> — chunk documents, enrich rows, or classify records inline.
+              </p>
+              <div class="use-case-operators">
+                <span>df.http()</span>
+                <span>~> sequence</span>
+              </div>
+            </article>
+            <article class="use-case-card">
+              <h3>🙋 Human-in-the-Loop Approval</h3>
+              <p class="use-case-desc">
+                Auto-approve routine work and pause high-stakes actions (large invoices, destructive
+                ops) until a human signals approval — like the invoice-approval example.
+              </p>
+              <div class="use-case-operators">
+                <span>df.wait_for_signal()</span>
+                <span>df.if()</span>
+                <span>@> loop</span>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── AI Skill ──────────────────────────────────── -->
+      <section class="callout" id="ai-skill">
+        <div class="container">
+          <span class="section-eyebrow">🤖 AI-assisted authoring</span>
+          <h2>Let your AI assistant write the SQL</h2>
+          <p class="section-lede">
+            You describe the workflow in plain English — Copilot writes correct durable-function SQL.
+          </p>
+          <div class="callout-box callout-feature">
+            <p>
+              <strong>Skip the syntax. Just describe what you want.</strong>
+            </p>
+            <p>
+              This repo ships a reusable agent skill, <code>pg-durable-sql</code>, that teaches
+              GitHub Copilot and other agents how to generate correct durable-function SQL —
+              operators, variable substitution, loops, parallel joins, and more.
+            </p>
+            <div class="callout-links">
+              <a href="https://github.com/microsoft/pg_durable/blob/main/.agents/skills/pg-durable-sql/SKILL.md">View the pg-durable-sql skill →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── OSS Durable Functions ─────────────────────── -->
+      <section class="install">
+        <div class="container">
+          <span class="section-eyebrow">📦 100% open source</span>
+          <h2>Open-source durable functions for Postgres</h2>
+          <p class="section-lede">
+            No waitlist, no lock-in. Clone, build, and run durable functions in your own PostgreSQL today.
+          </p>
+          <div class="callout-box callout-feature">
+            <p>
+              <strong>Bring durable orchestration to any PostgreSQL.</strong>
+              <span class="coming-soon-badge">Open source</span>
+            </p>
+            <p>
+              pg_durable is fully open source today. Clone the repo, build the extension, and
+              run durable functions in your own PostgreSQL — on your laptop, your server, or your cloud.
+            </p>
+            <div class="callout-links">
+              <a href="https://github.com/microsoft/pg_durable">View the source on GitHub →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Azure HorizonDB (cloud) ───────────────────── -->
+      <section class="horizon" id="horizondb">
+        <div class="container">
+          <div class="horizon-box">
+            <div class="horizon-head">
+              <img
+                class="horizon-logo"
+                src="https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1374850-Icon-Hero-HorizonDB-24x24?resMode=sharp2&op_usm=1.5,0.65,15,0&wid=48&hei=48&qlt=100&fit=constrain"
+                alt="Azure HorizonDB logo"
+                width="44"
+                height="44"
+              />
+              <div>
+                <span class="horizon-eyebrow">Run it in the cloud <span class="horizon-badge">Preview</span></span>
+                <h2>pg_durable, fully managed on <span class="accent-azure">Azure HorizonDB</span></h2>
+              </div>
+            </div>
+            <p class="horizon-lede">
+              Azure HorizonDB is Microsoft's new PostgreSQL cloud service — engineered for performance and built
+              with pg_durable inside. Keep the durable workflows you write here, and add enterprise scale,
+              security, and AI without managing a single server.
+            </p>
+            <div class="horizon-grid">
+              <div class="horizon-feature">
+                <span class="hf-icon">⚡</span>
+                <h4>Up to 3× faster</h4>
+                <p>Outscales self-managed Postgres with auto-scaling storage to 128&nbsp;TB and scale-out compute up to 3,072 vCores.</p>
+              </div>
+              <div class="horizon-feature">
+                <span class="hf-icon">🛡️</span>
+                <h4>Enterprise protection</h4>
+                <p>Real-time threat detection with Microsoft Defender and identity management through Microsoft Entra ID.</p>
+              </div>
+              <div class="horizon-feature">
+                <span class="hf-icon">🧠</span>
+                <h4>Built for AI</h4>
+                <p>Filtered DiskANN vector search, semantic ranking, and a curated set of in-database AI models.</p>
+              </div>
+              <div class="horizon-feature">
+                <span class="hf-icon">🔗</span>
+                <h4>Azure-native</h4>
+                <p>Near-real-time mirroring to Microsoft Fabric, VS Code integration, and GitHub Copilot — one ecosystem.</p>
+              </div>
+            </div>
+            <div class="horizon-pipeline">
+              <span class="hp-eyebrow">Built-in AI pipeline</span>
+              <h3>Postgres Native AI pipeline, built on pg_durable</h3>
+              <p class="hp-sub">
+                HorizonDB layers a managed, end-to-end AI pipeline on top of pg_durable's durable
+                execution — every stage is checkpointed, retried, and crash-safe, from raw data to
+                ready-to-query vectors.
+              </p>
+              <div class="hp-flow">
+                <div class="hp-stage"><span class="hp-num">1</span><strong>Ingest</strong><span>Load docs &amp; data</span></div>
+                <span class="hp-arrow">→</span>
+                <div class="hp-stage"><span class="hp-num">2</span><strong>Chunk</strong><span>Split content</span></div>
+                <span class="hp-arrow">→</span>
+                <div class="hp-stage"><span class="hp-num">3</span><strong>Embed</strong><span>Vectorize</span></div>
+                <span class="hp-arrow">→</span>
+                <div class="hp-stage"><span class="hp-num">4</span><strong>Index</strong><span>DiskANN store</span></div>
+                <span class="hp-arrow">→</span>
+                <div class="hp-stage"><span class="hp-num">5</span><strong>Serve</strong><span>Search &amp; rank</span></div>
+              </div>
+            </div>
+            <div class="horizon-cta">
+              <a class="button-azure" href="https://aka.ms/horizondb_pg_durable">Explore Azure HorizonDB →</a>
+              <a class="button-azure-outline" href="https://aka.ms/horizondb_pg_durable">AI pipelines →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── CTA ───────────────────────────────────────── -->
+      <section class="cta-section">
+        <div class="container">
+          <h2>Ready to get started?</h2>
+          <a class="cta-card" href="https://github.com/microsoft/pg_durable/blob/main/docs/SCENARIOS.md">
+            <div>
+              <h3>🚀 Explore the Scenarios Guide</h3>
+              <p>Copy-paste examples for ETL, scheduling, parallel aggregation, database maintenance, Azure integration, and more.</p>
+            </div>
+            <span class="arrow">→</span>
+          </a>
+        </div>
+      </section>
+
+    </main>
+
+    <footer>
+      <div class="container">
+        <strong>pg_durable</strong>
+        <p>Durable SQL functions and orchestration for PostgreSQL.</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var log = document.getElementById("engineLog");
+        var toggle = document.getElementById("engineToggle");
+        if (!log || !toggle) return;
+
+        var nodes = {};
+        ["start", "u", "o", "r", "join"].forEach(function (k) {
+          nodes[k] = document.querySelector('[data-node="' + k + '"]');
+        });
+
+        // Timeline of events (time in ms within the loop).
+        var TL = [
+          { at: 0, logs: ["$ SELECT df.start("] },
+          { at: 450, logs: ["    'SELECT count(*) FROM users'    &"] },
+          { at: 850, logs: ["    'SELECT count(*) FROM orders'   &"] },
+          { at: 1250, logs: ["    'SELECT sum(amount) FROM orders'"] },
+          { at: 1650, logs: ["  ~> 'refresh dashboard', 'metrics');"] },
+          { at: 2150, nodes: { start: "running" }, logs: ["", "\u2192 instance e7c1a2 \u00b7 started"] },
+          { at: 2550, nodes: { start: "done" } },
+          {
+            at: 2750,
+            nodes: { u: "running", o: "running", r: "running" },
+            logs: ["\u25b6 3 steps running in parallel \u2026"],
+          },
+          { at: 3550, nodes: { u: "done" }, logs: ["  \u2713 users    = 3"] },
+          { at: 4150, nodes: { o: "done" }, logs: ["  \u2713 orders   = 3"] },
+          { at: 4750, nodes: { r: "done" }, logs: ["  \u2713 revenue  = 525.00"] },
+          { at: 5350, nodes: { join: "running" }, logs: ["\u25b6 join \u2192 refresh dashboard"] },
+          { at: 6150, nodes: { join: "done" }, logs: ["\u2713 dashboard ready in 1.9s \u2014 durable \u26a1"] },
+        ];
+        var LOOP = 8200;
+
+        var t = 0,
+          fired = {},
+          timer = null,
+          playing = false;
+
+        function setNode(key, state) {
+          var el = nodes[key];
+          if (!el) return;
+          el.classList.remove("is-pending", "is-running", "is-done");
+          el.classList.add("is-" + state);
+          var s = el.querySelector(".gstatus");
+          if (s) s.textContent = state === "done" ? "\u2713" : state === "running" ? "\u25b6" : "\u00b7\u00b7\u00b7";
+        }
+
+        function reset() {
+          log.textContent = "";
+          fired = {};
+          Object.keys(nodes).forEach(function (k) {
+            setNode(k, "pending");
+          });
+        }
+
+        function apply(ev) {
+          if (ev.nodes) for (var k in ev.nodes) setNode(k, ev.nodes[k]);
+          if (ev.logs)
+            ev.logs.forEach(function (l) {
+              log.textContent += (log.textContent ? "\n" : "") + l;
+            });
+        }
+
+        function tick() {
+          for (var i = 0; i < TL.length; i++) {
+            if (t >= TL[i].at && !fired[i]) {
+              fired[i] = 1;
+              apply(TL[i]);
+            }
+          }
+          t += 100;
+          if (t >= LOOP) {
+            t = 0;
+            setTimeout(reset, 300);
+          }
+        }
+
+        function play() {
+          playing = true;
+          toggle.textContent = "\u23f8 Pause";
+          toggle.setAttribute("aria-pressed", "true");
+          timer = setInterval(tick, 100);
+        }
+        function pause() {
+          playing = false;
+          toggle.textContent = "\u25b6 Play";
+          toggle.setAttribute("aria-pressed", "false");
+          if (timer) clearInterval(timer);
+        }
+        toggle.addEventListener("click", function () {
+          playing ? pause() : play();
+        });
+
+        var reduced =
+          window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reduced) {
+          reset();
+          TL.forEach(apply);
+          pause();
+        } else {
+          reset();
+          play();
+        }
+      })();
+    </script>
+  </body>
+</html>
