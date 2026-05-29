@@ -830,7 +830,7 @@ mod tests {
 
     /// Wait for a durable function to complete, polling Duroxide status
     fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
-        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{new_backend_provider, postgres_connection_string};
         use duroxide::Client;
         use std::time::{Duration, Instant};
 
@@ -887,7 +887,7 @@ mod tests {
 
     /// Get the current status from Duroxide
     fn get_duroxide_status(instance_id: &str) -> Option<String> {
-        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{new_backend_provider, postgres_connection_string};
         use duroxide::Client;
 
         let _ = ensure_store_ready().ok()?;
