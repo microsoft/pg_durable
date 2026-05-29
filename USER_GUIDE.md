@@ -23,9 +23,10 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 13. [Monitoring](#monitoring)
 14. [User Isolation & Privileges](#user-isolation--privileges)
 15. [Connection Limits](#connection-limits)
-16. [Troubleshooting](#troubleshooting)
-17. [Quick Reference Card](#quick-reference-card)
-18. [Appendix: Test Data Setup](#appendix-test-data-setup)
+16. [Rate Limiting](#rate-limiting)
+17. [Troubleshooting](#troubleshooting)
+18. [Quick Reference Card](#quick-reference-card)
+19. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -1824,6 +1825,87 @@ pg_durable.max_user_connections = 50
 pg_durable.execution_acquire_timeout = 60
 # Budget: 10 + 15 + 50 + backends ≈ 80 connections
 ```
+
+---
+
+## Rate Limiting
+
+pg_durable enforces two per-user quotas on `df.start()` to prevent a single database role from exhausting disk space, background-worker pool capacity, or duroxide history storage. Both limits are checked **before** any rows are inserted or any worker capacity is consumed — a rejected `df.start()` has zero side effects.
+
+Superusers bypass both checks (consistent with PostgreSQL's trust model for superusers).
+
+### Concurrency Cap — `df.max_concurrent_per_user`
+
+Controls how many **pending or running** instances a single user may have simultaneously.
+
+| GUC | Default | Context | Who can change |
+|-----|---------|---------|----------------|
+| `df.max_concurrent_per_user` | `100` | `PGC_SUSET` | Superusers only |
+
+`0` means unlimited (not recommended in multi-tenant deployments).
+
+When the limit is reached, `df.start()` raises:
+
+```
+ERROR: df.start rejected: user "alice" has 100 active instance(s) (limit 100).
+       Wait for in-flight instances to complete or ask a superuser to raise
+       df.max_concurrent_per_user.
+```
+
+**Tuning guidance:**
+
+- Raise the limit for trusted users running bulk workflows.
+- Lower it (e.g. `10`) in highly multi-tenant environments where fairness matters.
+
+```sql
+-- Superuser sets limit for all users
+SET df.max_concurrent_per_user = 50;
+
+-- Verify current setting
+SHOW df.max_concurrent_per_user;
+```
+
+### Instance Quota — `df.max_instances_per_user`
+
+Controls the **total number of rows** in `df.instances` for a user, regardless of status. This prevents unbounded history accumulation.
+
+| GUC | Default | Context | Who can change |
+|-----|---------|---------|----------------|
+| `df.max_instances_per_user` | `10000` | `PGC_SUSET` | Superusers only |
+
+`0` means unlimited.
+
+When the limit is reached, `df.start()` raises:
+
+```
+ERROR: df.start rejected: user "alice" has 10000 total instance(s) (limit 10000).
+       Delete old instances (DELETE FROM df.instances WHERE submitted_by =
+       current_user::regrole AND lower(status) IN ('completed','failed','cancelled'))
+       or ask a superuser to raise df.max_instances_per_user.
+```
+
+**Quota reclamation:** Completed, failed, and cancelled instances count against the quota. Delete old rows manually to reclaim quota:
+
+```sql
+-- As a superuser or instance owner — deletes all finished instances for alice
+DELETE FROM df.instances
+  WHERE submitted_by = 'alice'::regrole
+    AND lower(status) IN ('completed', 'failed', 'cancelled');
+```
+
+> **Note:** A `df.purge()` helper function is planned for a future release to automate this cleanup.
+
+### Setting Limits in `postgresql.conf`
+
+Both GUCs are `PGC_SUSET` — they can be changed at runtime by superusers (`SET df.max_concurrent_per_user = 200`) or set persistently:
+
+```ini
+# postgresql.conf
+df.max_concurrent_per_user  = 100    # 0 = unlimited
+df.max_instances_per_user   = 10000  # 0 = unlimited
+```
+
+> **Security note:** Because these GUCs are `PGC_SUSET`, regular (non-superuser) roles **cannot** raise the limits — `SET df.max_concurrent_per_user = 999999` will be rejected with a permission error. This is intentional.
 
 ---
 
