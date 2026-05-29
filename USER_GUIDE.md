@@ -1442,12 +1442,20 @@ SELECT * FROM df.metrics();
 ### Quick Status Check
 
 ```sql
--- Status only
+-- Status by instance ID (returned by df.start())
 SELECT df.status('a1b2c3d4');
+
+-- Status by label — returns the most recently started instance with that label
+SELECT df.status_by_label('my-workflow');
 
 -- Result only
 SELECT df.result('a1b2c3d4');
 ```
+
+> **Tip:** `df.status()` requires the `instance_id` returned by `df.start()`, not a label.
+> Passing a label to `df.status()` returns `NULL` because no instance ID matches that string.
+> Use `df.status_by_label()` when you only have the label, and save the `instance_id` from
+> `df.start()` when you need to track a specific run.
 
 ### Worker Liveness
 

@@ -3717,6 +3717,17 @@ AS 'MODULE_PATHNAME', 'instance_info_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/monitoring.rs:111
+-- pg_durable::monitoring::status_by_label
+CREATE  FUNCTION df."status_by_label"(
+	"label" TEXT /* &str */
+) RETURNS TEXT /* core::option::Option<alloc::string::String> */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'status_by_label_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/dsl.rs:714
 -- pg_durable::dsl::status
 CREATE  FUNCTION df."status"(

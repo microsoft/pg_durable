@@ -72,7 +72,7 @@ We test against all previous versions in the same provider compatibility line. T
 | Variable capture | `df.start()` with vars set |
 | DSL construction | `df.sql()`, `df.seq()`, `df.if()`, `df.loop()`, `df.sleep()`, `df.http()` |
 | Execution | Starting and completing orchestrations |
-| Monitoring | `df.status()`, `df.result()`, `df.list_instances()`, `df.instance_info()` |
+| Monitoring | `df.status()`, `df.status_by_label()`, `df.result()`, `df.list_instances()`, `df.instance_info()` |
 | In-flight work | Orchestrations started before `.so` swap complete after swap |
 
 **What it catches:**

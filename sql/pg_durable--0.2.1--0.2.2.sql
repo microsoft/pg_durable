@@ -12,6 +12,9 @@
 -- The fix runs the name through quote_ident() first so regrole_in() sees a
 -- properly quoted identifier and resolves the role without case folding.
 -- See issue #161 / PR #162.
+--
+-- Add: df.status_by_label(label TEXT) — ergonomic status lookup by label.
+-- See issue #165.
 
 -- ----------------------------------------------------------------------------
 -- df.instances policy
@@ -42,3 +45,14 @@ CREATE POLICY vars_user_isolation ON df.vars
 
 ALTER TABLE df.vars
     ALTER COLUMN owner SET DEFAULT quote_ident(current_user)::regrole;
+
+-- ----------------------------------------------------------------------------
+-- df.status_by_label(label TEXT) — new in 0.2.2
+-- Returns the status of the most recently started instance with the given label.
+-- Returns NULL when no matching instance is visible to the calling user (RLS).
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION df.status_by_label("label" TEXT)
+RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'pg_durable', 'status_by_label_wrapper';

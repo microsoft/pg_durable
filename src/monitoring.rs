@@ -111,6 +111,29 @@ pub fn list_instances(
     TableIterator::new(results)
 }
 
+/// Gets the status of the most recently started instance with the given label.
+///
+/// Labels are not unique — multiple instances may share the same label. This
+/// function always returns the status of the **most recently created** matching
+/// instance. If no instance with the given label exists (or is visible to the
+/// calling user), `NULL` is returned.
+///
+/// To check the status of a specific run, use `df.status(instance_id)` with
+/// the `instance_id` returned by `df.start()`.
+///
+/// Note: SPI errors are mapped to `NULL` (same behaviour as `df.status()`).
+/// A `NULL` return means either "no matching instance" or an internal error;
+/// use `df.list_instances()` when you need to distinguish the two.
+#[pg_extern(schema = "df")]
+pub fn status_by_label(label: &str) -> Option<String> {
+    Spi::get_one_with_args::<String>(
+        "SELECT status FROM df.instances WHERE label = $1 ORDER BY created_at DESC LIMIT 1",
+        &[label.into()],
+    )
+    .ok()
+    .flatten()
+}
+
 /// Get detailed info about a specific durable function instance.
 #[pg_extern(schema = "df")]
 pub fn instance_info(
