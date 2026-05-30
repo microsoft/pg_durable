@@ -1561,3 +1561,115 @@ footer p {
   color: var(--muted);
   font-size: 0.85rem;
 }
+
+/* ── Always-on cloud rail ──────────────────────────────────────────────── */
+.cloud-rail {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  max-width: 66px; /* collapsed: only the logo strip shows */
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(58, 160, 255, 0.4);
+  border-right: none;
+  border-radius: 16px 0 0 16px;
+  background: linear-gradient(135deg, rgba(20, 28, 46, 0.96), rgba(12, 18, 32, 0.96));
+  box-shadow: -10px 0 34px -18px rgba(44, 139, 255, 0.7);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  text-decoration: none;
+  color: #eaf2ff;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.34s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.25s,
+    border-color 0.25s;
+}
+
+.cloud-rail:hover,
+.cloud-rail:focus-visible {
+  max-width: 300px;
+  border-color: rgba(58, 160, 255, 0.75);
+  box-shadow: -16px 0 44px -16px rgba(44, 139, 255, 0.85);
+  outline: none;
+}
+
+.cloud-rail-logo {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+}
+
+.cloud-rail-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.cloud-rail-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #7fbcff;
+}
+
+.cloud-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.98rem;
+}
+
+.cloud-rail-badge {
+  font-size: 0.56rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(58, 160, 255, 0.18);
+  border: 1px solid rgba(58, 160, 255, 0.45);
+  color: #aed6ff;
+}
+
+.cloud-rail-arrow {
+  flex: 0 0 auto;
+  color: #7fbcff;
+  font-weight: 700;
+  opacity: 0;
+  transform: translateX(-6px);
+  transition: opacity 0.25s, transform 0.25s;
+}
+
+.cloud-rail:hover .cloud-rail-arrow,
+.cloud-rail:focus-visible .cloud-rail-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cloud-rail-logo {
+    animation: cloudPulse 3.2s ease-in-out infinite;
+  }
+  @keyframes cloudPulse {
+    0%,
+    100% {
+      filter: drop-shadow(0 0 0 rgba(44, 139, 255, 0));
+    }
+    50% {
+      filter: drop-shadow(0 0 8px rgba(44, 139, 255, 0.7));
+    }
+  }
+}
+
+/* Hide on narrow screens so it never covers content */
+@media (max-width: 820px) {
+  .cloud-rail {
+    display: none;
+  }
+}

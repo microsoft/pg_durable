@@ -861,6 +861,28 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
 
     </main>
 
+    <!-- Always-on cloud rail: pinned to the right edge, expands on hover/focus -->
+    <a
+      class="cloud-rail"
+      href="#horizondb"
+      aria-label="Run pg_durable in the cloud on Azure HorizonDB"
+    >
+      <img
+        class="cloud-rail-logo"
+        src="https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1374850-Icon-Hero-HorizonDB-24x24?resMode=sharp2&op_usm=1.5,0.65,15,0&wid=48&hei=48&qlt=100&fit=constrain"
+        alt=""
+        width="34"
+        height="34"
+      />
+      <span class="cloud-rail-text">
+        <span class="cloud-rail-kicker">Run it in the cloud</span>
+        <span class="cloud-rail-title">
+          Azure HorizonDB <span class="cloud-rail-badge">Preview</span>
+        </span>
+      </span>
+      <span class="cloud-rail-arrow" aria-hidden="true">→</span>
+    </a>
+
     <footer>
       <div class="container">
         <strong>pg_durable</strong>
@@ -899,12 +921,13 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
           { at: 5350, nodes: { join: "running" }, logs: ["\u25b6 join \u2192 refresh dashboard"] },
           { at: 6150, nodes: { join: "done" }, logs: ["\u2713 dashboard ready in 1.9s \u2014 durable \u26a1"] },
         ];
-        var LOOP = 8200;
+        var LAST_AT = TL[TL.length - 1].at;
 
         var t = 0,
           fired = {},
           timer = null,
-          playing = false;
+          playing = false,
+          finished = false;
 
         function setNode(key, state) {
           var el = nodes[key];
@@ -918,6 +941,7 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
         function reset() {
           log.textContent = "";
           fired = {};
+          t = 0;
           Object.keys(nodes).forEach(function (k) {
             setNode(k, "pending");
           });
@@ -931,6 +955,15 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
             });
         }
 
+        function finish() {
+          if (timer) clearInterval(timer);
+          timer = null;
+          playing = false;
+          finished = true;
+          toggle.textContent = "\u21bb Replay";
+          toggle.setAttribute("aria-pressed", "false");
+        }
+
         function tick() {
           for (var i = 0; i < TL.length; i++) {
             if (t >= TL[i].at && !fired[i]) {
@@ -938,14 +971,20 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
               apply(TL[i]);
             }
           }
-          t += 100;
-          if (t >= LOOP) {
-            t = 0;
-            setTimeout(reset, 300);
+          // Once the final step has fired, hold on the completed state.
+          if (t >= LAST_AT) {
+            finish();
+            return;
           }
+          t += 100;
         }
 
         function play() {
+          // Restart from the beginning if the run already completed.
+          if (finished) {
+            finished = false;
+            reset();
+          }
           playing = true;
           toggle.textContent = "\u23f8 Pause";
           toggle.setAttribute("aria-pressed", "true");
@@ -966,7 +1005,7 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
         if (reduced) {
           reset();
           TL.forEach(apply);
-          pause();
+          finish();
         } else {
           reset();
           play();
