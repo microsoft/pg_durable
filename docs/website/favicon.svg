@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="pg_durable logo">
+  <defs>
+    <linearGradient id="pgEdge" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6bb3ec"/>
+      <stop offset="0.55" stop-color="#3d86c6"/>
+      <stop offset="1" stop-color="#34c6a8"/>
+    </linearGradient>
+    <linearGradient id="pgHub" x1="23" y1="23" x2="41" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6bb3ec"/>
+      <stop offset="1" stop-color="#2bb89a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Hexagon shell -->
+  <path d="M32 3 L57.12 17.5 L57.12 46.5 L32 61 L6.88 46.5 L6.88 17.5 Z"
+        fill="#0d1426" stroke="url(#pgEdge)" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- Gear teeth -->
+  <g fill="#eef4ff">
+    <g>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(45 32 32)"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(90 32 32)"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(135 32 32)"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(180 32 32)"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(225 32 32)"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(270 32 32)"/>
+      <rect x="29.4" y="12.5" width="5.2" height="7.5" rx="1.6" transform="rotate(315 32 32)"/>
+    </g>
+    <!-- Gear body -->
+    <circle cx="32" cy="32" r="13.2"/>
+  </g>
+
+  <!-- Hub disc -->
+  <circle cx="32" cy="32" r="9" fill="url(#pgHub)"/>
+
+  <!-- Fast-forward arrow -->
+  <g fill="#ffffff">
+    <path d="M27 27 L33 32 L27 37 Z"/>
+    <path d="M32.5 27 L38.5 32 L32.5 37 Z"/>
+  </g>
+</svg>

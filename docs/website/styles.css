@@ -147,16 +147,30 @@ main,
   font-size: 1.25rem;
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
 }
 
-.brand::before {
-  content: "";
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 0 10px var(--pg-blue-glow));
+  transition: transform 0.25s ease;
+}
+
+.brand:hover .brand-mark {
+  transform: rotate(-8deg) scale(1.05);
+}
+
+.brand-word {
+  color: var(--text);
+}
+
+.brand-word .brand-us {
   background: linear-gradient(135deg, var(--pg-blue-light), var(--copper));
-  box-shadow: 0 0 14px var(--pg-blue-glow);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .nav-links {
