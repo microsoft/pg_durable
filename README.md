@@ -1,10 +1,8 @@
 <div align="center">
 
-<img src="docs/website/favicon.svg" alt="pg_durable logo" width="96" height="96" />
+<img src="docs/website/lockup_arrow_dark.svg" alt="pg_durable logo" width="560" />
 
-# pg_durable
-
-**Durable SQL workflows for PostgreSQL — no extra infra.**
+## Durable SQL workflows for PostgreSQL — no extra infra.
 
 Long-running, fault-tolerant functions defined entirely in SQL. Composable operators,
 automatic checkpointing, crash-safe replay, and parallel execution. Built on Postgres —

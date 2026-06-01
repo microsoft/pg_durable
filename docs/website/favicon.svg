@@ -1,38 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="pg_durable logo">
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pg_durable logo mark">
   <defs>
-    <linearGradient id="pgGrad" x1="8" y1="6" x2="54" y2="60" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#86cdf2"/>
-      <stop offset="0.45" stop-color="#5a96e8"/>
-      <stop offset="1" stop-color="#8a5cf0"/>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#13B5A6"/>
+      <stop offset="52%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#7C4DDE"/>
     </linearGradient>
   </defs>
-
-  <!-- Hexagon shell -->
-  <path d="M32 3 L57.12 17.5 L57.12 46.5 L32 61 L6.88 46.5 L6.88 17.5 Z"
-        fill="#0d1426" stroke="url(#pgGrad)" stroke-width="3" stroke-linejoin="round"/>
-
-  <!-- Gear (gradient) -->
-  <g fill="url(#pgGrad)">
-    <g>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(45 32 32)"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(90 32 32)"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(135 32 32)"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(180 32 32)"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(225 32 32)"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(270 32 32)"/>
-      <rect x="28.5" y="8.6" width="7" height="10" rx="1.5" transform="rotate(315 32 32)"/>
-    </g>
-    <!-- Gear body -->
-    <circle cx="32" cy="32" r="15.2"/>
+  <g transform="translate(18 18) scale(0.86)">
+    <path d="M 128.00 30.00 L 212.87 79.00 L 212.87 177.00 L 128.00 226.00 L 43.13 177.00 L 43.13 79.00 Z" fill="none" stroke="url(#g)" stroke-width="11" stroke-linejoin="round"/>
+    <path d="M 119.03 82.88 L 116.29 69.15 L 139.71 69.15 L 136.97 82.88 L 153.56 89.75 L 161.33 78.11 L 177.89 94.67 L 166.25 102.44 L 173.12 119.03 L 186.85 116.29 L 186.85 139.71 L 173.12 136.97 L 166.25 153.56 L 177.89 161.33 L 161.33 177.89 L 153.56 166.25 L 136.97 173.12 L 139.71 186.85 L 116.29 186.85 L 119.03 173.12 L 102.44 166.25 L 94.67 177.89 L 78.11 161.33 L 89.75 153.56 L 82.88 136.97 L 69.15 139.71 L 69.15 116.29 L 82.88 119.03 L 89.75 102.44 L 78.11 94.67 L 94.67 78.11 L 102.44 89.75 Z" fill="url(#g)"/>
+    <circle cx="128" cy="128" r="27" fill="#ffffff"/>
+    <path transform="translate(109.10 140.24) scale(0.01800 -0.01800)" d="M406 860Q480 860 534.5 830.0Q589 800 632.5 760.0Q676 720 716.5 690.0Q757 660 802 660Q859 660 899.5 700.5Q940 741 980 817L1157 737Q1115 644 1064.5 573.0Q1014 502 948.5 461.5Q883 421 794 421Q722 421 667.5 451.0Q613 481 569.0 521.0Q525 561 484.0 591.0Q443 621 398 621Q340 621 299.5 579.0Q259 537 220 465L43 544Q84 628 134.0 700.0Q184 772 250.0 816.0Q316 860 406 860Z" fill="#15294D"/>
+    <path transform="translate(125.30 140.24) scale(0.01800 -0.01800)" d="M279 1225 1061 741V515L282 31L139 246L789 628L139 998Z" fill="#15294D"/>
   </g>
-
-  <!-- White hub -->
-  <circle cx="32" cy="32" r="9.6" fill="#ffffff"/>
-
-  <!-- Tilde + arrow glyph -->
-  <g fill="none" stroke="#0e1730" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M24.4 32.8 C 25.8 30.4, 27.5 30.3, 29.1 32.4 C 30.4 34.1, 31.8 34.2, 33.1 32.6"/>
-  </g>
-  <path d="M33.6 28.8 L40.2 32 L33.6 35.2 L33.6 33.5 L31.5 33.5 L31.5 30.5 L33.6 30.5 Z" fill="#0e1730"/>
 </svg>
