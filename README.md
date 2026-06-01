@@ -2,7 +2,7 @@
 
 <img src="docs/website/lockup_arrow_dark.svg" alt="pg_durable logo" width="560" />
 
-## Durable SQL workflows for PostgreSQL — no extra infra.
+## Durable SQL functions for PostgreSQL — no extra infra.
 
 Long-running, fault-tolerant functions defined entirely in SQL. Composable operators,
 automatic checkpointing, crash-safe replay, and parallel execution. Built on Postgres —
@@ -201,7 +201,7 @@ pg_durable is a PostgreSQL extension (built with [pgrx](https://github.com/pgcen
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-If you'd rather author durable workflows in Rust, Python, or Node while still persisting state in PostgreSQL, you can use duroxide and duroxide-pg directly from your host language — pg_durable is what you'd build on top of that pair when you'd prefer authoring in SQL.
+If you'd rather author durable functions in Rust, Python, or Node while still persisting state in PostgreSQL, you can use duroxide and duroxide-pg directly from your host language — pg_durable is what you'd build on top of that pair when you'd prefer authoring in SQL.
 
 ## Status
 

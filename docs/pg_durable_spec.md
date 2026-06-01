@@ -1,6 +1,6 @@
 # pg_durable
 
-**SQL-native durable workflows for PostgreSQL**
+**SQL-native durable functions for PostgreSQL**
 
 ---
 
