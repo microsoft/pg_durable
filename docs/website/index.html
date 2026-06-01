@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>pg_durable — Durable SQL workflows for PostgreSQL</title>
+    <title>pg_durable — Durable SQL functions for PostgreSQL</title>
     <meta
       name="description"
-      content="Build durable, fault-tolerant workflows in pure SQL. Retries, scheduling, parallel execution, and conditional branching — all inside PostgreSQL."
+      content="Build durable, fault-tolerant functions in pure SQL. Retries, scheduling, parallel execution, and conditional branching — all inside PostgreSQL."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="mask-icon" href="favicon.svg" color="#3d86c6" />
@@ -58,7 +58,7 @@
       <section class="hero">
         <div class="container hero-inner">
           <span class="hero-eyebrow">Open-source · durable functions for Postgres</span>
-          <h1>Durable, crash-proof workflows<br />built into <span class="accent">Postgres</span></h1>
+          <h1>Durable, crash-proof functions<br />built into <span class="accent">Postgres</span></h1>
           <p class="subtitle">
             Orchestrate retries, scheduling, parallel fan-out, and conditional branching with a tiny SQL DSL.
             Built on Postgres&nbsp;+ a background worker — no containers, no external services, just Postgres.
@@ -813,7 +813,7 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
             </div>
             <p class="horizon-lede">
               Azure HorizonDB is Microsoft's new PostgreSQL cloud service — engineered for performance and built
-              with pg_durable inside. Keep the durable workflows you write here, and add enterprise scale,
+              with pg_durable inside. Keep the durable functions you write here, and add enterprise scale,
               security, and AI without managing a single server.
             </p>
             <div class="horizon-grid">
