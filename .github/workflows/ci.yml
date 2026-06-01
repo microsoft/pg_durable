@@ -215,3 +215,109 @@ jobs:
       - name: Stop PostgreSQL after pg_regress
         if: steps.pg_regress.outcome != 'skipped'
         run: ./scripts/pg-stop.sh --pg-version ${{ matrix.pg_version }}
+
+  pgspot:
+    name: pgspot SQL Security Gate
+    runs-on: ubuntu-latest
+    needs: [format]
+    permissions:
+      contents: read
+    env:
+      PG_VERSION: 17
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space and show usage
+        run: |
+          echo "Disk usage before cleanup"
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          docker system prune -af || true
+          echo "Disk usage after cleanup"
+          df -h
+
+      - name: Install Rust nightly
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              pkg-config \
+              libssl-dev \
+              libclang-dev \
+              clang \
+              bison \
+              flex \
+              libreadline-dev \
+              zlib1g-dev \
+              libxml2-dev \
+              libxslt1-dev \
+              libicu-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache cargo-pgrx tool
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin/cargo-pgrx
+          key: ${{ runner.os }}-cargo-pgrx-0.16.1-v1
+
+      - name: Cache Cargo dependency sources
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deps-
+
+      - name: Cache PostgreSQL build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.pgrx/config.toml
+            ~/.pgrx/${{ env.PG_VERSION }}.*
+          key: ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}
+
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx &> /dev/null || ! cargo pgrx --version | grep -q "0.16.1"; then
+            cargo install cargo-pgrx --version 0.16.1 --locked
+          else
+            echo "cargo-pgrx 0.16.1 already installed, skipping"
+          fi
+
+      - name: Initialize pgrx
+        run: |
+          if [ ! -d "$HOME/.pgrx/${{ env.PG_VERSION }}."* ]; then
+            cargo pgrx init --pg${{ env.PG_VERSION }} download
+          else
+            echo "PostgreSQL ${{ env.PG_VERSION }} already initialized, skipping download"
+          fi
+
+      # Generate the CREATE EXTENSION install SQL with the same feature set used
+      # by the tested/released build, so the gate scans exactly what ships.
+      - name: Generate extension install SQL
+        run: |
+          cargo pgrx schema pg${{ env.PG_VERSION }} \
+            --no-default-features \
+            --features pg${{ env.PG_VERSION }},http-allow-test-domains \
+            -o /tmp/pg_durable-install.sql
+          echo "Generated install SQL:"
+          wc -l /tmp/pg_durable-install.sql
+
+      # Scan the generated install SQL plus active upgrade scripts that are not in
+      # the frozen baseline (sql/pgspot-frozen.txt). Released upgrade scripts and the
+      # frozen first-version fixture are intentionally exempt; new upgrade scripts are
+      # gated automatically.
+      - name: Run pgspot SQL security gate
+        run: scripts/pgspot-gate.sh /tmp/pg_durable-install.sql
