@@ -41,7 +41,14 @@ PGSPOT_VENV="${PGSPOT_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/pg_durable/pgspot-ve
 # Add entries only for constructs we provably cannot control from source, e.g.
 # pgrx-emitted DDL, each with a one-line reason.)
 PGSPOT_IGNORE=(
-  # Example (disabled): PS010  # `CREATE SCHEMA IF NOT EXISTS df` emitted by pgrx #[pg_schema]
+  # PS010 "Unsafe schema creation: df" -- pgrx emits `CREATE SCHEMA IF NOT
+  # EXISTS df` from #[pg_schema]; the `IF NOT EXISTS` (the construct pgspot
+  # flags, as it can adopt a pre-existing attacker-crafted schema) is not
+  # controllable from our source. Residual risk is negligible: all df objects
+  # are created by the installing superuser and we ship no SECURITY DEFINER
+  # functions. Schemas we DO control are created without IF NOT EXISTS (see
+  # `CREATE SCHEMA duroxide`), so they fail loudly and are not ignored here.
+  PS010
 )
 
 # ---------------------------------------------------------------------------
