@@ -313,7 +313,7 @@ This design uses `sqlx` polling (checking `pg_extension` table every 5 seconds):
     - `CREATE EXTENSION pg_durable` validates prerequisites before allowing installation:
       - **Validates shared_preload_libraries**: Extension creation fails if `pg_durable` is not in `shared_preload_libraries` (checked in `_PG_init`)
       - **Validates target database**: Extension creation fails if run in the wrong database
-        - Background worker connects to ONE database (determined by `POSTGRES_DB` or `PGDATABASE` environment variable, defaults to `postgres`)
+        - Background worker connects to ONE database (determined by the `pg_durable.database` GUC, defaults to `postgres`)
         - Extension must be created in that exact database
         - Validation runs during `CREATE EXTENSION` via SQL block that calls `df.target_database()` function
         - Error message clearly indicates which database should be used
@@ -417,7 +417,7 @@ The duroxide schema is extension-owned but its contents are BGW-managed:
     - Clear error message directs users to add pg_durable to `shared_preload_libraries` and restart
 
 2. **Single database limitation** ✅ **VALIDATED**
-   - Background worker connects to ONE database (POSTGRES_DB/PGDATABASE env var, defaults to `postgres`)
+   - Background worker connects to ONE database (controlled by the `pg_durable.database` GUC, defaults to `postgres`)
    - CREATE EXTENSION now validates the current database matches the background worker's target database
    - **Mitigation (implemented):** Extension creation fails with clear error if run in wrong database
    - **Future:** Support multi-database (would require multiple background workers or more complex architecture)
