@@ -1881,11 +1881,11 @@ pg_durable: waiting for CREATE EXTENSION pg_durable...
 **Solution**:
 1. Verify you're creating the extension in the correct database
 2. Check which database the background worker connects to:
-   - Defaults to the database specified by `PGDATABASE` environment variable or `postgres`
+   - Controlled by the `pg_durable.database` GUC (set in `postgresql.conf`); defaults to `postgres`
    - The background worker only processes functions in **one** database
 3. If you need pg_durable in a different database:
    - Create the extension in the database the background worker uses, OR
-   - Update environment variables and restart PostgreSQL
+   - Update `pg_durable.database` in `postgresql.conf` and restart PostgreSQL
 
 ### Extension Drop/Recreate Issues
 
