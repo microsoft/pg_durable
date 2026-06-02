@@ -158,8 +158,9 @@ Each PR that changes the extension schema or modifies SQL queries in Rust code s
 
 1. Add the necessary DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`)
 2. Ensure the `.so` is backward compatible with **all** previous schemas in the same provider compatibility line (Scenario B1)
-3. Add version-specific notes to this document under "Version-Specific Changes" below
-4. Pass upgrade tests in CI
+3. Keep all new DDL — in the Rust install SQL *and* in any new upgrade script — schema-qualified so it passes the pgspot SQL security gate (`scripts/pgspot-gate.sh`): qualify operators as `OPERATOR(pg_catalog.<op>)`, functions/types/objects by schema (e.g. `pg_catalog.now()`), and qualify references inside anonymous `DO` blocks (they run under the session search_path and are isolation-scanned by the gate). New upgrade scripts are gated automatically; they are exempt only after being frozen (see below).
+4. Add version-specific notes to this document under "Version-Specific Changes" below
+5. Pass upgrade and pgspot tests in CI
 
 ### Future work
 
@@ -185,12 +186,35 @@ No additional fixture is needed for subsequent minors — intermediate versions 
 
 `cargo pgrx package` generates the new major's install SQL. The previous major's install SQL and upgrade scripts are still needed for the A/B2 upgrade chain when the provider line continues across the major bump. B1 will be a no-op if there are no previous compatible versions within the new major, or if `PROVIDER_COMPAT_START_VERSION` marks the new major as the start of a new provider line.
 
+### Freezing released upgrade scripts (pgspot gate)
+
+The pgspot gate scans every upgrade script matching `*--*--*.sql` that is **not**
+listed in `sql/pgspot-frozen.txt`. A released upgrade script is an immutable
+artifact (customers run it verbatim during `ALTER EXTENSION UPDATE`), so once a
+version ships its upgrade script is added to the frozen list and exempted.
+
+**Freezing must be done in a separate post-release PR**, never in the same PR
+that introduces or edits the script. Adding a script to the frozen list in the
+same change that authors it would let unqualified DDL bypass the gate entirely.
+The intended lifecycle is: a new upgrade script is gated (and must pass) while in
+development → the version is tagged/released → a follow-up PR appends the now-
+immutable script's basename to `sql/pgspot-frozen.txt`. Each frozen basename
+should therefore correspond to an already-released tag.
+
 ---
 
 ## Version-Specific Changes
 
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
+
+### v0.2.2 → v0.2.3
+
+#### pgspot SQL security gate + schema-qualified install DDL
+- **DDL change:** None at the catalog level. The generated install SQL is hardened so every operator/function/object reference is schema-qualified (`OPERATOR(pg_catalog.<op>)`, `pg_catalog.now()`, `pg_catalog.current_database()`, etc.), including the references inside the two install-time anonymous `DO` blocks (worker-role superuser check and database validation), closing the CVE-2018-1058 search_path vector. A pgspot CI gate (`scripts/pgspot-gate.sh`, wired into `.github/workflows/ci.yml`) enforces qualification going forward and isolation-scans `DO` blocks to defeat pgspot's whole-file search_path leak. The `sql/pg_durable--0.2.2--0.2.3.sql` upgrade script is intentionally a no-op.
+- **Scenario A considerations:** Schema qualification is invisible to the catalogs — PostgreSQL resolves each reference to the same `pg_catalog` OID at parse time and the deparser omits the prefix, so stored CHECK/policy/default expression text is byte-identical to the unqualified 0.2.2 forms. Fresh 0.2.3 install therefore matches a 0.2.2 install upgraded through the no-op script. This is the first boundary at or after `PROVIDER_COMPAT_START_VERSION` (0.2.2), so Scenario A actively runs here.
+- **Scenario B1 considerations:** No runtime query contract changed; the new `.so` works against the 0.2.2 schema unchanged. The qualification is confined to install-time DDL.
+- **Scenario B2 considerations:** No data migration. Existing rows in `df.instances`, `df.nodes`, and `df.vars` are untouched.
 
 ### v0.2.1 → v0.2.2
 

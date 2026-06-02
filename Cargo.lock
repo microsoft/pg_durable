@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "pg_durable"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bigdecimal",
  "chrono",

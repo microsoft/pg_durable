@@ -63,8 +63,10 @@ fi
 scan+=("${targets[@]}")
 
 if [[ ${#scan[@]} -eq 0 ]]; then
-  echo "Nothing to scan (no install SQL and no non-frozen upgrade scripts)."
-  exit 0
+  echo "ERROR: nothing to scan (no install SQL and no non-frozen upgrade scripts)." >&2
+  echo "       In CI the generated install SQL must always be passed as an argument;" >&2
+  echo "       an empty scan set is treated as a gate failure, not a silent pass." >&2
+  exit 2
 fi
 
 exec "$SCRIPT_DIR/run-pgspot.sh" "${scan[@]}"

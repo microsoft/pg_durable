@@ -216,6 +216,12 @@ CREATE TABLE IF NOT EXISTS df._worker_epoch (
 
 ALTER TABLE df.instances
     ADD CONSTRAINT instances_id_format_chk
+        -- Operators are written as OPERATOR(pg_catalog.<op>) and functions are
+        -- schema-qualified (e.g. pg_catalog.now) throughout this install DDL so
+        -- that name resolution never depends on the session search_path. This
+        -- closes the CVE-2018-1058 vector (a malicious schema earlier on
+        -- search_path shadowing `=`, `~`, etc.) and is enforced by the pgspot
+        -- CI gate (scripts/pgspot-gate.sh).
         CHECK (id OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT instances_root_node_format_chk
         CHECK (root_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
@@ -525,12 +531,12 @@ DECLARE
     wrole TEXT;
     is_super BOOLEAN;
 BEGIN
-    wrole := current_setting('pg_durable.worker_role', true);
-    IF wrole IS NULL OR wrole = '' THEN
+    wrole := pg_catalog.current_setting('pg_durable.worker_role', true);
+    IF wrole IS NULL OR wrole OPERATOR(pg_catalog.=) '' THEN
         wrole := 'azuresu';
     END IF;
 
-    SELECT rolsuper INTO is_super FROM pg_roles WHERE rolname = wrole;
+    SELECT rolsuper INTO is_super FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) wrole;
     IF is_super IS NULL THEN
         RAISE WARNING 'pg_durable: worker role "%" does not exist. The background worker will not be able to process workflows. Create the role as a superuser before using pg_durable.', wrole;
     ELSIF NOT is_super THEN
@@ -578,12 +584,12 @@ DECLARE
     target_db TEXT;
 BEGIN
     -- Get the current database
-    SELECT current_database() INTO current_db;
+    SELECT pg_catalog.current_database() INTO current_db;
     
     -- Get the target database that the background worker will connect to
     SELECT df.target_database() INTO target_db;
     
-    IF current_db != target_db THEN
+    IF current_db OPERATOR(pg_catalog.<>) target_db THEN
         RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). The background worker only processes functions in the database specified by the pg_durable.database GUC (defaults to "postgres").', target_db, current_db
             USING HINT = 'Connect to the correct database and run: CREATE EXTENSION pg_durable;';
     END IF;

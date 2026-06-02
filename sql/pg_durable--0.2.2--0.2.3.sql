@@ -1,0 +1,22 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the PostgreSQL License.
+
+-- pg_durable upgrade: 0.2.2 → 0.2.3
+--
+-- No-op (intentionally empty).
+--
+-- The 0.2.3 changes are a security hardening of the install DDL only:
+--   * every operator/function/object reference in the generated install SQL is
+--     schema-qualified (e.g. `OPERATOR(pg_catalog.=)`, `pg_catalog.now()`),
+--     including the references inside the install-time anonymous DO blocks, to
+--     close the CVE-2018-1058 search_path vector; and
+--   * a pgspot CI gate (scripts/pgspot-gate.sh) enforces this going forward.
+--
+-- Schema qualification is invisible to the system catalogs: PostgreSQL binds
+-- each reference to the same pg_catalog OID at parse time and the deparser omits
+-- the pg_catalog prefix, so the stored CHECK/policy/default expressions are
+-- byte-identical to the unqualified 0.2.2 forms. The DO blocks run only at
+-- install time and leave no catalog footprint. There is therefore nothing to
+-- migrate for an existing 0.2.2 database, and test-upgrade.sh (Scenario A)
+-- verifies that a fresh 0.2.3 install matches a 0.2.2 install upgraded through
+-- this script.

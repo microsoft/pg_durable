@@ -304,8 +304,11 @@ jobs:
             echo "PostgreSQL ${{ env.PG_VERSION }} already initialized, skipping download"
           fi
 
-      # Generate the CREATE EXTENSION install SQL with the same feature set used
-      # by the tested/released build, so the gate scans exactly what ships.
+      # Generate the CREATE EXTENSION install SQL to scan. `http-allow-test-domains`
+      # is a test-only feature (it widens df.http()'s domain allowlist) and is NOT
+      # part of the released build, but it emits no extra DDL, so the install SQL's
+      # DDL surface here is identical to what ships. It is enabled only to match the
+      # clippy/test jobs' feature set and keep one cached build.
       - name: Generate extension install SQL
         run: |
           cargo pgrx schema pg${{ env.PG_VERSION }} \
