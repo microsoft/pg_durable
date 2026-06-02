@@ -15,6 +15,16 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/package-release.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - 'expected/**'
+      - 'scripts/package-deb.sh'
+      - 'scripts/validate-deb-package.sh'
+      - 'sql/**'
 
 permissions:
   contents: write
@@ -54,6 +64,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "VERSION=pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           else
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
           fi
@@ -151,11 +163,62 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pg-durable-${{ github.event.inputs.tag || github.ref_name }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
+          name: pg-durable-package-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
           path: |
             dist/*.deb
             dist/*.zip
           retention-days: 30
+
+  validate-packages:
+    name: Validate PG${{ matrix.pg_version }} ${{ matrix.platform.type }} package
+    needs: build-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        platform:
+          - type: amd64
+            docker_platform: linux/amd64
+          - type: arm64
+            docker_platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pg-durable-package-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
+          path: dist
+
+      - name: Validate Debian package in PostgreSQL
+        run: |
+          docker run --rm \
+            --platform "${{ matrix.platform.docker_platform }}" \
+            -v "$PWD:/work" \
+            -w /work \
+            --user root \
+            debian:bookworm \
+            bash -euxo pipefail -c 'scripts/validate-deb-package.sh "${{ matrix.pg_version }}" "${{ matrix.platform.type }}"'
+
+      - name: Upload validation diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-durable-validation-diagnostics-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
+          path: |
+            package-validation-logs/**
+            regression.out
+            regression.diffs
+          if-no-files-found: ignore
 
   build-source:
     name: Build source archives
@@ -170,6 +233,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "VERSION=pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           else
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
           fi
@@ -186,13 +251,13 @@ jobs:
       - name: Upload source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pg-durable-source-${{ github.event.inputs.tag || github.ref_name }}
+          name: pg-durable-source-${{ github.run_id }}
           path: dist/pg_durable-*.tar.*
           retention-days: 30
 
   release:
     name: Upload release assets
-    needs: [build-packages, build-source]
+    needs: [validate-packages, build-source]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event.inputs.publish_release == 'true'
 
