@@ -208,14 +208,6 @@ should therefore correspond to an already-released tag.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
-### v0.2.2 → v0.2.3
-
-#### pgspot SQL security gate + schema-qualified install DDL
-- **DDL change:** None at the catalog level. The generated install SQL is hardened so every operator/function/object reference is schema-qualified (`OPERATOR(pg_catalog.<op>)`, `pg_catalog.now()`, `pg_catalog.current_database()`, etc.), including the references inside the two install-time anonymous `DO` blocks (worker-role superuser check and database validation), closing the CVE-2018-1058 search_path vector. A pgspot CI gate (`scripts/pgspot-gate.sh`, wired into `.github/workflows/ci.yml`) enforces qualification going forward and isolation-scans `DO` blocks to defeat pgspot's whole-file search_path leak. The `sql/pg_durable--0.2.2--0.2.3.sql` upgrade script is intentionally a no-op.
-- **Scenario A considerations:** Schema qualification is invisible to the catalogs — PostgreSQL resolves each reference to the same `pg_catalog` OID at parse time and the deparser omits the prefix, so stored CHECK/policy/default expression text is byte-identical to the unqualified 0.2.2 forms. Fresh 0.2.3 install therefore matches a 0.2.2 install upgraded through the no-op script. This is the first boundary at or after `PROVIDER_COMPAT_START_VERSION` (0.2.2), so Scenario A actively runs here.
-- **Scenario B1 considerations:** No runtime query contract changed; the new `.so` works against the 0.2.2 schema unchanged. The qualification is confined to install-time DDL.
-- **Scenario B2 considerations:** No data migration. Existing rows in `df.instances`, `df.nodes`, and `df.vars` are untouched.
-
 ### v0.2.1 → v0.2.2
 
 #### #162 quote_ident-wrapped `current_user::regrole` (fixes #161)
