@@ -4,35 +4,18 @@
 
 """Extract top-level DO blocks from SQL file(s) for isolated pgspot scanning.
 
-Why this exists
----------------
-pgspot scans a whole file and, once it has seen a function that establishes a
-trusted search_path (``CREATE FUNCTION ... SET search_path = ..., df, ...`` with
-``CREATE SCHEMA df`` earlier in the file), it marks the top-level state as
-"search_path secure" and exempts every SUBSEQUENT top-level statement from the
-unqualified-reference rules (PS001/PS016/PS017).
+pgspot marks a file "search_path secure" after the first function that sets a
+trusted search_path, then skips the unqualified-reference checks on later
+top-level statements. Anonymous DO blocks don't inherit that search_path at run
+time, so an unqualified reference inside one is a real CVE-2018-1058 surface the
+whole-file pass misses. This pulls each top-level DO block into its own file,
+prefixed with a plain `CREATE SCHEMA df;` (gives df.* trusted context without
+tripping PS010), so scanning them in isolation catches those references. It is a
+targeted guard for DO blocks only; keep other install DDL schema-qualified.
 
-Anonymous ``DO`` blocks, however, do NOT inherit a function's ``SET search_path``
-at run time -- they execute under the installing role's *session* search_path.
-An unqualified reference inside a DO block is therefore a genuine CVE-2018-1058
-surface, yet pgspot's whole-file pass masks it.
-
-This script pulls each top-level ``DO`` block out and writes it to its own file,
-prefixed with a plain ``CREATE SCHEMA df;`` (so ``df.``-qualified references have
-trusted-schema context, and -- being a plain CREATE, not ``IF NOT EXISTS`` -- it
-does not itself trip PS010). Scanning those files in isolation defeats the leak
-for the DO-block class.
-
-This is a TARGETED regression guard for anonymous DO blocks, not a complete fix
-for pgspot's whole-file search_path leak; other statement classes that cannot
-carry their own search_path are guarded by manually schema-qualifying the
-install DDL (see docs/upgrade-testing.md).
-
-Usage:
-    extract-do-blocks.py OUTDIR FILE [FILE ...]
-
-Writes ``<OUTDIR>/<basename>.doN.sql`` for each DO block found and prints each
-written path on stdout. Exits 0 even when no DO blocks are found.
+Usage: extract-do-blocks.py OUTDIR FILE [FILE ...]
+Writes <OUTDIR>/<basename>.doN.sql per DO block and prints each path. Exits 0
+even when none are found.
 """
 
 import os

@@ -1,19 +1,16 @@
 # pgspot frozen baseline
 #
-# Upgrade scripts listed here are RELEASED, immutable artifacts and are exempt
-# from the pgspot SQL security gate. A customer on an older version runs these
-# verbatim during `ALTER EXTENSION UPDATE`, and `test-upgrade.sh` compares the
-# resulting schema, so they must not be edited after release. Their security
-# posture is owned by the generated install SQL of the current version (fixed in
-# Rust source), not by retrofitting historical upgrade SQL.
+# Released, immutable upgrade scripts -- exempt from the pgspot gate. Customers
+# run these verbatim during `ALTER EXTENSION UPDATE` and test-upgrade.sh compares
+# the resulting schema, so they must not change after release. Current security
+# posture is owned by the generated install SQL (fixed in Rust source), not by
+# retrofitting historical upgrade SQL.
 #
-# The frozen first-version install fixture `pg_durable--0.1.1.sql` is excluded
-# separately (the gate only scans upgrade scripts matching `*--*--*.sql`).
+# New upgrade scripts are gated automatically (absent here). On release, add the
+# script's basename. The first-version fixture `pg_durable--0.1.1.sql` is exempt
+# separately (the gate only scans `*--*--*.sql`).
 #
-# Process: any NEW upgrade script is gated automatically (it is not in this
-# list). When a version is released, add its upgrade script's basename here.
-#
-# One basename per line; blank lines and `#` comments are ignored.
+# One basename per line; blank lines and `#` comments ignored.
 
 pg_durable--0.1.1--0.2.0.sql
 pg_durable--0.2.0--0.2.1.sql

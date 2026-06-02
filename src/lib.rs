@@ -216,12 +216,11 @@ CREATE TABLE IF NOT EXISTS df._worker_epoch (
 
 ALTER TABLE df.instances
     ADD CONSTRAINT instances_id_format_chk
-        -- Operators are written as OPERATOR(pg_catalog.<op>) and functions are
-        -- schema-qualified (e.g. pg_catalog.now) throughout this install DDL so
-        -- that name resolution never depends on the session search_path. This
-        -- closes the CVE-2018-1058 vector (a malicious schema earlier on
-        -- search_path shadowing `=`, `~`, etc.) and is enforced by the pgspot
-        -- CI gate (scripts/pgspot-gate.sh).
+        -- Operators (OPERATOR(pg_catalog.<op>)) and functions (e.g. pg_catalog.now)
+        -- are schema-qualified throughout this install DDL so name resolution never
+        -- depends on the session search_path -- closing the CVE-2018-1058 vector
+        -- (a malicious schema shadowing `=`, `~`, etc.). Enforced by the pgspot CI
+        -- gate (scripts/pgspot-gate.sh).
         CHECK (id OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT instances_root_node_format_chk
         CHECK (root_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,

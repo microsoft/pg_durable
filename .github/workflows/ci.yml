@@ -304,11 +304,10 @@ jobs:
             echo "PostgreSQL ${{ env.PG_VERSION }} already initialized, skipping download"
           fi
 
-      # Generate the CREATE EXTENSION install SQL to scan. `http-allow-test-domains`
-      # is a test-only feature (it widens df.http()'s domain allowlist) and is NOT
-      # part of the released build, but it emits no extra DDL, so the install SQL's
-      # DDL surface here is identical to what ships. It is enabled only to match the
-      # clippy/test jobs' feature set and keep one cached build.
+      # Generate the install SQL to scan. http-allow-test-domains is a test-only
+      # feature (widens df.http()'s allowlist) that emits no extra DDL, so this DDL
+      # surface matches the shipped build. Enabled only to match the clippy/test
+      # jobs' feature set and reuse one cached build.
       - name: Generate extension install SQL
         run: |
           cargo pgrx schema pg${{ env.PG_VERSION }} \
@@ -318,9 +317,7 @@ jobs:
           echo "Generated install SQL:"
           wc -l /tmp/pg_durable-install.sql
 
-      # Scan the generated install SQL plus active upgrade scripts that are not in
-      # the frozen baseline (sql/pgspot-frozen.txt). Released upgrade scripts and the
-      # frozen first-version fixture are intentionally exempt; new upgrade scripts are
-      # gated automatically.
+      # Scan the install SQL plus non-frozen upgrade scripts. Released scripts and
+      # the first-version fixture are exempt; new scripts are gated automatically.
       - name: Run pgspot SQL security gate
         run: scripts/pgspot-gate.sh /tmp/pg_durable-install.sql

@@ -4,17 +4,14 @@
 
 # pgspot-gate.sh - Project entry point for the pgspot SQL security gate.
 #
-# Scans the generated `CREATE EXTENSION` install SQL plus every active upgrade
-# script that is NOT in the frozen baseline (sql/pgspot-frozen.txt). New upgrade
-# scripts are therefore gated automatically; released ones are exempt.
+# Scans the generated install SQL plus every active upgrade script NOT in the
+# frozen baseline (sql/pgspot-frozen.txt). New scripts are gated automatically;
+# released ones are exempt.
 #
-# Usage:
-#   scripts/pgspot-gate.sh [INSTALL_SQL]
-#
-#   INSTALL_SQL  Path to the generated install SQL to scan. Optional: if omitted
-#                (e.g. when a pgrx PostgreSQL install is unavailable locally) only
-#                the non-frozen upgrade scripts are scanned. In CI the install SQL
-#                is always generated and passed.
+# Usage: scripts/pgspot-gate.sh [INSTALL_SQL]
+#   INSTALL_SQL  install SQL to scan. Optional (omit when no local pgrx install);
+#                CI always generates and passes it. Without it, only non-frozen
+#                upgrade scripts are scanned.
 
 set -euo pipefail
 
@@ -36,8 +33,8 @@ if [[ -f "$FROZEN_LIST" ]]; then
   done < "$FROZEN_LIST"
 fi
 
-# Collect non-frozen upgrade scripts (basename matches `*--*--*.sql`, i.e. two
-# `--` separators; the single-`--` first-version fixture is never matched).
+# Non-frozen upgrade scripts (basename `*--*--*.sql`; the single-`--` first-
+# version fixture never matches).
 targets=()
 shopt -s nullglob
 for f in "$SQL_DIR"/pg_durable--*--*.sql; do
@@ -64,8 +61,7 @@ scan+=("${targets[@]}")
 
 if [[ ${#scan[@]} -eq 0 ]]; then
   echo "ERROR: nothing to scan (no install SQL and no non-frozen upgrade scripts)." >&2
-  echo "       In CI the generated install SQL must always be passed as an argument;" >&2
-  echo "       an empty scan set is treated as a gate failure, not a silent pass." >&2
+  echo "       CI must pass the generated install SQL; an empty scan set fails the gate." >&2
   exit 2
 fi
 
