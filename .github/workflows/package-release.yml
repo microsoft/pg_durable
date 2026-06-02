@@ -82,6 +82,7 @@ jobs:
         run: |
           docker run --rm \
             --platform "${{ matrix.platform.docker_platform }}" \
+            -e VERSION \
             -v "$PWD:/work" \
             -w /work \
             --user root \
