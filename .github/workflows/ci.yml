@@ -317,7 +317,7 @@ jobs:
           echo "Generated install SQL:"
           wc -l /tmp/pg_durable-install.sql
 
-      # Scan the install SQL plus non-frozen upgrade scripts. Released scripts and
-      # the first-version fixture are exempt; new scripts are gated automatically.
+      # Scan the install SQL plus upgrade scripts. Pre-pgspot legacy scripts are
+      # excluded in the gate; new scripts are gated automatically.
       - name: Run pgspot SQL security gate
         run: scripts/pgspot-gate.sh /tmp/pg_durable-install.sql

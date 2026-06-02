@@ -158,7 +158,7 @@ Each PR that changes the extension schema or modifies SQL queries in Rust code s
 
 1. Add the necessary DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`)
 2. Ensure the `.so` is backward compatible with **all** previous schemas in the same provider compatibility line (Scenario B1)
-3. Keep all new DDL — in the Rust install SQL *and* in any new upgrade script — schema-qualified so it passes the pgspot SQL security gate (`scripts/pgspot-gate.sh`): qualify operators as `OPERATOR(pg_catalog.<op>)`, functions/types/objects by schema (e.g. `pg_catalog.now()`), and qualify references inside anonymous `DO` blocks (they run under the session search_path and are isolation-scanned by the gate). New upgrade scripts are gated automatically; they are exempt only after being frozen (see below).
+3. Keep all new DDL — in the Rust install SQL *and* in any new upgrade script — schema-qualified so it passes the pgspot SQL security gate (`scripts/pgspot-gate.sh`): qualify operators as `OPERATOR(pg_catalog.<op>)`, functions/types/objects by schema (e.g. `pg_catalog.now()`), and qualify references inside anonymous `DO` blocks (they run under the session search_path and are isolation-scanned by the gate). New upgrade scripts are gated automatically.
 4. Add version-specific notes to this document under "Version-Specific Changes" below
 5. Pass upgrade and pgspot tests in CI
 
@@ -186,20 +186,14 @@ No additional fixture is needed for subsequent minors — intermediate versions 
 
 `cargo pgrx package` generates the new major's install SQL. The previous major's install SQL and upgrade scripts are still needed for the A/B2 upgrade chain when the provider line continues across the major bump. B1 will be a no-op if there are no previous compatible versions within the new major, or if `PROVIDER_COMPAT_START_VERSION` marks the new major as the start of a new provider line.
 
-### Freezing released upgrade scripts (pgspot gate)
+### Upgrade scripts and the pgspot gate
 
-The pgspot gate scans every upgrade script matching `*--*--*.sql` that is **not**
-listed in `sql/pgspot-frozen.txt`. A released upgrade script is an immutable
-artifact (customers run it verbatim during `ALTER EXTENSION UPDATE`), so once a
-version ships its upgrade script is added to the frozen list and exempted.
-
-**Freezing must be done in a separate post-release PR**, never in the same PR
-that introduces or edits the script. Adding a script to the frozen list in the
-same change that authors it would let unqualified DDL bypass the gate entirely.
-The intended lifecycle is: a new upgrade script is gated (and must pass) while in
-development → the version is tagged/released → a follow-up PR appends the now-
-immutable script's basename to `sql/pgspot-frozen.txt`. Each frozen basename
-should therefore correspond to an already-released tag.
+The pgspot gate scans every upgrade script matching `*--*--*.sql`, except a small
+hardcoded list of pre-pgspot legacy scripts in `scripts/pgspot-gate.sh` (authored
+before the install DDL was schema-qualified, and immutable now that they're
+released). Every new upgrade script is gated and must pass — keep its DDL
+schema-qualified (see step 3 above). Scripts written after qualification pass the
+gate, so they never need to be added to the exclude list.
 
 ---
 
