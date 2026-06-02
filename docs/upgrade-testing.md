@@ -158,7 +158,7 @@ Each PR that changes the extension schema or modifies SQL queries in Rust code s
 
 1. Add the necessary DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`)
 2. Ensure the `.so` is backward compatible with **all** previous schemas in the same provider compatibility line (Scenario B1)
-3. Keep all new DDL — in the Rust install SQL *and* in any new upgrade script — schema-qualified so it passes the pgspot SQL security gate (`scripts/pgspot-gate.sh`): qualify operators as `OPERATOR(pg_catalog.<op>)`, functions/types/objects by schema (e.g. `pg_catalog.now()`), and qualify references inside anonymous `DO` blocks (they run under the session search_path and are isolation-scanned by the gate). New upgrade scripts are gated automatically.
+3. Keep all new DDL — in the Rust install SQL *and* in any new upgrade script — schema-qualified so it passes the pgspot SQL security gate (`scripts/pgspot-gate.sh`): qualify operators as `OPERATOR(pg_catalog.<op>)`, functions/types/objects by schema (e.g. `pg_catalog.now()`), and qualify references inside anonymous `DO` blocks (they run under the session search_path). Note: pgspot cannot currently see unqualified references inside a `DO` block when an earlier statement set a trusted search_path (a known pgspot limitation, tracked upstream), so reviewers must check `DO`-block qualification by hand. New upgrade scripts are gated automatically.
 4. Add version-specific notes to this document under "Version-Specific Changes" below
 5. Pass upgrade and pgspot tests in CI
 

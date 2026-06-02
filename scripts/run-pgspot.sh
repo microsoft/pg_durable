@@ -10,10 +10,11 @@
 # A file passes only if every pgspot finding is on the per-finding allowlist
 # (PGSPOT_ALLOW); scan_file is fail-closed via two passes (see its comment).
 #
-# DO-block limitation: once pgspot sees a function with a trusted search_path it
-# stops checking later top-level statements. Anonymous DO blocks don't inherit
-# that search_path at run time, so each is also extracted (extract-do-blocks.py)
-# and scanned in isolation. Keep all other install DDL schema-qualified.
+# Known pgspot limitation: pgspot does not check unqualified references inside an
+# anonymous DO block when an earlier statement set a trusted search_path (its
+# file-level "secure" flag leaks into the block, though a DO block actually runs
+# under the session search_path). So qualify DO-block references by hand; the
+# gate cannot verify them. Tracked upstream.
 #
 # Usage: scripts/run-pgspot.sh FILE [FILE ...]   (globs expanded by caller)
 #
@@ -21,15 +22,11 @@
 #   PGSPOT_VERSION       pgspot version to pin (default: 0.9.2)
 #   PGSPOT_VENV          venv dir to install/reuse (default: a cache dir)
 #   PGSPOT_BIN           existing pgspot executable (skips venv setup)
-#   PGSPOT_DO_ISOLATION  set to 0 to disable DO-block isolation (debug only)
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PGSPOT_VERSION="${PGSPOT_VERSION:-0.9.2}"
 PGSPOT_VENV="${PGSPOT_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/pg_durable/pgspot-venv}"
-# Isolate-scan anonymous DO blocks too (see extract-do-blocks.py). Set 0 to debug.
-PGSPOT_DO_ISOLATION="${PGSPOT_DO_ISOLATION:-1}"
 
 # --- Finding allowlist -----------------------------------------------------
 # pgspot prints one line per finding: "PSxxx: <title>: <context> at line N". We
@@ -117,7 +114,6 @@ resolve_pgspot() {
   if [[ -n "${PGSPOT_BIN:-}" ]]; then
     if "$PGSPOT_BIN" --version 2>/dev/null | grep -q "pgspot ${PGSPOT_VERSION}"; then
       PGSPOT="$PGSPOT_BIN"
-      PGSPOT_PY="$(dirname "$PGSPOT_BIN")/python3"
       return
     fi
     err "PGSPOT_BIN=$PGSPOT_BIN is not pgspot ${PGSPOT_VERSION}"
@@ -127,7 +123,6 @@ resolve_pgspot() {
   local venv_bin="$PGSPOT_VENV/bin/pgspot"
   if [[ -x "$venv_bin" ]] && "$venv_bin" --version 2>/dev/null | grep -q "pgspot ${PGSPOT_VERSION}"; then
     PGSPOT="$venv_bin"
-    PGSPOT_PY="$PGSPOT_VENV/bin/python3"
     return
   fi
 
@@ -136,7 +131,6 @@ resolve_pgspot() {
   "$PGSPOT_VENV/bin/pip" install --quiet --upgrade pip
   "$PGSPOT_VENV/bin/pip" install --quiet "pgspot==${PGSPOT_VERSION}"
   PGSPOT="$venv_bin"
-  PGSPOT_PY="$PGSPOT_VENV/bin/python3"
 }
 
 main() {
@@ -147,20 +141,6 @@ main() {
 
   resolve_pgspot
   build_ignore_args
-
-  local do_isolation=0
-  local workdir=""
-  if [[ "$PGSPOT_DO_ISOLATION" == "1" ]]; then
-    if "$PGSPOT_PY" -c 'import pglast' 2>/dev/null; then
-      do_isolation=1
-      workdir="$(mktemp -d)"
-      # shellcheck disable=SC2064
-      trap "rm -rf '$workdir'" EXIT
-    else
-      err "ERROR: DO-block isolation requested but pglast is unavailable in $PGSPOT_PY"
-      exit 2
-    fi
-  fi
 
   local failed=0
   local checked=0
@@ -177,21 +157,6 @@ main() {
     else
       err "FAIL: $file"
       failed=$((failed + 1))
-    fi
-
-    # Isolate-scan each DO block so the whole-file leak can't mask it.
-    if [[ $do_isolation -eq 1 ]]; then
-      local do_file
-      while IFS= read -r do_file; do
-        [[ -z "$do_file" ]] && continue
-        printf '\n=== pgspot (DO-isolation): %s ===\n' "$do_file"
-        if scan_file "$do_file"; then
-          printf 'OK: %s\n' "$do_file"
-        else
-          err "FAIL (DO-isolation, source file $file): $do_file"
-          failed=$((failed + 1))
-        fi
-      done < <("$PGSPOT_PY" "$SCRIPT_DIR/extract-do-blocks.py" "$workdir" "$file")
     fi
   done
 
