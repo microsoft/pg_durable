@@ -10,12 +10,6 @@
 # A file passes only if every pgspot finding is on the per-finding allowlist
 # (PGSPOT_ALLOW); scan_file is fail-closed via two passes (see its comment).
 #
-# Known pgspot limitation: pgspot does not check unqualified references inside an
-# anonymous DO block when an earlier statement set a trusted search_path (its
-# file-level "secure" flag leaks into the block, though a DO block actually runs
-# under the session search_path). So qualify DO-block references by hand; the
-# gate cannot verify them. Tracked upstream.
-#
 # Usage: scripts/run-pgspot.sh FILE [FILE ...]   (globs expanded by caller)
 #
 # Env:
@@ -30,15 +24,13 @@ PGSPOT_VENV="${PGSPOT_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/pg_durable/pgspot-ve
 
 # --- Finding allowlist -----------------------------------------------------
 # pgspot prints one line per finding: "PSxxx: <title>: <context> at line N". We
-# allow specific findings by exact match rather than suppressing whole codes
-# globally (--ignore), so a future unsafe instance of the same code still fails.
-# Anything not matched here -- plus unknowns, fatals, and unexplained non-zero
-# exits -- fails the gate. Keep this list minimal; prefer fixing the source.
+# allow findings by exact match, not by suppressing whole codes (--ignore), so a
+# future unsafe instance of the same code still fails. Anything unmatched -- plus
+# unknowns, fatals, and unexplained non-zero exits -- fails the gate.
 PGSPOT_ALLOW=(
-  # pgrx emits `CREATE SCHEMA IF NOT EXISTS df` from #[pg_schema]; the
-  # IF NOT EXISTS (what PS010 flags) is not controllable from source. Only df is
-  # allowed -- any other PS010 still fails. Schemas we control omit IF NOT EXISTS
-  # (e.g. `CREATE SCHEMA duroxide`) and never trip PS010.
+  # pgrx emits `CREATE SCHEMA IF NOT EXISTS df` from #[pg_schema]; the IF NOT
+  # EXISTS (what PS010 flags) isn't controllable from source. Only df is allowed;
+  # any other PS010 still fails. Schemas we control omit IF NOT EXISTS.
   '^PS010: Unsafe schema creation: df at line [0-9]+$'
 )
 
