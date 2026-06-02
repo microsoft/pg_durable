@@ -37,7 +37,7 @@ env:
 
 concurrency:
   group: package-release-${{ github.event.inputs.tag || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-packages:
