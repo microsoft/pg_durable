@@ -6,13 +6,19 @@ Issue: [Move PostgresProvider's schema out of "duroxide" microsoft/pg_durable#17
 
 Move pg_durable's internal duroxide provider schema away from the generic `duroxide` name for new installations, while preserving existing installations that already have an extension-owned `duroxide` schema.
 
-The proposed default provider schema name for new installations is:
+The chosen default provider schema name for new installations is:
 
 ```text
-df-duroxide
+_duroxide
 ```
 
-The schema name should also be configurable through a postmaster-context, superuser-only GUC so deployments can choose a different provider schema before creating the extension.
+Rationale for the name:
+
+- Bare identifier (no quoting required anywhere). `_` is a legal leading character for PostgreSQL identifiers.
+- The leading underscore signals "internal / not part of the public API," matching common PostgreSQL convention for implementation-detail objects.
+- Makes the relationship to duroxide-pg obvious without overloading a more generic prefix like `_df`.
+
+There is no GUC. The schema name is an implementation detail of pg_durable, not an operator-facing setting.
 
 ## Current State
 
@@ -40,170 +46,118 @@ Already-shipped versions in Azure and open source assume the provider schema is 
 
 Therefore, a new binary must continue to work with existing databases where `pg_durable` already owns a `duroxide` schema. Existing instances and engine state must remain in place and must not be migrated implicitly to a different schema.
 
-The compatibility rule should be:
+The compatibility rules:
 
-- If the installed extension already owns `duroxide`, use `duroxide`.
-- If the installed extension already owns the configured/new schema, use that schema.
+- If the install records `duroxide` as its provider schema, use `duroxide`.
+- If the install records `_duroxide` (or any future name) as its provider schema, use that name.
 - Do not rename, copy, drop, or migrate provider state automatically.
-- A fresh `CREATE EXTENSION pg_durable` under the new SQL should create and use `df-duroxide` by default.
+- A fresh `CREATE EXTENSION pg_durable` under the new SQL creates and uses `_duroxide`.
+- A `.so` upgrade that arrives **without** `ALTER EXTENSION pg_durable UPDATE` must continue to operate against the legacy `duroxide` schema (see "Selection algorithm" below).
 
-## Proposed GUC
+There is **no in-place migration path** from `duroxide` to `_duroxide` for an existing cluster that wants to adopt the new name while preserving engine state. The only supported "adopt the new name" path is `DROP EXTENSION pg_durable CASCADE` followed by `CREATE EXTENSION pg_durable`, which is a destructive reset of durable engine state. This is acknowledged as a deliberate non-goal of this work.
 
-Add a new GUC:
+## Design Overview
 
-```text
-pg_durable.duroxide_schema = 'df-duroxide'
+Rather than a GUC, the selected provider schema is exposed by a small extension-owned SQL function:
+
+```sql
+CREATE FUNCTION df.duroxide_schema() RETURNS TEXT
+    LANGUAGE SQL IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT '_duroxide'::TEXT $$;
 ```
 
-Recommended properties:
+Both the install SQL and any future upgrade scripts are responsible for defining this function with the correct value for the lifecycle path being taken:
 
-- Context: `Postmaster`
-- Flags: `SUPERUSER_ONLY`
-- Default: `df-duroxide`
-- Validated as a PostgreSQL identifier/name suitable for a schema name
-- Documented as install-time configuration, not a runtime migration switch
+- The **fresh install** SQL (the new version's primary install script) defines the function to return `'_duroxide'`.
+- The **upgrade script** `pg_durable--0.2.2--<v-next>.sql` defines the function to return `'duroxide'`. This pins existing clusters to their already-created legacy schema deterministically, regardless of any other heuristics.
 
-The setting should mean: "which provider schema should new extension installs create and which schema should the background worker expect when there is no legacy extension-owned `duroxide` schema."
+The background worker and backend sessions read the value once at startup (or whenever they need it) and use it everywhere the provider schema is referenced.
 
-## Desired Behavior
+### Why a function instead of a table?
 
-### Fresh install, default GUC
+- Mirrors the existing pattern of [`df.target_database()`](../src/lib.rs) — a parameterless function used to expose install-time configuration to validation SQL and to Rust code.
+- No row management, no `CHECK` constraints to enforce a single row, no `UPDATE` ergonomics.
+- The value is baked into an extension-owned object, which makes it tamper-resistant by default (non-superusers cannot `CREATE OR REPLACE` it).
+- Changing the value across versions is a straightforward `CREATE OR REPLACE FUNCTION` in the relevant upgrade script.
 
-1. `pg_durable.duroxide_schema` is unset or set to `df-duroxide`.
-2. `CREATE EXTENSION pg_durable` creates an extension-owned schema named `df-duroxide`.
-3. The background worker verifies `df-duroxide` is extension-owned.
-4. The worker runs duroxide-pg migrations in `df-duroxide`.
-5. Backend sessions use `df-duroxide._worker_ready` and a provider configured with `schema_name = "df-duroxide"`.
+### Selection algorithm (BGW + backend)
 
-### Fresh install, custom GUC
+At runtime the selected schema is computed once per connection / once at BGW startup:
 
-1. Admin sets `pg_durable.duroxide_schema = 'custom_schema'` in `postgresql.conf` and restarts PostgreSQL.
-2. `CREATE EXTENSION pg_durable` creates an extension-owned schema named `custom_schema`.
-3. The worker and backend sessions use `custom_schema`.
+1. Try to call `df.duroxide_schema()`. If it returns a non-empty value, use that value.
+2. If the function does not exist (PostgreSQL error code `42883`, `undefined_function`), fall back to `'duroxide'`.
 
-### Existing install using `duroxide`, new binary deployed, GUC unset/default
+Rule 2 is the **only** fallback, and exists strictly for the documented operational reality that customers may receive a new `.so` through a maintenance update without running `ALTER EXTENSION pg_durable UPDATE`. In that case:
 
-1. The database already has `pg_durable` installed and owns schema `duroxide`.
-2. The new binary default is `df-duroxide`.
-3. The worker detects the extension-owned `duroxide` schema and keeps using it.
-4. No provider state is moved.
-5. Existing instances continue to run and monitoring APIs continue to work.
+- The cluster is still at the old extension version, so the helper function does not yet exist.
+- The pre-existing extension-owned `duroxide` schema is the only possible provider schema.
+- Falling back to `'duroxide'` is unambiguous and safe.
 
-This is the most important backward-compatibility path.
+The fallback is self-deleting: as soon as the operator runs `ALTER EXTENSION pg_durable UPDATE`, the function is defined (by the upgrade script) to return `'duroxide'`, and selection step 1 wins on every subsequent startup.
 
-### Existing install using `duroxide`, admin changes GUC to `df-duroxide` or custom value without dropping extension
+No GUC source inspection, no `pg_depend` scan, no metadata-vs-GUC priority puzzle.
 
-Current requested behavior: do not delete or migrate the old schema. The extension still has the schema it already owns, while the worker is configured to wait for the new schema name to exist and be extension-owned. Functions will not make progress until the extension is dropped and recreated with the new setting.
+## Compatibility Matrix
 
-This mirrors the existing operational hazard for `pg_durable.database`: changing the GUC after extension creation can leave the worker watching a database/schema state that does not match the existing extension installation.
-
-This requirement has one tension with the previous compatibility path: if the new binary always falls back to extension-owned `duroxide`, then changing the GUC would not intentionally stall the worker. We need a crisp rule to distinguish "legacy default compatibility" from "admin explicitly changed the schema setting." See Open Questions.
-
-### Drop and recreate after changing GUC
-
-1. Admin sets `pg_durable.duroxide_schema` to the desired schema and restarts.
-2. Admin runs `DROP EXTENSION pg_durable CASCADE`.
-3. The extension-owned provider schema and provider state are dropped by PostgreSQL cascade.
-4. Admin runs `CREATE EXTENSION pg_durable`.
-5. The new extension creates the configured schema and starts with fresh provider state.
-
-This is a destructive reset of durable engine state, not a migration.
-
-### Upgrade script path
-
-`ALTER EXTENSION pg_durable UPDATE` should not rename `duroxide` or create `df-duroxide` for existing installations. The upgrade path should preserve existing provider state and should leave schema selection to runtime detection/configuration.
-
-Scenario A schema-equivalence tests must account for the fact that provider schema state is intentionally not compared as part of `df` schema snapshots. Scenario B1 is the critical test: new `.so` against an older compatible schema must still use `duroxide`.
-
-## Open Questions
-
-### How do we detect an explicit schema GUC change?
-
-Postmaster GUC access normally gives the effective value, not whether it came from the compiled default or from a config file. If the compiled default changes from `duroxide` to `df-duroxide`, an existing installation with no explicit setting will also observe `df-duroxide`.
-
-That means these two cases look identical unless we add another signal:
-
-1. Existing install, admin did nothing, new binary default is now `df-duroxide`.
-2. Existing install, admin explicitly set `pg_durable.duroxide_schema = 'df-duroxide'` without dropping/recreating.
-
-The requested behavior wants case 1 to keep using `duroxide`, but case 2 to wait for `df-duroxide`. We need a way to tell them apart.
-
-Possible approaches:
-
-- Use PostgreSQL GUC source inspection if pgrx exposes enough information or if we can safely call the relevant PostgreSQL APIs. Treat `PGC_S_DEFAULT` as compatibility mode and non-default config sources as explicit admin intent.
-- Avoid trying to detect explicitness. Rule: an existing extension-owned `duroxide` schema always wins. This is simpler and safer for upgrades, but changing the GUC alone would not stall/move an old install.
-- Persist the selected provider schema in `df` metadata during `CREATE EXTENSION`. This would make runtime behavior explicit after install, but it requires new DDL and does not help already-shipped installs unless absence of metadata means legacy `duroxide`.
-- Create both a GUC and a SQL helper that records the selected schema at install time. This is probably overkill unless PostgreSQL GUC source inspection is not viable.
-
-Recommendation: prefer explicit metadata if we want deterministic behavior independent of GUC-source quirks. Add a small `df._provider_config` or similar table with `duroxide_schema TEXT NOT NULL`, populated by install SQL from the GUC value. For old installs without the table/row, fallback to extension-owned `duroxide`.
-
-### Can `CREATE SCHEMA` use a GUC-derived dynamic name in extension SQL?
-
-Static extension SQL currently uses literal `CREATE SCHEMA duroxide;`. A configurable schema name probably requires a `DO` block that reads `current_setting('pg_durable.duroxide_schema')`, validates it, executes `CREATE SCHEMA %I`, and then runs `ALTER EXTENSION pg_durable ADD SCHEMA %I` if dynamic schema creation is not automatically registered as an extension member.
-
-This needs a prototype. The cheap check is to package/install locally and inspect `pg_depend` for the dynamically created schema.
-
-### Is `df-duroxide` an acceptable PostgreSQL schema name?
-
-Yes if quoted: `"df-duroxide"`. It is not a bare identifier because of the hyphen. All SQL that references it must use identifier quoting. Rust/provider config can pass the raw name, assuming duroxide-pg quotes identifiers correctly internally. pg_durable's own dynamic SQL must use `quote_ident()` or equivalent.
-
-This also affects test scripts and readiness probes: direct SQL must refer to `"df-duroxide"._worker_ready`, or better use formatted SQL with `%I`.
-
-### Should we choose `df_duroxide` instead?
-
-`df-duroxide` clearly signals an internal implementation schema and avoids ordinary bare-identifier collisions, but it increases quoting requirements and test churn. `df_duroxide` is simpler operationally. The current requested default is `df-duroxide`; keep it unless we decide the quoting burden is not worth it.
+| Scenario | Selection outcome | Provider schema actually used |
+|---|---|---|
+| Fresh `CREATE EXTENSION` on new version | Step 1: function returns `'_duroxide'` | `_duroxide` |
+| Existing v0.2.2 cluster, new `.so` deployed, **no** `ALTER EXTENSION UPDATE` | Step 2: function missing, fallback | `duroxide` |
+| Existing v0.2.2 cluster, new `.so` deployed, `ALTER EXTENSION UPDATE` run | Step 1: upgrade script defined function to return `'duroxide'` | `duroxide` |
+| Future fresh install on v0.2.4+ where default changes again | Step 1: install script defines function to return the new value | New value |
+| Operator manually drops `_duroxide` schema on a fresh install | Worker readiness check fails (extension-owned schema missing) | N/A — operator error, loud failure |
 
 ## Implementation Plan
 
 ### Phase 1: Schema-name abstraction
 
-- Replace the hardcoded `DUROXIDE_SCHEMA` constant with functions that return the selected provider schema.
-- Add helpers for quoted identifier rendering in SQL snippets that must mention the schema directly.
-- Update `backend_provider_config()` and `worker_provider_config()` to use the selected schema.
-- Update debug/status messages to display the selected schema.
+- Replace the hardcoded `DUROXIDE_SCHEMA` constant in `src/types.rs` with a runtime-resolved value cached at BGW startup and per backend session.
+- Introduce a small helper, e.g. `resolve_duroxide_schema(conn) -> String`, implementing the selection algorithm (call function, catch `42883`, fall back to `"duroxide"`).
+- Update `backend_provider_config()` and `worker_provider_config()` to consume the resolved value.
+- Update debug/log messages to display the resolved schema.
 
-### Phase 2: Install-time schema creation
+### Phase 2: Install SQL changes
 
-- Add `pg_durable.duroxide_schema` GUC in `src/lib.rs`.
-- Replace literal `CREATE SCHEMA duroxide;` with dynamic schema creation using the configured name.
-- Ensure the created schema is an extension member.
-- Preserve the no-adoption rule: if the target schema already exists, `CREATE EXTENSION` must fail.
-- Decide whether to persist the chosen schema in `df` metadata.
+- Define `df.duroxide_schema()` in the new version's install SQL, returning `'_duroxide'`.
+- Replace the literal `CREATE SCHEMA duroxide;` with `CREATE SCHEMA _duroxide;` (still **without** `IF NOT EXISTS`, preserving the no-adoption rule).
+- Both objects are extension members by virtue of being declared inside the extension install SQL.
+- No additional install-time validation is needed: a pre-existing `_duroxide` schema makes `CREATE SCHEMA` fail, which fails `CREATE EXTENSION` — the same protection the current literal `duroxide` enjoys.
 
-### Phase 3: Runtime schema selection
+### Phase 3: Upgrade script
 
-Recommended selection algorithm if metadata is added:
-
-1. If `df._provider_config.duroxide_schema` exists and has a value, use it.
-2. Else if the extension owns `duroxide`, use `duroxide` for legacy compatibility.
-3. Else use the current GUC value.
-
-If metadata is not added, the selection algorithm must explicitly resolve the open question about GUC explicitness.
+- `sql/pg_durable--0.2.2--<v-next>.sql` defines `df.duroxide_schema()` returning `'duroxide'`.
+- The script must **not** create `_duroxide`, must **not** rename `duroxide`, and must **not** touch existing provider state.
+- The script is the contract that says "this cluster is staying on `duroxide` forever."
 
 ### Phase 4: Worker ownership and migration flow
 
-- Generalize `check_duroxide_schema_owned()` to accept the selected schema name.
-- Generalize `has_extension_owned_duroxide_objects()` and `release_extension_owned_duroxide_objects()` to filter on the selected schema.
-- Generalize `write_worker_ready()` to create/grant/upsert in the selected schema.
-- Ensure all dynamic SQL uses identifier quoting.
+- Generalize `check_duroxide_schema_owned()` to accept the resolved schema name.
+- Generalize `has_extension_owned_duroxide_objects()` and `release_extension_owned_duroxide_objects()` to filter on the resolved schema.
+- Generalize `write_worker_ready()` to write to `<resolved_schema>._worker_ready`.
 - Keep `MigrationPolicy::ApplyAll` in the worker and `VerifyOnly` in backend sessions.
+- Because `_duroxide` is a bare identifier, no special quoting is required for the new default. The schema-name string can be interpolated into SQL via the same code paths used today, but it is still good practice to use `quote_ident` for any dynamic-schema SQL to remain robust against future name choices.
 
 ### Phase 5: Backend readiness checks
 
-- Generalize `is_worker_ready()` in `src/client.rs` to check the selected schema's `_worker_ready` table.
-- Avoid directly querying a possibly missing table; retain the current catalog-existence pre-check.
-- Ensure non-superuser backend sessions can read readiness state in quoted/custom schemas.
+- Generalize `is_worker_ready()` in `src/client.rs` to check `<resolved_schema>._worker_ready`.
+- Retain the catalog-existence pre-check before querying the readiness table so missing-schema cases produce a clear "not ready" signal rather than a SQL error.
+- Ensure non-superuser backend sessions have `USAGE` on the resolved schema and `SELECT` on `_worker_ready` (existing grants on the literal `duroxide` schema move to the new name).
 
 ### Phase 6: Tests and scripts
 
 Add or update checks for:
 
-- Fresh install uses `df-duroxide` by default.
-- Fresh install with custom `pg_durable.duroxide_schema` uses the custom schema.
-- Pre-existing schema with the configured name blocks `CREATE EXTENSION`.
-- New binary against old schema uses existing `duroxide` and can run a workflow.
-- Changing the GUC without drop/recreate has the decided behavior and emits clear logs/errors.
-- Drop/recreate after changing the GUC creates the new schema and no old provider state remains unless separately preserved by the admin outside the extension lifecycle.
+- Fresh install creates `_duroxide` and `df.duroxide_schema()` returns `'_duroxide'`.
+- Pre-existing `_duroxide` schema blocks `CREATE EXTENSION`.
+- New `.so` against an unmigrated v0.2.2 schema:
+  - `df.duroxide_schema()` does not exist.
+  - BGW resolves to `'duroxide'` via fallback.
+  - Existing workflows continue to run.
+- After `ALTER EXTENSION UPDATE` on a v0.2.2 cluster:
+  - `df.duroxide_schema()` exists and returns `'duroxide'`.
+  - Selection step 1 is taken on subsequent restarts.
+  - Provider state is unchanged.
+- E2E setup SQL and helper scripts no longer hardcode the string `duroxide`. Where direct SQL must reference the schema, fetch the name via `SELECT df.duroxide_schema()` with the same `42883` fallback.
 
 Touch points likely include:
 
@@ -222,7 +176,24 @@ Update:
 - `docs/upgrade-testing.md`
 - `USER_GUIDE.md` connection/troubleshooting sections if readiness probes or drop/recreate guidance changes
 
-Document clearly that changing `pg_durable.duroxide_schema` does not migrate existing durable state.
+Document clearly that:
+
+- The provider schema is an implementation detail, not a configurable setting.
+- Existing `duroxide`-based installs are not migrated to `_duroxide`; they keep using `duroxide` indefinitely.
+- The only way to adopt `_duroxide` on an existing cluster is `DROP EXTENSION pg_durable CASCADE` followed by `CREATE EXTENSION pg_durable`, which destroys durable engine state.
+
+## Security Notes
+
+- `df.duroxide_schema()` is created by the extension install / upgrade scripts and is therefore owned by the extension owner (typically a superuser). Non-superusers cannot `CREATE OR REPLACE` it.
+- The function is `IMMUTABLE PARALLEL SAFE` and contains a literal string; no SQL injection surface.
+- Falling back to `'duroxide'` on `42883` is safe because that fallback only fires when the new helper function is genuinely absent, which can only happen on a pre-upgrade-script extension version. At that version the only possible extension-owned provider schema is `duroxide`.
+- The BGW must still verify extension ownership of the resolved schema before applying duroxide migrations. This invariant is unchanged.
+
+## Open Questions
+
+1. **Cache lifetime in backend sessions.** Resolving the schema per connection is cheap (one SQL call). Caching it for the process lifetime is fine because the value cannot change without an extension upgrade, which in turn requires a session reconnect to see new function definitions reliably. Recommend: resolve once on first use per session, cache for session lifetime.
+2. **Whether to expose `df.duroxide_schema()` as `SECURITY DEFINER` or rely on default invoker rights.** Default invoker rights are sufficient since the function only returns a literal. Recommend: leave as default to minimize surface area.
+3. **Whether to also remove the `DUROXIDE_SCHEMA` constant from any Rust test fixtures.** Yes, but only where tests run against a real PostgreSQL backend. Pure unit tests that never touch the schema can keep using a constant for clarity.
 
 ## Validation Strategy
 
@@ -235,23 +206,25 @@ cargo build --features pg17
 ./scripts/test-upgrade.sh --verbose
 ```
 
-If time is short, prioritize a targeted E2E or SQL smoke test that verifies a default fresh install creates `df-duroxide`, and the upgrade B1 path still works with an existing `duroxide` schema.
+If time is short, prioritize:
+
+1. A targeted E2E that verifies a fresh install creates `_duroxide` and that `df.duroxide_schema()` returns `'_duroxide'`.
+2. An upgrade path (B1) test that verifies the new `.so` against a v0.2.2 schema (with no `ALTER EXTENSION UPDATE` run) continues to use `duroxide` via the `42883` fallback.
+3. An upgrade-then-restart test that verifies, after `ALTER EXTENSION UPDATE`, selection step 1 is taken and the cluster still uses `duroxide`.
 
 ## Issue Update Draft
 
 Proposed summary to add to the GitHub issue:
 
-> We should make the duroxide provider schema configurable for new installs, with a new default of `df-duroxide`, but preserve existing installations that already have extension-owned `duroxide` provider state. The implementation needs to avoid automatic rename/copy/drop of provider state. Fresh installs should create the configured schema as an extension-owned object and the BGW should only run `ApplyAll` after verifying extension ownership. Existing installs should continue using their current extension-owned `duroxide` schema unless the admin intentionally drops and recreates the extension under a new setting. The main design question is how to distinguish an unchanged legacy install from an admin explicitly changing the new GUC without drop/recreate; options are GUC-source inspection, always letting legacy `duroxide` win, or persisting the selected provider schema in `df` metadata at install time.
+> We will rename the duroxide provider schema for new pg_durable installs to `_duroxide` (bare identifier, no quoting required, leading underscore signals internal/private). No GUC will be added — the schema name is an implementation detail of pg_durable, not an operator-facing setting. Existing installs that already own a `duroxide` schema will continue to use it indefinitely; there is no in-place migration to `_duroxide`. The selected schema is exposed by a small extension-owned function `df.duroxide_schema()`: the fresh-install SQL defines it to return `'_duroxide'`, and the `0.2.2 -> <v-next>` upgrade script defines it to return `'duroxide'`. The BGW and backend sessions resolve the schema by calling this function with a single fallback: if the function does not exist (error 42883), assume legacy `'duroxide'`. This fallback covers the case where a new `.so` is deployed without `ALTER EXTENSION UPDATE` being run, and is self-deleting once the upgrade script has run.
 
 ## Current Recommendation
 
-Do not implement the schema rename as a simple constant change. The safe implementation needs a selected-schema abstraction and a persisted install-time provider schema record, or an equally precise rule for GUC explicitness.
+Implement as described above. This design:
 
-The metadata approach is the most deterministic:
-
-- New installs record and use the configured schema.
-- Old installs without metadata keep using `duroxide`.
-- Changing the GUC after install does not mutate the recorded schema and therefore does not migrate state.
-- Drop/recreate is the supported way to adopt a different provider schema.
-
-This differs slightly from the requested "worker waits for the new schema if GUC changes" behavior, but it avoids ambiguity and matches PostgreSQL extension practice: install-time state should define which schema belongs to that extension instance.
+- Removes all GUC-related ambiguity from the original proposal.
+- Has a single, well-defined fallback path tied to a concrete PostgreSQL error code rather than to fuzzy heuristics about admin intent or `pg_depend` state.
+- Keeps the security invariants (no schema adoption, BGW verifies extension ownership) intact.
+- Avoids identifier-quoting churn by choosing a bare-identifier default (`_duroxide`).
+- Localizes "which schema does this version use" into the version-specific install and upgrade SQL, where version-specific decisions naturally belong.
+- Explicitly declines to offer in-place schema migration, making the operational contract clear to operators: keep state on `duroxide`, or destroy state and adopt `_duroxide`.
