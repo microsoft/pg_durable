@@ -176,6 +176,21 @@ jobs:
       - name: Run clippy
         run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }},http-allow-test-domains -- -D warnings
 
+      # pgspot SQL security gate (pg17 only; the install SQL is the shipped DDL).
+      # http-allow-test-domains is a test-only feature that emits no extra DDL, so
+      # the scanned surface matches the shipped build while reusing this job's build.
+      - name: Generate extension install SQL
+        if: matrix.pg_version == 17
+        run: |
+          cargo pgrx schema pg${{ matrix.pg_version }} \
+            --no-default-features \
+            --features pg${{ matrix.pg_version }},http-allow-test-domains \
+            -o /tmp/pg_durable-install.sql
+
+      - name: Run pgspot SQL security gate
+        if: matrix.pg_version == 17
+        run: scripts/pgspot-gate.sh /tmp/pg_durable-install.sql
+
       # Include an http feature to allow http unit tests to run. No time for multiple feature combos.
       - name: Run unit tests
         run: cargo pgrx test pg${{ matrix.pg_version }} --features http-allow-test-domains

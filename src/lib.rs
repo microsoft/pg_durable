@@ -166,8 +166,8 @@ CREATE TABLE IF NOT EXISTS df.nodes (
     error TEXT,
     submitted_by REGROLE,
     database TEXT,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now()
+    created_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
+    updated_at TIMESTAMPTZ DEFAULT pg_catalog.now()
 );
 
 COMMENT ON COLUMN df.nodes.submitted_by IS
@@ -181,8 +181,8 @@ CREATE TABLE IF NOT EXISTS df.instances (
     status TEXT DEFAULT 'pending',
     submitted_by REGROLE NOT NULL,
     database TEXT,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
+    updated_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
     completed_at TIMESTAMPTZ
 );
 
@@ -200,7 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
 CREATE TABLE IF NOT EXISTS df.vars (
     name TEXT NOT NULL,
     value TEXT,
-    owner REGROLE NOT NULL DEFAULT quote_ident(current_user)::regrole,
+    owner REGROLE NOT NULL DEFAULT pg_catalog.quote_ident(current_user)::pg_catalog.regrole,
     PRIMARY KEY (owner, name)
 );
 
@@ -210,17 +210,22 @@ CREATE TABLE IF NOT EXISTS df.vars (
 -- recreation even though the extension is always "present" in pg_extension.
 CREATE TABLE IF NOT EXISTS df._worker_epoch (
     epoch_id UUID PRIMARY KEY,
-    started_at TIMESTAMPTZ DEFAULT now(),
-    last_seen_at TIMESTAMPTZ DEFAULT now()
+    started_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
+    last_seen_at TIMESTAMPTZ DEFAULT pg_catalog.now()
 );
 
 ALTER TABLE df.instances
     ADD CONSTRAINT instances_id_format_chk
-        CHECK (id ~ '^[0-9a-f]{8}$') NOT VALID,
+        -- Operators (OPERATOR(pg_catalog.<op>)) and functions (e.g. pg_catalog.now)
+        -- are schema-qualified throughout this install DDL so name resolution never
+        -- depends on the session search_path -- closing the CVE-2018-1058 vector
+        -- (a malicious schema shadowing `=`, `~`, etc.). Enforced by the pgspot CI
+        -- gate (scripts/pgspot-gate.sh).
+        CHECK (id OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT instances_root_node_format_chk
-        CHECK (root_node ~ '^[0-9a-f]{8}$') NOT VALID,
+        CHECK (root_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT instances_status_chk
-        CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT VALID,
+        CHECK (status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running', 'completed', 'failed', 'cancelled'])) NOT VALID,
     -- Supports the composite FK from df.nodes that ties node identity to the instance row.
     ADD CONSTRAINT instances_identity_key
         UNIQUE (id, submitted_by);
@@ -231,35 +236,35 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_submitted_by_present_chk
         CHECK (submitted_by IS NOT NULL) NOT VALID,
     ADD CONSTRAINT nodes_id_format_chk
-        CHECK (id ~ '^[0-9a-f]{8}$') NOT VALID,
+        CHECK (id OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_instance_id_format_chk
-        CHECK (instance_id ~ '^[0-9a-f]{8}$') NOT VALID,
+        CHECK (instance_id OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_left_node_format_chk
-        CHECK (left_node IS NULL OR left_node ~ '^[0-9a-f]{8}$') NOT VALID,
+        CHECK (left_node IS NULL OR left_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_right_node_format_chk
-        CHECK (right_node IS NULL OR right_node ~ '^[0-9a-f]{8}$') NOT VALID,
+        CHECK (right_node IS NULL OR right_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_node_type_chk
-        CHECK (node_type IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL')) NOT VALID,
+        CHECK (node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL'])) NOT VALID,
     ADD CONSTRAINT nodes_result_name_chk
-        CHECK (result_name IS NULL OR result_name ~ '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
+        CHECK (result_name IS NULL OR result_name OPERATOR(pg_catalog.~) '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
     ADD CONSTRAINT nodes_status_chk
-        CHECK (status IN ('pending', 'running', 'completed', 'failed')) NOT VALID,
+        CHECK (status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running', 'completed', 'failed'])) NOT VALID,
     ADD CONSTRAINT nodes_result_status_chk
-        CHECK (result IS NULL OR status IN ('completed', 'failed')) NOT VALID,
+        CHECK (result IS NULL OR status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed'])) NOT VALID,
     ADD CONSTRAINT nodes_structure_chk
         CHECK (
             CASE
-                WHEN node_type IN ('SQL', 'SLEEP', 'WAIT_SCHEDULE', 'BREAK', 'HTTP', 'SIGNAL')
+                WHEN node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'SLEEP', 'WAIT_SCHEDULE', 'BREAK', 'HTTP', 'SIGNAL'])
                     THEN left_node IS NULL AND right_node IS NULL AND query IS NOT NULL
-                WHEN node_type = 'THEN'
+                WHEN node_type OPERATOR(pg_catalog.=) 'THEN'
                     THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NULL
-                WHEN node_type = 'IF'
+                WHEN node_type OPERATOR(pg_catalog.=) 'IF'
                     THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NOT NULL
-                WHEN node_type = 'LOOP'
+                WHEN node_type OPERATOR(pg_catalog.=) 'LOOP'
                     THEN left_node IS NOT NULL AND right_node IS NULL
-                WHEN node_type = 'JOIN'
+                WHEN node_type OPERATOR(pg_catalog.=) 'JOIN'
                     THEN left_node IS NOT NULL AND right_node IS NOT NULL
-                WHEN node_type = 'RACE'
+                WHEN node_type OPERATOR(pg_catalog.=) 'RACE'
                     THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NULL
                 ELSE FALSE
             END
@@ -302,24 +307,24 @@ ALTER TABLE df.instances ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY instances_user_isolation ON df.instances
     FOR ALL
-    USING (submitted_by = quote_ident(current_user)::regrole)
-    WITH CHECK (submitted_by = quote_ident(current_user)::regrole);
+    USING (submitted_by OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole)
+    WITH CHECK (submitted_by OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole);
 
 -- Enable RLS on df.nodes
 ALTER TABLE df.nodes ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY nodes_user_isolation ON df.nodes
     FOR ALL
-    USING (submitted_by = quote_ident(current_user)::regrole)
-    WITH CHECK (submitted_by = quote_ident(current_user)::regrole);
+    USING (submitted_by OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole)
+    WITH CHECK (submitted_by OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole);
 
 -- Enable RLS on df.vars (per-user variable isolation)
 ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY vars_user_isolation ON df.vars
     FOR ALL
-    USING (owner = quote_ident(current_user)::regrole)
-    WITH CHECK (owner = quote_ident(current_user)::regrole);
+    USING (owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole)
+    WITH CHECK (owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole);
 
 -- No automatic PUBLIC grants. Admins must explicitly grant privileges
 -- to application roles after CREATE EXTENSION.
@@ -525,12 +530,12 @@ DECLARE
     wrole TEXT;
     is_super BOOLEAN;
 BEGIN
-    wrole := current_setting('pg_durable.worker_role', true);
-    IF wrole IS NULL OR wrole = '' THEN
+    wrole := pg_catalog.current_setting('pg_durable.worker_role', true);
+    IF wrole IS NULL OR wrole OPERATOR(pg_catalog.=) '' THEN
         wrole := 'azuresu';
     END IF;
 
-    SELECT rolsuper INTO is_super FROM pg_roles WHERE rolname = wrole;
+    SELECT rolsuper INTO is_super FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) wrole;
     IF is_super IS NULL THEN
         RAISE WARNING 'pg_durable: worker role "%" does not exist. The background worker will not be able to process workflows. Create the role as a superuser before using pg_durable.', wrole;
     ELSIF NOT is_super THEN
@@ -578,12 +583,12 @@ DECLARE
     target_db TEXT;
 BEGIN
     -- Get the current database
-    SELECT current_database() INTO current_db;
+    SELECT pg_catalog.current_database() INTO current_db;
     
     -- Get the target database that the background worker will connect to
     SELECT df.target_database() INTO target_db;
     
-    IF current_db != target_db THEN
+    IF current_db OPERATOR(pg_catalog.<>) target_db THEN
         RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). The background worker only processes functions in the database specified by the pg_durable.database GUC (defaults to "postgres").', target_db, current_db
             USING HINT = 'Connect to the correct database and run: CREATE EXTENSION pg_durable;';
     END IF;
