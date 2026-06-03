@@ -32,6 +32,10 @@ PGSPOT_ALLOW=(
   # EXISTS (what PS010 flags) isn't controllable from source. Only df is allowed;
   # any other PS010 still fails. Schemas we control omit IF NOT EXISTS.
   '^PS010: Unsafe schema creation: df at line [0-9]+$'
+  # pg_durable's DSL intentionally exposes unqualified custom operators (for
+  # example, `df.sql(...) ~> df.sql(...)`) so users do not need df in search_path.
+  # pgspot reports the generated CREATE OPERATOR name as an unqualified object.
+  '^PS017: Unqualified object reference: ~> at line [0-9]+$'
 )
 
 # Whole codes to suppress globally (pgspot --ignore). Prefer PGSPOT_ALLOW. Empty.
