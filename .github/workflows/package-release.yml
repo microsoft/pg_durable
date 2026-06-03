@@ -51,9 +51,6 @@ jobs:
           - type: amd64
             docker_platform: linux/amd64
             file_pattern: x86-64
-          - type: arm64
-            docker_platform: linux/arm64
-            file_pattern: aarch64
 
     steps:
       - uses: actions/checkout@v4
@@ -70,11 +67,6 @@ jobs:
           else
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
           fi
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -182,18 +174,11 @@ jobs:
         platform:
           - type: amd64
             docker_platform: linux/amd64
-          - type: arm64
-            docker_platform: linux/arm64
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Download package artifact
         uses: actions/download-artifact@v4

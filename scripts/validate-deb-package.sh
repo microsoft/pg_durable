@@ -100,7 +100,7 @@ PGHOST=localhost \
 PGPORT="$PGPORT" \
 PGUSER=postgres \
 PGDATABASE=postgres \
-CONTRIB_TESTDB=postgres \
+REGRESS_OPTS="--use-existing --dbname=postgres" \
 make -e installcheck
 
 pg_ctlcluster "$PG_VERSION" main stop
