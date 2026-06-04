@@ -57,6 +57,19 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # Release tooling (scripts, packaging helpers) must come from the commit
+      # that defines this workflow, not from the target tag. For
+      # workflow_dispatch, GitHub runs the workflow YAML from the default
+      # branch HEAD while the primary checkout above is pinned to an older
+      # tag, so the tag may predate these scripts. github.sha tracks the
+      # workflow's own commit for both workflow_dispatch (main HEAD) and
+      # push:tags (the tagged commit), keeping YAML and scripts in sync.
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _release_tooling
+
       - name: Set version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -127,7 +140,7 @@ jobs:
                 --no-default-features \
                 --features "$FEATURES"
 
-              scripts/package-deb.sh \
+              _release_tooling/scripts/package-deb.sh \
                 "$VERSION" \
                 "$PWD/target/release/pg_durable-pg${{ matrix.pg_version }}" \
                 "${{ matrix.platform.type }}" \
@@ -172,6 +185,15 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # See build-packages: validation tooling must come from the workflow's
+      # own commit (github.sha), not the target tag, so a tag predating these
+      # scripts still validates correctly.
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _release_tooling
+
       - name: Download package artifact
         uses: actions/download-artifact@v4
         with:
@@ -186,7 +208,7 @@ jobs:
             -w /work \
             --user root \
             debian:bookworm \
-            bash -euxo pipefail -c 'scripts/validate-deb-package.sh "${{ matrix.pg_version }}" "${{ matrix.platform.type }}"'
+            bash -euxo pipefail -c '_release_tooling/scripts/validate-deb-package.sh "${{ matrix.pg_version }}" "${{ matrix.platform.type }}"'
 
       - name: Upload validation diagnostics on failure
         if: failure()
