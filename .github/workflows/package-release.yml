@@ -27,7 +27,7 @@ on:
       - 'sql/**'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,8 +100,7 @@ jobs:
                 libxml2-dev \
                 libxslt1-dev \
                 libicu-dev \
-                file \
-                zip
+                file
 
               install -d -m 0755 /usr/share/keyrings
               curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -148,19 +147,12 @@ jobs:
           dpkg-deb -x "$deb_file" check-package
           file "check-package/usr/lib/postgresql/${{ matrix.pg_version }}/lib/pg_durable.so" | grep -E "${{ matrix.platform.file_pattern }}"
 
-      - name: Create package archive
-        run: |
-          cd dist
-          zip "pg-durable-${VERSION}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}.zip" \
-            pg-durable-postgresql-${{ matrix.pg_version }}_*_${{ matrix.platform.type }}.deb
-
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: pg-durable-package-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
           path: |
             dist/*.deb
-            dist/*.zip
           retention-days: 30
 
   validate-packages:
@@ -248,6 +240,8 @@ jobs:
     needs: [validate-packages, build-source]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event.inputs.publish_release == 'true'
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -278,5 +272,11 @@ jobs:
               --draft
           fi
 
-          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.tar.bz2' \) -print0 \
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.deb' -o -name '*.tar.gz' -o -name '*.tar.bz2' \) \
+            -exec cp -t release-assets {} +
+
+          ( cd release-assets && sha256sum -- * > SHA256SUMS )
+
+          find release-assets -type f -print0 \
             | xargs -0 -I {} gh release upload "$VERSION" "{}" --clobber
