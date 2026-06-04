@@ -54,19 +54,28 @@ Start with the workload. Each scenario below has a roll-your-own answer that wor
 
 A pg_durable function is a **graph of SQL steps** the database executes and checkpoints as it goes. On crash, restart, or step failure it **resumes where it left off** — no re-running successful side effects, no manual bookkeeping.
 
-### How it differs from rolling your own
+### Who it's for
 
-| You'd otherwise build | pg_durable gives you |
-|---|---|
-| Jobs table + polling worker + lock columns | Built-in queue and worker |
-| Retry counters + "did this step run?" guards | Per-step checkpoint + replay |
-| Status table + custom dashboard | `SELECT ... FROM df.instances` |
-| External orchestrator (Temporal/Airflow/Step Functions) | Runs inside Postgres, no extra service |
-| Sagas/approval state machines in app code | `df.wait_for_signal()`, `df.if()`, `@>` loop |
+- **Backend & data engineers** who already lean on Postgres for state and don't want to stand up Temporal, Airflow, Step Functions, or Celery+Redis just to make a workflow reliable.
+- **DBAs and SREs** automating maintenance (vacuum/bloat, archival, wraparound) that must survive restarts and be auditable in SQL.
+- **Teams building AI / agentic pipelines** (chunk → embed → index → serve) that need durable execution per row or per document.
+
+### What you're probably doing today instead
+
+- `pg_cron` + a `jobs` table + a polling worker + a status column + manual retry counters.
+- An external orchestrator (Airflow, Temporal, Step Functions, Argo) calling back into Postgres.
+- A queue (SQS, Redis, RabbitMQ) + workers + a state table to coordinate steps.
+- A `plpgsql` procedure with `BEGIN ... EXCEPTION` that **still** loses progress on crash.
+
+### What changes in your architecture
+
+- Delete the bespoke job queue, polling worker, retry bookkeeping, and "where did this leave off?" status columns.
+- Background work that lived in an app tier (or a separate orchestrator) moves into Postgres, invoked with `df.start(...)`.
+- Observability shifts from external dashboards to `SELECT ... FROM df.instances` — same auth, backups, and PITR as your data.
 
 ### Limits of the SQL approach
 
-Steps are SQL statements (plus `df.http()` and built-ins). If a step needs arbitrary code — parsing a proprietary binary format, calling a non-HTTP SDK, branching on rich data structures — you either (a) wrap it as a SQL function / `plpgsql` block, (b) expose it behind an HTTP endpoint and call `df.http()`, or (c) reach for [duroxide](https://github.com/microsoft/duroxide) directly in Rust / Python / Node and keep pg_durable for the SQL-shaped parts. The DSL is intentionally narrow; complex control flow that doesn't map to sequence / parallel / branch / loop is a smell that the workload belongs in a general-purpose orchestrator.
+Steps are SQL statements (plus `df.http()` and built-ins). If a step needs arbitrary code — parsing a proprietary binary format, calling a non-HTTP SDK, branching on rich data structures — you either (a) wrap it as a SQL function / `plpgsql` block, (b) expose it behind an HTTP endpoint and call `df.http()`, or (c) reach for [duroxide](https://github.com/microsoft/duroxide) directly in Rust / Python / Node and keep pg_durable for the SQL-shaped parts. The DSL is intentionally narrow; control flow that doesn't map to sequence / parallel / branch / loop is a signal the workload belongs in a general-purpose orchestrator.
 
 ### When **not** to use it
 
