@@ -11,7 +11,7 @@ no external orchestrators, no YAML, no separate deployment.
 [Website](https://microsoft.github.io/pg_durable/) · [Docs](docs/) · [Quick Example](#quick-example) · [GitHub](https://github.com/microsoft/pg_durable)
 
 [![License](https://img.shields.io/badge/license-PostgreSQL%20License-3d86c6.svg)](LICENSE.txt)
-[![Built for PostgreSQL 17](https://img.shields.io/badge/built%20for-PostgreSQL%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![PostgreSQL 17 & 18](https://img.shields.io/badge/PostgreSQL-17%20%26%2018-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 
 <br />
 
@@ -38,55 +38,43 @@ SELECT df.start(
 
 ## Is this for me?
 
+Start with the workload. Each scenario below has a roll-your-own answer that works — until it doesn't.
+
+**Vector embedding pipeline** (chunk → call embedding API → upsert into `pgvector`). *Can't I just do this in my ingest script?* Yes — until the embedding service rate-limits you halfway through 2M rows, your pod restarts, or one row's API call times out and silently drops. pg_durable checkpoints per row, retries the failed step only, and resumes after a crash without re-embedding what already succeeded (and re-billing you for it).
+
+**Ingest with staging + dedup + publish.** *I have a `plpgsql` procedure that does all three in one transaction.* Fine for small batches. At 50M rows the transaction holds locks for hours, bloats WAL, and on crash you start over. pg_durable runs the stages as discrete checkpointed steps — staging survives, dedup picks up where it stopped, publish is its own commit.
+
+**Scheduled maintenance** (detect bloat → notify → wait for human approval → `VACUUM FULL`). *I use `pg_cron` + a status table.* Now write the retry logic, the "did the previous run finish?" guard, the approval-wait state machine, and the crash-recovery path. Or express it as `df.if(...) ~> df.wait_for_signal(...) ~> '...'` and let the extension handle replay.
+
+**Fan-out aggregation for a dashboard.** *Three `SELECT`s in parallel with `asyncio` from my app tier.* Adds a service to deploy and a place for partial-failure bugs to hide. `a & b & c ~> 'refresh'` runs them concurrently inside Postgres with one durable record of what completed.
+
+**Calling external HTTPS APIs from SQL** (enrichment, classification, webhooks). *I move it to a worker because Postgres can't retry HTTP.* It can now — `df.http()` is a checkpointed step with retries; the rest of the workflow stays in SQL.
+
 ### The core idea
 
-A pg_durable function is a **graph of SQL steps** that the database executes for you, **checkpointing each step** as it goes. If the connection drops, the server restarts, or a step fails midway, execution **resumes exactly where it left off** — no lost work, no duplicated side effects. You write SQL; the extension handles the orchestration, state, and recovery.
+A pg_durable function is a **graph of SQL steps** the database executes and checkpoints as it goes. On crash, restart, or step failure it **resumes where it left off** — no re-running successful side effects, no manual bookkeeping.
 
-### Pain points it addresses
+### How it differs from rolling your own
 
-- **Long-running SQL falls over.** Batch jobs, ETL, backfills, and maintenance tasks fail when a client disconnects, a node restarts, or a single step errors — and you start over from scratch.
-- **Multi-step workflows leak into app code.** Step coordination, retries, "did this step already run?", and timeouts end up in Python/Node/cron + queues + status tables you maintain by hand.
-- **No native way to express "wait", "fan out", "branch", or "loop"** in SQL workflows without bespoke queue tables, polling workers, and crash-recovery logic.
-- **Operational scripts have no memory.** A `VACUUM`/reindex/migration script that crashes halfway has to be re-run carefully and manually.
+| You'd otherwise build | pg_durable gives you |
+|---|---|
+| Jobs table + polling worker + lock columns | Built-in queue and worker |
+| Retry counters + "did this step run?" guards | Per-step checkpoint + replay |
+| Status table + custom dashboard | `SELECT ... FROM df.instances` |
+| External orchestrator (Temporal/Airflow/Step Functions) | Runs inside Postgres, no extra service |
+| Sagas/approval state machines in app code | `df.wait_for_signal()`, `df.if()`, `@>` loop |
 
-### Who it's for
+### Limits of the SQL approach
 
-- **Backend engineers** who already lean on Postgres for state and don't want to stand up Temporal, Airflow, Step Functions, or a Celery+Redis stack just to make a workflow reliable.
-- **Data / platform engineers** building ETL, reporting, or sync pipelines that must run to completion.
-- **DBAs and SREs** automating maintenance (vacuum/bloat remediation, archival, wraparound) that should survive restarts and be auditable in SQL.
-- **Teams building AI / agentic pipelines** (chunk → embed → index → serve) that need durable execution per row or per document.
+Steps are SQL statements (plus `df.http()` and built-ins). If a step needs arbitrary code — parsing a proprietary binary format, calling a non-HTTP SDK, branching on rich data structures — you either (a) wrap it as a SQL function / `plpgsql` block, (b) expose it behind an HTTP endpoint and call `df.http()`, or (c) reach for [duroxide](https://github.com/microsoft/duroxide) directly in Rust / Python / Node and keep pg_durable for the SQL-shaped parts. The DSL is intentionally narrow; complex control flow that doesn't map to sequence / parallel / branch / loop is a smell that the workload belongs in a general-purpose orchestrator.
 
-### Workloads it fits
+### When **not** to use it
 
-ETL and backfills · scheduled jobs and cron · parallel fan-out aggregations · order/invoice processing · multi-step validation · human-in-the-loop approvals (wait for signal) · DB maintenance with rollback-safe checkpoints · calling external HTTPS APIs from SQL with retries.
-
-### What you're probably doing today instead
-
-- A `pg_cron` job + a `jobs` table + a polling worker + a status column + manual retry counters.
-- An external orchestrator (Airflow, Temporal, Step Functions, Argo) calling back into Postgres.
-- A queue (SQS, Redis, RabbitMQ) plus worker processes plus a state table to coordinate steps.
-- A `plpgsql` procedure with `BEGIN ... EXCEPTION` blocks that **still** loses progress on crash.
-
-### How it's different
-
-- **Lives inside Postgres.** No separate service to deploy, scale, secure, or monitor. State is just rows in `df.*` tables you can `SELECT` from.
-- **SQL is the workflow language**, not YAML or a Python SDK. The DSL composes with familiar operators (`~>` sequence, `&` parallel, `|=>` capture, `?>` conditional, `@>` loop).
-- **Per-step checkpointing with replay**, not transactional all-or-nothing. Side effects (HTTP calls, external writes) aren't redone on resume.
-- **Postgres is the source of truth** for code, state, history, and observability — query it with the tools you already have.
-
-### What changes in your architecture
-
-- You can **delete** the bespoke job queue table, the polling worker process, the retry bookkeeping, and the "where did this workflow leave off?" status columns.
-- Background work that used to live in an app tier (or a separate orchestrator) moves into Postgres and is invoked with `df.start(...)`.
-- Operational visibility shifts from external dashboards to `SELECT ... FROM df.instances` — same auth, same backups, same point-in-time recovery as your data.
-
-### When **not** to use this
-
-- **Sub-millisecond / high-QPS request paths.** pg_durable targets durable background work, not synchronous hot-path queries.
-- **Heavyweight stream processing or huge fan-out (millions of concurrent workflows/sec).** Reach for a dedicated stream/orchestration system.
-- **You're not on PostgreSQL 17**, or you can't install extensions / run a background worker in your managed service.
-- **Pure single-statement SQL.** If `INSERT ... SELECT` in one transaction already does the job, you don't need an orchestrator.
-- **Cross-database distributed transactions / sagas spanning many heterogeneous systems** as the primary concern — a general-purpose orchestrator may fit better.
+- Sub-millisecond / high-QPS synchronous request paths.
+- Millions of concurrent workflows/sec or heavyweight stream processing.
+- You can't install extensions or run a background worker in your managed Postgres.
+- One `INSERT ... SELECT` already does the job — you don't need an orchestrator.
+- Distributed sagas spanning many heterogeneous systems where Postgres is incidental.
 
 ## How It Works
 
@@ -97,7 +85,7 @@ ETL and backfills · scheduled jobs and cron · parallel fan-out aggregations ·
 
 ## Prerequisites
 
-- PostgreSQL 17
+- PostgreSQL 17 or 18
 - Rust (nightly)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
 
