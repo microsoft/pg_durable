@@ -206,7 +206,7 @@ Superusers bypass all permission checks in PostgreSQL, including RLS. This means
 - No additional GRANTs to the worker role needed
 - Consistent with the existing trust model: the extension is installed by a superuser, and the worker is trusted code
 
-The worker role is configured via `pg_durable.worker_role` GUC (defaults to `azuresu`). The extension should document that this role must be a superuser.
+The worker role is configured via `pg_durable.worker_role` GUC (defaults to `postgres`). The extension should document that this role must be a superuser.
 
 ### Decision 7: `df.cancel()` and `df.signal()` ownership checks
 
@@ -298,7 +298,7 @@ The worker role must be a superuser (see Decision 6). Superusers bypass RLS auto
 
 ```sql
 -- No RLS bypass configuration needed.
--- The worker role (pg_durable.worker_role GUC, default: azuresu) must be a superuser.
+-- The worker role (pg_durable.worker_role GUC, default: postgres) must be a superuser.
 -- Superusers bypass all permission checks including RLS.
 ```
 
