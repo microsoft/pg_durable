@@ -19,9 +19,6 @@ case "$ARCH" in
     amd64|x86_64)
         DEB_ARCH="amd64"
         ;;
-    arm64|aarch64)
-        DEB_ARCH="arm64"
-        ;;
     *)
         echo "unsupported architecture: $ARCH" >&2
         exit 2
