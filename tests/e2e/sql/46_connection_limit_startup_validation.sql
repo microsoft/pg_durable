@@ -13,16 +13,20 @@ DECLARE
     ready        BOOLEAN;
     table_exists BOOLEAN;
     attempts     INT := 0;
+    dx_schema    TEXT := df.duroxide_schema();
 BEGIN
-    -- Poll duroxide._worker_ready for up to 15 seconds — the worker should never become ready.
+    -- Poll <schema>._worker_ready for up to 15 seconds — the worker should never become ready.
     LOOP
         SELECT EXISTS(
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'duroxide' AND table_name = '_worker_ready'
+            WHERE table_schema = dx_schema AND table_name = '_worker_ready'
         ) INTO table_exists;
 
         IF table_exists THEN
-            SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1) INTO ready;
+            EXECUTE format(
+                'SELECT EXISTS(SELECT 1 FROM %I._worker_ready WHERE schema_version >= 1)',
+                dx_schema
+            ) INTO ready;
         ELSE
             ready := FALSE;
         END IF;

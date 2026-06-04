@@ -29,17 +29,20 @@ END $$;
 -- 2. Clean up df extension tables (instances + nodes)
 TRUNCATE TABLE df.nodes, df.instances;
 
--- 3. Clean up duroxide engine state
-TRUNCATE TABLE
-    duroxide.history,
-    duroxide.executions,
-    duroxide.instances,
-    duroxide.instance_locks,
-    duroxide.orchestrator_queue,
-    duroxide.worker_queue,
-    duroxide.kv_delta,
-    duroxide.kv_store,
-    duroxide.sessions;
+-- 3. Clean up duroxide engine state.
+-- The provider schema is '_duroxide' on fresh installs and 'duroxide' on
+-- installs upgraded from <= 0.2.2; resolve it via df.duroxide_schema().
+DO $$
+DECLARE
+    dx_schema TEXT := df.duroxide_schema();
+BEGIN
+    EXECUTE format(
+        'TRUNCATE TABLE %1$I.history, %1$I.executions, %1$I.instances, '
+        '%1$I.instance_locks, %1$I.orchestrator_queue, %1$I.worker_queue, '
+        '%1$I.kv_delta, %1$I.kv_store, %1$I.sessions',
+        dx_schema
+    );
+END $$;
 
 -- 4. Reset demo tables
 TRUNCATE TABLE demo.invoice_audit, demo.invoices RESTART IDENTITY;

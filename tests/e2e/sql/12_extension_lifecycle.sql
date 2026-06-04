@@ -13,25 +13,26 @@
 -- Ensure a clean starting point
 SELECT public._e2e_drop_extension_safe();
 
--- 1) Verify BGW does not create duroxide schema pre-extension
+-- 1) Verify BGW does not create the duroxide provider schema pre-extension.
+-- Fresh installs use the '_duroxide' schema (created by CREATE EXTENSION).
 DO $$
 DECLARE
     exists_before BOOLEAN;
     exists_after BOOLEAN;
 BEGIN
-    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'duroxide') INTO exists_before;
+    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = '_duroxide') INTO exists_before;
     IF exists_before THEN
-        RAISE EXCEPTION 'TEST FAILED: duroxide schema exists before CREATE EXTENSION';
+        RAISE EXCEPTION 'TEST FAILED: _duroxide schema exists before CREATE EXTENSION';
     END IF;
 
     PERFORM pg_sleep(6);
 
-    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'duroxide') INTO exists_after;
+    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = '_duroxide') INTO exists_after;
     IF exists_after THEN
-        RAISE EXCEPTION 'TEST FAILED: duroxide schema was created before CREATE EXTENSION';
+        RAISE EXCEPTION 'TEST FAILED: _duroxide schema was created before CREATE EXTENSION';
     END IF;
 
-    RAISE NOTICE 'PASSED: BGW did not create duroxide schema pre-extension';
+    RAISE NOTICE 'PASSED: BGW did not create _duroxide schema pre-extension';
 END $$;
 
 -- 2) Create extension and run a simple workflow
@@ -78,12 +79,12 @@ DO $$
 DECLARE
     schema_exists BOOLEAN;
 BEGIN
-    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'duroxide') INTO schema_exists;
+    SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = '_duroxide') INTO schema_exists;
     IF schema_exists THEN
-        RAISE EXCEPTION 'TEST FAILED: duroxide schema still exists after DROP EXTENSION';
+        RAISE EXCEPTION 'TEST FAILED: _duroxide schema still exists after DROP EXTENSION';
     END IF;
 
-    RAISE NOTICE 'PASSED: DROP EXTENSION removed duroxide schema';
+    RAISE NOTICE 'PASSED: DROP EXTENSION removed _duroxide schema';
 END $$;
 
 -- 4) Re-create extension and run another workflow

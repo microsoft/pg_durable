@@ -117,6 +117,44 @@ first_fixture_for_major() {
     fi
 }
 
+# Selects the best checked-in install fixture to use as the base for
+# reconstructing a target version: the highest install fixture (same major)
+# that is <= the target version. This lets the harness install a version
+# directly from its own fixture (e.g. 0.2.2) instead of always chaining from
+# the major's first fixture (0.1.1), which would drag in the pre-provider
+# legacy duroxide schema. Versions before PROVIDER_COMPAT_START_VERSION are
+# never selected as a base for targets within the provider compatibility line.
+base_fixture_for_version() {
+    local target_version="$1"
+    local target_major
+    target_major=$(echo "$target_version" | cut -d. -f1)
+
+    local best=""
+    for f in "$PROJECT_DIR"/sql/pg_durable--*.sql; do
+        local fname
+        fname=$(basename "$f")
+        if [[ "$fname" =~ ^pg_durable--([0-9]+\.[0-9]+\.[0-9]+)\.sql$ ]]; then
+            local candidate="${BASH_REMATCH[1]}"
+            local candidate_major
+            candidate_major=$(echo "$candidate" | cut -d. -f1)
+            [ "$candidate_major" = "$target_major" ] || continue
+            # Skip fixtures newer than the target.
+            version_ge "$target_version" "$candidate" || continue
+            # When the target is within the provider compatibility line, never
+            # base it on a fixture from before that line started.
+            if version_ge "$target_version" "$PROVIDER_COMPAT_START_VERSION" \
+               && ! version_ge "$candidate" "$PROVIDER_COMPAT_START_VERSION"; then
+                continue
+            fi
+            if [ -z "$best" ] || version_ge "$candidate" "$best"; then
+                best="$candidate"
+            fi
+        fi
+    done
+
+    printf '%s' "$best"
+}
+
 # Find the previous version by looking for upgrade SQL scripts
 PREV_VERSION=$(for f in "$PROJECT_DIR"/sql/pg_durable--*--"${CURRENT_VERSION}".sql; do
     fname=$(basename "$f")
@@ -396,19 +434,21 @@ wait_for_ready() {
     return 1
 }
 
-# Creates the extension at a specific version by installing from that major's
-# first checked-in fixture and chaining ALTER EXTENSION UPDATE if needed.
+# Creates the extension at a specific version by installing from the closest
+# checked-in fixture at or below the target (see base_fixture_for_version) and
+# chaining ALTER EXTENSION UPDATE if needed. This keeps reconstruction within
+# the provider compatibility line and avoids chaining across the pre-0.2.2
+# boundary, where the legacy in-extension duroxide schema is incompatible with
+# the duroxide-pg provider.
 create_extension_at_version() {
     local target_version="$1"
-    local target_major
     local base_version
 
-    target_major=$(echo "$target_version" | cut -d. -f1)
-    base_version=$(first_fixture_for_major "$target_major")
+    base_version=$(base_fixture_for_version "$target_version")
 
     if [ -z "$base_version" ]; then
-        echo "No install SQL fixture found for major version $target_major"
-        echo "Expected: sql/pg_durable--<first-version>.sql"
+        echo "No install SQL fixture found at or below version $target_version"
+        echo "Expected: sql/pg_durable--<version>.sql"
         return 1
     fi
 

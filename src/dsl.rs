@@ -47,11 +47,11 @@ pub fn version() -> String {
 /// Debug function to see what duroxide connection is being used
 #[pg_extern(schema = "df")]
 pub fn debug_connection() -> String {
-    use crate::types::{postgres_connection_string, DUROXIDE_SCHEMA};
+    use crate::types::{backend_duroxide_schema, postgres_connection_string};
     format!(
         "{} (schema: {})",
         postgres_connection_string(),
-        DUROXIDE_SCHEMA
+        backend_duroxide_schema()
     )
 }
 
