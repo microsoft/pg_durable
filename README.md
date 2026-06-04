@@ -36,6 +36,58 @@ SELECT df.start(
 );
 ```
 
+## Is this for me?
+
+### The core idea
+
+A pg_durable function is a **graph of SQL steps** that the database executes for you, **checkpointing each step** as it goes. If the connection drops, the server restarts, or a step fails midway, execution **resumes exactly where it left off** — no lost work, no duplicated side effects. You write SQL; the extension handles the orchestration, state, and recovery.
+
+### Pain points it addresses
+
+- **Long-running SQL falls over.** Batch jobs, ETL, backfills, and maintenance tasks fail when a client disconnects, a node restarts, or a single step errors — and you start over from scratch.
+- **Multi-step workflows leak into app code.** Step coordination, retries, "did this step already run?", and timeouts end up in Python/Node/cron + queues + status tables you maintain by hand.
+- **No native way to express "wait", "fan out", "branch", or "loop"** in SQL workflows without bespoke queue tables, polling workers, and crash-recovery logic.
+- **Operational scripts have no memory.** A `VACUUM`/reindex/migration script that crashes halfway has to be re-run carefully and manually.
+
+### Who it's for
+
+- **Backend engineers** who already lean on Postgres for state and don't want to stand up Temporal, Airflow, Step Functions, or a Celery+Redis stack just to make a workflow reliable.
+- **Data / platform engineers** building ETL, reporting, or sync pipelines that must run to completion.
+- **DBAs and SREs** automating maintenance (vacuum/bloat remediation, archival, wraparound) that should survive restarts and be auditable in SQL.
+- **Teams building AI / agentic pipelines** (chunk → embed → index → serve) that need durable execution per row or per document.
+
+### Workloads it fits
+
+ETL and backfills · scheduled jobs and cron · parallel fan-out aggregations · order/invoice processing · multi-step validation · human-in-the-loop approvals (wait for signal) · DB maintenance with rollback-safe checkpoints · calling external HTTPS APIs from SQL with retries.
+
+### What you're probably doing today instead
+
+- A `pg_cron` job + a `jobs` table + a polling worker + a status column + manual retry counters.
+- An external orchestrator (Airflow, Temporal, Step Functions, Argo) calling back into Postgres.
+- A queue (SQS, Redis, RabbitMQ) plus worker processes plus a state table to coordinate steps.
+- A `plpgsql` procedure with `BEGIN ... EXCEPTION` blocks that **still** loses progress on crash.
+
+### How it's different
+
+- **Lives inside Postgres.** No separate service to deploy, scale, secure, or monitor. State is just rows in `df.*` tables you can `SELECT` from.
+- **SQL is the workflow language**, not YAML or a Python SDK. The DSL composes with familiar operators (`~>` sequence, `&` parallel, `|=>` capture, `?>` conditional, `@>` loop).
+- **Per-step checkpointing with replay**, not transactional all-or-nothing. Side effects (HTTP calls, external writes) aren't redone on resume.
+- **Postgres is the source of truth** for code, state, history, and observability — query it with the tools you already have.
+
+### What changes in your architecture
+
+- You can **delete** the bespoke job queue table, the polling worker process, the retry bookkeeping, and the "where did this workflow leave off?" status columns.
+- Background work that used to live in an app tier (or a separate orchestrator) moves into Postgres and is invoked with `df.start(...)`.
+- Operational visibility shifts from external dashboards to `SELECT ... FROM df.instances` — same auth, same backups, same point-in-time recovery as your data.
+
+### When **not** to use this
+
+- **Sub-millisecond / high-QPS request paths.** pg_durable targets durable background work, not synchronous hot-path queries.
+- **Heavyweight stream processing or huge fan-out (millions of concurrent workflows/sec).** Reach for a dedicated stream/orchestration system.
+- **You're not on PostgreSQL 17**, or you can't install extensions / run a background worker in your managed service.
+- **Pure single-statement SQL.** If `INSERT ... SELECT` in one transaction already does the job, you don't need an orchestrator.
+- **Cross-database distributed transactions / sagas spanning many heterogeneous systems** as the primary concern — a general-purpose orchestrator may fit better.
+
 ## How It Works
 
 1. **Define functions in SQL** using composable operators like `~>` (sequence) and `|=>` (name result)
