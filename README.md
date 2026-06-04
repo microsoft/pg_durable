@@ -2,22 +2,85 @@
 
 <img src="docs/website/lockup_arrow_dark.svg" alt="pg_durable logo" width="560" />
 
-## Durable SQL functions for PostgreSQL — no extra infra.
-
-Long-running, fault-tolerant functions defined entirely in SQL. Composable operators,
-automatic checkpointing, crash-safe replay, and parallel execution. Built on Postgres —
-no external orchestrators, no YAML, no separate deployment.
-
 [Website](https://microsoft.github.io/pg_durable/) · [Docs](docs/) · [Quick Example](#quick-example) · [GitHub](https://github.com/microsoft/pg_durable)
 
 [![License](https://img.shields.io/badge/license-PostgreSQL%20License-3d86c6.svg)](LICENSE.txt)
 [![PostgreSQL 17 & 18](https://img.shields.io/badge/PostgreSQL-17%20%26%2018-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 
-<br />
-
-<img src="docs/website/workflow-graph.svg" alt="A durable function fans out into three parallel queries — count users, count orders, sum revenue — that join into a dashboard step" width="480" />
+## Durable Execution inside PostgreSQL
 
 </div>
+
+Long-running, fault-tolerant SQL functions for teams that already keep their state in Postgres and want to stop stitching together cron jobs, workers, queues, and status tables to make background work reliable. Define the workflow in SQL, let pg_durable checkpoint each step, and resume after crashes, restarts, or failed steps.
+
+Durable execution is now a standard industry pattern, and pg_durable brings it inside Postgres with no extra service infrastructure required. Part of our mission to bring compute close to data.
+
+## Is this for me?
+
+### Who it's for
+
+- Backend and data engineers who want workflows to live next to the data they touch.
+- DBAs and SREs automating runbooks that must survive restarts and be auditable in SQL.
+- Teams building data or AI pipelines that need durable execution per row, document, or batch.
+
+### The core idea
+
+A pg_durable function is a graph of SQL steps that PostgreSQL executes and checkpoints as it goes. If the database crashes, restarts, or a step fails, execution resumes from the last durable checkpoint instead of making you reconstruct state by hand.
+
+<div align="center">
+
+<img src="docs/website/workflow-graph.svg" alt="A durable function fans out into three parallel queries — count users, count orders, sum revenue — that join into a dashboard step" width="450" />
+
+</div>
+
+### Workloads this is useful for
+
+- Vector embedding pipelines: chunk, call an embedding API, and upsert into `pgvector`.
+- Ingest pipelines: stage, deduplicate, transform, and publish large batches.
+- Scheduled maintenance: detect bloat, notify, wait for approval, then run the next action.
+- Fan-out aggregation: run independent queries in parallel, then join the results.
+- External API workflows: enrichment, classification, and webhook-style calls from SQL.
+
+### What you're probably doing today instead
+
+- `pg_cron` plus a jobs table, status columns, retry counters, and a polling worker.
+- An external orchestrator such as Airflow, Temporal, Step Functions, or Argo calling back into Postgres.
+- A queue plus workers plus a separate state table to coordinate retries and partial completion.
+- A `plpgsql` procedure that works until a crash or long-running transaction forces you to start over.
+
+### Pain points it addresses
+
+- A restart in the middle of a long job means rerunning work that already succeeded.
+- One failed row or one failed API call turns into manual cleanup and uncertain replay.
+- Long transactions hold locks, grow WAL, and make batch jobs fragile at larger scale.
+- Parallel work in the app tier creates more places for partial-failure bugs and drift.
+- The workflow logic ends up spread across SQL, workers, queues, dashboards, and status tables.
+
+### What changes in your architecture
+
+- The workflow definition moves into SQL and starts with `df.start(...)`.
+- Retry state, progress tracking, and checkpointing move into Postgres instead of bespoke app code.
+- Some app-tier workers, queue consumers, or scheduler glue can disappear entirely.
+- Operational visibility comes from Postgres tables such as `df.instances`, using the same auth and backup model as your data.
+
+### When not to use it
+
+- The job is already a single `INSERT ... SELECT` or one ordinary SQL statement.
+- You need sub-millisecond synchronous request handling rather than durable background execution.
+- You cannot install extensions or run a background worker in your Postgres environment.
+- The workflow mostly lives outside Postgres and spans many heterogeneous systems.
+- You need arbitrary application logic that does not map cleanly to SQL steps, branching, loops, or HTTP calls.
+
+### How it works
+
+1. Define a workflow in SQL using composable operators such as `~>` and `|=>`.
+2. Start it with `df.start()` and get back an instance ID.
+3. Let the runtime execute each step durably with checkpointing between steps.
+4. Query status and results from PostgreSQL while the workflow runs or after it completes.
+
+### Limitations
+
+The model is intentionally SQL-shaped. If a step needs arbitrary code, a non-HTTP SDK, or rich in-memory control flow, you may need to wrap that logic in a SQL function, expose it behind an HTTP endpoint for `df.http()`, or use a general-purpose orchestrator for that part of the system.
 
 ## Features
 
@@ -36,68 +99,6 @@ SELECT df.start(
 );
 ```
 
-## Is this for me?
-
-Start with the workload. Each scenario below has a roll-your-own answer that works — until it doesn't.
-
-**Vector embedding pipeline** (chunk → call embedding API → upsert into `pgvector`). *Can't I just do this in my ingest script?* Yes — until the embedding service rate-limits you halfway through 2M rows, your pod restarts, or one row's API call times out and silently drops. pg_durable checkpoints per row, retries the failed step only, and resumes after a crash without re-embedding what already succeeded (and re-billing you for it).
-
-**Ingest with staging + dedup + publish.** *I have a `plpgsql` procedure that does all three in one transaction.* Fine for small batches. At 50M rows the transaction holds locks for hours, bloats WAL, and on crash you start over. pg_durable runs the stages as discrete checkpointed steps — staging survives, dedup picks up where it stopped, publish is its own commit.
-
-**Scheduled maintenance** (detect bloat → notify → wait for human approval → `VACUUM FULL`). *I use `pg_cron` + a status table.* Now write the retry logic, the "did the previous run finish?" guard, the approval-wait state machine, and the crash-recovery path. Or express it as `df.if(...) ~> df.wait_for_signal(...) ~> '...'` and let the extension handle replay.
-
-**Fan-out aggregation for a dashboard.** *Three `SELECT`s in parallel with `asyncio` from my app tier.* Adds a service to deploy and a place for partial-failure bugs to hide. `a & b & c ~> 'refresh'` runs them concurrently inside Postgres with one durable record of what completed.
-
-**Calling external HTTPS APIs from SQL** (enrichment, classification, webhooks). *I move it to a worker because Postgres can't retry HTTP.* It can now — `df.http()` is a checkpointed step with retries; the rest of the workflow stays in SQL.
-
-### The core idea
-
-A pg_durable function is a **graph of SQL steps** the database executes and checkpoints as it goes. On crash, restart, or step failure it **resumes where it left off** — no re-running successful side effects, no manual bookkeeping.
-
-### Who it's for
-
-- **Backend & data engineers** who already lean on Postgres for state and don't want to stand up Temporal, Airflow, Step Functions, or Celery+Redis just to make a workflow reliable.
-- **DBAs and SREs** automating maintenance (vacuum/bloat, archival, wraparound) that must survive restarts and be auditable in SQL.
-- **Teams building AI / agentic pipelines** (chunk → embed → index → serve) that need durable execution per row or per document.
-
-### What you're probably doing today instead
-
-- `pg_cron` + a `jobs` table + a polling worker + a status column + manual retry counters.
-- An external orchestrator (Airflow, Temporal, Step Functions, Argo) calling back into Postgres.
-- A queue (SQS, Redis, RabbitMQ) + workers + a state table to coordinate steps.
-- A `plpgsql` procedure with `BEGIN ... EXCEPTION` that **still** loses progress on crash.
-
-### What changes in your architecture
-
-- Delete the bespoke job queue, polling worker, retry bookkeeping, and "where did this leave off?" status columns.
-- Background work that lived in an app tier (or a separate orchestrator) moves into Postgres, invoked with `df.start(...)`.
-- Observability shifts from external dashboards to `SELECT ... FROM df.instances` — same auth, backups, and PITR as your data.
-
-### Limits of the SQL approach
-
-Steps are SQL statements (plus `df.http()` and built-ins). If a step needs arbitrary code — parsing a proprietary binary format, calling a non-HTTP SDK, branching on rich data structures — you either (a) wrap it as a SQL function / `plpgsql` block, (b) expose it behind an HTTP endpoint and call `df.http()`, or (c) reach for [duroxide](https://github.com/microsoft/duroxide) directly in Rust / Python / Node and keep pg_durable for the SQL-shaped parts. The DSL is intentionally narrow; control flow that doesn't map to sequence / parallel / branch / loop is a signal the workload belongs in a general-purpose orchestrator.
-
-### When **not** to use it
-
-- Sub-millisecond / high-QPS synchronous request paths.
-- Millions of concurrent workflows/sec or heavyweight stream processing.
-- You can't install extensions or run a background worker in your managed Postgres.
-- One `INSERT ... SELECT` already does the job — you don't need an orchestrator.
-- Distributed sagas spanning many heterogeneous systems where Postgres is incidental.
-
-## How It Works
-
-1. **Define functions in SQL** using composable operators like `~>` (sequence) and `|=>` (name result)
-2. **Start functions** with `df.start()` which returns an instance ID
-3. **Runtime executes durably** — each step is checkpointed, survives crashes via replay
-4. **Query progress** anytime from standard PostgreSQL tables
-
-## Prerequisites
-
-- PostgreSQL 17 or 18
-- Rust (nightly)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
-
 ## Packages
 
 Tagged releases publish Debian packages for PostgreSQL 17 and 18 on amd64 from the GitHub release assets. Packages are named `pg-durable-postgresql-<PG major>_<pg_durable version>-1_<arch>.deb` and install the extension library, control file, and SQL upgrade files into the matching PostgreSQL installation directories.
@@ -113,6 +114,12 @@ The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) f
 Release assets also include source archives for building from source.
 
 ## Development Installation
+
+### Prerequisites
+
+- PostgreSQL 17 or 18
+- Rust (nightly)
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
 
 ### GitHub Codespace
 
