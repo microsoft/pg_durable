@@ -119,7 +119,7 @@ Release assets also include source archives for building from source.
 
 - PostgreSQL 17 or 18
 - Rust (nightly)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.18.1
 
 ### GitHub Codespace
 

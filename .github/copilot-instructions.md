@@ -100,7 +100,7 @@ For Scenario A, treat the upgrade path as the contract for already-shipped versi
 
 ## Dependencies
 
-- **pgrx 0.16.1**: PostgreSQL extension framework (pinned version)
+- **pgrx 0.18.1**: PostgreSQL extension framework (pinned version)
 - **duroxide**: Durable execution runtime (crates.io dependency pinned in [`Cargo.toml`](../Cargo.toml))
 - **duroxide-pg**: duroxide provider/stores engine state in PostgreSQL (crates.io dependency pinned in [`Cargo.toml`](../Cargo.toml)); keep pinned with `duroxide` as a compatible pair
 - **sqlx**: Async PostgreSQL from background worker

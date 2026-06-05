@@ -19,7 +19,7 @@ model:
     - "duroxide-pg (PostgreSQL persistence provider for duroxide)"
     - "sqlx (async PostgreSQL driver for background worker connections)"
     - "reqwest (HTTP client for df.http() activity)"
-    - "pgrx 0.16.1 (PostgreSQL extension framework)"
+    - "pgrx 0.18.1 (PostgreSQL extension framework)"
 
 diagrams:
   - name: "pg_durable System Overview"
