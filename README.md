@@ -15,6 +15,7 @@ Long-running, fault-tolerant SQL functions for teams that already keep their sta
 
 Durable execution is now a standard industry pattern, and pg_durable brings it inside Postgres with no extra service infrastructure required. Part of our mission to bring compute close to data.
 
+> <img src="https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1374850-Icon-Hero-HorizonDB-24x24?resMode=sharp2&op_usm=1.5,0.65,15,0&wid=48&hei=48&qlt=100&fit=constrain" alt="Azure HorizonDB logo" width="24" /> <sub>Run it in the cloud <strong>Preview</strong></sub><br />
 > **Try pg_durable now in [Azure HorizonDB](https://aka.ms/AzureHorizonDB):** Azure HorizonDB is Microsoft's new PostgreSQL cloud service -- engineered for performance and built with [pg_durable inside](https://aka.ms/horizondb_pg_durable).
 
 ## Is this for me?
