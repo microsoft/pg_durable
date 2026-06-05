@@ -131,7 +131,7 @@ jobs:
           path: |
             ~/.cargo/.crates2.json
             ~/.cargo/bin/cargo-pgrx
-          key: ${{ runner.os }}-cargo-pgrx-0.16.1-v1
+          key: ${{ runner.os }}-cargo-pgrx-0.18.1-v1
 
       - name: Cache Cargo dependency sources
         uses: actions/cache@v5
@@ -158,10 +158,10 @@ jobs:
 
       - name: Install cargo-pgrx
         run: |
-          if ! command -v cargo-pgrx &> /dev/null || ! cargo pgrx --version | grep -q "0.16.1"; then
-            cargo install cargo-pgrx --version 0.16.1 --locked
+          if ! command -v cargo-pgrx &> /dev/null || ! cargo pgrx --version | grep -q "0.18.1"; then
+            cargo install cargo-pgrx --version 0.18.1 --locked
           else
-            echo "cargo-pgrx 0.16.1 already installed, skipping"
+            echo "cargo-pgrx 0.18.1 already installed, skipping"
           fi
 
       - name: Initialize pgrx

@@ -43,11 +43,11 @@ else
 fi
 
 # Install cargo-pgrx
-echo "Installing cargo-pgrx 0.16.1..."
+echo "Installing cargo-pgrx 0.18.1..."
 if [ "$SMOKE_MODE" = "1" ]; then
     echo "Smoke mode: skipping cargo-pgrx install"
 else
-    cargo install cargo-pgrx --version 0.16.1 --locked
+    cargo install cargo-pgrx --version 0.18.1 --locked
 fi
 
 # Initialize pgrx with PostgreSQL 17 (pgrx will download and compile PG17)
