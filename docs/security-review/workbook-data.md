@@ -16,14 +16,14 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 |---|---|---|---|---|
 | session_user (login_role) | pg_hba.conf authentication | `GetSessionUserId()` C API | df.instances.login_role, df.nodes.login_role | Connection authentication for per-user SQL execution |
 | current_user (submitted_by) | PostgreSQL SET ROLE / default | `GetOuterUserId()` C API | df.instances.submitted_by, df.nodes.submitted_by | SET ROLE target for privilege isolation; RLS policy column |
-| worker_role | GUC `pg_durable.worker_role` | Configuration (default: "azuresu") | postgresql.conf | Background worker sqlx pool authentication |
+| worker_role | GUC `pg_durable.worker_role` | Configuration (default: "postgres") | postgresql.conf | Background worker sqlx pool authentication |
 
 ### Least Privilege Assessment
 
 | Identity | Privileges | Minimum Required | Delta |
 |---|---|---|---|
 | Database user | EXECUTE on all df.* functions, SELECT/INSERT on df.tables, USAGE on df schema | EXECUTE on needed df.* functions only; no df.http() unless needed | Too broad — PUBLIC has EXECUTE on all functions including df.http() |
-| Worker role (azuresu) | SUPERUSER (bypasses RLS, connects as any role) | BYPASSRLS + CREATEROLE or trust-auth connect-as capability | Could explore non-superuser with BYPASSRLS if PostgreSQL supports connect-as without superuser |
+| Worker role (postgres) | SUPERUSER (bypasses RLS, connects as any role) | BYPASSRLS + CREATEROLE or trust-auth connect-as capability | Could explore non-superuser with BYPASSRLS if PostgreSQL supports connect-as without superuser |
 | Per-user SQL connection | User's own RBAC (login_role + SET ROLE submitted_by) | Exactly what the user has outside durable functions | ✅ Correct — no privilege amplification |
 
 ---
@@ -115,7 +115,7 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 
 | GUC | Default | Scope | Security Relevance |
 |---|---|---|---|
-| `pg_durable.worker_role` | "azuresu" | Postmaster | Determines background worker's PostgreSQL identity; must be superuser |
+| `pg_durable.worker_role` | "postgres" | Postmaster | Determines background worker's PostgreSQL identity; must be superuser |
 | `pg_durable.database` | "postgres" | Postmaster | Target database for extension operations |
 | `df.in_workflow` | unset | Session | Custom GUC set on worker connections; prevents variable mutation during execution |
 

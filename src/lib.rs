@@ -15,7 +15,7 @@ use std::ffi::CString;
 // ============================================================================
 
 pub static WORKER_ROLE: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"azuresu"));
+    GucSetting::<Option<CString>>::new(Some(c"postgres"));
 
 pub static DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
@@ -532,7 +532,7 @@ DECLARE
 BEGIN
     wrole := pg_catalog.current_setting('pg_durable.worker_role', true);
     IF wrole IS NULL OR wrole OPERATOR(pg_catalog.=) '' THEN
-        wrole := 'azuresu';
+        wrole := 'postgres';
     END IF;
 
     SELECT rolsuper INTO is_super FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) wrole;

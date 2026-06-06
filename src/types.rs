@@ -20,12 +20,12 @@ use uuid::Uuid;
 // ============================================================================
 
 /// Get the worker role from the `pg_durable.worker_role` GUC.
-/// Falls back to `"azuresu"` if the GUC is not set.
+/// Falls back to `"postgres"` if the GUC is not set.
 pub fn get_worker_role() -> String {
     crate::WORKER_ROLE
         .get()
         .map(|cs: CString| cs.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "azuresu".to_string())
+        .unwrap_or_else(|| "postgres".to_string())
 }
 
 /// Get the database from the `pg_durable.database` GUC.

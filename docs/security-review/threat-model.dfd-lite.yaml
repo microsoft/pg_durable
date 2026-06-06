@@ -10,7 +10,7 @@ model:
     - "Single-tenant PostgreSQL deployment — one organization per database instance"
     - "Extension installed by superuser (trusted extension model)"
     - "pg_hba.conf configured for trust or peer auth on localhost for background worker connections"
-    - "Background worker role (azuresu) is a PostgreSQL superuser"
+    - "Background worker role (postgres) is a PostgreSQL superuser"
     - "No external services — everything runs inside the PostgreSQL server process"
     - "Users have database role accounts with appropriate PostgreSQL RBAC"
   externalDependencies:
