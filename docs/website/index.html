@@ -21,7 +21,7 @@
   </head>
   <body>
     <header class="site-header">
-      <div class="container nav">
+      <div class="container nav" id="siteNav">
         <a class="brand" href="#top">
           <svg class="brand-mark" viewBox="0 0 256 256" role="img" aria-label="pg_durable logo mark">
             <defs>
@@ -41,7 +41,15 @@
           </svg>
           <span class="brand-word">pg<span class="brand-us">_</span>durable</span>
         </a>
-        <nav class="nav-links" aria-label="Primary">
+        <button class="nav-toggle" id="navToggle" type="button" aria-expanded="false" aria-controls="primaryNav">
+          <span class="nav-toggle-icon" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+          <span class="nav-toggle-label">Menu</span>
+        </button>
+        <nav class="nav-links" id="primaryNav" aria-label="Primary">
           <a href="#how-it-works">How It Works</a>
           <a href="#why">Why pg_durable</a>
           <a href="#use-cases">Use Cases</a>
@@ -913,8 +921,35 @@ SELECT job.id, v.ord, v.name, v.query, v.deps FROM job, (VALUES
 
     <script>
       (function () {
+        var siteNav = document.getElementById("siteNav");
+        var navToggle = document.getElementById("navToggle");
+        var primaryNav = document.getElementById("primaryNav");
         var log = document.getElementById("engineLog");
         var toggle = document.getElementById("engineToggle");
+        if (siteNav && navToggle && primaryNav) {
+          var closeNav = function () {
+            siteNav.classList.remove("is-nav-open");
+            navToggle.setAttribute("aria-expanded", "false");
+            navToggle.querySelector(".nav-toggle-label").textContent = "Menu";
+          };
+
+          navToggle.addEventListener("click", function () {
+            var isOpen = siteNav.classList.toggle("is-nav-open");
+            navToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+            navToggle.querySelector(".nav-toggle-label").textContent = isOpen ? "Close" : "Menu";
+          });
+
+          primaryNav.querySelectorAll("a").forEach(function (link) {
+            link.addEventListener("click", closeNav);
+          });
+
+          window.addEventListener("resize", function () {
+            if (window.innerWidth > 760) {
+              closeNav();
+            }
+          });
+        }
+
         if (!log || !toggle) return;
 
         var nodes = {};

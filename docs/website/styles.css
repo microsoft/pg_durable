@@ -179,6 +179,41 @@ main,
   gap: 1.6rem;
 }
 
+.nav-toggle {
+  display: none;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid rgba(61, 134, 198, 0.22);
+  border-radius: 999px;
+  padding: 0.68rem 0.95rem;
+  color: var(--text);
+  background: rgba(20, 26, 43, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nav-toggle-icon {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.24rem;
+}
+
+.nav-toggle-icon span {
+  display: block;
+  width: 1rem;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--pg-blue-light), var(--copper));
+}
+
+.nav-toggle:hover,
+.nav-toggle:focus-visible {
+  border-color: rgba(61, 134, 198, 0.38);
+  background: rgba(29, 38, 61, 0.92);
+}
+
 .nav-links a {
   position: relative;
   color: var(--text-secondary);
@@ -1714,17 +1749,55 @@ footer p {
     width: min(1140px, 90vw);
   }
 
-  /* Header: brand left, links wrap tidily below */
+  /* Header: brand + toggle, with a collapsible link panel below */
   .nav {
     flex-wrap: wrap;
-    row-gap: 0.55rem;
+    justify-content: space-between;
+    align-items: center;
+    row-gap: 0.7rem;
     padding: 0.8rem 0;
   }
+  .brand {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .nav-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
   .nav-links {
-    gap: 0.85rem 1.15rem;
+    display: none;
+    flex: 1 1 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.45rem;
+    margin-top: 0.15rem;
+    padding: 0.75rem;
+    background: linear-gradient(180deg, rgba(20, 26, 43, 0.92), rgba(20, 26, 43, 0.76));
+    border: 1px solid rgba(61, 134, 198, 0.18);
+    border-radius: 18px;
+    box-shadow: var(--shadow-card);
+  }
+  .nav.is-nav-open .nav-links {
+    display: flex;
   }
   .nav-links a {
-    font-size: 0.86rem;
+    width: 100%;
+    padding: 0.72rem 0.85rem;
+    border-radius: 12px;
+    background: rgba(8, 11, 20, 0.32);
+    border: 1px solid rgba(61, 134, 198, 0.1);
+    font-size: 0.92rem;
+    white-space: normal;
+  }
+  .nav-links a::after {
+    display: none;
+  }
+  .nav-links a:hover,
+  .nav-links a:focus-visible {
+    color: var(--text);
+    background: rgba(61, 134, 198, 0.14);
+    border-color: rgba(61, 134, 198, 0.22);
   }
 
   /* Tighter vertical rhythm */
@@ -1807,6 +1880,16 @@ footer p {
 @media (max-width: 460px) {
   .container {
     width: 92vw;
+  }
+  .nav {
+    row-gap: 0.55rem;
+  }
+  .nav-toggle {
+    padding: 0.62rem 0.82rem;
+    gap: 0.5rem;
+  }
+  .nav-toggle-label {
+    font-size: 0.92rem;
   }
   .hero h1 {
     font-size: clamp(2.45rem, 11vw, 3rem);
