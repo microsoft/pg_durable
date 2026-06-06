@@ -2,7 +2,7 @@
 
 **Purpose:** Track duroxide-pg issues/limitations that require workarounds in pg_durable.
 
-**Last Updated:** 2026-01-06
+**Last Updated:** 2026-05-26
 
 **GitHub Query:** [All pg_durable issues in duroxide-pg](https://github.com/microsoft/duroxide-pg/issues?q=is%3Aissue+label%3Apg_durable)
 
@@ -44,21 +44,23 @@ _No active blockers at this time._
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [microsoft/duroxide-pg#6](https://github.com/microsoft/duroxide-pg/issues/6) |
+| **Issue** | `microsoft/duroxide-pg-opt#6` (historical, private repo) |
 | **Also filed** | [microsoft/duroxide-pg#1](https://github.com/microsoft/duroxide-pg/issues/1) (FYI only) |
 | **Status** | ✅ Resolved |
-| **Fixed In** | duroxide-pg v0.1.9 (requires duroxide 0.1.11) |
+| **Fixed In** | duroxide-pg-opt v0.1.9 (requires duroxide 0.1.11) |
 
 **Resolution Date:** 2026-01-06
 
 **Problem (was):**
-When upgrading `duroxide` or `duroxide-pg` versions, the PostgreSQL schema in the `duroxide` schema may change (new columns, changed function signatures, etc.). This caused runtime errors:
+When upgrading `duroxide` or `duroxide-pg-opt` versions, the PostgreSQL schema in the `duroxide` schema may change (new columns, changed function signatures, etc.). This caused runtime errors:
 - `function duroxide.XXX does not exist` (function signature changed)
 - `column index out of bounds` (table columns changed)
 - `cached plan must not change result type` (prepared statement cache invalidated)
 
 **Resolution:**
-The duroxide-pg v0.1.9 release includes ProviderAdmin lifecycle management which handles schema versioning. No workarounds were needed in pg_durable codebase at the time of the fix.
+The duroxide-pg-opt v0.1.9 release includes ProviderAdmin lifecycle management which handles schema versioning. No workarounds were needed in pg_durable codebase at the time of the fix.
+
+_Note: this blocker was tracked against the private `duroxide-pg-opt` provider. Since v0.2.2, pg_durable depends on the crates.io `duroxide-pg` crate instead; the historical issue link is preserved as a plain reference because the private repo is not publicly accessible._
 
 ---
 
@@ -81,6 +83,6 @@ When updating the duroxide dependency, run through this checklist:
 ## Version Compatibility Matrix
 
 | pg_durable | duroxide | duroxide-pg | Notes |
-|------------|----------|-----------------|-------|
-| 0.1.1 | 0.1.11 | 0.1.9 | Current - schema versioning fix |
-| 0.1.0 | 0.1.6 | 0.1.6 | Legacy |
+|------------|----------|-------------|-------|
+| 0.2.2 | 0.1.29 | 0.1.34 (crates.io) | Current — switch from private `duroxide-pg-opt` to crates.io `duroxide-pg`; starts a new provider compatibility line (see [docs/upgrade-testing.md](upgrade-testing.md)) |
+| ≤0.2.1 | 0.1.x | `duroxide-pg-opt` 0.1.x (private) | Legacy provider line; Azure fork owns its upgrade testing |

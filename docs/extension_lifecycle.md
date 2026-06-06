@@ -1,7 +1,7 @@
 # pg_durable Extension Lifecycle and Background Worker
 
 **Status:** Implemented  
-**Last Updated:** 2026-03-01  
+**Last Updated:** 2026-05-26  
 **Dependencies:** duroxide-pg (crates.io)
 
 > **Note:** This document describes the extension lifecycle management, background worker behavior, and duroxide-pg schema integration in pg_durable.
