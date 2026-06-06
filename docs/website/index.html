@@ -14,6 +14,9 @@
     <!-- Replace __CLARITY_PROJECT_ID__ with the deployed Microsoft Clarity project ID. -->
     <script type="text/javascript">
       (function (c, l, a, r, i, t, y) {
+        if (!i || i === "__CLARITY_PROJECT_ID__") {
+          return;
+        }
         c[a] =
           c[a] ||
           function () {
