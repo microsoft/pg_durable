@@ -105,6 +105,8 @@ SELECT df.start(
 
 Tagged releases publish Debian packages for PostgreSQL 17 and 18 on amd64 from the GitHub release assets. Packages are named `pg-durable-postgresql-<PG major>_<pg_durable version>-1_<arch>.deb` and install the extension library, control file, and SQL upgrade files into the matching PostgreSQL installation directories.
 
+Tagged releases and pushes to `main` also publish a ready-to-run multi-arch Docker image to GitHub Container Registry: `ghcr.io/microsoft/pg_durable` (`latest`, `vX.Y.Z`, `X.Y.Z`, and `pg17` on release tags; `edge` on `main`).
+
 After installing a package, add `pg_durable` to `shared_preload_libraries`, restart PostgreSQL, and create the extension in the configured pg_durable database:
 
 ```sql
@@ -161,6 +163,12 @@ A VS Code Dev Container (`.devcontainer/`) provides Rust, cargo-pgrx, and Postgr
 #### Docker
 
 ```bash
+# Pull prebuilt image (extension preloaded and created on first init)
+docker run -d --name pg_durable \
+  -p 5432:5432 \
+  -e POSTGRES_PASSWORD=secret \
+  ghcr.io/microsoft/pg_durable:latest
+
 # Build and test
 ./scripts/test-e2e-docker.sh --rebuild
 
