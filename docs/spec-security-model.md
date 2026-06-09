@@ -249,11 +249,11 @@ See [rls.md](rls.md) for the full design, policy definitions, grant strategy, an
 
 **Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape.
 
-**Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers.
+**Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers, for pg_durable's built-in `df.http()` activity path. It does not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that SQL nodes are permitted to execute.
 
 See [http-security.md](http-security.md) for the full specification, blocked IP ranges, and implementation details.
 
-**Residual Risk**: Low — hardcoded blocklist cannot be bypassed.
+**Residual Risk**: Low for `df.http()` — hardcoded blocklist cannot be bypassed in that path.
 
 ---
 

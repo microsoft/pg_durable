@@ -1546,7 +1546,7 @@ HTTP requests (`df.http()`) currently execute with the **background worker's pri
 - All users can make HTTP requests to the same endpoints
 - No user-specific URL allowlists
 
-**Security model:** Outbound HTTP is controlled by compile-time Cargo features and is off by default. When enabled, a hardcoded SSRF IP blocklist and domain allow-list are enforced — all requests to private/reserved IP ranges are blocked and only approved Azure service domains are permitted (e.g. `*.blob.core.windows.net`, `*.openai.azure.com`). These restrictions cannot be bypassed by any database user, including superusers. See `docs/http-security.md` for the full security model and feature flag reference.
+**Security model:** For pg_durable's built-in `df.http()` activity, outbound HTTP is controlled by compile-time Cargo features and is off by default. When enabled, a hardcoded SSRF IP blocklist and domain allow-list are enforced — all `df.http()` requests to private/reserved IP ranges are blocked and only approved Azure service domains are permitted (e.g. `*.blob.core.windows.net`, `*.openai.azure.com`). These `df.http()` restrictions cannot be bypassed by any database user, including superusers. They do not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that a workflow role can execute from SQL nodes; administrators must manage extension installation, function privileges, and network egress separately. See `docs/http-security.md` for the full security model and feature flag reference.
 
 **Future:** Per-user HTTP isolation and URL allowlists are planned.
 
