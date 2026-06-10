@@ -1528,4 +1528,50 @@ mod tests {
             substitute_all_raw("Hello $doc.name", &results, &empty_vars(), &sys_vars()).unwrap();
         assert_eq!(out, "Hello Alice");
     }
+
+    #[test]
+    fn test_row_set_expansion_rejects_oversized_result() {
+        // Build a JSON result with more than 10,000 rows
+        let mut rows = Vec::new();
+        for i in 0..10_001 {
+            rows.push(serde_json::json!({"id": i}));
+        }
+        let json_str = serde_json::json!({"rows": rows, "row_count": 10_001}).to_string();
+        let results = make_results(&[("big", &json_str)]);
+
+        let result = substitute_all("SELECT * FROM $big.*", &results, &empty_vars(), &sys_vars());
+        assert!(
+            result.is_err(),
+            "Should reject row-set expansion > 10,000 rows"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("exceeding the maximum"),
+            "Error should mention the limit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_row_set_expansion_accepts_within_limit() {
+        // Build a JSON result with exactly 100 rows (well within limit)
+        let mut rows = Vec::new();
+        for i in 0..100 {
+            rows.push(serde_json::json!({"id": i, "name": format!("item_{i}")}));
+        }
+        let json_str = serde_json::json!({"rows": rows, "row_count": 100}).to_string();
+        let results = make_results(&[("batch", &json_str)]);
+
+        let result = substitute_all(
+            "SELECT * FROM $batch.*",
+            &results,
+            &empty_vars(),
+            &sys_vars(),
+        );
+        assert!(
+            result.is_ok(),
+            "Should accept row-set expansion within limit"
+        );
+        let sql = result.unwrap();
+        assert!(sql.contains("VALUES"), "Should produce VALUES clause");
+    }
 }

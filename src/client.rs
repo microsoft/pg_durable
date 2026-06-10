@@ -149,6 +149,11 @@ fn is_connection_error(err: &str) -> bool {
         || lower.contains("closed")
 }
 
+/// Test-accessible wrapper for is_connection_error.
+pub fn is_connection_error_for_test(err: &str) -> bool {
+    is_connection_error(err)
+}
+
 async fn list_running_descendants(client: &Client, root_instance_id: &str) -> Vec<String> {
     let tree = match client.get_instance_tree(root_instance_id).await {
         Ok(tree) => tree,
@@ -257,4 +262,48 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
             Ok(())
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_connection_error;
+
+    #[test]
+    fn detects_connection_refused() {
+        assert!(is_connection_error(
+            "Failed to start durable function: connection refused"
+        ));
+    }
+
+    #[test]
+    fn detects_broken_pipe() {
+        assert!(is_connection_error("IO error: broken pipe"));
+    }
+
+    #[test]
+    fn detects_pool_timeout() {
+        assert!(is_connection_error(
+            "pool timed out while waiting for an open connection"
+        ));
+    }
+
+    #[test]
+    fn detects_connection_reset() {
+        assert!(is_connection_error("reset by peer"));
+    }
+
+    #[test]
+    fn detects_connection_closed() {
+        assert!(is_connection_error("connection closed unexpectedly"));
+    }
+
+    #[test]
+    fn does_not_match_normal_errors() {
+        assert!(!is_connection_error("Instance not found"));
+        assert!(!is_connection_error("permission denied for table foo"));
+        assert!(!is_connection_error("syntax error at position 42"));
+        assert!(!is_connection_error(
+            "Orchestration already exists for instance abc123"
+        ));
+    }
 }
