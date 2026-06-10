@@ -1032,7 +1032,7 @@ SELECT df.start(
 SELECT df.cancel('a1b2c3d4', 'Manual stop');
 
 -- Find by label first, then cancel
-SELECT instance_id FROM df.list_instances() WHERE label = 'every-minute-tick';
+SELECT instance_id FROM df.list_instances(filter_label => 'every-minute-tick');
 -- Then cancel with the found ID
 SELECT df.cancel('found_id', 'Stopping cron job');
 ```
@@ -1389,6 +1389,12 @@ SELECT * FROM df.list_instances('Running');
 SELECT * FROM df.list_instances('Completed');
 SELECT * FROM df.list_instances('Failed');
 
+-- Filter by label
+SELECT * FROM df.list_instances(filter_label => 'my-job');
+
+-- Filter by status and label
+SELECT * FROM df.list_instances('Completed', filter_label => 'my-job');
+
 -- With limit
 SELECT * FROM df.list_instances(NULL, 10);
 ```
@@ -1625,7 +1631,7 @@ GRANT EXECUTE ON FUNCTION df.result(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.cancel(text, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.wait_for_completion(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.run(text) TO app_role;
-GRANT EXECUTE ON FUNCTION df.list_instances(text, integer) TO app_role;
+GRANT EXECUTE ON FUNCTION df.list_instances(text, integer, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_info(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_nodes(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_executions(text, integer) TO app_role;
