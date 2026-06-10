@@ -117,7 +117,7 @@ CREATE EXTENSION pg_durable;
 
 The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) for background worker configuration and privilege setup.
 
-Release assets also include source archives for building from source.
+Each release also publishes source archives for building from source and a `SHA256SUMS` file for verifying downloaded assets.
 
 ## Development Installation
 
