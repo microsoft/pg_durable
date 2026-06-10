@@ -25,6 +25,14 @@ on:
       dry_run:
         description: Build and smoke-test only — do not push images to GHCR.
         required: false
+        # Manual runs default to a safe dry run; set false to actually push.
+        default: true
+        type: boolean
+      overwrite:
+        description: >
+          Allow overwriting immutable X.Y.Z-pg<major> tags that already exist in
+          the registry. Floating tags (pg<major>, latest) always move regardless.
+        required: false
         default: false
         type: boolean
 
@@ -131,6 +139,7 @@ jobs:
             # Floating tags only move forward: only the highest stable published
             # release may claim pg${PG_MAJOR} (and latest, for the default major).
             highest="$(gh release list --repo "${GITHUB_REPOSITORY}" \
+              --limit 1000 \
               --json tagName,isPrerelease,isDraft \
               --jq '[.[] | select(.isPrerelease == false and .isDraft == false) | .tagName] | .[]' \
               | sed 's/^v//' | sort -V | tail -n1)"
@@ -155,7 +164,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # Build once and load into the local daemon (all final tags applied), so the
-      # exact image we smoke-test is the one we push.
+      # exact image we smoke-test is the one we publish. The publish step below
+      # rebuilds from this builder's cache (a content-identical, near-instant
+      # cache hit) so it can attach provenance + SBOM attestations, which the
+      # `--load` daemon image store cannot carry.
       - name: Build image (amd64)
         uses: docker/build-push-action@v6
         with:
@@ -223,15 +235,91 @@ jobs:
           VERSION="$(docker exec "$CONTAINER" psql -U postgres -t -c "SELECT df.version();")"
           echo "pg_durable version: $(echo "$VERSION" | tr -d ' \n')"
 
-      - name: Push image tags
+          # Run a durable function end-to-end to prove the background worker is
+          # actually executing (catches worker/database misconfiguration that a
+          # plain CREATE EXTENSION would not).
+          echo "Starting a durable function..."
+          INSTANCE="$(docker exec "$CONTAINER" psql -U postgres -t -A -d postgres \
+            -c "SELECT df.start('SELECT 1');" | tr -d ' \n')"
+          echo "Instance: $INSTANCE"
+
+          echo -n "Waiting for completion"
+          STATUS=""
+          for _ in $(seq 1 60); do
+            STATUS="$(docker exec "$CONTAINER" psql -U postgres -t -A -d postgres \
+              -c "SELECT s FROM df.status('$INSTANCE') s;" | tr -d ' \n' | tr '[:upper:]' '[:lower:]')"
+            case "$STATUS" in
+              completed) echo " done!"; break ;;
+              failed|cancelled)
+                echo " FAILED ($STATUS)"; docker logs "$CONTAINER"; exit 1 ;;
+            esac
+            echo -n "."
+            sleep 1
+          done
+
+          if [ "$STATUS" != "completed" ]; then
+            echo " TIMEOUT (last status: ${STATUS:-none})"
+            docker logs "$CONTAINER"
+            exit 1
+          fi
+
+      - name: Resolve tags to publish
+        id: push
         if: ${{ github.event.inputs.dry_run != 'true' }}
         shell: bash
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
+          OVERWRITE: ${{ github.event.inputs.overwrite }}
         run: |
           set -euo pipefail
+          final=()
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
-            echo "Pushing $tag"
-            docker push "$tag"
+            # Floating tags (pg<major>, latest) are meant to move forward; only
+            # immutable X.Y.Z-pg<major> tags are protected from being replaced.
+            if [[ ! "$tag" =~ :(pg[0-9]+|latest)$ ]] \
+               && [[ "${OVERWRITE:-false}" != "true" ]] \
+               && docker manifest inspect "$tag" >/dev/null 2>&1; then
+              echo "Immutable tag $tag already exists; skipping (set overwrite=true to replace)."
+              continue
+            fi
+            final+=("$tag")
           done <<< "$TAGS"
+
+          if [ "${#final[@]}" -eq 0 ]; then
+            echo "No tags to publish."
+            echo "has_tags=false" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Publishing tags:\n%s\n' "${final[*]}"
+            {
+              echo "tags<<EOF"
+              printf '%s\n' "${final[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "has_tags=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Re-run the build with push enabled. Inputs are identical to the load build
+      # above, so this is a full cache hit on the same builder — the published
+      # bytes match what was smoke-tested. push (not --load) lets buildx attach
+      # provenance + SBOM attestations to the image in the registry.
+      - name: Publish image with attestations (amd64)
+        if: ${{ github.event.inputs.dry_run != 'true' && steps.push.outputs.has_tags == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.release
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          build-args: |
+            PG_MAJOR=${{ matrix.pg_major }}
+          tags: ${{ steps.push.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=pg_durable
+            org.opencontainers.image.description=Durable SQL function execution for PostgreSQL — test/learning image, not for production
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=PostgreSQL
+            org.opencontainers.image.version=${{ steps.pkg.outputs.version }}
