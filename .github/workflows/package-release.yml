@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag/version to package, for example v0.2.2'
+        description: 'v-tag to package, for example v0.2.2'
         required: true
         type: string
-      publish_release:
-        description: 'Upload assets to the GitHub release'
+      publish:
+        description: 'Upload assets to the GitHub release after packaging and validation'
         required: true
         default: false
         type: boolean
@@ -36,12 +36,29 @@ env:
   PACKAGE_HTTP_FEATURE: http-allow-azure-domains
 
 concurrency:
-  group: package-release-${{ github.event.inputs.tag || github.ref }}
+  group: package-release-${{ inputs.tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-inputs:
+    name: Validate package inputs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require v-tag for manual packaging
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          case "${{ inputs.tag }}" in
+            v*) ;;
+            *)
+              echo "::error::tag input must be a v-tag, for example v0.2.2"
+              exit 1
+              ;;
+          esac
+
   build-packages:
     name: Build PG${{ matrix.pg_version }} ${{ matrix.platform.type }} package
+    needs: validate-inputs
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -55,15 +72,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       # Release tooling (scripts, packaging helpers) must come from the commit
       # that defines this workflow, not from the target tag. For
-      # workflow_dispatch, GitHub runs the workflow YAML from the default
-      # branch HEAD while the primary checkout above is pinned to an older
-      # tag, so the tag may predate these scripts. github.sha tracks the
-      # workflow's own commit for both workflow_dispatch (main HEAD) and
-      # push:tags (the tagged commit), keeping YAML and scripts in sync.
+      # workflow_dispatch, this allows a PR branch to run its updated pipeline
+      # while the primary checkout above is pinned to the v-tag being packaged.
+      # github.sha tracks the workflow's own commit for workflow_dispatch and
+      # push:tags, keeping YAML and scripts in sync with the branch that ran it.
       - name: Checkout release tooling
         uses: actions/checkout@v4
         with:
@@ -73,7 +89,7 @@ jobs:
       - name: Set version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+            echo "VERSION=${{ inputs.tag }}" >> "$GITHUB_ENV"
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             echo "VERSION=${crate_version}~pr${{ github.event.pull_request.number }}+${GITHUB_SHA::7}" >> "$GITHUB_ENV"
@@ -183,7 +199,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       # See build-packages: validation tooling must come from the workflow's
       # own commit (github.sha), not the target tag, so a tag predating these
@@ -223,17 +239,18 @@ jobs:
 
   build-source:
     name: Build source archives
+    needs: validate-inputs
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+            echo "VERSION=${{ inputs.tag }}" >> "$GITHUB_ENV"
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             echo "VERSION=${crate_version}~pr${{ github.event.pull_request.number }}+${GITHUB_SHA::7}" >> "$GITHUB_ENV"
@@ -261,19 +278,19 @@ jobs:
     name: Upload release assets
     needs: [validate-packages, build-source]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event.inputs.publish_release == 'true'
+    if: github.event_name == 'push' || inputs.publish == true
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+            echo "VERSION=${{ inputs.tag }}" >> "$GITHUB_ENV"
           else
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
           fi
