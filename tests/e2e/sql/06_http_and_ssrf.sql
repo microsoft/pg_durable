@@ -583,7 +583,7 @@ DROP TABLE _test_ssrf7;
 CREATE TEMP TABLE _test_ssrf8 (instance_id TEXT);
 
 INSERT INTO _test_ssrf8 SELECT df.start(
-    df.http('https://httpbin.org/status/302', 'GET') |=> 'response'
+    df.http('https://httpbin.org/status/302', 'GET', NULL, NULL, 10) |=> 'response'
     ~> 'SELECT ($response::jsonb->>''status'')::int AS status_code',
     'test-ssrf-redirect-blocked'
 );
@@ -598,7 +598,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf8;
     RAISE NOTICE 'Testing redirect not followed: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.wait_for_completion(inst_id, 60) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: redirect request should complete (return 3xx), got status = %', status;
