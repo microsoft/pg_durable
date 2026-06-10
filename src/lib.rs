@@ -2668,10 +2668,9 @@ mod tests {
 
     #[pg_test]
     fn test_malformed_loop_condition_detected_at_validate() {
-        // A LOOP node whose query is present but not valid JSON should still
-        // pass validate_recursive (validation only checks node_type), but fail
-        // at execution time. We verify the graph can be constructed — the
-        // actual error propagation is tested in E2E tests.
+        // A LOOP node whose condition_node is a plain string (not a Durofut object)
+        // should be rejected by validate_recursive because for_each_config_child
+        // requires condition_node to deserialize as a valid Durofut.
         let node = Durofut {
             node_type: "LOOP".to_string(),
             left_node: Some(Box::new(Durofut {
@@ -2679,20 +2678,20 @@ mod tests {
                 query: Some("SELECT 1".to_string()),
                 ..Default::default()
             })),
-            // Malformed config: valid JSON but condition_node points to nonexistent node.
-            // At execution time this would fail; at validation time the structure is accepted.
+            // Malformed config: valid JSON but condition_node is a string, not a Durofut object.
             query: Some(r#"{"condition_node": "nonexist"}"#.to_string()),
             ..Default::default()
         };
-        // Validate should pass (it only checks node_types, not runtime resolution)
+        // Validate should fail because condition_node is not a valid Durofut object
+        let err = node.validate_recursive().unwrap_err();
         assert!(
-            node.validate_recursive().is_ok(),
-            "LOOP with config referencing nonexistent node should pass structural validation"
+            err.contains("condition_node"),
+            "Error should mention condition_node, got: {err}"
         );
 
-        // But if the config is totally not JSON, the orchestration will error at runtime.
-        // This tests that the Durofut can still be created (DSL-time is fine).
-        let bad_config_node = Durofut {
+        // But if the config is totally not JSON, for_each_config_child skips it
+        // (it's treated as a plain query string, not a config object).
+        let non_json_node = Durofut {
             node_type: "LOOP".to_string(),
             left_node: Some(Box::new(Durofut {
                 node_type: "SQL".to_string(),
@@ -2703,7 +2702,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            bad_config_node.validate_recursive().is_ok(),
+            non_json_node.validate_recursive().is_ok(),
             "LOOP with non-JSON config passes DSL validation (caught at execution time)"
         );
     }
