@@ -244,22 +244,22 @@ df.start(
 
 ## Variable Substitution
 
-Variables are set before `df.start()` using `df.setvar()`:
+Variables set with `df.setvar()` use curly-brace syntax `{name}` and are substituted at execution time:
 
 ```sql
 SELECT df.setvar('customer_id', '42');
 SELECT df.setvar('sku', 'WIDGET-001');
-SELECT df.start('SELECT * FROM products WHERE sku = $sku');
+SELECT df.start('SELECT * FROM products WHERE sku = ''{sku}''');
 ```
 
-Result bindings (`|=>`) create variables available in subsequent steps:
+Result bindings (`|=>`) create named results available via dollar-sign syntax `$name` in subsequent steps:
 
 ```sql
-'SELECT id FROM users WHERE email = $email' |=> 'user_id'
+'SELECT id FROM users WHERE email = ''{email}''' |=> 'user_id'
 ~> 'SELECT * FROM orders WHERE user_id = $user_id'
 ```
 
-Variables are substituted at execution time, not at definition time.
+Variables (`{name}`) and named results (`$name`) are substituted at execution time, not at definition time.
 
 ## Auto-Wrapping
 

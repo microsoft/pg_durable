@@ -193,6 +193,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
 | `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
 | `df.signal(id, name, data)` | Send signal to instance | `df.signal('a1b2', 'go', '{}')` |
+| `df.wait_for_completion(id, timeout)` | Block until instance completes (default 30s timeout) | `df.wait_for_completion('a1b2c3d4', 60)` |
 
 ### Operators
 
@@ -283,6 +284,43 @@ SELECT df.start(
 ```
 
 This is useful for passing row sets between steps. The expansion generates SQL like `(VALUES (1,'Alice'), (2,'Bob')) AS batch(id, name)`.
+
+### Result Format
+
+When a SQL node completes, its result is stored as a JSON object with this shape:
+
+```json
+{
+  "rows": [
+    {"column1": "value1", "column2": 42},
+    {"column1": "value2", "column2": 99}
+  ],
+  "row_count": 2
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rows` | Array of objects | Each element is one row; keys are column names |
+| `row_count` | Integer | Number of rows returned |
+
+When accessing results via `df.result(id)`, you get this JSON text. Use PostgreSQL's JSON operators to extract values:
+
+```sql
+-- Get the result
+SELECT df.result('a1b2c3d4');
+-- Returns: '{"rows":[{"answer":42}],"row_count":1}'
+
+-- Extract a specific value
+SELECT df.result('a1b2c3d4')::jsonb->'rows'->0->>'answer';
+-- Returns: '42'
+```
+
+**Special cases:**
+- A query returning no rows produces: `{"rows": [], "row_count": 0}`
+- `df.sleep()` and `df.wait_for_schedule()` produce no result (NULL)
+- `df.http()` results contain `status`, `body`, and `headers` fields inside the row
+- `df.break('value')` stores the literal value as the loop result (not wrapped in `rows`)
 
 
 ### Cron Expression Format
@@ -708,7 +746,7 @@ SELECT df.start(
         df.wait_for_schedule('*/5 * * * *')  -- Every 5 minutes
         ~> df.http('https://api.example.com/status', 'GET') |=> 'status'
         ~> df.if(
-            'SELECT ($status::jsonb->''body''::jsonb->>''healthy'')::boolean = false',
+            'SELECT (($status::jsonb->>''body'')::jsonb->>''healthy'')::boolean = false',
             'INSERT INTO playground.logs (msg, level) VALUES (''Service unhealthy!'', ''error'')',
             'SELECT ''healthy'''
         )
@@ -1113,12 +1151,12 @@ SELECT df.signal('a1b2c3d4', 'approval', '{"approved": true, "approver": "jane@a
 
 ### Example: Multi-Party Approval
 
-Wait for multiple approvals using `df.join()`:
+Wait for multiple approvals using `df.join3()`:
 
 ```sql
 SELECT df.start(
     'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
-    ~> df.join(
+    ~> df.join3(
         df.wait_for_signal('legal_approval'),
         df.wait_for_signal('tech_approval'),
         df.wait_for_signal('mgmt_approval')
@@ -1384,10 +1422,10 @@ LOOP
 -- All instances
 SELECT * FROM df.list_instances();
 
--- Filter by status
-SELECT * FROM df.list_instances('Running');
-SELECT * FROM df.list_instances('Completed');
-SELECT * FROM df.list_instances('Failed');
+-- Filter by status (lowercase)
+SELECT * FROM df.list_instances('running');
+SELECT * FROM df.list_instances('completed');
+SELECT * FROM df.list_instances('failed');
 
 -- With limit
 SELECT * FROM df.list_instances(NULL, 10);
@@ -1496,36 +1534,46 @@ SELECT df.start('SELECT * FROM bob_data');
 
 ### How Identity Is Captured
 
-When you call `df.start()`, pg_durable captures two pieces of identity:
+When you call `df.start()`, pg_durable captures **one** piece of identity:
 
-1. **Login role** (`session_user`) - The user you authenticated as
-2. **Effective role** (`current_user`) - Your current effective privileges (after `SET ROLE`, if used)
+- **`current_user`** — Your effective role at the time of submission (stored as `submitted_by`)
 
-The background worker then:
-1. Connects to PostgreSQL as your **login role**
-2. Executes `SET ROLE` to your **effective role** 
-3. Runs your SQL with the correct privileges
+The background worker then connects to PostgreSQL **directly as `submitted_by`** and executes your SQL with that role's privileges. There is no `SET ROLE` indirection.
 
-### Working with Group Roles
+**Important:** The captured role must have the `LOGIN` attribute, because the background worker authenticates as that role. If `current_user` lacks `LOGIN`, `df.start()` will reject the submission with an error.
 
-You can use `SET ROLE` to switch to a group role before submitting a durable function:
+### Working with Roles
+
+Since the captured role must have `LOGIN`, you cannot use `SET ROLE` to submit workflows as a `NOLOGIN` group role. Instead, grant the necessary table privileges directly to login-capable roles:
 
 ```sql
--- Create a group role (no LOGIN)
+-- Grant table access to alice directly
+GRANT SELECT ON analyst_reports TO alice;
+
+-- Alice submits as herself (her own login role)
+SET SESSION AUTHORIZATION alice;
+SELECT df.start('SELECT * FROM analyst_reports');
+-- ✅ Runs as 'alice' — alice has LOGIN and the required privileges
+```
+
+If you need multiple users to share access to the same tables, grant privileges via a group role but submit as the individual login role:
+
+```sql
+-- Create a group role and grant it to users
 CREATE ROLE analysts NOLOGIN;
 GRANT analysts TO alice;
+GRANT analysts TO bob;
 
-CREATE TABLE analyst_reports (id INT, report TEXT);
-ALTER TABLE analyst_reports OWNER TO analysts;
+-- Grant table access to the group
+GRANT SELECT ON analyst_reports TO analysts;
 
--- Alice switches to the analysts role
+-- Alice submits as herself (inherits analysts privileges)
 SET SESSION AUTHORIZATION alice;
-SET ROLE analysts;
-
--- Submit as the group role
 SELECT df.start('SELECT * FROM analyst_reports');
--- ✅ Runs as 'analysts', alice's session user is used for authentication
+-- ✅ Runs as 'alice', who inherits SELECT from 'analysts'
 ```
+
+**Note:** `SET ROLE` to a `NOLOGIN` role before calling `df.start()` will fail because the worker cannot authenticate as a role without `LOGIN`.
 
 ### What Happens If a Role Is Dropped?
 
@@ -1624,7 +1672,7 @@ GRANT EXECUTE ON FUNCTION df.status(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.result(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.cancel(text, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.wait_for_completion(text, integer) TO app_role;
-GRANT EXECUTE ON FUNCTION df.run(text) TO app_role;
+GRANT EXECUTE ON FUNCTION df.run(text) TO app_role;  -- NOTE: stub, not yet implemented
 GRANT EXECUTE ON FUNCTION df.list_instances(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_info(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_nodes(text, integer) TO app_role;
@@ -1945,6 +1993,46 @@ CREATE EXTENSION pg_durable;
 1. Check PostgreSQL logs for errors
 2. Verify the background worker is running (see "Extension Exists But Workflows Don't Start")
 3. Check for resource contention (CPU, disk I/O, connection limits)
+
+### Superuser Cannot Start Workflows
+
+**Symptom**: A superuser calling `df.start()` gets an error like:
+```
+Superuser-submitted instances are disabled. Set pg_durable.enable_superuser_instances = true to allow.
+```
+
+**Cause**: By default, `pg_durable.enable_superuser_instances` is `false`. This is a security safeguard — superuser-submitted workflows bypass RLS and run with full privileges, which could be dangerous in shared environments.
+
+**Solution**: If you intentionally want to submit workflows as a superuser:
+1. Add to `postgresql.conf`:
+   ```ini
+   pg_durable.enable_superuser_instances = true
+   ```
+2. Restart PostgreSQL (this is a Postmaster-context GUC)
+
+Alternatively, create a dedicated non-superuser role for workflow submission and grant it the necessary privileges.
+
+### "current_user lacks LOGIN attribute" Error
+
+**Symptom**: Calling `df.start()` returns an error:
+```
+current_user 'role_name' does not have the LOGIN attribute
+```
+
+**Cause**: The background worker must connect to PostgreSQL as the role that submitted the workflow. Roles without the `LOGIN` attribute cannot be authenticated, so `df.start()` rejects the submission.
+
+This commonly happens when you use `SET ROLE` to switch to a group role (typically `NOLOGIN`) before calling `df.start()`.
+
+**Solution**:
+- Submit workflows as a login-capable role (your own user, not a group role)
+- If you need shared table access, grant privileges via a group role and submit as the individual user:
+  ```sql
+  -- Instead of SET ROLE analysts; df.start(...):
+  GRANT analysts TO alice;  -- alice inherits privileges
+  SET SESSION AUTHORIZATION alice;
+  SELECT df.start('SELECT * FROM analyst_data');  -- runs as alice
+  ```
+- If a role needs `LOGIN`, alter it: `ALTER ROLE role_name LOGIN;`
 
 ### Debugging Failed Workflows
 

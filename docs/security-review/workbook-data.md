@@ -14,8 +14,7 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 
 | Identity | Source | Capture Method | Stored In | Used For |
 |---|---|---|---|---|
-| session_user (login_role) | pg_hba.conf authentication | `GetSessionUserId()` C API | df.instances.login_role, df.nodes.login_role | Connection authentication for per-user SQL execution |
-| current_user (submitted_by) | PostgreSQL SET ROLE / default | `GetOuterUserId()` C API | df.instances.submitted_by, df.nodes.submitted_by | SET ROLE target for privilege isolation; RLS policy column |
+| current_user (submitted_by) | PostgreSQL current_user at df.start() time | `GetOuterUserId()` C API | df.instances.submitted_by, df.nodes.submitted_by | Direct connection authentication for per-user SQL execution; RLS policy column |
 | worker_role | GUC `pg_durable.worker_role` | Configuration (default: "postgres") | postgresql.conf | Background worker sqlx pool authentication |
 
 ### Least Privilege Assessment
@@ -24,7 +23,7 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 |---|---|---|---|
 | Database user | EXECUTE on all df.* functions, SELECT/INSERT on df.tables, USAGE on df schema | EXECUTE on needed df.* functions only; no df.http() unless needed | Too broad — PUBLIC has EXECUTE on all functions including df.http() |
 | Worker role (postgres) | SUPERUSER (bypasses RLS, connects as any role) | BYPASSRLS + CREATEROLE or trust-auth connect-as capability | Could explore non-superuser with BYPASSRLS if PostgreSQL supports connect-as without superuser |
-| Per-user SQL connection | User's own RBAC (login_role + SET ROLE submitted_by) | Exactly what the user has outside durable functions | ✅ Correct — no privilege amplification |
+| Per-user SQL connection | User's own RBAC (connected directly as submitted_by) | Exactly what the user has outside durable functions | ✅ Correct — no privilege amplification |
 
 ---
 
@@ -83,7 +82,7 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 
 | Activity | Input | Output | I/O |
 |---|---|---|---|
-| `execute-sql` | query, submitted_by, login_role, database? | JSON result rows | Per-user PostgreSQL connection |
+| `execute-sql` | query, submitted_by, database? | JSON result rows | Per-user PostgreSQL connection |
 | `execute-http` | HttpConfig JSON | HTTP response JSON | Outbound HTTP/HTTPS |
 | `load-function-graph` | instance_id | FunctionGraph JSON | SELECT df.instances/nodes |
 | `update-instance-status` | instance_id, status | None | UPDATE df.instances |
@@ -95,8 +94,8 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 
 | Table | Schema | RLS | Grants | Key Columns |
 |---|---|---|---|---|
-| df.instances | df | ✅ ENABLE (not FORCE) | PUBLIC: SELECT, INSERT, UPDATE(status, updated_at) | id, label, root_node, status, submitted_by, login_role, created_at, updated_at, completed_at |
-| df.nodes | df | ✅ ENABLE (not FORCE) | PUBLIC: SELECT, INSERT | id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, status, result |
+| df.instances | df | ✅ ENABLE (not FORCE) | PUBLIC: SELECT, INSERT, UPDATE(status, updated_at) | id, label, root_node, status, submitted_by, database, created_at, updated_at, completed_at |
+| df.nodes | df | ✅ ENABLE (not FORCE) | PUBLIC: SELECT, INSERT | id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database, status, result |
 | df.vars | df | ✅ ENABLE (not FORCE) | PUBLIC: SELECT, INSERT, UPDATE, DELETE | name, value, owner |
 | df._worker_epoch | df | ❌ | None (no GRANT to PUBLIC) | sentinel UUID |
 | duroxide.* | duroxide | ❌ | None (no GRANT to PUBLIC) | Internal duroxide runtime state |

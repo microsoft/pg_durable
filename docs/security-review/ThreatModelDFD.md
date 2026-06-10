@@ -113,16 +113,16 @@ sequenceDiagram
     participant HTTP as External HTTP
 
     User->>Backend: SELECT df.start(df.sql('...'))
-    Note over Backend: Captures session_user_oid<br/>and outer_user_oid
+    Note over Backend: Captures current_user (outer_user_oid);<br/>validates LOGIN attribute
     Backend->>Tables: INSERT nodes + instance<br/>(SPI as calling user, RLS)
     Backend->>Duroxide: Enqueue orchestration<br/>(via cached duroxide client)
     Backend-->>User: Returns instance_id
 
     Worker->>Duroxide: Poll for work items<br/>(as worker role / superuser)
     Duroxide-->>Worker: Orchestration work item
-    Worker->>Tables: Load function graph<br/>(reads submitted_by, login_role)
+    Worker->>Tables: Load function graph<br/>(reads submitted_by)
 
-    Note over Worker: Creates per-user connection:<br/>connect as login_role,<br/>SET ROLE submitted_by
+    Note over Worker: Creates per-user connection:<br/>connect directly as submitted_by
     Worker->>Tables: Execute user SQL<br/>(per-user connection, user privileges)
     Worker->>Tables: Update status/results<br/>(as worker role)
 
@@ -159,7 +159,7 @@ EE-USER ──[PostgreSQL wire protocol]──> P-BACKEND
 |---|---|---|---|
 | **S** Spoofing | Attacker impersonates legitimate user | PostgreSQL pg_hba.conf authentication (password, cert, GSSAPI) | ✅ Mitigated |
 | **T** Tampering | Man-in-middle modifies SQL commands | TLS encryption (if configured in pg_hba.conf); not enforced by default | ⚠️ Partial |
-| **R** Repudiation | User denies submitting a durable function | submitted_by and login_role captured at df.start() via GetOuterUserId()/GetSessionUserId() | ✅ Mitigated |
+| **R** Repudiation | User denies submitting a durable function | submitted_by captured at df.start() via GetOuterUserId(); current_user must have LOGIN | ✅ Mitigated |
 | **I** Information Disclosure | Eavesdropping on wire protocol | TLS encryption (if configured); plaintext by default on localhost | ⚠️ Partial |
 | **D** Denial of Service | Flooding with df.start() calls | No rate limiting implemented | ⛔ NOT IMPLEMENTED |
 | **E** Elevation of Privilege | User escalates via SECURITY DEFINER | GetOuterUserId() captures *caller* not *definer*; tested in E2E | ✅ Mitigated |
@@ -174,7 +174,7 @@ P-BACKEND ──[SPI (in-process)]──> DS-TABLES
 |---|---|
 | Source | P-BACKEND (User Session) |
 | Destination | DS-TABLES (df.instances / df.nodes) |
-| Data | Function graph nodes, instance metadata, user identity (submitted_by, login_role) |
+| Data | Function graph nodes, instance metadata, user identity (submitted_by) |
 | Classification | Internal control-plane data |
 | Encryption | N/A (in-process SPI) |
 | Trust Boundary Crossed | TB-USER → TB-PG (same process, different privilege context) |
@@ -262,7 +262,7 @@ P-WORKER ──[sqlx (TCP localhost)]──> DS-TABLES
 |---|---|
 | Source | P-WORKER (Background Worker) |
 | Destination | DS-TABLES (df.instances / df.nodes) |
-| Data | Function graph nodes including submitted_by, login_role, queries |
+| Data | Function graph nodes including submitted_by, queries |
 | Classification | User-authored SQL + identity metadata |
 | Encryption | Localhost TCP (trust auth) |
 | Trust Boundary Crossed | TB-BGW → TB-PG |
@@ -310,10 +310,10 @@ P-WORKER ──[sqlx per-user connection (TCP localhost)]──> DS-TABLES
 
 | STRIDE | Threat | Mitigation | Status |
 |---|---|---|---|
-| **S** Spoofing | Worker impersonates wrong user | login_role and submitted_by captured via C API (GetSessionUserId, GetOuterUserId); cannot be spoofed | ✅ Mitigated |
-| **T** Tampering | User SQL modifies data beyond their privileges | Connection authenticated as login_role + SET ROLE submitted_by; standard PostgreSQL RBAC applies | ✅ Mitigated |
-| **E** Elevation via RESET ROLE | User SQL contains `RESET ROLE` to escape to worker | RESET ROLE reverts to login_role (user's own identity), not worker role; connection is separate | ✅ Mitigated |
-| **E** Elevation via SET ROLE | User attempts `SET ROLE postgres` | SET ROLE requires role membership (checked against login_role); standard PostgreSQL RBAC | ✅ Mitigated |
+| **S** Spoofing | Worker impersonates wrong user | submitted_by captured via C API (GetOuterUserId); must have LOGIN attribute; cannot be spoofed | ✅ Mitigated |
+| **T** Tampering | User SQL modifies data beyond their privileges | Connection authenticated directly as submitted_by; standard PostgreSQL RBAC applies | ✅ Mitigated |
+| **E** Elevation via RESET ROLE | User SQL contains `RESET ROLE` to escape to worker | RESET ROLE reverts to submitted_by (user's own identity), not worker role; connection is separate | ✅ Mitigated |
+| **E** Elevation via SET ROLE | User attempts `SET ROLE postgres` | SET ROLE requires role membership (checked against submitted_by); standard PostgreSQL RBAC | ✅ Mitigated |
 | **E** Elevation via dynamic SQL | User obfuscates privilege escalation | Dynamic SQL runs on same per-user connection; authenticated identity is immutable | ✅ Mitigated |
 | **T** Tampering | Variable substitution ({var}) injects SQL | By design: vars are SQL fragments substituted as-is; user controls both var content and query; runs with user's own privileges | ⚠️ Accepted |
 | **I** Information Disclosure | Result substitution ($name) leaks cross-user data | Results are per-instance; RLS prevents cross-user access to nodes/instances | ✅ Mitigated |
@@ -340,7 +340,7 @@ P-WORKER ──[HTTP/HTTPS (external network)]──> EE-HTTP-TARGET
 | **T** Tampering | Man-in-middle modifies HTTP response | HTTPS available; HTTP also allowed (user's choice) | ⚠️ Partial |
 | **T** Tampering (SSRF) | User targets internal network (169.254.169.254, 10.x, 127.x) | Compile-time IP blocklist; scheme validation; IP literal check; SsrfSafeResolver; DNS rebinding protection | ✅ Mitigated |
 | **T** Tampering (SSRF) | IPv4-mapped IPv6 bypass (::ffff:169.254.169.254) | IPv4-mapped IPv6 extraction before blocklist check | ✅ Mitigated |
-| **R** Repudiation | User denies making HTTP request | Audit logging: submitted_by, login_role, URL, method in trace_info | ✅ Mitigated |
+| **R** Repudiation | User denies making HTTP request | Audit logging: submitted_by, URL, method in trace_info | ✅ Mitigated |
 | **I** Information Disclosure | Data exfiltration via HTTP POST to attacker endpoint | REVOKE EXECUTE on df.http() not yet default; no URL allowlist | ⛔ NOT IMPLEMENTED |
 | **I** Information Disclosure | Credentials in headers stored in df.nodes | HTTP config (including headers with auth tokens) stored in node query column; RLS-protected | ⚠️ Partial |
 | **D** Denial of Service | Attacker creates many HTTP requests to exhaust outbound connections | No rate limiting; timeout configurable (default 30s) | ⛔ NOT IMPLEMENTED |
@@ -414,17 +414,15 @@ graph LR
         A["pg_hba.conf<br/>Authentication"] --> B["PostgreSQL Backend<br/>session_user established"]
         B --> C["Optional: SET ROLE<br/>current_user changes"]
         C --> D["df.start() called"]
-        D --> E["GetSessionUserId()<br/>→ login_role"]
         D --> F["GetOuterUserId()<br/>→ submitted_by"]
-        E --> G["Stored in df.instances<br/>& df.nodes"]
-        F --> G
+        D --> V["Validates LOGIN attribute"]
+        F --> G["Stored in df.instances<br/>& df.nodes"]
     end
 
     subgraph TB-EXEC["Execution Isolation"]
         G --> H["Worker loads graph"]
-        H --> I["connect_as_user(<br/>login_role)"]
-        I --> J["SET ROLE<br/>submitted_by"]
-        J --> K["Execute user SQL<br/>with user privileges"]
+        H --> I["connect_as_user(<br/>submitted_by)"]
+        I --> K["Execute user SQL<br/>with user privileges"]
     end
 ```
 

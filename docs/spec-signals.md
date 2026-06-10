@@ -104,7 +104,7 @@ SELECT df.start(
 ```sql
 SELECT df.start(
     'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
-    ~> df.join(
+    ~> df.join3(
         df.wait_for_signal('legal_approval'),
         df.wait_for_signal('tech_approval'),
         df.wait_for_signal('mgmt_approval')
