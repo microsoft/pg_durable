@@ -24,20 +24,25 @@ ARG PG_MAJOR=17
 ARG DEB_DIR=dist
 
 # Install runtime dependencies and the pg_durable package.
-# ca-certificates is needed for native-tls HTTPS from df.http().
+# ca-certificates is needed for native-tls HTTPS from df.http(). Installing the
+# .deb via apt (rather than `dpkg -i`) lets apt resolve any dependencies the
+# package declares, so the build won't break if new runtime deps are added.
 COPY ${DEB_DIR}/pg-durable-postgresql-${PG_MAJOR}_*_amd64.deb /tmp/pg_durable.deb
 RUN apt-get update && apt-get install -y \
         libssl3 \
         ca-certificates \
-    && dpkg -i /tmp/pg_durable.deb \
+        /tmp/pg_durable.deb \
     && rm -rf /var/lib/apt/lists/* /tmp/pg_durable.deb
 
-# Create the extension on first database initialization.
+# Create the extension on first database initialization. The extension is
+# always created in the `postgres` database to match the hardcoded
+# pg_durable.database GUC below; POSTGRES_DB is intentionally ignored so the
+# worker and the extension never target different databases.
 RUN mkdir -p /docker-entrypoint-initdb.d && \
     printf '%s\n' \
         '#!/bin/bash' \
         'set -e' \
-        'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL' \
+        'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<-EOSQL' \
         '    CREATE EXTENSION IF NOT EXISTS pg_durable;' \
         'EOSQL' \
         'echo "pg_durable extension created successfully"' \
@@ -51,5 +56,10 @@ RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/post
     echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.enable_superuser_instances = on" >> /usr/share/postgresql/postgresql.conf.sample
+
+# Report container health based on PostgreSQL accepting connections on the
+# pg_durable database.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+    CMD pg_isready -U postgres -d postgres || exit 1
 
 EXPOSE 5432
