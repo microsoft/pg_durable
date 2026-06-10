@@ -207,27 +207,24 @@ pub async fn connect_as_user(
     }
 
     let connect_future = sqlx::postgres::PgConnection::connect_with(&options);
-    let mut conn = tokio::time::timeout(
-        Duration::from_secs(CONNECT_TIMEOUT_SECS),
-        connect_future,
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "Connection to database '{}' as '{}' timed out after {}s",
-            db,
-            normalized_user.as_ref(),
-            CONNECT_TIMEOUT_SECS
-        )
-    })?
-    .map_err(|e| {
-        format!(
-            "Failed to connect to database '{}' as '{}'. Error: {}",
-            db,
-            normalized_user.as_ref(),
-            e
-        )
-    })?;
+    let mut conn = tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), connect_future)
+        .await
+        .map_err(|_| {
+            format!(
+                "Connection to database '{}' as '{}' timed out after {}s",
+                db,
+                normalized_user.as_ref(),
+                CONNECT_TIMEOUT_SECS
+            )
+        })?
+        .map_err(|e| {
+            format!(
+                "Failed to connect to database '{}' as '{}'. Error: {}",
+                db,
+                normalized_user.as_ref(),
+                e
+            )
+        })?;
 
     // Mark this connection as running inside a workflow.
     // Currently used to prevent variable mutations (setvar/unsetvar/clearvars)
@@ -909,8 +906,7 @@ impl Durofut {
     /// Fallible deserialization from JSON. Preferred over `from_json()` in
     /// production code paths where corrupted data must not crash the worker.
     pub fn try_from_json(s: &str) -> Result<Self, String> {
-        serde_json::from_str(s)
-            .map_err(|e| format!("failed to deserialize Durofut: {}", e))
+        serde_json::from_str(s).map_err(|e| format!("failed to deserialize Durofut: {}", e))
     }
 
     /// Deserialize from JSON, panicking on failure.
