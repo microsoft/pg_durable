@@ -1,30 +1,29 @@
 name: Docker Publish
 
-# Publishes the public, multi-arch pg_durable image to GHCR.
+# Publishes the public pg_durable image to GHCR by installing a released Debian
+# package on top of the official PostgreSQL image. No source compilation, so
+# this is fast and amd64-only (matching the released .deb architecture).
 #
-# This image is built with the `http-allow-all` Cargo feature (all SSRF /
-# outbound-HTTP protections disabled) and other test-friendly settings. It is
-# intended for evaluating and learning pg_durable only — NOT for production.
+# Multi-arch (arm64) is intentionally not built here: there is no arm64 .deb yet.
+# When arm64 packages are published, add the arch to this workflow.
+#
+# The image is intended for evaluating and learning pg_durable only — NOT for
+# production. Its HTTP egress policy is whatever the released package was built
+# with (http-allow-azure-domains).
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       ref:
         description: >
-          Release tag to build and publish, e.g. v0.2.2. The workflow logic runs
-          from the branch selected in "Use workflow from", but the source is
-          checked out at this ref. Use this to publish a tag created before this
-          workflow existed. In a dry run, a branch name is also accepted.
+          Release tag to publish an image for, e.g. v0.2.2. The matching .deb
+          assets must already be attached to that GitHub release.
         required: true
         type: string
       dry_run:
-        description: >
-          Build and smoke-test only — do not push images to GHCR. Use this to
-          rehearse the publish path (including tag computation) from a feature
-          branch before merging.
+        description: Build and smoke-test only — do not push images to GHCR.
         required: false
         default: false
         type: boolean
@@ -35,32 +34,33 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/pg_durable
-  PG_MAJOR: '17'
   # PG major that also receives the unqualified `latest` tag. Lets future PG
   # versions (e.g. pg18) be published without fighting over `latest`.
   DEFAULT_PG_MAJOR: '17'
 
 concurrency:
-  group: docker-publish-${{ github.event.inputs.ref || github.ref }}
+  group: docker-publish-${{ github.event.release.tag_name || github.event.inputs.ref }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Build, verify, and publish multi-arch image
+    name: Publish PG${{ matrix.pg_major }} image
     runs-on: ubuntu-latest
     # Don't run (and push images) on forks.
     if: github.repository == 'microsoft/pg_durable'
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_major: ['17', '18']
 
     steps:
-      - uses: actions/checkout@v4
+      # Check out the tooling (Dockerfile.release) from where the workflow runs:
+      # the default branch for release events, or the dispatched branch for
+      # workflow_dispatch. The release tag itself may predate this file.
+      - name: Checkout tooling
+        uses: actions/checkout@v4
         with:
-          # On workflow_dispatch, build the requested tag; on tag push, build the
-          # pushed tag. fetch-depth: 0 brings all tags for the highest-version check.
-          ref: ${{ github.event.inputs.ref || github.ref }}
-          fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -72,89 +72,100 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Verify the image before publishing anything. Builds amd64 locally with the
-      # exact feature set we publish, then boots it and checks the extension loads.
-      - name: Build and smoke-test image (amd64)
-        uses: ./.github/actions/docker-build-smoke
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:smoke
-          http-feature: http-allow-all
+      - name: Resolve version and download package
+        id: pkg
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PG_MAJOR: ${{ matrix.pg_major }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "release" ]]; then
+            tag="${RELEASE_TAG}"
+          else
+            tag="${INPUT_REF}"
+          fi
+
+          if [[ "${tag}" != v* ]]; then
+            echo "::error::Expected a version tag starting with 'v' (e.g. v0.2.2), got '${tag}'."
+            exit 1
+          fi
+
+          version="${tag#v}"
+
+          mkdir -p dist
+          echo "Downloading PG${PG_MAJOR} package for ${tag}..."
+          gh release download "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "pg-durable-postgresql-${PG_MAJOR}_*_amd64.deb" \
+            --dir dist
+          ls -l dist
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Compute image tags
         id: meta
         shell: bash
         env:
-          INPUT_REF: ${{ github.event.inputs.ref }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          PG_MAJOR: ${{ matrix.pg_major }}
         run: |
           set -euo pipefail
 
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            raw_ref="${INPUT_REF}"
-          else
-            raw_ref="${GITHUB_REF#refs/tags/}"
-          fi
-
-          if [[ "${raw_ref}" != v* ]]; then
-            if [[ "${DRY_RUN}" == "true" ]]; then
-              # Allow non-tag refs (e.g. a branch) in a dry run by synthesizing a
-              # placeholder version so the publish logic can still be exercised.
-              echo "::notice::Dry run with non-version ref '${raw_ref}'; using placeholder version 0.0.0-dryrun."
-              raw_ref="v0.0.0-dryrun"
-            else
-              echo "::error::Expected a version tag starting with 'v' (e.g. v0.2.2), got '${raw_ref}'."
-              exit 1
-            fi
-          fi
-
-          version="${raw_ref#v}"
-          revision="$(git rev-parse HEAD)"
-          short_sha="$(git rev-parse --short=7 HEAD)"
-
-          # Immutable, fully-qualified tags (always published).
           tags=(
-            "${IMAGE_NAME}:${version}-pg${PG_MAJOR}"
-            "${IMAGE_NAME}:v${version}-pg${PG_MAJOR}"
-            "${IMAGE_NAME}:sha-${short_sha}-pg${PG_MAJOR}"
+            "${IMAGE_NAME}:${VERSION}-pg${PG_MAJOR}"
+            "${IMAGE_NAME}:v${VERSION}-pg${PG_MAJOR}"
           )
 
-          # A version containing a hyphen is a semver pre-release (e.g. 0.2.2-rc1).
-          if [[ "${version}" == *-* ]]; then
-            echo "Pre-release ${version}: publishing immutable tags only (no floating pg${PG_MAJOR}/latest)."
+          # A version containing a hyphen is a semver pre-release (e.g. 0.2.2-rc1):
+          # publish immutable tags only, never move floating tags.
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "Pre-release ${VERSION}: immutable tags only (no floating pg${PG_MAJOR}/latest)."
           else
-            # Floating tags only move forward: only the highest stable version
-            # across all v* git tags may claim pg${PG_MAJOR} / latest.
-            highest="$(git tag -l 'v*' | sed 's/^v//' | grep -v -- '-' | sort -V | tail -n1)"
-            if [[ "${version}" == "${highest}" ]]; then
+            # Floating tags only move forward: only the highest stable published
+            # release may claim pg${PG_MAJOR} (and latest, for the default major).
+            highest="$(gh release list --repo "${GITHUB_REPOSITORY}" \
+              --json tagName,isPrerelease,isDraft \
+              --jq '[.[] | select(.isPrerelease == false and .isDraft == false) | .tagName] | .[]' \
+              | sed 's/^v//' | sort -V | tail -n1)"
+
+            if [[ "${VERSION}" == "${highest}" ]]; then
               tags+=("${IMAGE_NAME}:pg${PG_MAJOR}")
               if [[ "${PG_MAJOR}" == "${DEFAULT_PG_MAJOR}" ]]; then
                 tags+=("${IMAGE_NAME}:latest")
               fi
             else
-              echo "Version ${version} is not the highest stable release (${highest}); not moving floating tags."
+              echo "Version ${VERSION} is not the highest stable release (${highest}); not moving floating tags."
             fi
           fi
 
-          printf 'Publishing tags:\n%s\n' "${tags[*]}"
+          printf 'Image tags:\n%s\n' "${tags[*]}"
 
           {
             echo "tags<<EOF"
             printf '%s\n' "${tags[@]}"
             echo "EOF"
-            echo "version=${version}"
-            echo "revision=${revision}"
+            echo "smoke=${IMAGE_NAME}:${VERSION}-pg${PG_MAJOR}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push multi-arch image
+      # Build once and load into the local daemon (all final tags applied), so the
+      # exact image we smoke-test is the one we push.
+      - name: Build image (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          # Dry runs build both arches but do not push to GHCR.
-          push: ${{ github.event.inputs.dry_run != 'true' }}
+          file: ./Dockerfile.release
+          platforms: linux/amd64
+          load: true
+          push: false
           build-args: |
-            HTTP_FEATURE=http-allow-all
+            PG_MAJOR=${{ matrix.pg_major }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.title=pg_durable
@@ -162,7 +173,65 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=PostgreSQL
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            org.opencontainers.image.version=${{ steps.pkg.outputs.version }}
+
+      - name: Smoke test — container starts and extension loads
+        shell: bash
+        env:
+          IMAGE: ${{ steps.meta.outputs.smoke }}
+        run: |
+          set -euo pipefail
+          CONTAINER="pg_durable_smoke_${{ matrix.pg_major }}"
+          cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker run -d \
+            --name "$CONTAINER" \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            "$IMAGE"
+
+          echo -n "Waiting for PostgreSQL"
+          READY_COUNT=0
+          for _ in $(seq 1 90); do
+            if docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
+              READY_COUNT=$((READY_COUNT + 1))
+              # Require 3 consecutive ready checks to clear the post-init restart.
+              if [ "$READY_COUNT" -ge 3 ]; then
+                echo " ready!"
+                break
+              fi
+            else
+              READY_COUNT=0
+            fi
+            echo -n "."
+            sleep 1
+          done
+
+          if [ "$READY_COUNT" -lt 3 ]; then
+            echo " TIMEOUT"
+            docker logs "$CONTAINER"
+            exit 1
+          fi
+
+          # Allow the background worker to initialize.
+          sleep 2
+
+          echo "Creating extension..."
+          docker exec "$CONTAINER" psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_durable;"
+
+          echo "Verifying extension version..."
+          VERSION="$(docker exec "$CONTAINER" psql -U postgres -t -c "SELECT df.version();")"
+          echo "pg_durable version: $(echo "$VERSION" | tr -d ' \n')"
+
+      - name: Push image tags
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Pushing $tag"
+            docker push "$tag"
+          done <<< "$TAGS"
