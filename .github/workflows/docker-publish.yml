@@ -52,12 +52,22 @@ jobs:
     if: github.repository == 'microsoft/pg_durable'
 
     steps:
-      - uses: actions/checkout@v4
+      # Tooling checkout (the workflow's own ref, e.g. main): provides the local
+      # composite action and the current Dockerfile (with HTTP_FEATURE support).
+      # Local actions are resolved from the working tree, so this must be a ref
+      # that actually contains them.
+      - name: Checkout workflow tooling
+        uses: actions/checkout@v4
+
+      # Source checkout (the version to build): may be an older tag that predates
+      # this workflow. We build its source with the current Dockerfile above, so
+      # the image still gets the http-allow-all build and current build steps.
+      - name: Checkout source to build
+        uses: actions/checkout@v4
         with:
-          # On workflow_dispatch, build the requested tag; on tag push, build the
-          # pushed tag. fetch-depth: 0 brings all tags for the highest-version check.
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
+          path: source
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -79,10 +89,13 @@ jobs:
         with:
           image-ref: ${{ env.IMAGE_NAME }}:smoke
           http-feature: http-allow-all
+          context: source
+          dockerfile: ./Dockerfile
 
       - name: Compute image tags
         id: meta
         shell: bash
+        working-directory: source
         env:
           INPUT_REF: ${{ github.event.inputs.ref }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
@@ -148,7 +161,7 @@ jobs:
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: source
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           # Dry runs build both arches but do not push to GHCR.

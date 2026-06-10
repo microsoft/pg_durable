@@ -20,6 +20,14 @@ inputs:
     description: Single platform to build for local load + smoke test.
     required: false
     default: linux/amd64
+  context:
+    description: Docker build context path.
+    required: false
+    default: .
+  dockerfile:
+    description: Path to the Dockerfile (workspace-relative).
+    required: false
+    default: ./Dockerfile
 
 runs:
   using: composite
@@ -27,8 +35,8 @@ runs:
     - name: Build image (load for smoke test)
       uses: docker/build-push-action@v6
       with:
-        context: .
-        file: ./Dockerfile
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
         platforms: ${{ inputs.platform }}
         load: true
         push: false
