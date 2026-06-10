@@ -1,0 +1,55 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
+# pg_durable published image — installs a pre-built Debian package from a
+# GitHub release on top of the official PostgreSQL image. Used by the
+# "Docker Publish" workflow.
+#
+# This is a single-stage build (no compilation): the .deb is downloaded by the
+# workflow into the build context and installed here. For the source-built CI
+# image, see ./Dockerfile.
+#
+# NOTE: This image is intended for evaluating and learning pg_durable only —
+# NOT for production. It enables superuser instances for an out-of-the-box demo
+# experience. The extension HTTP egress policy is whatever the released package
+# was built with (http-allow-azure-domains).
+
+ARG PG_MAJOR=17
+FROM postgres:${PG_MAJOR}-bookworm
+
+# Re-declare after FROM so the value is available in build instructions below.
+ARG PG_MAJOR=17
+
+# Directory (relative to the build context) containing the downloaded package.
+ARG DEB_DIR=dist
+
+# Install runtime dependencies and the pg_durable package.
+# ca-certificates is needed for native-tls HTTPS from df.http().
+COPY ${DEB_DIR}/pg-durable-postgresql-${PG_MAJOR}_*_amd64.deb /tmp/pg_durable.deb
+RUN apt-get update && apt-get install -y \
+        libssl3 \
+        ca-certificates \
+    && dpkg -i /tmp/pg_durable.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/pg_durable.deb
+
+# Create the extension on first database initialization.
+RUN mkdir -p /docker-entrypoint-initdb.d && \
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'set -e' \
+        'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL' \
+        '    CREATE EXTENSION IF NOT EXISTS pg_durable;' \
+        'EOSQL' \
+        'echo "pg_durable extension created successfully"' \
+        > /docker-entrypoint-initdb.d/01-init-pg-durable.sh && \
+    chmod +x /docker-entrypoint-initdb.d/01-init-pg-durable.sh
+
+# Configure the background worker. enable_superuser_instances lets the default
+# postgres superuser run durable functions for a frictionless demo (not a
+# production-safe setting).
+RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.enable_superuser_instances = on" >> /usr/share/postgresql/postgresql.conf.sample
+
+EXPOSE 5432
