@@ -269,6 +269,9 @@ pub fn instance_executions(
 }
 
 /// Get system-wide durable function metrics.
+///
+/// Restricted to superusers.  Regular users can call `df.list_instances()` to
+/// see counts scoped to their own workflows.
 #[pg_extern(schema = "df")]
 pub fn metrics() -> TableIterator<
     'static,
@@ -281,6 +284,22 @@ pub fn metrics() -> TableIterator<
         name!(total_events, i64),
     ),
 > {
+    // Superuser check: df.metrics() exposes system-wide aggregate counts that
+    // span all users.  Restrict access to superusers to prevent information
+    // disclosure about other users' workflow activity.
+    let user_oid = unsafe { pgrx::pg_sys::GetUserId() };
+    match crate::types::is_role_superuser_oid(user_oid) {
+        Ok(true) => {}
+        Ok(false) => {
+            pgrx::error!(
+                "permission denied: df.metrics() is restricted to superusers; \
+                 use df.list_instances() to view your own workflow summary"
+            );
+        }
+        Err(e) => {
+            pgrx::error!("could not verify superuser status: {}", e);
+        }
+    }
     let pg_conn_str = postgres_connection_string();
 
     let rt = match tokio::runtime::Builder::new_current_thread()

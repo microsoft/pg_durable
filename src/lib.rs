@@ -369,9 +369,9 @@ AS $fn$
 DECLARE
     grant_opt TEXT := '';
     func_sig TEXT;
-    -- Explicit list of df.* functions to grant.  Sensitive functions
-    -- (df.http, df.grant_usage, df.revoke_usage) are excluded from this
-    -- list and granted conditionally below.
+    -- Explicit list of df.* functions to grant.  Sensitive/admin-only functions
+    -- (df.http, df.grant_usage, df.revoke_usage, df.metrics) are excluded from
+    -- this list and granted conditionally below.
     func_sigs TEXT[] := ARRAY[
         -- DSL functions
         'df.sql(text)',
@@ -403,7 +403,6 @@ DECLARE
         'df.instance_info(text)',
         'df.instance_nodes(text, integer)',
         'df.instance_executions(text, integer)',
-        'df.metrics()',
         -- Internal helpers (operators, version, etc.)
         'df.as_op(text, text)',
         'df.if_then_op(text, text)',

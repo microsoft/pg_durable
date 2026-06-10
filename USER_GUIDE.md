@@ -1431,13 +1431,16 @@ SELECT * FROM df.instance_nodes('a1b2c3d4', 10);
 
 **Columns:** `execution_id`, `node_id`, `node_type`, `query`, `result_name`, `left_node`, `right_node`, `status`, `result`
 
-### System Metrics
+### System Metrics (Superusers Only)
 
 ```sql
+-- Requires superuser; non-superusers should use df.list_instances() instead.
 SELECT * FROM df.metrics();
 ```
 
 **Columns:** `total_instances`, `running_instances`, `completed_instances`, `failed_instances`, `total_executions`, `total_events`
+
+> **Note:** `df.metrics()` returns system-wide aggregate counts across all users and is restricted to superusers. Non-superusers calling this function will receive a permission-denied error. Use `df.list_instances()` to view a summary of your own workflows.
 
 ### Quick Status Check
 
@@ -1629,7 +1632,8 @@ GRANT EXECUTE ON FUNCTION df.list_instances(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_info(text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_nodes(text, integer) TO app_role;
 GRANT EXECUTE ON FUNCTION df.instance_executions(text, integer) TO app_role;
-GRANT EXECUTE ON FUNCTION df.metrics() TO app_role;
+-- Note: df.metrics() is superuser-only and is NOT included in df.grant_usage().
+-- Superusers can call it without an explicit GRANT.
 GRANT EXECUTE ON FUNCTION df.as_op(text, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.if_then_op(text, text) TO app_role;
 GRANT EXECUTE ON FUNCTION df.if_else_op(text, text) TO app_role;
