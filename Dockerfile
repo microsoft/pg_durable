@@ -44,8 +44,13 @@ COPY src ./src
 COPY pg_durable.control ./
 COPY sql ./sql
 
+# HTTP egress policy compiled into the extension (see src/ssrf.rs).
+#   http-allow-test-domains (default) — Azure suffixes + E2E test domains, used by CI.
+#   http-allow-all                    — all SSRF protections disabled (testing/learning images only).
+ARG HTTP_FEATURE=http-allow-test-domains
+
 # Build the extension
-RUN cargo pgrx package --features http-allow-test-domains --pg-config /usr/lib/postgresql/17/bin/pg_config
+RUN cargo pgrx package --features "${HTTP_FEATURE}" --pg-config /usr/lib/postgresql/17/bin/pg_config
 
 # Stage 2: Runtime image with PostgreSQL
 FROM postgres:17-bookworm

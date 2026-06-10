@@ -1,0 +1,85 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the PostgreSQL License.
+
+name: Build and smoke-test pg_durable image
+description: >
+  Builds the pg_durable Docker image for a single architecture, loads it into
+  the local Docker daemon, and runs a smoke test that boots PostgreSQL, creates
+  the extension, and reads df.version(). Shared by Docker CI and the publish
+  workflow so the build + verification logic lives in one place.
+
+inputs:
+  image-ref:
+    description: Local image tag to build and smoke-test (e.g. pg_durable:smoke).
+    required: true
+  http-feature:
+    description: Cargo HTTP feature compiled into the image (see src/ssrf.rs).
+    required: false
+    default: http-allow-test-domains
+  platform:
+    description: Single platform to build for local load + smoke test.
+    required: false
+    default: linux/amd64
+
+runs:
+  using: composite
+  steps:
+    - name: Build image (load for smoke test)
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: ${{ inputs.platform }}
+        load: true
+        push: false
+        tags: ${{ inputs.image-ref }}
+        build-args: |
+          HTTP_FEATURE=${{ inputs.http-feature }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Smoke test — container starts and extension loads
+      shell: bash
+      run: |
+        set -euo pipefail
+        CONTAINER="pg_durable_smoke_$$"
+        cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+        trap cleanup EXIT
+
+        docker run -d \
+          --name "$CONTAINER" \
+          -e POSTGRES_HOST_AUTH_METHOD=trust \
+          "${{ inputs.image-ref }}"
+
+        echo -n "Waiting for PostgreSQL"
+        READY_COUNT=0
+        for _ in $(seq 1 90); do
+          if docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
+            READY_COUNT=$((READY_COUNT + 1))
+            # Require 3 consecutive ready checks to clear the post-init restart.
+            if [ "$READY_COUNT" -ge 3 ]; then
+              echo " ready!"
+              break
+            fi
+          else
+            READY_COUNT=0
+          fi
+          echo -n "."
+          sleep 1
+        done
+
+        if [ "$READY_COUNT" -lt 3 ]; then
+          echo " TIMEOUT"
+          docker logs "$CONTAINER"
+          exit 1
+        fi
+
+        # Allow the background worker to initialize.
+        sleep 2
+
+        echo "Creating extension..."
+        docker exec "$CONTAINER" psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_durable;"
+
+        echo "Verifying extension version..."
+        VERSION="$(docker exec "$CONTAINER" psql -U postgres -t -c "SELECT df.version();")"
+        echo "pg_durable version: $(echo "$VERSION" | tr -d ' \n')"

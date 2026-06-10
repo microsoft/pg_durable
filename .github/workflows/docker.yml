@@ -16,6 +16,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/docker.yml'
+      - '.github/actions/docker-build-smoke/**'
       - 'Dockerfile'
       - 'docker-compose.yml'
       - 'docker-entrypoint-initdb.d/**'
@@ -47,70 +48,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --tag ${{ env.IMAGE_NAME }} \
-            --file Dockerfile \
-            .
-
-      - name: Smoke test — container starts and extension loads
-        run: |
-          CONTAINER="pg_durable_smoke"
-          docker run -d \
-            --name "$CONTAINER" \
-            -e POSTGRES_HOST_AUTH_METHOD=trust \
-            ${{ env.IMAGE_NAME }}
-
-          echo -n "Waiting for PostgreSQL"
-          READY_COUNT=0
-          for i in $(seq 1 90); do
-            if docker exec "$CONTAINER" pg_isready -U postgres &>/dev/null; then
-              READY_COUNT=$((READY_COUNT + 1))
-              if [ $READY_COUNT -ge 3 ]; then
-                echo " ready!"
-                break
-              fi
-            else
-              READY_COUNT=0
-            fi
-            echo -n "."
-            sleep 1
-          done
-
-          if [ $READY_COUNT -lt 3 ]; then
-            echo " TIMEOUT"
-            docker logs "$CONTAINER"
-            exit 1
-          fi
-
-          # Allow background worker to initialize
-          sleep 2
-
-          echo "Creating extension..."
-          docker exec "$CONTAINER" psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_durable;"
-
-          echo "Verifying extension version..."
-          VERSION=$(docker exec "$CONTAINER" psql -U postgres -t -c "SELECT df.version();")
-          echo "pg_durable version: $(echo "$VERSION" | tr -d ' \n')"
-
-          docker rm -f "$CONTAINER"
+      - name: Build and smoke-test image
+        uses: ./.github/actions/docker-build-smoke
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}
 
       - name: Run E2E tests in Docker
         env:
           PG_DURABLE_LOG_DIR: /tmp/docker-logs
         run: ./scripts/test-e2e-docker.sh
-
-      - name: Collect smoke-test container logs on failure
-        if: failure()
-        run: |
-          mkdir -p /tmp/docker-logs
-          # The E2E script exports its own logs via export_logs().
-          # Capture smoke-test container logs if it still exists.
-          if docker inspect pg_durable_smoke &>/dev/null; then
-            docker logs pg_durable_smoke &> /tmp/docker-logs/smoke-docker-stdout.log || true
-            docker cp pg_durable_smoke:/var/lib/postgresql/data/log/. /tmp/docker-logs/ 2>/dev/null || true
-          fi
 
       - name: Upload container logs on failure
         if: failure()

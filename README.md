@@ -105,7 +105,9 @@ SELECT df.start(
 
 Tagged releases publish Debian packages for PostgreSQL 17 and 18 on amd64 from the GitHub release assets. Packages are named `pg-durable-postgresql-<PG major>_<pg_durable version>-1_<arch>.deb` and install the extension library, control file, and SQL upgrade files into the matching PostgreSQL installation directories.
 
-Tagged releases and pushes to `main` also publish a ready-to-run multi-arch Docker image to GitHub Container Registry: `ghcr.io/microsoft/pg_durable` (`latest`, `vX.Y.Z`, `X.Y.Z`, and `pg17` on release tags; `edge` on `main`).
+Tagged releases also publish a ready-to-run multi-arch (`linux/amd64`, `linux/arm64`) Docker image to GitHub Container Registry: `ghcr.io/microsoft/pg_durable`. Each release publishes immutable `X.Y.Z-pg17`, `vX.Y.Z-pg17`, and `sha-<commit>-pg17` tags; the highest stable release additionally updates the floating `pg17` and `latest` tags. The PG major version is part of each tag so future PostgreSQL versions (for example `pg18`) can be published alongside.
+
+> **Warning:** The published Docker image is built with the `http-allow-all` Cargo feature (all SSRF / outbound-HTTP protections disabled) and other test-friendly defaults. It is intended for **evaluating and learning pg_durable only — do not use it in production.** For production, install the Debian package, which is built with a restrictive HTTP allow-list feature (`http-allow-azure-domains`).
 
 After installing a package, add `pg_durable` to `shared_preload_libraries`, restart PostgreSQL, and create the extension in the configured pg_durable database:
 
@@ -164,6 +166,7 @@ A VS Code Dev Container (`.devcontainer/`) provides Rust, cargo-pgrx, and Postgr
 
 ```bash
 # Pull prebuilt image (extension preloaded and created on first init)
+# NOTE: testing/learning image only — not for production (see Packages section).
 docker run -d --name pg_durable \
   -p 5432:5432 \
   -e POSTGRES_PASSWORD=secret \
