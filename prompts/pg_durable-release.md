@@ -278,6 +278,43 @@ docker pull ${ACR_REGISTRY:-myregistry.azurecr.io}/${ACR_IMAGE:-pg_durable}:late
 az acr repository show-tags --name ${ACR_REGISTRY%%.*} --repository ${ACR_IMAGE:-pg_durable} --output table
 ```
 
+## Step 7b: Publish the Public Image to GHCR
+
+The `Docker Publish` workflow (`.github/workflows/docker-publish.yml`) builds the
+public `ghcr.io/microsoft/pg_durable` image by installing the released `.deb`
+on top of the official `postgres` image (PG 17 and 18, `linux/amd64`). It runs
+automatically when a GitHub release is **published**, and can also be triggered
+manually for re-runs or backfills.
+
+> The matching `.deb` assets must already be attached to the GitHub release
+> before this workflow runs.
+
+### Automatic (release event)
+
+Publishing a GitHub release triggers the workflow with no inputs. It pushes the
+immutable `X.Y.Z-pg<major>` / `vX.Y.Z-pg<major>` tags, and moves the floating
+`pg<major>` (and `latest` for PG 17) tags only if the release is the highest
+stable version.
+
+### Manual (`workflow_dispatch`) inputs
+
+| Input | Default | When to set it |
+|-------|---------|----------------|
+| `ref` | *(required)* | The release tag to publish, e.g. `v0.2.2`. |
+| `dry_run` | `true` | Leave `true` to build + smoke-test without pushing. Set `false` to actually publish. |
+| `overwrite` | `false` | Set `true` only to deliberately replace an already-published immutable `X.Y.Z-pg<major>` tag. Floating tags (`pg<major>`, `latest`) always move regardless. |
+
+Typical flows:
+
+- **Verify only:** dispatch with `ref=vX.Y.Z`, `dry_run=true` (default) — builds and runs the end-to-end smoke test, pushes nothing.
+- **Publish:** dispatch with `ref=vX.Y.Z`, `dry_run=false`.
+- **Re-publish a botched immutable tag:** `ref=vX.Y.Z`, `dry_run=false`, `overwrite=true`.
+
+### Verify
+
+Confirm the new tags at
+<https://github.com/microsoft/pg_durable/pkgs/container/pg_durable>.
+
 ## Step 8: Review, Commit, and Push
 
 ### 8.1 Review All Changes

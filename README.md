@@ -109,6 +109,28 @@ Tagged releases also publish a ready-to-run Docker image (`linux/amd64`) for Pos
 
 > **Warning:** The published Docker image is intended for **evaluating and learning pg_durable only — do not use it in production.** It enables superuser durable instances for a frictionless out-of-the-box demo. Its HTTP egress policy is whatever the released Debian package was built with (`http-allow-azure-domains` — Azure domains only). Multi-arch (`linux/arm64`) images are not published yet; they will follow once arm64 Debian packages are available.
 
+Run the published image — PostgreSQL 17 and 18 can run side by side on different host ports:
+
+```bash
+# PostgreSQL 17 (the `latest` tag also points at the newest PG17 release)
+docker run -d --name pg_durable_pg17 \
+  -p 5432:5432 \
+  -e POSTGRES_PASSWORD=secret \
+  ghcr.io/microsoft/pg_durable:pg17
+
+# PostgreSQL 18 (run alongside PG17 on a different host port)
+docker run -d --name pg_durable_pg18 \
+  -p 5433:5432 \
+  -e POSTGRES_PASSWORD=secret \
+  ghcr.io/microsoft/pg_durable:pg18
+
+# Connect with psql (PG17 on 5432, PG18 on 5433)
+psql "postgresql://postgres:secret@localhost:5432/postgres"
+psql "postgresql://postgres:secret@localhost:5433/postgres"
+```
+
+The extension is preloaded and created in the `postgres` database on first init. `POSTGRES_DB` is ignored — pg_durable always installs into `postgres` so the extension and the background worker never target different databases. For reproducible deployments, pin an immutable `X.Y.Z-pg<major>` tag (for example `0.2.2-pg17`) rather than the floating `pg<major>`/`latest` tags; immutable tags are never overwritten once published.
+
 After installing a package, add `pg_durable` to `shared_preload_libraries`, restart PostgreSQL, and create the extension in the configured pg_durable database:
 
 ```sql
@@ -164,35 +186,17 @@ A VS Code Dev Container (`.devcontainer/`) provides Rust, cargo-pgrx, and Postgr
 
 #### Docker
 
-The published images (extension preloaded and created on first init) are testing/learning images only — not for production (see Packages section). Browse all available tags at <https://github.com/microsoft/pg_durable/pkgs/container/pg_durable>.
+To run the prebuilt published image, see the [Packages](#packages) section. For local development and testing, build and run from source:
 
 ```bash
-# PostgreSQL 17 (the `latest` tag also points at the newest PG17 release)
-docker run -d --name pg_durable_pg17 \
-  -p 5432:5432 \
-  -e POSTGRES_PASSWORD=secret \
-  ghcr.io/microsoft/pg_durable:pg17
-
-# PostgreSQL 18 (run alongside PG17 on a different host port)
-docker run -d --name pg_durable_pg18 \
-  -p 5433:5432 \
-  -e POSTGRES_PASSWORD=secret \
-  ghcr.io/microsoft/pg_durable:pg18
-
-# Connect with psql (PG17 on 5432, PG18 on 5433)
-psql "postgresql://postgres:secret@localhost:5432/postgres"
-psql "postgresql://postgres:secret@localhost:5433/postgres"
-```
-
-For local development and testing, build and run from source instead:
-
-```bash
-# Build and test
+# Build and test (source Dockerfile — compiles the extension)
 ./scripts/test-e2e-docker.sh --rebuild
 
-# Optional: Deploy to ACR (for custom PG17 image with pg_durable baked-in)
+# Optional: Deploy to ACR (for a custom PG17 image with pg_durable baked-in)
 ./scripts/deploy-acr.sh
 ```
+
+> The published GHCR image installs the released `.deb` on top of the official `postgres` image; the source `Dockerfile` used here compiles the extension and is meant for CI and local development. They are different artifacts.
 
 ## Multi-User Setup
 

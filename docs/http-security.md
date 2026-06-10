@@ -34,7 +34,10 @@ or SQL.
 | `http-allow-all` | All URLs; SSRF IP blocklist and allow-list are both disabled | Local development only |
 
 The scripts and CI use `http-allow-test-domains` so that the HTTP E2E tests
-pass.  The production `Dockerfile` uses `http-allow-azure-domains`.
+pass — this includes the source-built `Dockerfile` used for local dev and CI.
+The released Debian packages are built with `http-allow-azure-domains`, so the
+published Docker image (`Dockerfile.release`, which installs that package)
+inherits the `http-allow-azure-domains` policy.
 
 ### When no feature is set
 
