@@ -2525,6 +2525,188 @@ mod tests {
         // Cancel immediately so the BGW does not attempt to execute this instance.
         Spi::run(&format!("SELECT df.cancel('{instance_id}')")).unwrap();
     }
+
+    // ========================================================================
+    // Regression Tests - Correctness Bugs from Reliability Audit
+    // ========================================================================
+
+    // --- C1: Empty result set must evaluate as false in conditions ---
+
+    #[pg_test]
+    fn test_evaluate_condition_empty_rows_is_false() {
+        use crate::types::evaluate_condition;
+        // Simulates a SQL condition query that returns zero rows
+        let empty_result = r#"{"rows":[],"row_count":0}"#;
+        assert_eq!(
+            evaluate_condition(empty_result).unwrap(),
+            false,
+            "Empty result set should evaluate as false for conditions"
+        );
+    }
+
+    #[pg_test]
+    fn test_evaluate_condition_single_true_row() {
+        use crate::types::evaluate_condition;
+        let result = r#"{"rows":[{"col":true}],"row_count":1}"#;
+        assert_eq!(
+            evaluate_condition(result).unwrap(),
+            true,
+            "Single row with true value should be truthy"
+        );
+    }
+
+    #[pg_test]
+    fn test_evaluate_condition_single_false_row() {
+        use crate::types::evaluate_condition;
+        let result = r#"{"rows":[{"col":false}],"row_count":1}"#;
+        assert_eq!(
+            evaluate_condition(result).unwrap(),
+            false,
+            "Single row with false value should be falsy"
+        );
+    }
+
+    #[pg_test]
+    fn test_evaluate_condition_zero_count_is_falsy() {
+        use crate::types::evaluate_condition;
+        // A query like SELECT count(*) FROM empty_table returns 0
+        let result = r#"{"rows":[{"count":0}],"row_count":1}"#;
+        assert_eq!(
+            evaluate_condition(result).unwrap(),
+            false,
+            "Row with zero value should be falsy"
+        );
+    }
+
+    // --- H1: Recursion depth limit rejects overly deep graphs ---
+
+    #[pg_test]
+    fn test_validate_rejects_graph_exceeding_depth_limit() {
+        use crate::types::MAX_GRAPH_DEPTH;
+        // Build a chain deeper than MAX_GRAPH_DEPTH
+        let mut node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+        for _ in 0..MAX_GRAPH_DEPTH + 1 {
+            node = Durofut {
+                node_type: "THEN".to_string(),
+                left_node: Some(Box::new(node)),
+                right_node: Some(Box::new(Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+        }
+        let result = node.validate_recursive();
+        assert!(
+            result.is_err(),
+            "Graph exceeding depth limit must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("maximum nesting depth"),
+            "Error should mention depth limit, got: {err}"
+        );
+    }
+
+    #[pg_test]
+    fn test_validate_accepts_graph_within_depth_limit() {
+        // A moderately deep graph (10 levels) should be fine
+        let mut node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            node = Durofut {
+                node_type: "THEN".to_string(),
+                left_node: Some(Box::new(node)),
+                right_node: Some(Box::new(Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+        }
+        let result = node.validate_recursive();
+        assert!(
+            result.is_ok(),
+            "Graph within depth limit should be accepted"
+        );
+    }
+
+    // --- H2: Node count limit rejects overly large graphs ---
+
+    #[pg_test]
+    fn test_start_rejects_graph_exceeding_node_count() {
+        use crate::types::MAX_GRAPH_NODES;
+
+        // Build a wide graph that exceeds MAX_GRAPH_NODES by chaining sequences.
+        // Each ~> produces a THEN node + right SQL node, so N sequences = ~2N nodes.
+        // We need MAX_GRAPH_NODES/2 + 1 sequences to exceed the limit.
+        let needed = MAX_GRAPH_NODES / 2 + 1;
+        let mut expr = String::from("'SELECT 1'");
+        for _ in 0..needed {
+            expr.push_str(" ~> 'SELECT 1'");
+        }
+
+        // This should fail at df.start() with a node count error.
+        // Use SPI to call df.start and expect an error.
+        let sql = format!("SELECT df.start({expr})");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<String>(&sql).ok()
+        }));
+
+        // pgrx::error! causes a panic that gets caught here
+        assert!(
+            result.is_err(),
+            "df.start() should reject graph exceeding node count limit"
+        );
+    }
+
+    // --- H4: try_from_json returns error instead of panicking ---
+
+    #[pg_test]
+    fn test_try_from_json_invalid_json_returns_error() {
+        let result = Durofut::try_from_json("not valid json at all");
+        assert!(
+            result.is_err(),
+            "try_from_json should return Err on invalid JSON"
+        );
+        assert!(
+            result.unwrap_err().contains("failed to deserialize"),
+            "Error message should mention deserialization failure"
+        );
+    }
+
+    #[pg_test]
+    fn test_try_from_json_valid_json_succeeds() {
+        let json = crate::dsl::sql("SELECT 42");
+        let result = Durofut::try_from_json(&json);
+        assert!(
+            result.is_ok(),
+            "try_from_json should succeed on valid Durofut JSON"
+        );
+        let d = result.unwrap();
+        assert_eq!(d.node_type, "SQL");
+        assert_eq!(d.query, Some("SELECT 42".to_string()));
+    }
+
+    #[pg_test]
+    fn test_try_from_json_corrupted_node_type_returns_error() {
+        // Valid JSON structure but missing required fields
+        let corrupted = r#"{"not_a_durofut": true}"#;
+        let result = Durofut::try_from_json(corrupted);
+        assert!(
+            result.is_err(),
+            "try_from_json should return Err on structurally invalid Durofut"
+        );
+    }
 }
 
 /// Required by `cargo pgrx test`
