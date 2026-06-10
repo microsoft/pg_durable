@@ -721,7 +721,16 @@ pub fn start(
         current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
         legacy_login_role: bool,
+        node_count: &mut usize,
     ) -> String {
+        *node_count += 1;
+        if *node_count > crate::types::MAX_GRAPH_NODES {
+            pgrx::error!(
+                "Workflow exceeds maximum node count of {}. \
+                 Simplify the workflow or break it into multiple instances.",
+                crate::types::MAX_GRAPH_NODES
+            );
+        }
         let node_id = short_id();
 
         // Recursively insert children FIRST to get their IDs
@@ -732,6 +741,7 @@ pub fn start(
                 current_user_oid,
                 database,
                 legacy_login_role,
+                node_count,
             )
         });
         let right_id = node.right_node.as_ref().map(|n| {
@@ -741,6 +751,7 @@ pub fn start(
                 current_user_oid,
                 database,
                 legacy_login_role,
+                node_count,
             )
         });
 
@@ -752,6 +763,7 @@ pub fn start(
                 current_user_oid,
                 database,
                 legacy_login_role,
+                node_count,
             ))
         }) {
             Ok(updated_query) => updated_query,
@@ -826,12 +838,14 @@ pub fn start(
     }
 
     let legacy_login_role = legacy_login_role_schema();
+    let mut node_count: usize = 0;
     let root_node_id = insert_nodes(
         &durofut,
         &instance_id,
         current_user_oid,
         database,
         legacy_login_role,
+        &mut node_count,
     );
 
     // Build parameterized args for the instance INSERT

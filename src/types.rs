@@ -91,6 +91,14 @@ pub async fn is_role_superuser_name(pool: &sqlx::PgPool, role_name: &str) -> Res
         .and_then(|opt| opt.ok_or_else(|| format!("role '{}' not found in pg_roles", role_name)))
 }
 
+/// Maximum nesting depth for workflow graphs. Prevents stack overflow from
+/// deeply nested operator chains (e.g., 10,000 levels of `~>`).
+pub const MAX_GRAPH_DEPTH: usize = 256;
+
+/// Maximum number of nodes allowed in a single workflow instance. Prevents
+/// unbounded INSERTs and memory exhaustion from extremely large graphs.
+pub const MAX_GRAPH_NODES: usize = 10_000;
+
 /// Generate a short 8-character instance ID from a UUID
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();
@@ -182,6 +190,9 @@ pub async fn connect_as_user(
     use sqlx::postgres::PgConnectOptions;
     use sqlx::Connection;
 
+    /// Connection timeout for per-user SQL connections (seconds).
+    const CONNECT_TIMEOUT_SECS: u64 = 30;
+
     let normalized_user = normalize_role_name_for_connection(user)?;
     let default_db = target_database();
     let db = database.unwrap_or(&default_db);
@@ -195,16 +206,28 @@ pub async fn connect_as_user(
         options = options.host(&host);
     }
 
-    let mut conn = sqlx::postgres::PgConnection::connect_with(&options)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to connect to database '{}' as '{}'. Error: {}",
-                db,
-                normalized_user.as_ref(),
-                e
-            )
-        })?;
+    let connect_future = sqlx::postgres::PgConnection::connect_with(&options);
+    let mut conn = tokio::time::timeout(
+        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        connect_future,
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "Connection to database '{}' as '{}' timed out after {}s",
+            db,
+            normalized_user.as_ref(),
+            CONNECT_TIMEOUT_SECS
+        )
+    })?
+    .map_err(|e| {
+        format!(
+            "Failed to connect to database '{}' as '{}'. Error: {}",
+            db,
+            normalized_user.as_ref(),
+            e
+        )
+    })?;
 
     // Mark this connection as running inside a workflow.
     // Currently used to prevent variable mutations (setvar/unsetvar/clearvars)
@@ -283,6 +306,10 @@ pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
 pub fn evaluate_condition(result: &str) -> Result<bool, String> {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
         if let Some(rows) = json.get("rows").and_then(|r| r.as_array()) {
+            // Empty result set → falsy (no rows means condition is not met)
+            if rows.is_empty() {
+                return Ok(false);
+            }
             if let Some(first_row) = rows.first() {
                 if let Some(obj) = first_row.as_object() {
                     if let Some((_, value)) = obj.iter().next() {
@@ -879,6 +906,16 @@ impl Durofut {
         serde_json::to_string(self).expect("failed to serialize Durofut")
     }
 
+    /// Fallible deserialization from JSON. Preferred over `from_json()` in
+    /// production code paths where corrupted data must not crash the worker.
+    pub fn try_from_json(s: &str) -> Result<Self, String> {
+        serde_json::from_str(s)
+            .map_err(|e| format!("failed to deserialize Durofut: {}", e))
+    }
+
+    /// Deserialize from JSON, panicking on failure.
+    /// Suitable for test code only — use `try_from_json()` in production paths
+    /// where invalid input should surface an error rather than crash.
     pub fn from_json(s: &str) -> Self {
         serde_json::from_str(s).expect("failed to deserialize Durofut")
     }
@@ -955,6 +992,17 @@ impl Durofut {
     /// Validate a Durofut node and all its children have valid node_types.
     /// Used during insertion in df.start() to catch invalid nested nodes.
     pub fn validate_recursive(&self) -> Result<(), String> {
+        self.validate_recursive_inner(0)
+    }
+
+    fn validate_recursive_inner(&self, depth: usize) -> Result<(), String> {
+        if depth > MAX_GRAPH_DEPTH {
+            return Err(format!(
+                "Graph exceeds maximum nesting depth of {}. \
+                 Simplify the workflow or break it into multiple instances.",
+                MAX_GRAPH_DEPTH
+            ));
+        }
         if !VALID_NODE_TYPES.contains(&self.node_type.as_str()) {
             return Err(format!(
                 "Unknown node_type '{}'. Valid types: {}",
@@ -963,13 +1011,14 @@ impl Durofut {
             ));
         }
         if let Some(ref left) = self.left_node {
-            left.validate_recursive()?;
+            left.validate_recursive_inner(depth + 1)?;
         }
         if let Some(ref right) = self.right_node {
-            right.validate_recursive()?;
+            right.validate_recursive_inner(depth + 1)?;
         }
         // Validate config-embedded nodes (condition_node, extra_nodes)
-        self.for_each_config_child(|child| child.validate_recursive())?;
+        let d = depth + 1;
+        self.for_each_config_child(|child| child.validate_recursive_inner(d))?;
         Ok(())
     }
 
@@ -1160,6 +1209,9 @@ mod tests {
             (r#"{"rows":[{"col":"no"}]}"#, false, "string 'no'"),
             (r#"{"rows":[{"col":0}]}"#, false, "int 0"),
             (r#"{"rows":[{"col":null}]}"#, false, "null"),
+            // Empty result set (no rows) should be falsy
+            (r#"{"rows":[],"row_count":0}"#, false, "empty rows"),
+            (r#"{"rows":[]}"#, false, "empty rows (no row_count)"),
         ];
 
         for (input, expected, label) in &cases {
@@ -1432,5 +1484,58 @@ mod tests {
         let out =
             substitute_all_raw("Hello $doc.name", &results, &empty_vars(), &sys_vars()).unwrap();
         assert_eq!(out, "Hello Alice");
+    }
+
+    #[test]
+    fn test_validate_recursive_depth_limit() {
+        // Build a chain deeper than MAX_GRAPH_DEPTH
+        let mut node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+        for _ in 0..MAX_GRAPH_DEPTH + 1 {
+            node = Durofut {
+                node_type: "THEN".to_string(),
+                left_node: Some(Box::new(node)),
+                right_node: Some(Box::new(Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+        }
+        let result = node.validate_recursive();
+        assert!(result.is_err(), "should reject graph exceeding depth limit");
+        assert!(
+            result.unwrap_err().contains("maximum nesting depth"),
+            "error should mention depth limit"
+        );
+    }
+
+    #[test]
+    fn test_validate_recursive_within_depth_limit() {
+        // Build a chain at exactly the limit — should succeed
+        let mut node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+        // MAX_GRAPH_DEPTH - 1 nestings (the root counts as depth 0)
+        for _ in 0..MAX_GRAPH_DEPTH - 1 {
+            node = Durofut {
+                node_type: "THEN".to_string(),
+                left_node: Some(Box::new(node)),
+                right_node: Some(Box::new(Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+        }
+        let result = node.validate_recursive();
+        assert!(result.is_ok(), "should accept graph within depth limit");
     }
 }
