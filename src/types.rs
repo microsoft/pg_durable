@@ -590,6 +590,10 @@ fn extract_column_value(
 
 /// Expand `$name.*` into an inline `VALUES` subquery (SQL) or JSON array (raw).
 fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, String> {
+    /// Maximum number of rows allowed in `$name.*` expansion to prevent
+    /// unbounded SQL string allocation from large result sets.
+    const MAX_ROWSET_EXPANSION: usize = 10_000;
+
     let json: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| format!("${name}.* — invalid result JSON: {e}"))?;
 
@@ -597,6 +601,15 @@ fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, S
         .get("rows")
         .and_then(|r| r.as_array())
         .ok_or_else(|| format!("${name}.* — invalid result format"))?;
+
+    if rows.len() > MAX_ROWSET_EXPANSION {
+        return Err(format!(
+            "${name}.* — result has {} rows, exceeding the maximum of {} for row-set expansion. \
+             Use pagination or intermediate tables for large result sets.",
+            rows.len(),
+            MAX_ROWSET_EXPANSION
+        ));
+    }
 
     if !for_sql {
         return Ok(serde_json::to_string(rows).unwrap());
@@ -858,6 +871,10 @@ pub struct FunctionInput {
     pub label: Option<String>,
     #[serde(default)]
     pub vars: std::collections::HashMap<String, String>,
+    /// Loop iteration counter, incremented on each `continue_as_new`.
+    /// Used to enforce a maximum iteration safeguard.
+    #[serde(default)]
+    pub loop_iteration: u64,
 }
 
 /// Configuration for HTTP requests
