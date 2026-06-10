@@ -1496,15 +1496,52 @@ SELECT df.start('SELECT * FROM bob_data');
 
 ### How Identity Is Captured
 
-When you call `df.start()`, pg_durable captures two pieces of identity:
+When you call `df.start()`, pg_durable captures your **effective role** (`current_user`) as the execution identity. This is the role under whose privileges all SQL nodes in the workflow will run.
 
-1. **Login role** (`session_user`) - The user you authenticated as
-2. **Effective role** (`current_user`) - Your current effective privileges (after `SET ROLE`, if used)
+> **Default behavior:** `df.start()` calls `GetUserId()`, which returns `current_user` — the effective PostgreSQL role at the moment of the call. If you have issued `SET ROLE analysts`, the captured identity is `analysts`, not your login role.
 
-The background worker then:
-1. Connects to PostgreSQL as your **login role**
-2. Executes `SET ROLE` to your **effective role** 
-3. Runs your SQL with the correct privileges
+The background worker then connects to PostgreSQL as the captured identity and runs all SQL nodes with that role's privileges.
+
+### ⚠️ SECURITY DEFINER Warning
+
+> **Security risk (medium severity):** Calling `df.start()` inside a `SECURITY DEFINER` function captures the **function owner's** identity, not the caller's identity. Any SQL embedded in the `fut` argument will execute with the owner's privileges — even if supplied by an unprivileged caller.
+
+**Example of the dangerous pattern:**
+
+```sql
+-- Admin creates a "helpful" wrapper
+CREATE FUNCTION run_report(q TEXT) RETURNS TEXT
+LANGUAGE SQL SECURITY DEFINER AS $$
+    SELECT df.start(df.sql(q), 'report');
+$$;
+GRANT EXECUTE ON FUNCTION run_report TO reporting_role;
+
+-- Attacker (reporting_role) escalates:
+SELECT run_report('DROP TABLE admin_secrets');
+-- ❌ DANGER: SQL executes as the admin who owns run_report, not reporting_role
+```
+
+This is standard PostgreSQL `SECURITY DEFINER` semantics. pg_durable captures `current_user` at `df.start()` time, and inside a `SECURITY DEFINER` function `current_user` is the function owner.
+
+**Mitigations:**
+
+1. **Avoid passing untrusted SQL through `SECURITY DEFINER` wrappers** — never let callers supply the `fut` argument (or any SQL fragments) to `df.start()` from a `SECURITY DEFINER` context unless you explicitly intend definer-level execution.
+
+2. **Enable `pg_durable.start_use_session_user`** — set this GUC to `on` to make `df.start()` capture `session_user` (the authenticated login role) instead of `current_user`. This prevents a `SECURITY DEFINER` wrapper from escalating the submitted identity to the function owner:
+
+   ```sql
+   -- In postgresql.conf or ALTER DATABASE SET:
+   pg_durable.start_use_session_user = on
+
+   -- Or for the current session (superuser only):
+   SET pg_durable.start_use_session_user = on;
+   ```
+
+   With this GUC enabled, even inside a `SECURITY DEFINER` wrapper the captured identity will be the login role of the session, not the function owner. The workflow will execute with the caller's own privileges, making the dangerous example above safe.
+
+   > **Note:** Enabling `start_use_session_user` changes the identity used for all `df.start()` calls in scope, including legitimate uses of `SET ROLE`. If your application relies on `SET ROLE` to submit workflows under a group role, switching to `session_user` capture will cause the workflow to run under the login role instead of the group role.
+
+3. **Use `SECURITY INVOKER` (the default)** — PostgreSQL functions are `SECURITY INVOKER` by default. Avoid `SECURITY DEFINER` unless necessary, and never combine it with user-supplied `df.start()` calls.
 
 ### Working with Group Roles
 
@@ -1565,6 +1602,7 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 2. **Review df.vars usage** — Variables are scoped per-user via RLS, but avoid storing secrets in plain text
 3. **Use labels carefully** — Instance labels are visible only to the submitting user (RLS-filtered) and superusers
 4. **Monitor instances** — Superusers can use `df.list_instances()` to see all users' instances; regular users see only their own
+5. **Avoid `SECURITY DEFINER` wrappers around `df.start()`** — See [⚠️ SECURITY DEFINER Warning](#️-security-definer-warning) above. Never allow untrusted callers to supply SQL to `df.start()` from a `SECURITY DEFINER` context. Consider enabling `pg_durable.start_use_session_user = on` as a defence-in-depth measure.
 
 ### Privilege Grants
 
