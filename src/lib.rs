@@ -2643,29 +2643,42 @@ mod tests {
     // --- H2: Node count limit rejects overly large graphs ---
 
     #[pg_test]
-    fn test_start_rejects_graph_exceeding_node_count() {
+    fn test_validate_rejects_graph_exceeding_node_count() {
         use crate::types::MAX_GRAPH_NODES;
 
-        // Build a wide graph that exceeds MAX_GRAPH_NODES by chaining sequences.
-        // Each ~> produces a THEN node + right SQL node, so N sequences = ~2N nodes.
-        // We need MAX_GRAPH_NODES/2 + 1 sequences to exceed the limit.
-        let needed = MAX_GRAPH_NODES / 2 + 1;
-        let mut expr = String::from("'SELECT 1'");
-        for _ in 0..needed {
-            expr.push_str(" ~> 'SELECT 1'");
-        }
+        // Build a shallow-but-wide graph using a JOIN node with many extra_nodes.
+        // This exceeds MAX_GRAPH_NODES without exceeding MAX_GRAPH_DEPTH (stays at depth 1).
+        let sql_node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
 
-        // This should fail at df.start() with a node count error.
-        // Use SPI to call df.start and expect an error.
-        let sql = format!("SELECT df.start({expr})");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Spi::get_one::<String>(&sql).ok()
-        }));
+        // Construct extra_nodes JSON array with enough entries to exceed the limit.
+        // The JOIN node itself + left + right + extra_nodes = 3 + N nodes.
+        let extra_count = MAX_GRAPH_NODES; // guarantees we exceed the limit
+        let extra_nodes: Vec<serde_json::Value> = (0..extra_count)
+            .map(|_| serde_json::to_value(&sql_node).unwrap())
+            .collect();
+        let config = serde_json::json!({ "extra_nodes": extra_nodes });
 
-        // pgrx::error! causes a panic that gets caught here
+        let join_node = Durofut {
+            node_type: "JOIN".to_string(),
+            left_node: Some(Box::new(sql_node.clone())),
+            right_node: Some(Box::new(sql_node.clone())),
+            query: Some(config.to_string()),
+            ..Default::default()
+        };
+
+        let result = join_node.validate_recursive();
         assert!(
             result.is_err(),
-            "df.start() should reject graph exceeding node count limit"
+            "validate_recursive should reject graph exceeding node count limit"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("maximum node count"),
+            "Error should mention node count limit, got: {err}"
         );
     }
 

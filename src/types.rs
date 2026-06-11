@@ -987,11 +987,26 @@ impl Durofut {
 
     /// Validate a Durofut node and all its children have valid node_types.
     /// Used during insertion in df.start() to catch invalid nested nodes.
+    /// Also enforces MAX_GRAPH_NODES so oversized graphs fail fast without
+    /// needing a second traversal during insertion.
     pub fn validate_recursive(&self) -> Result<(), String> {
-        self.validate_recursive_inner(0)
+        let mut node_count = 0;
+        self.validate_recursive_inner(0, &mut node_count)
     }
 
-    fn validate_recursive_inner(&self, depth: usize) -> Result<(), String> {
+    fn validate_recursive_inner(
+        &self,
+        depth: usize,
+        node_count: &mut usize,
+    ) -> Result<(), String> {
+        *node_count += 1;
+        if *node_count > MAX_GRAPH_NODES {
+            return Err(format!(
+                "Workflow exceeds maximum node count of {}. \
+                 Simplify the workflow or break it into multiple instances.",
+                MAX_GRAPH_NODES
+            ));
+        }
         if depth > MAX_GRAPH_DEPTH {
             return Err(format!(
                 "Graph exceeds maximum nesting depth of {}. \
@@ -1007,14 +1022,14 @@ impl Durofut {
             ));
         }
         if let Some(ref left) = self.left_node {
-            left.validate_recursive_inner(depth + 1)?;
+            left.validate_recursive_inner(depth + 1, node_count)?;
         }
         if let Some(ref right) = self.right_node {
-            right.validate_recursive_inner(depth + 1)?;
+            right.validate_recursive_inner(depth + 1, node_count)?;
         }
         // Validate config-embedded nodes (condition_node, extra_nodes)
         let d = depth + 1;
-        self.for_each_config_child(|child| child.validate_recursive_inner(d))?;
+        self.for_each_config_child(|child| child.validate_recursive_inner(d, node_count))?;
         Ok(())
     }
 
@@ -1533,5 +1548,64 @@ mod tests {
         }
         let result = node.validate_recursive();
         assert!(result.is_ok(), "should accept graph within depth limit");
+    }
+
+    #[test]
+    fn test_validate_recursive_node_count_limit() {
+        // Build a shallow-but-wide graph: a JOIN with many extra_nodes.
+        // This stays at depth 1 but exceeds MAX_GRAPH_NODES.
+        let sql_node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+
+        let extra_count = MAX_GRAPH_NODES; // exceeds limit when added to root+left+right
+        let extra_nodes: Vec<serde_json::Value> = (0..extra_count)
+            .map(|_| serde_json::to_value(&sql_node).unwrap())
+            .collect();
+        let config = serde_json::json!({ "extra_nodes": extra_nodes });
+
+        let join_node = Durofut {
+            node_type: "JOIN".to_string(),
+            left_node: Some(Box::new(sql_node.clone())),
+            right_node: Some(Box::new(sql_node.clone())),
+            query: Some(config.to_string()),
+            ..Default::default()
+        };
+
+        let result = join_node.validate_recursive();
+        assert!(result.is_err(), "should reject graph exceeding node count");
+        assert!(
+            result.unwrap_err().contains("maximum node count"),
+            "error should mention node count limit"
+        );
+    }
+
+    #[test]
+    fn test_validate_recursive_node_count_within_limit() {
+        // A graph with a moderate number of nodes should pass
+        let sql_node = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
+
+        let extra_count = 50;
+        let extra_nodes: Vec<serde_json::Value> = (0..extra_count)
+            .map(|_| serde_json::to_value(&sql_node).unwrap())
+            .collect();
+        let config = serde_json::json!({ "extra_nodes": extra_nodes });
+
+        let join_node = Durofut {
+            node_type: "JOIN".to_string(),
+            left_node: Some(Box::new(sql_node.clone())),
+            right_node: Some(Box::new(sql_node.clone())),
+            query: Some(config.to_string()),
+            ..Default::default()
+        };
+
+        let result = join_node.validate_recursive();
+        assert!(result.is_ok(), "should accept graph within node count limit");
     }
 }
