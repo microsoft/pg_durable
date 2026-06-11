@@ -429,6 +429,15 @@ DROP EXTENSION IF EXISTS pg_durable CASCADE;
 CREATE EXTENSION pg_durable;
 COMMIT;
 SQL
+
+    # The DSL operators (~>, |=>, &, |, ?>, !>, @>) live in the df schema and
+    # are resolved in the caller's session before df.start()/df.explain() run,
+    # so df must be on the database search_path for the unqualified operator
+    # syntax used throughout the E2E suite to resolve. Set it at the database
+    # level so every test session (including isolated single-test runs that skip
+    # 00_setup_playground.sql) picks it up at connection time.
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+        -c "ALTER DATABASE \"${PG_DB}\" SET search_path = \"\$user\", public, df" >/dev/null 2>&1
 }
 
 configure_phase() {

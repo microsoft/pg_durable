@@ -94,6 +94,8 @@ From highest to lowest binding:
 | 5          | `?>` `!>` | right        | Conditional (if-then-else) |
 | 6 (lowest) | `@>`     | prefix        | Loop (forever) |
 
+> **Schema:** These operators are defined in the `df` schema. They are resolved in the calling session, so `df` must be on your `search_path` (e.g. `SET search_path TO "$user", public, df;`) to use the unqualified syntax shown below. The `df.*` function forms are always schema-qualified and need no `search_path` change.
+
 ## Examples
 
 ### Sequence

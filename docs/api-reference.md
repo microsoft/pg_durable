@@ -18,6 +18,8 @@ Parameters marked with ✅ **Auto-wrap** accept either:
 
 Parameters marked with ❌ **Literal** expect a literal value (not auto-wrapped).
 
+> **Operators and `search_path`:** The operator forms documented below (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) are defined in the `df` schema and are resolved in the calling session. Add `df` to your `search_path` (e.g. `SET search_path TO "$user", public, df;`) to use them unqualified, or call the equivalent `df.*` function form (always schema-qualified).
+
 ---
 
 ## Node Functions

@@ -303,38 +303,41 @@ This allows users to write `'SELECT 1' ~> 'SELECT 2'` instead of `df.sql('SELECT
 
 ### SQL Operators
 
-Operators are syntactic sugar that call DSL functions:
+Operators are syntactic sugar that call DSL functions. They are created in the
+`df` schema (alongside the functions they wrap), so callers need `df` on their
+`search_path` to use the unqualified operator syntax — operators are resolved in
+the calling session before `df.start()`/`df.explain()` run:
 
 ```sql
 -- src/lib.rs (extension_sql!)
 
 -- Sequence: a ~> b calls df.seq(a, b)
-CREATE OPERATOR ~> (
+CREATE OPERATOR df.~> (
     FUNCTION = df.seq,
     LEFTARG = text,
     RIGHTARG = text
 );
 
 -- Name result: a |=> 'name' calls df.as_op(a, name)
-CREATE OPERATOR |=> (
+CREATE OPERATOR df.|=> (
     FUNCTION = df.as_op,
     LEFTARG = text,
     RIGHTARG = text
 );
 
 -- Parallel join: a & b calls df.join(a, b)
-CREATE OPERATOR & (
+CREATE OPERATOR df.& (
     FUNCTION = df.join,
     LEFTARG = text,
     RIGHTARG = text
 );
 
 -- Conditional: cond ?> then !> else
-CREATE OPERATOR ?> (FUNCTION = df.if_then_op, ...);
-CREATE OPERATOR !> (FUNCTION = df.if_else_op, ...);
+CREATE OPERATOR df.?> (FUNCTION = df.if_then_op, ...);
+CREATE OPERATOR df.!> (FUNCTION = df.if_else_op, ...);
 
 -- Loop prefix: @> body calls df.loop(body)
-CREATE OPERATOR @> (FUNCTION = df.loop_prefix_op, RIGHTARG = text);
+CREATE OPERATOR df.@> (FUNCTION = df.loop_prefix_op, RIGHTARG = text);
 ```
 
 ### Node Insertion

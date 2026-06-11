@@ -72,6 +72,8 @@ pub const NAME: &str = "pg_durable::activity::execute-sql";
 ### DSL Creates Graph Nodes
 DSL functions like `df.sql()` insert rows into `df.nodes`. The `Durofut` struct represents a node reference passed between operators.
 
+The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) are created in the `df` schema (see `extension_sql!` in [src/lib.rs](../src/lib.rs)). They are resolved in the caller's session before `df.start()`/`df.explain()` run, so `df` must be on the session `search_path` for unqualified operator syntax. The E2E runners set this at the database level after `CREATE EXTENSION`.
+
 ### E2E Test Structure
 Tests in `tests/e2e/sql/` follow this pattern:
 1. Create temp state table, call `df.start()`

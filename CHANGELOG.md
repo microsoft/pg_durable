@@ -2,6 +2,12 @@
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [0.2.3] - unreleased
+
+### Breaking Changes
+
+- **DSL operators moved from `public` to the `df` schema (#202):** The seven DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) are now created in the `df` schema instead of `public`, so they no longer pollute the public namespace (resolving a pgspot PS017 finding). Because operators are resolved in the calling session before `df.start()`/`df.explain()` run, the unqualified operator syntax now requires `df` on the session `search_path` (e.g. `SET search_path TO "$user", public, df;`, or `ALTER ROLE`/`ALTER DATABASE ... SET search_path`). The `df.*` function forms (`df.seq`, `df.join`, …) are unaffected. Existing installs move the operators when they run `ALTER EXTENSION pg_durable UPDATE`; a non-upgraded `.so` keeps the operators in `public` and continues to work unchanged.
+
 ## [0.2.2] - 2026-05-28
 
 First open-source release of `pg_durable` on GitHub under the PostgreSQL License.

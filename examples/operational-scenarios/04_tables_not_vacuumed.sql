@@ -77,6 +77,10 @@ CREATE TABLE stale_vacuum_action_log (
 
 -- Start the durable function: find stale tables → detect blockers → branch → vacuum
 CREATE TEMP TABLE _scenario4_state (instance_id TEXT);
+-- The DSL sequence (~>) and conditional (?> / !>) operators live in the df
+-- schema. Add df to the session search_path so the unqualified syntax resolves.
+SET search_path TO "$user", public, df;
+
 INSERT INTO _scenario4_state SELECT df.start(
 
     -- Step 1: Identify tables not vacuumed in the last 7 days

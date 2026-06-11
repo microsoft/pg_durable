@@ -1,6 +1,10 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
+-- The DSL operators (~>, |=>, &, |, ?>, !>, @>) live in the df schema. Add df
+-- to the session search_path so the unqualified operator syntax below resolves.
+SET search_path TO "$user", public, df;
+
 -- Invoice Approval Pipeline — start the workflow
 --
 -- Prerequisites:

@@ -85,6 +85,10 @@ CREATE TABLE wraparound_action_log (
 
 -- Start the durable function: detect DB risk → find tables → branch on blockers → freeze
 CREATE TEMP TABLE _scenario3_state (instance_id TEXT);
+-- The DSL sequence (~>) and conditional (?> / !>) operators live in the df
+-- schema. Add df to the session search_path so the unqualified syntax resolves.
+SET search_path TO "$user", public, df;
+
 INSERT INTO _scenario3_state SELECT df.start(
 
     -- Step 1: Log database-level transaction ages

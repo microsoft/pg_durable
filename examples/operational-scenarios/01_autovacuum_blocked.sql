@@ -58,6 +58,10 @@ CREATE TABLE autovacuum_remediation_log (
 
 -- Start the durable function: detect → branch on blockers → remediate or vacuum directly
 CREATE TEMP TABLE _scenario1_state (instance_id TEXT);
+-- The DSL sequence (~>) and conditional (?> / !>) operators live in the df
+-- schema. Add df to the session search_path so the unqualified syntax resolves.
+SET search_path TO "$user", public, df;
+
 INSERT INTO _scenario1_state SELECT df.start(
 
     -- Step 1: Log all autovacuum blockers into the diagnostics table

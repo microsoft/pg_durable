@@ -648,11 +648,19 @@ CREATE FUNCTION df.duroxide_schema() RETURNS text
 // ============================================================================
 // SQL Operators
 // ============================================================================
+//
+// The DSL operators are created in the `df` schema (not `public`) so the
+// extension does not pollute the public namespace (issue #202). Because an
+// expression such as `'a' ~> 'b'` is resolved in the *caller's* session before
+// df.start()/df.explain() ever see it, the unqualified operator syntax only
+// resolves when `df` is on the session search_path. Users add df to their
+// search_path (e.g. `SET search_path = "$user", public, df;`) or invoke the
+// equivalent df.*() functions, which are always schema-qualified.
 
 extension_sql!(
     r#"
 -- Operator ~> for sequencing: a ~> b means "run a, then run b"
-CREATE OPERATOR ~> (
+CREATE OPERATOR df.~> (
     FUNCTION = df.seq,
     LEFTARG = text,
     RIGHTARG = text
@@ -663,21 +671,21 @@ CREATE OR REPLACE FUNCTION df.as_op(fut text, name text) RETURNS text AS $$
     SELECT df.as(fut, name);
 $$ LANGUAGE SQL IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
-CREATE OPERATOR |=> (
+CREATE OPERATOR df.|=> (
     FUNCTION = df.as_op,
     LEFTARG = text,
     RIGHTARG = text
 );
 
 -- Operator & for parallel join: a & b means "run a and b in parallel, wait for both"
-CREATE OPERATOR & (
+CREATE OPERATOR df.& (
     FUNCTION = df.join,
     LEFTARG = text,
     RIGHTARG = text
 );
 
 -- Operator | for race: a | b means "run a and b in parallel, first wins"
-CREATE OPERATOR | (
+CREATE OPERATOR df.| (
     FUNCTION = df.race,
     LEFTARG = text,
     RIGHTARG = text
@@ -765,13 +773,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
-CREATE OPERATOR ?> (
+CREATE OPERATOR df.?> (
     FUNCTION = df.if_then_op,
     LEFTARG = text,
     RIGHTARG = text
 );
 
-CREATE OPERATOR !> (
+CREATE OPERATOR df.!> (
     FUNCTION = df.if_else_op,
     LEFTARG = text,
     RIGHTARG = text
@@ -783,7 +791,7 @@ CREATE OR REPLACE FUNCTION df.loop_prefix_op(body text) RETURNS text AS $$
     SELECT df.loop(body);
 $$ LANGUAGE SQL IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
 
-CREATE OPERATOR @> (
+CREATE OPERATOR df.@> (
     FUNCTION = df.loop_prefix_op,
     RIGHTARG = text
 );
@@ -2565,6 +2573,10 @@ pub mod pg_test {
             "pg_durable.worker_role = 'postgres'",
             "pg_durable.database = 'postgres'",
             "pg_durable.enable_superuser_instances = on",
+            // DSL operators live in the df schema (issue #202); add df to the
+            // default search_path so unqualified operator syntax (e.g. `a ~> b`)
+            // and df.explain()'s SPI evaluation resolve them in tests.
+            "search_path = '\"$user\", public, df'",
         ]
     }
 }

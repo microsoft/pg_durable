@@ -15,6 +15,7 @@ Generate correct, idiomatic pg_durable durable function SQL using the `df.*` sch
 4. **Operators are SQL-level custom operators.** They work on `TEXT` operands. Parentheses control grouping.
 5. **`df.setvar()` must be called BEFORE `df.start()`.** Variables are captured at start time and are immutable during execution.
 6. **Two variable syntaxes:** `{varname}` for durable function variables (from `df.setvar`), `$name` for result captures (from `|=>`). Do NOT mix them up.
+7. **Operators live in the `df` schema.** They are resolved in the calling session, so `df` must be on the `search_path` (e.g. `SET search_path TO "$user", public, df;`) for the unqualified operator syntax to work. Functions (`df.seq`, `df.join`, …) are always schema-qualified and work regardless.
 
 ## Operators — Complete Reference
 

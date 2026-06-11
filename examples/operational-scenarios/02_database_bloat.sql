@@ -37,6 +37,10 @@ CREATE TABLE bloat_remediation_log (
 
 -- Start the durable function: detect bloat → log blockers → branch → remediate or vacuum
 CREATE TEMP TABLE _scenario2_state (instance_id TEXT);
+-- The DSL sequence (~>) and conditional (?> / !>) operators live in the df
+-- schema. Add df to the session search_path so the unqualified syntax resolves.
+SET search_path TO "$user", public, df;
+
 INSERT INTO _scenario2_state SELECT df.start(
 
     -- Step 1: Identify bloated tables (dead tuple ratio > 20% as proxy for bloat)

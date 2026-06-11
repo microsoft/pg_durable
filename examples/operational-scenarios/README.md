@@ -22,6 +22,11 @@ Each scenario file is a standalone SQL script that can be run against a PostgreS
 # Connect to your database
 psql -h <host> -U <user> -d <database>
 
+# The DSL operators (~>, ?>, !>) used below live in the df schema, so add it
+# to your search_path for the current session (each scenario file also sets
+# this itself):
+SET search_path TO "$user", public, df;
+
 # Run the common prerequisite to check for blockers
 \i examples/operational-scenarios/00_common_prerequisite.sql
 

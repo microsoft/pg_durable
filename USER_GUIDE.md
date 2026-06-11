@@ -81,6 +81,19 @@ SELECT df.grant_usage('app_role');
 
 After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
 
+> ℹ️ **Using the DSL operators?** The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) live in the `df` schema, and they are resolved in your session *before* `df.start()`/`df.explain()` run. To use the unqualified operator syntax, add `df` to your `search_path`:
+>
+> ```sql
+> -- Per session
+> SET search_path TO "$user", public, df;
+>
+> -- Or persist it for a role / database
+> ALTER ROLE app_role SET search_path = "$user", public, df;
+> ALTER DATABASE mydb  SET search_path = "$user", public, df;
+> ```
+>
+> Alternatively, schema-qualify each operator with `OPERATOR(df.~>)` syntax — but adding `df` to `search_path` is far more ergonomic. Other `df.*` functions are always called schema-qualified and work without this.
+
 > ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
 
 ### Your First Durable Function
@@ -196,6 +209,8 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.wait_for_completion(id, timeout)` | Block until instance completes (default 30s timeout) | `df.wait_for_completion('a1b2c3d4', 60)` |
 
 ### Operators
+
+> **Note:** Operators live in the `df` schema. Using the unqualified syntax below requires `df` on your `search_path` (see [Enable the Extension](#enable-the-extension)). Without it, use the explicit `OPERATOR(df.~>)` form.
 
 | Operator | Name | Description | Example |
 |----------|------|-------------|---------|

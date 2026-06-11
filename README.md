@@ -94,12 +94,17 @@ The model is intentionally SQL-shaped. If a step needs arbitrary code, a non-HTT
 ## Quick Example
 
 ```sql
+-- Add the df schema to your search_path so the DSL operators resolve
+SET search_path TO "$user", public, df;
+
 -- A durable function that processes data in steps
 SELECT df.start(
     'SELECT id FROM documents WHERE processed = false LIMIT 100' |=> 'batch'
     ~> 'UPDATE documents SET processed = true WHERE id = ANY($batch)'
 );
 ```
+
+> The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) live in the `df` schema. Add `df` to your `search_path` (as above) to use the unqualified syntax. See the [User Guide](USER_GUIDE.md#enable-the-extension) for details.
 
 ## Packages
 
@@ -137,7 +142,7 @@ After installing a package, add `pg_durable` to `shared_preload_libraries`, rest
 CREATE EXTENSION pg_durable;
 ```
 
-The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) for background worker configuration and privilege setup.
+The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) for background worker configuration and privilege setup. To use the unqualified DSL operator syntax, add the `df` schema to your `search_path` (e.g. `ALTER DATABASE postgres SET search_path = "$user", public, df;`).
 
 Each release also publishes source archives for building from source and a `SHA256SUMS` file for verifying downloaded assets.
 

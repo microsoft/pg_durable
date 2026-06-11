@@ -163,6 +163,14 @@ if ! docker exec "$CONTAINER_NAME" psql -U postgres -c "CREATE EXTENSION IF NOT 
     exit 1
 fi
 
+# The DSL operators (~>, |=>, &, |, ?>, !>, @>) live in the df schema and are
+# resolved in the caller's session before df.start()/df.explain() run, so df
+# must be on the database search_path for the unqualified operator syntax used
+# throughout the E2E suite to resolve. Set it at the database level so every
+# test session picks it up at connection time.
+docker exec "$CONTAINER_NAME" psql -U postgres \
+    -c "ALTER DATABASE postgres SET search_path = \"\$user\", public, df;" 2>&1
+
 # Show version
 echo -n "pg_durable version: "
 VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SELECT df.version();" 2>&1)
