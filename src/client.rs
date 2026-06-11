@@ -150,7 +150,8 @@ fn is_connection_error(err: &str) -> bool {
 }
 
 /// Test-accessible wrapper for is_connection_error.
-pub fn is_connection_error_for_test(err: &str) -> bool {
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn is_connection_error_for_test(err: &str) -> bool {
     is_connection_error(err)
 }
 

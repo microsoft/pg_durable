@@ -455,12 +455,11 @@ async fn initialize_duroxide_runtime(
     log!("pg_durable: initializing duroxide runtime...");
 
     // Control duroxide provider pool size via env var (the only mechanism
-    // without modifying duroxide-pg). BGW is single-threaded so no
-    // concurrent readers of environment at this point.
+    // without modifying duroxide-pg).
     //
-    // SAFETY: This is called during initialization before any pool or async
-    // task has started, and the BGW tokio runtime uses new_current_thread()
-    // (no worker threads). No other thread can be reading env concurrently.
+    // SAFETY: The BGW tokio runtime uses new_current_thread() — no additional
+    // OS threads are spawned. PostgreSQL's fork model means this process has no
+    // other threads that could be reading the environment concurrently.
     unsafe {
         std::env::set_var(
             "DUROXIDE_PG_POOL_MAX",
