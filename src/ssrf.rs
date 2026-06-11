@@ -237,7 +237,10 @@ pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
 /// Extract the hostname (without port or brackets) from a URL.
 ///
 /// Returns `None` for malformed URLs or URLs without a `://` scheme separator.
-#[cfg(not(feature = "http-allow-all"))]
+#[cfg(any(
+    feature = "http-allow-azure-domains",
+    feature = "http-allow-test-domains"
+))]
 fn extract_host(url: &str) -> Option<String> {
     // Strip scheme
     let after_scheme = url.find("://").map(|i| &url[i + 3..])?;
@@ -555,7 +558,10 @@ mod tests {
 
     // --- extract_host helper ---
 
-    #[cfg(not(feature = "http-allow-all"))]
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
     #[test]
     fn extract_host_basic() {
         assert_eq!(
@@ -571,7 +577,10 @@ mod tests {
         assert_eq!(extract_host("http://user:pass@host/p"), Some("host".into()));
     }
 
-    #[cfg(not(feature = "http-allow-all"))]
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
     #[test]
     fn extract_host_query_and_fragment() {
         // Query-only URL (no path slash after authority)
@@ -601,7 +610,10 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "http-allow-all"))]
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
     #[test]
     fn extract_host_none_cases() {
         assert_eq!(extract_host("no-scheme"), None);
