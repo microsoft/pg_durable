@@ -994,11 +994,7 @@ impl Durofut {
         self.validate_recursive_inner(0, &mut node_count)
     }
 
-    fn validate_recursive_inner(
-        &self,
-        depth: usize,
-        node_count: &mut usize,
-    ) -> Result<(), String> {
+    fn validate_recursive_inner(&self, depth: usize, node_count: &mut usize) -> Result<(), String> {
         *node_count += 1;
         if *node_count > MAX_GRAPH_NODES {
             return Err(format!(
@@ -1606,6 +1602,9 @@ mod tests {
         };
 
         let result = join_node.validate_recursive();
-        assert!(result.is_ok(), "should accept graph within node count limit");
+        assert!(
+            result.is_ok(),
+            "should accept graph within node count limit"
+        );
     }
 }
