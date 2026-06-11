@@ -63,7 +63,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'dg_admin',
-        'df.grant_usage(text, boolean, boolean)',
+        'df.grant_usage(text, boolean, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant;
 
@@ -129,7 +129,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'dg_delegate_target',
-        'df.grant_usage(text, boolean, boolean)',
+        'df.grant_usage(text, boolean, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant;
 
@@ -201,7 +201,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'dg_app',
-        'df.grant_usage(text, boolean, boolean)',
+        'df.grant_usage(text, boolean, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant;
 

@@ -81,7 +81,9 @@ SELECT df.grant_usage('app_role');
 
 After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
 
-> ℹ️ **Using the DSL operators?** The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) live in the `df` schema, and they are resolved in your session *before* `df.start()`/`df.explain()` run. To use the unqualified operator syntax, add `df` to your `search_path`:
+> ℹ️ **Using the DSL operators?** The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) live in the `df` schema, and they are resolved in your session *before* `df.start()`/`df.explain()` run, so `df` must be on your `search_path`. **`df.grant_usage('app_role')` handles this for you by default** — it adds `df` to the role's `search_path` (via `ALTER ROLE`) during onboarding, so the operators resolve the next time that role connects. Pass `set_search_path => false` to opt out and manage `search_path` yourself.
+>
+> To set it manually (or for the current session, before reconnecting):
 >
 > ```sql
 > -- Per session
@@ -92,7 +94,7 @@ After `CREATE EXTENSION`, the background worker initializes the engine schema as
 > ALTER DATABASE mydb  SET search_path = "$user", public, df;
 > ```
 >
-> Alternatively, schema-qualify each operator with `OPERATOR(df.~>)` syntax — but adding `df` to `search_path` is far more ergonomic. Other `df.*` functions are always called schema-qualified and work without this.
+> Alternatively, schema-qualify each operator with `OPERATOR(df.~>)` syntax. Other `df.*` functions are always called schema-qualified and work without this.
 
 > ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
 
@@ -1650,6 +1652,8 @@ SELECT df.grant_usage('admin_role', include_http => true, with_grant => true);
 
 This function is purely additive — it never issues REVOKE. To downgrade a role's privileges (e.g., remove HTTP access), call `df.revoke_usage()` first, then `df.grant_usage()` with the desired options.
 
+By default it also adds `df` to the role's `search_path` (see `set_search_path` below) so the unqualified DSL operators resolve — the only change it makes outside of privilege grants.
+
 **Parameters:**
 
 | Parameter | Default | Description |
@@ -1657,6 +1661,7 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 | `p_role` | *(required)* | Target role name |
 | `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
 | `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
+| `set_search_path` | `true` | Add `df` to the role's `search_path` (via `ALTER ROLE`) so the unqualified DSL operators resolve without manual setup. Takes effect the next time the role connects; append-only and idempotent. Pass `false` to manage `search_path` yourself. If the caller lacks privilege to alter the role, a `NOTICE` is raised and the grant otherwise succeeds. |
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
@@ -1710,6 +1715,10 @@ GRANT SELECT ON df.nodes TO app_role;
 GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO app_role;
 GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO app_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO app_role;
+
+-- Add df to the role's search_path so the unqualified DSL operators resolve
+-- (df.grant_usage does this too, unless set_search_path => false)
+ALTER ROLE app_role SET search_path = "$user", public, df;
 ```
 
 </details>
@@ -1759,7 +1768,7 @@ To remove a role's access to pg_durable:
 SELECT df.revoke_usage('app_role');
 ```
 
-This revokes all privileges previously granted by `df.grant_usage()`. As a safety measure, `df.revoke_usage()` prevents revoking privileges from a role the caller is a member of (including the caller's own role).
+This revokes all privileges previously granted by `df.grant_usage()`, and also removes the `df` entry that `df.grant_usage()` added to the role's `search_path` (idempotent — a no-op if `df` was never added or was already removed; any other entries are preserved). As a safety measure, `df.revoke_usage()` prevents revoking privileges from a role the caller is a member of (including the caller's own role).
 
 For non-superusers, `df.revoke_usage()` is still subject to PostgreSQL's normal grantor rules because it is a SECURITY INVOKER helper. In practice, that means a delegated admin can only revoke the privileges that delegated admin granted; removing grants made by another role requires the original grantor or a superuser.
 

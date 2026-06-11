@@ -8,6 +8,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 - **DSL operators moved from `public` to the `df` schema (#202):** The seven DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) are now created in the `df` schema instead of `public`, so they no longer pollute the public namespace (resolving a pgspot PS017 finding). Because operators are resolved in the calling session before `df.start()`/`df.explain()` run, the unqualified operator syntax now requires `df` on the session `search_path` (e.g. `SET search_path TO "$user", public, df;`, or `ALTER ROLE`/`ALTER DATABASE ... SET search_path`). The `df.*` function forms (`df.seq`, `df.join`, …) are unaffected. Existing installs move the operators when they run `ALTER EXTENSION pg_durable UPDATE`; a non-upgraded `.so` keeps the operators in `public` and continues to work unchanged.
 
+### Changed
+
+- **`df.grant_usage()` now manages `search_path` (#202):** `df.grant_usage('role')` adds `df` to the target role's `search_path` (via `ALTER ROLE`) by default, so the unqualified DSL operators resolve without manual setup. This adds a fourth optional parameter, `set_search_path boolean DEFAULT true` (signature is now `df.grant_usage(text, boolean, boolean, boolean)`); pass `set_search_path => false` to opt out. `df.revoke_usage('role')` removes that `df` entry again (idempotent; other `search_path` entries are preserved). If the caller lacks privilege to alter the role, a `NOTICE` is raised and the grant/revoke otherwise succeeds.
+
 ## [0.2.2] - 2026-05-28
 
 First open-source release of `pg_durable` on GitHub under the PostgreSQL License.

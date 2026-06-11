@@ -104,7 +104,7 @@ SELECT df.start(
 );
 ```
 
-> The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) live in the `df` schema. Add `df` to your `search_path` (as above) to use the unqualified syntax. See the [User Guide](USER_GUIDE.md#enable-the-extension) for details.
+> The DSL operators (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) live in the `df` schema and resolve in your session, so `df` must be on your `search_path`. `df.grant_usage('role')` adds it for a role automatically (the `SET` above is for an ad-hoc session). See the [User Guide](USER_GUIDE.md#enable-the-extension) for details.
 
 ## Packages
 
@@ -142,7 +142,7 @@ After installing a package, add `pg_durable` to `shared_preload_libraries`, rest
 CREATE EXTENSION pg_durable;
 ```
 
-The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) for background worker configuration and privilege setup. To use the unqualified DSL operator syntax, add the `df` schema to your `search_path` (e.g. `ALTER DATABASE postgres SET search_path = "$user", public, df;`).
+The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) for background worker configuration and privilege setup. The unqualified DSL operator syntax needs the `df` schema on your `search_path` — `df.grant_usage('role')` adds it per role automatically, or set it yourself (e.g. `ALTER DATABASE postgres SET search_path = "$user", public, df;`).
 
 Each release also publishes source archives for building from source and a `SHA256SUMS` file for verifying downloaded assets.
 

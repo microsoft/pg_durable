@@ -355,12 +355,22 @@ CREATE POLICY vars_user_isolation ON df.vars
 -- privilege WITH GRANT OPTION, which is automatically true for superusers
 -- and for delegated admins granted via with_grant => true.
 --
+-- set_search_path (default true) ensures df is on the role's search_path (via
+-- ALTER ROLE) so the unqualified DSL operators (~>, |=>, &, |, ?>, !>, @>) —
+-- which live in the df schema and are resolved in the caller's session before
+-- df.start() runs — work without each user adding df by hand.  It appends df
+-- at the end (lowest precedence) only when absent and never reorders an
+-- existing path.  Pass false to manage search_path yourself.  If the caller
+-- lacks privilege to ALTER the role, a NOTICE is raised and the grant
+-- otherwise succeeds.
+--
 -- MAINTENANCE: when adding a new df.* function, add it to the func_sigs
 -- array below.  Functions NOT in this list are deny-by-default.
 CREATE OR REPLACE FUNCTION df.grant_usage(
     p_role TEXT,
     include_http boolean DEFAULT false,
-    with_grant boolean DEFAULT false
+    with_grant boolean DEFAULT false,
+    set_search_path boolean DEFAULT true
 )
 RETURNS VOID
 LANGUAGE plpgsql
@@ -440,7 +450,7 @@ BEGIN
 
     -- Admin helpers — only for delegated administrators.
     IF with_grant THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) || grant_opt;
+        EXECUTE format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean, boolean) TO %I', p_role) || grant_opt;
         EXECUTE format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) || grant_opt;
     END IF;
 
@@ -451,6 +461,41 @@ BEGIN
     EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) || grant_opt;
     EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) || grant_opt;
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role) || grant_opt;
+
+    -- Ensure df is on the role's search_path so the unqualified DSL operators
+    -- (which live in df and are resolved in the caller's session) work without
+    -- each user setting search_path by hand.  Opt out with
+    -- set_search_path => false.  Append-only and idempotent: df is added at the
+    -- end (lowest precedence) and only when not already present.
+    IF set_search_path THEN
+        DECLARE
+            v_path text;
+        BEGIN
+            SELECT substring(opt FROM 13)  -- strip leading 'search_path='
+            INTO v_path
+            FROM pg_db_role_setting s
+            JOIN pg_roles r ON r.oid = s.setrole
+            CROSS JOIN LATERAL unnest(s.setconfig) AS o(opt)
+            WHERE r.rolname = p_role
+              AND s.setdatabase = 0
+              AND opt LIKE 'search_path=%'
+            LIMIT 1;
+
+            IF v_path IS NULL THEN
+                -- No per-role search_path yet: set the standard default plus df.
+                EXECUTE format('ALTER ROLE %I SET search_path = %s', p_role, '"$user", public, df');
+                RAISE NOTICE 'pg_durable: set search_path for "%" to "$user", public, df', p_role;
+            ELSIF NOT EXISTS (
+                SELECT 1 FROM unnest(string_to_array(v_path, ',')) AS t(tok)
+                WHERE lower(btrim(tok, ' "')) = 'df'
+            ) THEN
+                EXECUTE format('ALTER ROLE %I SET search_path = %s', p_role, v_path || ', df');
+                RAISE NOTICE 'pg_durable: added df to search_path for "%"', p_role;
+            END IF;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'pg_durable: could not set search_path for "%" (insufficient privilege); add df to search_path manually', p_role;
+        END;
+    END IF;
 
     RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
 END;
@@ -517,6 +562,44 @@ BEGIN
 
     EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I CASCADE', p_role);
 
+    -- Mirror df.grant_usage()'s search_path setup: remove the df entry this
+    -- extension manages from the role's search_path.  Idempotent (a no-op when
+    -- df is absent) and gracefully skipped if the caller lacks privilege to
+    -- ALTER the role.
+    DECLARE
+        v_path text;
+        v_newpath text;
+    BEGIN
+        SELECT substring(opt FROM 13)  -- strip leading 'search_path='
+        INTO v_path
+        FROM pg_db_role_setting s
+        JOIN pg_roles r ON r.oid = s.setrole
+        CROSS JOIN LATERAL unnest(s.setconfig) AS o(opt)
+        WHERE r.rolname = p_role
+          AND s.setdatabase = 0
+          AND opt LIKE 'search_path=%'
+        LIMIT 1;
+
+        IF v_path IS NOT NULL AND EXISTS (
+            SELECT 1 FROM unnest(string_to_array(v_path, ',')) AS t(tok)
+            WHERE lower(btrim(tok, ' "')) = 'df'
+        ) THEN
+            SELECT string_agg(btrim(tok), ', ')
+            INTO v_newpath
+            FROM unnest(string_to_array(v_path, ',')) AS t(tok)
+            WHERE lower(btrim(tok, ' "')) <> 'df';
+
+            IF v_newpath IS NULL OR btrim(v_newpath) = '' THEN
+                EXECUTE format('ALTER ROLE %I RESET search_path', p_role);
+            ELSE
+                EXECUTE format('ALTER ROLE %I SET search_path = %s', p_role, v_newpath);
+            END IF;
+            RAISE NOTICE 'pg_durable: removed df from search_path for "%"', p_role;
+        END IF;
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE 'pg_durable: could not adjust search_path for "%" (insufficient privilege)', p_role;
+    END;
+
     RAISE NOTICE 'pg_durable: revoked df usage privileges granted by "%" from "%"', current_user, p_role;
 END;
 $fn$;
@@ -554,7 +637,7 @@ REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC
 -- Revoke PUBLIC's default EXECUTE privilege so that only roles explicitly
 -- granted access (via with_grant => true or a direct superuser GRANT) can
 -- manage other roles' df privileges.
-REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",

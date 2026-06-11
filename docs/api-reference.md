@@ -18,7 +18,7 @@ Parameters marked with ✅ **Auto-wrap** accept either:
 
 Parameters marked with ❌ **Literal** expect a literal value (not auto-wrapped).
 
-> **Operators and `search_path`:** The operator forms documented below (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) are defined in the `df` schema and are resolved in the calling session. Add `df` to your `search_path` (e.g. `SET search_path TO "$user", public, df;`) to use them unqualified, or call the equivalent `df.*` function form (always schema-qualified).
+> **Operators and `search_path`:** The operator forms documented below (`~>`, `|=>`, `&`, `|`, `?>`, `!>`, `@>`) are defined in the `df` schema and are resolved in the calling session, so `df` must be on your `search_path`. `df.grant_usage('role')` adds it per role automatically; you can also set it yourself (e.g. `SET search_path TO "$user", public, df;`) or call the equivalent `df.*` function form (always schema-qualified).
 
 ---
 
@@ -420,9 +420,9 @@ SELECT df.clearvars();
 
 ## Administration Functions
 
-### df.grant_usage(role_name [, include_http] [, with_grant])
+### df.grant_usage(role_name [, include_http] [, with_grant] [, set_search_path])
 
-Grants the privileges a role needs to use pg_durable. By default this grants general `df` usage but does not grant `EXECUTE` on `df.http()`. Pass `include_http => true` to opt a role into HTTP access. Pass `with_grant => true` to allow the role to delegate access to others.
+Grants the privileges a role needs to use pg_durable. By default this grants general `df` usage but does not grant `EXECUTE` on `df.http()`. Pass `include_http => true` to opt a role into HTTP access. Pass `with_grant => true` to allow the role to delegate access to others. By default it also adds `df` to the role's `search_path` so the unqualified DSL operators resolve; pass `set_search_path => false` to opt out.
 
 Authorization is enforced by PostgreSQL’s native mechanisms: EXECUTE on this function is revoked from PUBLIC (so only roles explicitly granted access can call it), and the inner GRANT statements run as the caller via SECURITY INVOKER, so the caller must hold the underlying privileges WITH GRANT OPTION.
 
@@ -431,16 +431,18 @@ Authorization is enforced by PostgreSQL’s native mechanisms: EXECUTE on this f
 | `role_name` | TEXT | The role to grant privileges to |
 | `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer)` |
 | `with_grant` | BOOLEAN | Optional, defaults to `false`; when `true`, grants all privileges WITH GRANT OPTION and retains EXECUTE on `df.grant_usage` / `df.revoke_usage` |
+| `set_search_path` | BOOLEAN | Optional, defaults to `true`; when `true`, adds `df` to the role's `search_path` (via `ALTER ROLE`) so the unqualified DSL operators resolve. Takes effect on the role's next connection; append-only and idempotent. A `NOTICE` is raised (and the grant otherwise succeeds) if the caller cannot alter the role |
 
 ```sql
 SELECT df.grant_usage('app_role');
 SELECT df.grant_usage('app_role', include_http => true);
 SELECT df.grant_usage('admin_role', with_grant => true);
+SELECT df.grant_usage('app_role', set_search_path => false);  -- manage search_path yourself
 ```
 
 ### df.revoke_usage(role_name)
 
-Revokes all privileges previously granted by `df.grant_usage()`, including any `df.http()` access. Authorization is enforced the same way as `df.grant_usage()` — EXECUTE is revoked from PUBLIC, and the inner REVOKE statements run as the caller. On upgraded installs, revoking `df.http()` from `PUBLIC` is still a separate manual step.
+Revokes all privileges previously granted by `df.grant_usage()`, including any `df.http()` access, and removes the `df` entry `df.grant_usage()` added to the role's `search_path` (idempotent; other entries are preserved). Authorization is enforced the same way as `df.grant_usage()` — EXECUTE is revoked from PUBLIC, and the inner REVOKE statements run as the caller. On upgraded installs, revoking `df.http()` from `PUBLIC` is still a separate manual step.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

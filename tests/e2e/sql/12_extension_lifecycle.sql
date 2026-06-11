@@ -214,7 +214,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'df_e2e_user',
-        'df.grant_usage(text, boolean, boolean)',
+        'df.grant_usage(text, boolean, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant_usage;
 
@@ -246,7 +246,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'df_e2e_user',
-        'df.grant_usage(text, boolean, boolean)',
+        'df.grant_usage(text, boolean, boolean, boolean)',
         'EXECUTE'
     ) INTO can_grant_usage;
 
@@ -274,7 +274,7 @@ DROP ROLE IF EXISTS test_helper_grantee;
 CREATE ROLE test_helper_grantee LOGIN;
 
 GRANT USAGE ON SCHEMA df TO test_helper_grantee;
-GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO test_helper_grantee;
+GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean, boolean) TO test_helper_grantee;
 GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO test_helper_grantee;
 
 SET ROLE test_helper_grantee;
@@ -312,7 +312,7 @@ END $$;
 
 RESET ROLE;
 
-REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM test_helper_grantee;
+REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean, boolean) FROM test_helper_grantee;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM test_helper_grantee;
 REVOKE USAGE ON SCHEMA df FROM test_helper_grantee;
 DROP ROLE test_helper_grantee;
