@@ -100,8 +100,8 @@ The extension demonstrates strong security design for its core threat model:
 | ID | Finding | Severity | Status |
 |---|---|---|---|
 | S-1 | PostgreSQL authentication delegates to pg_hba.conf — extension does not add its own auth layer | Info | ✅ Appropriate for trusted extension model |
-| S-2 | User identity captured via unforgeable C API calls (GetSessionUserId, GetOuterUserId) | Info | ✅ Well-implemented |
-| S-3 | Per-user SQL connections authenticated as login_role via trust auth on localhost | Medium | ✅ Mitigated — pg_hba.conf trust is intentional and appropriate for same-host background worker |
+| S-2 | User identity captured via unforgeable C API call (GetOuterUserId); current_user must have LOGIN attribute | Info | ✅ Well-implemented |
+| S-3 | Per-user SQL connections authenticated directly as submitted_by via trust auth on localhost | Medium | ✅ Mitigated — pg_hba.conf trust is intentional and appropriate for same-host background worker |
 | S-4 | SECURITY DEFINER functions: GetOuterUserId correctly captures caller, not definer | Info | ✅ Tested (E2E test 27_user_isolation) |
 
 ### 3.2 Tampering
@@ -112,9 +112,9 @@ The extension demonstrates strong security design for its core threat model:
 | T-2 | **String formatting in activity SQL**: update_instance_status and update_node_status use `format!()` for SQL construction. Instance IDs/node IDs come from trusted duroxide orchestration data, not user input, but parameterization would be more robust. | Medium | ⚠️ Recommend parameterize |
 | T-3 | **Variable substitution is raw injection by design**: `{var}` substitution replaces variables as-is into SQL. This is intentional (variables are SQL fragments), runs with user's own privileges, and is documented. | Medium | ✅ Accepted risk (documented) |
 | T-4 | **Result substitution ($name) quotes strings**: String values from result substitution are properly escaped with single-quote doubling (`s.replace('\'', "''")`) | Info | ✅ Implemented |
-| T-5 | **SET ROLE quote escaping**: `connect_as_user()` escapes double quotes in role names via `replace('"', "\"\"")`. This is correct PostgreSQL identifier escaping. | Info | ✅ Correct |
+| T-5 | **Role name quote escaping**: `connect_as_user()` escapes double quotes in role names via `replace('"', "\"\"")`. This is correct PostgreSQL identifier escaping. | Info | ✅ Correct |
 | T-6 | **RLS prevents cross-user table manipulation**: WITH CHECK clauses on all tables prevent user from inserting/updating rows with forged identity | Info | ✅ Well-implemented |
-| T-7 | **Column-level UPDATE grant on df.instances**: Only (status, updated_at) columns are writable by users; submitted_by, login_role, root_node, label are immutable | Info | ✅ Good defense-in-depth |
+| T-7 | **Column-level UPDATE grant on df.instances**: Only (status, updated_at) columns are writable by users; submitted_by, root_node, label are immutable | Info | ✅ Good defense-in-depth |
 | T-8 | **search_path pinned on helper functions**: PL/pgSQL helpers set `search_path = pg_catalog, df, pg_temp` | Info | ✅ Implemented |
 | T-9 | **SSRF protection comprehensive**: IP blocklist, DNS rebinding protection, redirect disabling, IPv6 mapped address handling | Info | ✅ Well-implemented |
 
@@ -122,8 +122,8 @@ The extension demonstrates strong security design for its core threat model:
 
 | ID | Finding | Severity | Status |
 |---|---|---|---|
-| R-1 | **Audit trail for SQL execution**: submitted_by and login_role stored in df.instances and df.nodes | Info | ✅ Good |
-| R-2 | **Audit trail for HTTP requests**: submit_by, login_role, URL, and method logged via trace_info | Info | ✅ Good |
+| R-1 | **Audit trail for SQL execution**: submitted_by stored in df.instances and df.nodes | Info | ✅ Good |
+| R-2 | **Audit trail for HTTP requests**: submitted_by, URL, and method logged via trace_info | Info | ✅ Good |
 | R-3 | **No centralized audit log table**: Audit data is distributed across instance/node rows and worker log files. No dedicated, queryable audit log. | Medium | ⚠️ Recommend for GA |
 | R-4 | **Worker logs include user SQL**: Full query text logged, which aids forensics but may expose sensitive data in log files | Low | ⚠️ Log protection needed |
 | R-5 | **No alerting for security events**: SSRF blocks, privilege failures, and auth errors are logged but no alerting mechanism exists | Low | ⚠️ Deferred |
@@ -157,7 +157,7 @@ The extension demonstrates strong security design for its core threat model:
 
 | ID | Finding | Severity | Status |
 |---|---|---|---|
-| E-1 | **RESET ROLE cannot escalate**: Per-user connections authenticated as login_role; RESET ROLE returns to user's own identity | Info | ✅ Well-designed |
+| E-1 | **RESET ROLE cannot escalate**: Per-user connections authenticated directly as submitted_by; RESET ROLE returns to user's own identity | Info | ✅ Well-designed |
 | E-2 | **SET ROLE membership-checked**: Standard PostgreSQL RBAC applies on per-user connections | Info | ✅ Correct |
 | E-3 | **SECURITY DEFINER correctly handled**: GetOuterUserId captures caller, not definer. E2E tested. | Info | ✅ Tested |
 | E-4 | **EXECUTE on all df.* functions granted to PUBLIC**: Any database user can use the extension. Consider defaulting to a specific role. | Medium | ⚠️ Recommend REVOKE from PUBLIC, grant to specific role |
@@ -217,7 +217,7 @@ The extension demonstrates strong security design for its core threat model:
 | Check | Status | Notes |
 |---|---|---|
 | Comprehensive logging | ⚠️ | HTTP requests logged; SQL logged in trace_info; no centralized audit log |
-| Action attribution (who did what) | ✅ | submitted_by and login_role in all records |
+| Action attribution (who did what) | ✅ | submitted_by in all records |
 | Log integrity protection | ⛔ | Worker logs to PostgreSQL log files; no tamper protection |
 | Alerting for anomalies | ⛔ | No alerting mechanism |
 
