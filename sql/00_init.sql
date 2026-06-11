@@ -60,3 +60,15 @@ BEGIN
 END $$;
 SELECT df.grant_usage('df_regress_user');
 GRANT CREATE ON SCHEMA public TO df_regress_user;
+
+-- The DSL operators (~>, |=>, &, |, ?>, !>, @>) live in the df schema and are
+-- resolved in the caller's session before df.start()/df.explain() run, so df
+-- must be on the database search_path for the unqualified operator syntax used
+-- by the operator tests below to resolve. Set it at the database level so each
+-- pg_regress test connection picks it up. A per-role setting (e.g. from
+-- df.grant_usage) is not sufficient here because the tests use SET ROLE, which
+-- does not reload role-level search_path settings.
+DO $$
+BEGIN
+    EXECUTE format('ALTER DATABASE %I SET search_path = "$user", public, df', current_database());
+END $$;
