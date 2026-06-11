@@ -95,7 +95,7 @@ CREATE POLICY instances_user_isolation ON df.instances
 
 This is the correct choice because:
 - `current_user` in an SPI call from a SECURITY INVOKER function = the calling user
-- `submitted_by` is set by trusted extension code via `GetOuterUserId()` — users cannot forge it
+- `submitted_by` is set by trusted extension code via `GetUserId()` — users cannot forge it
 - `REGROLE` comparison handles OID-based identity correctly
 
 **Decision**: Use `submitted_by = current_user::regrole`. ✅ No ambiguity.
@@ -111,7 +111,7 @@ CREATE POLICY instances_user_isolation ON df.instances
     WITH CHECK (submitted_by = current_user::regrole);
 ```
 
-This ensures a user can only INSERT rows where `submitted_by` matches their own identity. Since `df.start()` sets `submitted_by` via `GetOuterUserId()`, this is always true for legitimate calls. It also prevents a user from manually inserting a row with a forged `submitted_by`.
+This ensures a user can only INSERT rows where `submitted_by` matches their own identity. Since `df.start()` sets `submitted_by` via `GetUserId()`, this is always true for legitimate calls. It also prevents a user from manually inserting a row with a forged `submitted_by`.
 
 **Decision**: Single FOR ALL policy with both USING and WITH CHECK. ✅ No ambiguity.
 

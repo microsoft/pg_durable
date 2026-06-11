@@ -105,8 +105,7 @@ diagrams:
         description: >
           Core extension tables storing function graph definitions (df.nodes)
           and instance metadata (df.instances). Protected by RLS policies
-          (submitted_by = current_user::regrole). Contains user identity
-          columns (submitted_by, login_role) for privilege isolation.
+          (submitted_by = current_user::regrole). Contains the submitted_by column for privilege isolation.
         properties:
           Store Type: "SQL Relational Database"
           Stores Credentials: "No"
@@ -210,8 +209,7 @@ diagrams:
         to: "DS-TABLES"
         description: >
           load_function_graph activity reads df.instances and df.nodes
-          to reconstruct the function graph for execution. Reads submitted_by
-          and login_role for privilege isolation.
+          to reconstruct the function graph for execution. Reads submitted_by for privilege isolation.
         properties:
           Source Authenticated: "Yes"
           Provides Integrity: "Yes"
@@ -233,7 +231,7 @@ diagrams:
         to: "DS-TABLES"
         description: >
           execute_sql activity creates a per-user sqlx connection (authenticated
-          as login_role, SET ROLE to submitted_by) and executes user-supplied
+          directly as submitted_by) and executes user-supplied
           SQL queries. Results returned as JSON to the orchestration.
         properties:
           Source Authenticated: "Yes"

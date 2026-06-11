@@ -193,7 +193,8 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
 | `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
 | `df.signal(id, name, data)` | Send signal to instance | `df.signal('a1b2', 'go', '{}')` |
-| `df.wait_for_completion(id, timeout)` | Block until instance completes (default 30s timeout) | `df.wait_for_completion('a1b2c3d4', 60)` |
+| `df.wait_for_completion(id)` | Block until instance completes (default 30s timeout) | `df.wait_for_completion('a1b2c3d4')` |
+| `df.wait_for_completion(id, timeout)` | Block until instance completes with explicit timeout in seconds | `df.wait_for_completion('a1b2c3d4', 60)` |
 
 ### Operators
 
@@ -317,9 +318,10 @@ SELECT df.result('a1b2c3d4')::jsonb->'rows'->0->>'answer';
 ```
 
 **Special cases:**
-- A query returning no rows produces: `{"rows": [], "row_count": 0}`
-- `df.sleep()` and `df.wait_for_schedule()` produce no result (NULL)
-- `df.http()` results contain `status`, `body`, and `headers` fields inside the row
+- A SQL query returning no rows produces: `{"rows": [], "row_count": 0}`
+- `df.sleep()` returns a top-level JSON object like `{"slept": true, "seconds": 60}`
+- `df.wait_for_schedule()` returns a top-level JSON object: `{"scheduled": true}`
+- `df.http()` returns a top-level JSON object with `status`, `body`, `headers`, `ok`, and `duration_ms` fields
 - `df.break('value')` stores the literal value as the loop result (not wrapped in `rows`)
 
 
@@ -1998,7 +2000,7 @@ CREATE EXTENSION pg_durable;
 
 **Symptom**: A superuser calling `df.start()` gets an error like:
 ```
-Superuser-submitted instances are disabled. Set pg_durable.enable_superuser_instances = true to allow.
+pg_durable: superuser instances are disabled. current_user "postgres" is a superuser, but pg_durable.enable_superuser_instances is off. Set pg_durable.enable_superuser_instances = on to allow this.
 ```
 
 **Cause**: By default, `pg_durable.enable_superuser_instances` is `false`. This is a security safeguard — superuser-submitted workflows bypass RLS and run with full privileges, which could be dangerous in shared environments.
@@ -2006,20 +2008,20 @@ Superuser-submitted instances are disabled. Set pg_durable.enable_superuser_inst
 **Solution**: If you intentionally want to submit workflows as a superuser:
 1. Add to `postgresql.conf`:
    ```ini
-   pg_durable.enable_superuser_instances = true
+   pg_durable.enable_superuser_instances = on
    ```
 2. Restart PostgreSQL (this is a Postmaster-context GUC)
 
 Alternatively, create a dedicated non-superuser role for workflow submission and grant it the necessary privileges.
 
-### "current_user lacks LOGIN attribute" Error
+### "current_user does not have LOGIN privilege" Error
 
 **Symptom**: Calling `df.start()` returns an error:
 ```
-current_user 'role_name' does not have the LOGIN attribute
+current_user "role_name" does not have LOGIN privilege. The background worker must connect as this role to execute SQL. Grant LOGIN to this role or call df.start() as a role with LOGIN.
 ```
 
-**Cause**: The background worker must connect to PostgreSQL as the role that submitted the workflow. Roles without the `LOGIN` attribute cannot be authenticated, so `df.start()` rejects the submission.
+**Cause**: The background worker must connect to PostgreSQL as the role that submitted the workflow. Roles without the `LOGIN` privilege cannot be authenticated, so `df.start()` rejects the submission.
 
 This commonly happens when you use `SET ROLE` to switch to a group role (typically `NOLOGIN`) before calling `df.start()`.
 

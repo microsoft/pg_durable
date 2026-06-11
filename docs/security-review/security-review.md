@@ -29,7 +29,7 @@ The extension demonstrates strong security design for its core threat model:
 **Strengths:**
 - Privilege isolation via per-user sqlx connections is well-designed and correctly implemented
 - RLS enforcement on all user-facing tables with appropriate policies
-- Identity capture via PostgreSQL C API (GetSessionUserId/GetOuterUserId) is unforgeable from SQL
+- Identity capture via PostgreSQL C API (GetUserId) records current_user at df.start() time
 - Comprehensive SSRF protection with IP blocklist, DNS rebinding prevention, and redirect disabling 
 - SQL injection mitigated in critical paths (df.status, df.result use parameterized SPI)
 - Thorough security documentation with explicit threat model
@@ -100,9 +100,9 @@ The extension demonstrates strong security design for its core threat model:
 | ID | Finding | Severity | Status |
 |---|---|---|---|
 | S-1 | PostgreSQL authentication delegates to pg_hba.conf — extension does not add its own auth layer | Info | ✅ Appropriate for trusted extension model |
-| S-2 | User identity captured via unforgeable C API call (GetOuterUserId); current_user must have LOGIN attribute | Info | ✅ Well-implemented |
+| S-2 | User identity captured via unforgeable C API call (GetUserId); current_user must have LOGIN attribute | Info | ✅ Well-implemented |
 | S-3 | Per-user SQL connections authenticated directly as submitted_by via trust auth on localhost | Medium | ✅ Mitigated — pg_hba.conf trust is intentional and appropriate for same-host background worker |
-| S-4 | SECURITY DEFINER functions: GetOuterUserId correctly captures caller, not definer | Info | ✅ Tested (E2E test 27_user_isolation) |
+| S-4 | SECURITY DEFINER functions: GetUserId captures current_user, so SECURITY DEFINER submissions run as the definer | Info | ✅ Tested (E2E test 27_user_isolation) |
 
 ### 3.2 Tampering
 
@@ -159,7 +159,7 @@ The extension demonstrates strong security design for its core threat model:
 |---|---|---|---|
 | E-1 | **RESET ROLE cannot escalate**: Per-user connections authenticated directly as submitted_by; RESET ROLE returns to user's own identity | Info | ✅ Well-designed |
 | E-2 | **SET ROLE membership-checked**: Standard PostgreSQL RBAC applies on per-user connections | Info | ✅ Correct |
-| E-3 | **SECURITY DEFINER correctly handled**: GetOuterUserId captures caller, not definer. E2E tested. | Info | ✅ Tested |
+| E-3 | **SECURITY DEFINER behavior documented**: GetUserId captures current_user, so SECURITY DEFINER submissions run as the definer. | Info | ✅ Tested |
 | E-4 | **EXECUTE on all df.* functions granted to PUBLIC**: Any database user can use the extension. Consider defaulting to a specific role. | Medium | ⚠️ Recommend REVOKE from PUBLIC, grant to specific role |
 | E-5 | **df.http() EXECUTE not restricted by default**: Per T9 in threat model, HTTP access should default to restricted | High | ⛔ NOT IMPLEMENTED |
 | E-6 | **Worker superuser validates at startup**: lib.rs checks if worker role is superuser — warns if not, but does not prevent startup | Medium | ⚠️ Consider hard-fail |
