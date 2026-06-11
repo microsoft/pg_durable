@@ -620,11 +620,26 @@ END $$;
 
 extension_sql!(
     r#"
--- The duroxide schema is created here so the extension owns it.
--- No IF NOT EXISTS: fails loudly if a duroxide schema already exists,
+-- The duroxide provider schema is created here so the extension owns it.
+-- No IF NOT EXISTS: fails loudly if a _duroxide schema already exists,
 -- preventing adoption of a potentially attacker-crafted schema.
 -- The background worker populates this schema at startup via ApplyAll.
-CREATE SCHEMA duroxide;
+--
+-- Fresh installs use the '_duroxide' schema. Installs that originated on
+-- pg_durable <= 0.2.2 keep the legacy 'duroxide' schema; the upgrade script
+-- pg_durable--0.2.2--0.2.3.sql defines df.duroxide_schema() to return
+-- 'duroxide' for those installs. Both backend sessions and the background
+-- worker call df.duroxide_schema() to discover which schema to use, falling
+-- back to 'duroxide' when the helper is absent (installs predating it).
+CREATE SCHEMA _duroxide;
+
+-- Returns the name of the duroxide provider schema selected for this install.
+-- Fresh installs return '_duroxide'. The body is version-specific: the upgrade
+-- script for pre-existing installs replaces it to return 'duroxide'.
+CREATE FUNCTION df.duroxide_schema() RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $$ SELECT '_duroxide'::text $$;
 "#,
     name = "create_duroxide_schema",
     requires = ["validate_database"]
@@ -800,10 +815,13 @@ mod tests {
 
     /// Ensure the Duroxide store exists and is ready
     fn ensure_store_ready() -> Result<String, String> {
-        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{
+            backend_duroxide_schema, new_backend_provider, postgres_connection_string,
+        };
         use std::time::{Duration, Instant};
 
         let pg_conn_str = postgres_connection_string();
+        let schema = backend_duroxide_schema();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -816,8 +834,8 @@ mod tests {
             let timeout = Duration::from_secs(10);
 
             loop {
-                match new_backend_provider(&pg_conn_str).await {
-                    Ok(_) => return Ok(format!("{pg_conn_str} (schema: {DUROXIDE_SCHEMA})")),
+                match new_backend_provider(&pg_conn_str, schema).await {
+                    Ok(_) => return Ok(format!("{pg_conn_str} (schema: {schema})")),
                     Err(e) => {
                         if start.elapsed() > timeout {
                             return Err(format!(
@@ -835,7 +853,9 @@ mod tests {
 
     /// Wait for a durable function to complete, polling Duroxide status
     fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
-        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{
+            backend_duroxide_schema, new_backend_provider, postgres_connection_string,
+        };
         use duroxide::Client;
         use std::time::{Duration, Instant};
 
@@ -843,6 +863,7 @@ mod tests {
         let _ = ensure_store_ready()?;
 
         let pg_conn_str = postgres_connection_string();
+        let schema = backend_duroxide_schema();
         let start = Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
 
@@ -852,7 +873,7 @@ mod tests {
             .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
         rt.block_on(async {
-            let store = new_backend_provider(&pg_conn_str).await?;
+            let store = new_backend_provider(&pg_conn_str, schema).await?;
             let client = Client::new(store);
 
             loop {
@@ -892,11 +913,14 @@ mod tests {
 
     /// Get the current status from Duroxide
     fn get_duroxide_status(instance_id: &str) -> Option<String> {
-        use crate::types::{new_backend_provider, postgres_connection_string, DUROXIDE_SCHEMA};
+        use crate::types::{
+            backend_duroxide_schema, new_backend_provider, postgres_connection_string,
+        };
         use duroxide::Client;
 
         let _ = ensure_store_ready().ok()?;
         let pg_conn_str = postgres_connection_string();
+        let schema = backend_duroxide_schema();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -904,7 +928,7 @@ mod tests {
             .ok()?;
 
         rt.block_on(async {
-            let store = new_backend_provider(&pg_conn_str).await.ok()?;
+            let store = new_backend_provider(&pg_conn_str, schema).await.ok()?;
             let client = Client::new(store);
             client
                 .get_instance_info(instance_id)

@@ -12,7 +12,7 @@ use duroxide::Client;
 use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::types::{new_backend_provider, postgres_connection_string};
+use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
 
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -23,17 +23,20 @@ static DUROXIDE_CLIENT: OnceLock<Client> = OnceLock::new();
 /// Check whether the background worker has finished initializing the duroxide
 /// schema for the current binary's expected schema version.
 ///
-/// Returns `false` if `duroxide._worker_ready` does not exist, has no row, or
-/// has a `schema_version` below `WORKER_SCHEMA_VERSION`. This is a fast SPI
-/// read called once per session on the first call to any `df.*` function that
-/// needs the duroxide client.
+/// Returns `false` if `<provider_schema>._worker_ready` does not exist, has no
+/// row, or has a `schema_version` below `WORKER_SCHEMA_VERSION`. This is a fast
+/// SPI read called once per session on the first call to any `df.*` function
+/// that needs the duroxide client.
 fn is_worker_ready() -> bool {
+    let schema = backend_duroxide_schema();
+
     // First check if the readiness table exists via the catalogue.  Querying
     // the non-existent table directly would raise a PostgreSQL ERROR that
     // aborts the current (sub)transaction — even if caught in Rust.
-    let table_exists = Spi::get_one::<bool>(
+    let table_exists = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
-         WHERE schemaname = 'duroxide' AND tablename = '_worker_ready')",
+         WHERE schemaname = $1 AND tablename = '_worker_ready')",
+        &[schema.into()],
     )
     .ok()
     .flatten()
@@ -44,7 +47,10 @@ fn is_worker_ready() -> bool {
     }
 
     Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= $1)",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM {}._worker_ready WHERE schema_version >= $1)",
+            schema
+        ),
         &[crate::WORKER_SCHEMA_VERSION.into()],
     )
     .ok()
@@ -76,6 +82,7 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
 
     let rt = get_client_runtime();
     let pg_conn_str = postgres_connection_string();
+    let schema = backend_duroxide_schema();
 
     rt.block_on(async {
         // Limit backend provider to 1 connection — backends need minimal duroxide
@@ -83,7 +90,7 @@ fn get_duroxide_client() -> Result<&'static Client, String> {
         // (new_current_thread). Note: std::env::set_var becomes unsafe in Rust 2024 edition.
         std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
 
-        let store = new_backend_provider(&pg_conn_str).await?;
+        let store = new_backend_provider(&pg_conn_str, schema).await?;
 
         let _ = DUROXIDE_CLIENT.set(Client::new(store));
         DUROXIDE_CLIENT

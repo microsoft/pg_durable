@@ -147,7 +147,8 @@ Returns the version that was last installed/updated. Compare against known thres
 
 ### Test infrastructure
 
-- `sql/pg_durable--0.1.1.sql` — first install SQL for the current major version (only the first version per major needs a fixture; intermediate versions are reconstructed by chaining upgrade scripts)
+- `sql/pg_durable--0.1.1.sql` — first install SQL for the current major version
+- `sql/pg_durable--0.2.2.sql` — install SQL fixture at the start of the current provider compatibility line (`PROVIDER_COMPAT_START_VERSION`). The harness reconstructs a target version from the **highest install fixture at or below it** (see `base_fixture_for_version` in `scripts/test-upgrade.sh`), then chains `ALTER EXTENSION UPDATE`. A fixture is required at the provider-compat-start boundary so reconstruction never has to chain across it — the pre-0.2.2 install SQL embeds a hand-written `duroxide` schema that is incompatible with the duroxide-pg provider's migration tracking (`_duroxide_migrations`).
 - `sql/pg_durable--0.1.1--0.2.0.sql` — upgrade script (initially empty, populated by subsequent PRs)
 - `scripts/test-upgrade.sh` — runs Scenarios A, B1, and B2. The `PROVIDER_COMPAT_START_VERSION` environment variable/default controls the first version in the current provider compatibility line. Versions before that boundary are excluded from B1 and cannot be used as A/B2 upgrade sources.
 - CI step in `.github/workflows/ci.yml`
@@ -171,7 +172,7 @@ Each PR that changes the extension schema or modifies SQL queries in Rust code s
 **Minor release** (e.g. 0.2.0 → 0.3.0):
 1. Create empty `sql/pg_durable--<N>--<N+1>.sql` upgrade script
 2. Bump `Cargo.toml` version to `<N+1>`
-3. If this release starts a new provider compatibility line, update the `PROVIDER_COMPAT_START_VERSION` default in `scripts/test-upgrade.sh` and document the boundary under "Version-Specific Changes". Downstream forks can instead override `PROVIDER_COMPAT_START_VERSION` in CI to keep the script shared.
+3. If this release starts a new provider compatibility line, update the `PROVIDER_COMPAT_START_VERSION` default in `scripts/test-upgrade.sh`, check in an install SQL fixture (`sql/pg_durable--<start>.sql`) at that boundary so reconstruction never chains across it, and document the boundary under "Version-Specific Changes". Downstream forks can instead override `PROVIDER_COMPAT_START_VERSION` in CI to keep the script shared.
 
 If this is the first minor after a new major (e.g. 1.0.0 → 1.1.0), also:
 
@@ -201,6 +202,17 @@ gate, so they never need to be added to the exclude list.
 
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
+
+### v0.2.2 → v0.2.3
+
+#### Rename duroxide provider schema to `_duroxide` for fresh installs
+- **DDL change (df schema):** Adds `df.duroxide_schema()`, an `IMMUTABLE`/`PARALLEL SAFE` SQL function that returns the name of the schema holding the duroxide provider objects. Fresh 0.2.3 installs create the function (in `src/lib.rs`) returning `'_duroxide'`; the upgrade script `sql/pg_durable--0.2.2--0.2.3.sql` creates the same function returning `'duroxide'` so pre-existing installs keep using the legacy schema. Both bodies set `search_path = pg_catalog, pg_temp` to satisfy the pgspot gate.
+- **DDL change (provider schema):** Fresh installs now run `CREATE SCHEMA _duroxide` (was `CREATE SCHEMA duroxide`). The upgrade script does **not** rename, drop, or move the existing `duroxide` schema — renaming an in-use provider schema would orphan the BGW's durable state. Upgraded installs therefore continue to use `duroxide`.
+- **Runtime selection:** Backend sessions resolve the provider schema once per session via `backend_duroxide_schema()` (cached in a `OnceLock`); the BGW resolves it once per epoch via `resolve_duroxide_schema_pool()` (re-resolved after every CREATE EXTENSION so drop+recreate with a different schema version is handled). Both call `df.duroxide_schema()` and fall back to `'duroxide'` (`LEGACY_DUROXIDE_SCHEMA`) when the helper is absent — i.e. a new `.so` deployed against a ≤0.2.2 schema that has not run `ALTER EXTENSION pg_durable UPDATE`. Presence is detected via a `pg_proc` catalog lookup rather than catching `42883`, so the surrounding (sub)transaction is never aborted.
+- **Scenario A considerations:** The Scenario A equivalence contract covers the `df` schema only and compares function signatures, not bodies. `df.duroxide_schema()` has an identical signature on the fresh-install and upgrade paths (only the returned literal differs), so Scenario A passes. The provider schema name (`_duroxide` vs `duroxide`) is intentionally excluded from the snapshot diff, as it was for v0.2.0.
+- **Scenario B1 considerations:** The new `.so` works against all previous schemas: when `df.duroxide_schema()` does not exist (≤0.2.2 schemas without the upgrade applied) the runtime falls back to `'duroxide'`, which is exactly the schema those installs use.
+- **Scenario B2 considerations:** No data migration. The existing `duroxide` schema and its tables are untouched; the upgrade only adds one `df` function.
+- **Test fixture:** A new `sql/pg_durable--0.2.2.sql` install fixture is checked in at the provider-compat-start boundary. The upgrade harness now reconstructs 0.2.2 directly from it (an empty `duroxide` schema that the BGW populates via the duroxide-pg `ApplyAll` migration) instead of chaining from the pre-provider `pg_durable--0.1.1.sql` fixture, whose embedded hand-written `duroxide` schema lacks the `_duroxide_migrations` tracking table and is therefore incompatible with the duroxide-pg provider.
 
 ### v0.2.1 → v0.2.2
 

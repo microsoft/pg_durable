@@ -18,7 +18,7 @@ use tracing_subscriber::EnvFilter;
 use crate::registry::{create_activity_registry, create_orchestration_registry};
 use crate::types::{
     get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
-    postgres_connection_string, worker_provider_config, DUROXIDE_SCHEMA,
+    postgres_connection_string, resolve_duroxide_schema_pool, worker_provider_config,
 };
 
 /// Initialize tracing subscriber for duroxide logs.
@@ -92,9 +92,8 @@ async fn run_duroxide_runtime() {
 
     let pg_conn_str = postgres_connection_string();
     log!(
-        "pg_durable: background worker connected to PostgreSQL at {} (schema: {})",
+        "pg_durable: background worker connected to PostgreSQL at {}",
         pg_conn_str,
-        DUROXIDE_SCHEMA
     );
 
     // Validate connection limit GUCs at startup
@@ -161,8 +160,23 @@ async fn run_duroxide_runtime() {
             break;
         }
 
-        let Some(duroxide_runtime) =
-            initialize_duroxide_runtime(&pg_conn_str, INIT_RETRY_INTERVAL, &mgmt_pool).await
+        // Resolve the duroxide provider schema for this epoch. The extension may
+        // have been dropped and recreated with a different schema version (e.g.
+        // a fresh `_duroxide` install vs. a legacy `duroxide` install), so we
+        // must re-resolve after every CREATE EXTENSION rather than once at startup.
+        let duroxide_schema = resolve_duroxide_schema_pool(&mgmt_pool).await;
+        log!(
+            "pg_durable: using duroxide provider schema '{}' for this epoch",
+            duroxide_schema
+        );
+
+        let Some(duroxide_runtime) = initialize_duroxide_runtime(
+            &pg_conn_str,
+            INIT_RETRY_INTERVAL,
+            &mgmt_pool,
+            &duroxide_schema,
+        )
+        .await
         else {
             // Shutdown requested or extension dropped while initializing.
             continue;
@@ -171,7 +185,7 @@ async fn run_duroxide_runtime() {
         // Write the worker readiness record so backend sessions know the
         // duroxide schema is fully initialized for this schema version.
         // Skipped if the row already has the current WORKER_SCHEMA_VERSION.
-        if let Err(e) = write_worker_ready(&mgmt_pool).await {
+        if let Err(e) = write_worker_ready(&mgmt_pool, &duroxide_schema).await {
             log!("pg_durable: failed to write worker readiness record: {}", e);
         }
 
@@ -233,7 +247,7 @@ async fn check_extension_exists(pool: &sqlx::PgPool) -> bool {
 ///
 /// This prevents the BGW from running ApplyAll into an attacker-crafted schema
 /// that happens to be named "duroxide" but was not created by CREATE EXTENSION.
-async fn check_duroxide_schema_owned(pool: &sqlx::PgPool) -> bool {
+async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> bool {
     let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
         "SELECT EXISTS (
             SELECT 1
@@ -245,9 +259,10 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool) -> bool {
             JOIN pg_extension e
                 ON e.oid = d.refobjid
                 AND e.extname = 'pg_durable'
-            WHERE n.nspname = 'duroxide'
+            WHERE n.nspname = $1
         )",
     )
+    .bind(schema_name)
     .fetch_one(pool)
     .await;
 
@@ -262,8 +277,11 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool) -> bool {
 /// the schema namespace itself). On upgrades from v0.1.1 — where CREATE EXTENSION
 /// embedded the full duroxide DDL — this de-registers those embedded objects from
 /// the extension before the BGW applies any new migrations.
-async fn release_extension_owned_duroxide_objects(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
+async fn release_extension_owned_duroxide_objects(
+    pool: &sqlx::PgPool,
+    schema_name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
         r#"DO $$
 DECLARE
     r RECORD;
@@ -285,7 +303,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = 'duroxide'
+        WHERE n.nspname = '{schema}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TRIGGER '
                 || r.trigger_name || ' ON ' || r.table_name;
@@ -303,7 +321,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = 'duroxide'
+        WHERE n.nspname = '{schema}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP FUNCTION ' || r.sig;
     END LOOP;
@@ -320,7 +338,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = 'duroxide' AND c.relkind = 'r'
+        WHERE n.nspname = '{schema}' AND c.relkind = 'r'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TABLE ' || r.name;
     END LOOP;
@@ -339,7 +357,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = 'duroxide' AND c.relkind = 'i'
+        WHERE n.nspname = '{schema}' AND c.relkind = 'i'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP INDEX ' || r.name;
     END LOOP;
@@ -356,12 +374,13 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = 'duroxide' AND c.relkind = 'S'
+        WHERE n.nspname = '{schema}' AND c.relkind = 'S'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP SEQUENCE ' || r.name;
     END LOOP;
 END $$"#,
-    )
+        schema = schema_name
+    ))
     .execute(pool)
     .await?;
     Ok(())
@@ -371,21 +390,21 @@ END $$"#,
 /// schema namespace entry itself) is still registered as an extension member.
 /// Used to short-circuit `release_extension_owned_duroxide_objects` on the
 /// common path (fresh 0.2.0 installs and all restarts after the first upgrade).
-async fn has_extension_owned_duroxide_objects(pool: &sqlx::PgPool) -> bool {
+async fn has_extension_owned_duroxide_objects(pool: &sqlx::PgPool, schema_name: &str) -> bool {
     let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
         "SELECT EXISTS (
             SELECT 1
             FROM pg_depend d
             JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
             JOIN pg_class c     ON c.oid = d.objid
-            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'duroxide'
+            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
             WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e'
             UNION ALL
             SELECT 1
             FROM pg_depend d
             JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
             JOIN pg_proc p      ON p.oid = d.objid
-            JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'duroxide'
+            JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = $1
             WHERE d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
             UNION ALL
             SELECT 1
@@ -393,10 +412,11 @@ async fn has_extension_owned_duroxide_objects(pool: &sqlx::PgPool) -> bool {
             JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
             JOIN pg_trigger t   ON t.oid = d.objid
             JOIN pg_class c     ON c.oid = t.tgrelid
-            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'duroxide'
+            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
             WHERE d.classid = 'pg_trigger'::regclass AND d.deptype = 'e'
         )",
     )
+    .bind(schema_name)
     .fetch_one(pool)
     .await;
     result.map(|(b,)| b).unwrap_or(false)
@@ -406,6 +426,7 @@ async fn initialize_duroxide_runtime(
     pg_conn_str: &str,
     retry_interval: Duration,
     mgmt_pool: &sqlx::PgPool,
+    schema_name: &str,
 ) -> Option<Arc<runtime::Runtime>> {
     log!("pg_durable: initializing duroxide runtime...");
 
@@ -434,7 +455,7 @@ async fn initialize_duroxide_runtime(
             return None;
         }
 
-        if !check_duroxide_schema_owned(mgmt_pool).await {
+        if !check_duroxide_schema_owned(mgmt_pool, schema_name).await {
             log!(
                 "pg_durable: duroxide schema missing or not extension-owned \
                  (CREATE EXTENSION may still be in progress) — will retry"
@@ -449,8 +470,8 @@ async fn initialize_duroxide_runtime(
         // embedded DDL from the extension before ApplyAll runs.
         // The existence check avoids executing the five-loop DO block on every
         // clean restart once the upgrade has already been applied.
-        if has_extension_owned_duroxide_objects(mgmt_pool).await {
-            if let Err(e) = release_extension_owned_duroxide_objects(mgmt_pool).await {
+        if has_extension_owned_duroxide_objects(mgmt_pool, schema_name).await {
+            if let Err(e) = release_extension_owned_duroxide_objects(mgmt_pool, schema_name).await {
                 log!(
                     "pg_durable: failed to release extension-owned duroxide objects (will retry): {}",
                     e
@@ -460,18 +481,22 @@ async fn initialize_duroxide_runtime(
             }
         }
 
-        let store =
-            match PostgresProvider::new_with_config(worker_provider_config(pg_conn_str)).await {
-                Ok(s) => Arc::new(s),
-                Err(e) => {
-                    log!(
-                        "pg_durable: failed to create PostgreSQL store (will retry): {}",
-                        e
-                    );
-                    tokio::time::sleep(retry_interval).await;
-                    continue;
-                }
-            };
+        let store = match PostgresProvider::new_with_config(worker_provider_config(
+            pg_conn_str,
+            schema_name,
+        ))
+        .await
+        {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                log!(
+                    "pg_durable: failed to create PostgreSQL store (will retry): {}",
+                    e
+                );
+                tokio::time::sleep(retry_interval).await;
+                continue;
+            }
+        };
 
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
@@ -510,35 +535,43 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
 /// `schema_version` differs from `WORKER_SCHEMA_VERSION`; if the row already
 /// matches, it is left untouched so `initialized_at` reflects when the current
 /// schema version was first established rather than the last BGW restart.
-async fn write_worker_ready(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS duroxide._worker_ready (
+async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
             sentinel        BOOLEAN PRIMARY KEY DEFAULT TRUE,
             CONSTRAINT      only_one_sentinel CHECK (sentinel),
             schema_version  INT NOT NULL,
             initialized_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         )",
-    )
+        schema = schema_name
+    ))
     .execute(pool)
     .await?;
 
     // Allow non-superuser sessions to read the readiness record via
     // is_worker_ready() which runs SPI in the caller's security context.
-    sqlx::query("GRANT USAGE ON SCHEMA duroxide TO PUBLIC")
-        .execute(pool)
-        .await?;
-    sqlx::query("GRANT SELECT ON duroxide._worker_ready TO PUBLIC")
-        .execute(pool)
-        .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {schema} TO PUBLIC",
+        schema = schema_name
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT ON {schema}._worker_ready TO PUBLIC",
+        schema = schema_name
+    ))
+    .execute(pool)
+    .await?;
 
-    sqlx::query(
-        "INSERT INTO duroxide._worker_ready (sentinel, schema_version, initialized_at) \
+    sqlx::query(&format!(
+        "INSERT INTO {schema}._worker_ready (sentinel, schema_version, initialized_at) \
          VALUES (TRUE, $1, now()) \
          ON CONFLICT (sentinel) DO UPDATE SET \
              schema_version = EXCLUDED.schema_version, \
              initialized_at = EXCLUDED.initialized_at \
-         WHERE duroxide._worker_ready.schema_version != EXCLUDED.schema_version",
-    )
+         WHERE {schema}._worker_ready.schema_version != EXCLUDED.schema_version",
+        schema = schema_name
+    ))
     .bind(crate::WORKER_SCHEMA_VERSION)
     .execute(pool)
     .await?;

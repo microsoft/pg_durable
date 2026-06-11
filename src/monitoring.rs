@@ -8,7 +8,7 @@
 use duroxide::Client;
 use pgrx::prelude::*;
 
-use crate::types::{new_backend_provider, postgres_connection_string};
+use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
 
 // ============================================================================
 // Monitoring Functions
@@ -36,6 +36,7 @@ pub fn list_instances(
     let limit_count = limit_count.min(10000);
 
     let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
 
     // Query df.instances via SPI first — RLS filters to calling user's rows only.
     // We also fetch status here so that all three monitoring APIs (df.status(),
@@ -82,7 +83,7 @@ pub fn list_instances(
     };
 
     let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str).await {
+        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
             Ok(s) => s,
             Err(_) => return vec![],
         };
@@ -128,6 +129,7 @@ pub fn instance_info(
     ),
 > {
     let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
     let instance_id_str = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, returning NULL for non-owned instances.
@@ -165,7 +167,7 @@ pub fn instance_info(
     };
 
     let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str).await {
+        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
             Ok(s) => s,
             Err(_) => return vec![],
         };
@@ -205,6 +207,7 @@ pub fn instance_executions(
     ),
 > {
     let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
     let instance_id_owned = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, so non-owned instances are invisible.
@@ -229,7 +232,7 @@ pub fn instance_executions(
     };
 
     let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str).await {
+        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
             Ok(s) => s,
             Err(_) => return vec![],
         };
@@ -282,6 +285,7 @@ pub fn metrics() -> TableIterator<
     ),
 > {
     let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -292,7 +296,7 @@ pub fn metrics() -> TableIterator<
     };
 
     let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str).await {
+        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
             Ok(s) => s,
             Err(_) => return vec![],
         };
@@ -339,6 +343,7 @@ pub fn instance_nodes(
 
     let instance_id = instance_id_param.to_string();
     let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
 
     // Get node definitions from PostgreSQL (including status, result and updated_at)
     let node_defs: Vec<(
@@ -392,7 +397,7 @@ pub fn instance_nodes(
     };
 
     let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str).await {
+        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
             Ok(s) => s,
             Err(_) => return vec![],
         };

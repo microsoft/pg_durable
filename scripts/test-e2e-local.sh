@@ -389,9 +389,17 @@ SQL
 wait_for_worker_ready() {
     local ready="f"
     local attempts=0
+    local dx_schema=""
 
     while [ "$attempts" -lt 120 ]; do
-        ready=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'duroxide' AND table_name = '_worker_ready') THEN EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1) ELSE FALSE END;" 2>/dev/null | tr -d ' \n' || true)
+        # Resolve the duroxide provider schema via df.duroxide_schema().
+        # Falls back to the legacy 'duroxide' schema when the helper is absent
+        # (extension not yet created, or installs predating the helper).
+        dx_schema=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -Atqc "SELECT df.duroxide_schema();" 2>/dev/null | tr -d ' \n' || true)
+        if [ -z "$dx_schema" ]; then
+            dx_schema="duroxide"
+        fi
+        ready=$("$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = '$dx_schema' AND table_name = '_worker_ready') THEN EXISTS(SELECT 1 FROM $dx_schema._worker_ready WHERE schema_version >= 1) ELSE FALSE END;" 2>/dev/null | tr -d ' \n' || true)
         if [ "$ready" = "t" ]; then
             return
         fi

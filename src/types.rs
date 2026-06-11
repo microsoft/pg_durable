@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -218,16 +218,87 @@ pub async fn connect_as_user(
     Ok(conn)
 }
 
-/// Schema name for Duroxide internal tables
-pub const DUROXIDE_SCHEMA: &str = "duroxide";
+/// Legacy duroxide provider schema name used by installs created before the
+/// `df.duroxide_schema()` helper existed (pg_durable ≤ 0.2.2). It is the only
+/// fallback when that helper is absent, and the value the upgrade script pins
+/// existing clusters to.
+pub const LEGACY_DUROXIDE_SCHEMA: &str = "duroxide";
+
+/// Resolve the duroxide provider schema name by calling the extension-owned
+/// `df.duroxide_schema()` helper.
+///
+/// Returns [`LEGACY_DUROXIDE_SCHEMA`] when the helper does not exist (an install
+/// that predates it — e.g. a new `.so` deployed against a ≤0.2.2 schema without
+/// running `ALTER EXTENSION pg_durable UPDATE`). The presence check uses the
+/// catalog rather than catching `42883` so it never aborts the surrounding
+/// (sub)transaction in a backend session.
+fn resolve_duroxide_schema_spi() -> String {
+    let helper_exists = Spi::get_one::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'df' AND p.proname = 'duroxide_schema' AND p.pronargs = 0)",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+
+    if !helper_exists {
+        return LEGACY_DUROXIDE_SCHEMA.to_string();
+    }
+
+    match Spi::get_one::<String>("SELECT df.duroxide_schema()") {
+        Ok(Some(s)) if !s.is_empty() => s,
+        _ => LEGACY_DUROXIDE_SCHEMA.to_string(),
+    }
+}
+
+/// Resolve the duroxide provider schema for the current backend session,
+/// caching it for the session lifetime. The value cannot change without an
+/// extension upgrade, which requires a reconnect to observe reliably, so a
+/// per-session cache is safe.
+pub fn backend_duroxide_schema() -> &'static str {
+    static SCHEMA: OnceLock<String> = OnceLock::new();
+    SCHEMA.get_or_init(resolve_duroxide_schema_spi)
+}
+
+/// Resolve the duroxide provider schema name from the background worker using an
+/// async pool. Mirrors [`resolve_duroxide_schema_spi`] but for the BGW context.
+/// The BGW resolves this once per epoch (after the extension is detected) rather
+/// than caching for the process lifetime, because drop+recreate can switch the
+/// provider schema within a single worker lifetime.
+pub async fn resolve_duroxide_schema_pool(pool: &sqlx::PgPool) -> String {
+    let helper_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'df' AND p.proname = 'duroxide_schema' AND p.pronargs = 0)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !helper_exists {
+        return LEGACY_DUROXIDE_SCHEMA.to_string();
+    }
+
+    match sqlx::query_scalar::<_, String>("SELECT df.duroxide_schema()")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(s) if !s.is_empty() => s,
+        _ => LEGACY_DUROXIDE_SCHEMA.to_string(),
+    }
+}
 
 /// Create a `ProviderConfig` for backend (request/response) operations.
 ///
 /// - `VerifyOnly`: never create schema/tables, reject unknown migrations.
 ///   Backend sessions must not run DDL — the BGW owns schema lifecycle.
-pub fn backend_provider_config(database_url: &str) -> duroxide_pg::ProviderConfig {
+pub fn backend_provider_config(
+    database_url: &str,
+    schema_name: &str,
+) -> duroxide_pg::ProviderConfig {
     let mut config = duroxide_pg::ProviderConfig::url(database_url);
-    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
+    config.schema_name = Some(schema_name.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::VerifyOnly;
     config
 }
@@ -235,22 +306,29 @@ pub fn backend_provider_config(database_url: &str) -> duroxide_pg::ProviderConfi
 /// Create a backend provider for request/response operations.
 pub async fn new_backend_provider(
     database_url: &str,
+    schema_name: &str,
 ) -> Result<Arc<duroxide_pg::PostgresProvider>, String> {
-    duroxide_pg::PostgresProvider::new_with_config(backend_provider_config(database_url))
-        .await
-        .map(Arc::new)
-        .map_err(|e| format!("Failed to connect to duroxide store: {e}"))
+    duroxide_pg::PostgresProvider::new_with_config(backend_provider_config(
+        database_url,
+        schema_name,
+    ))
+    .await
+    .map(Arc::new)
+    .map_err(|e| format!("Failed to connect to duroxide store: {e}"))
 }
 
 /// Create a `ProviderConfig` for the background worker runtime.
 ///
 /// - `ApplyAll`: applies pending duroxide migrations at startup; creates tables
-///   inside the extension-owned `duroxide` schema. Safe because the BGW verifies
+///   inside the extension-owned provider schema. Safe because the BGW verifies
 ///   schema ownership via `pg_depend` before calling
 ///   `PostgresProvider::new_with_config`.
-pub fn worker_provider_config(database_url: &str) -> duroxide_pg::ProviderConfig {
+pub fn worker_provider_config(
+    database_url: &str,
+    schema_name: &str,
+) -> duroxide_pg::ProviderConfig {
     let mut config = duroxide_pg::ProviderConfig::url(database_url);
-    config.schema_name = Some(DUROXIDE_SCHEMA.to_string());
+    config.schema_name = Some(schema_name.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::ApplyAll;
     config
 }
