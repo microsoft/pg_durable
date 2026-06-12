@@ -390,19 +390,194 @@ async fn execute_sleep_node(
     node: &FunctionNode,
     node_id: &str,
 ) -> Result<String, String> {
-    let seconds_str = node
+    let duration_str = node
         .query
         .as_ref()
         .ok_or_else(|| format!("SLEEP node {node_id} has no duration"))?;
 
-    let seconds: u64 = seconds_str
-        .parse()
-        .map_err(|_| format!("Invalid sleep duration: {seconds_str}"))?;
+    // Backward compatibility:
+    // - v0.2.1 and earlier stored plain integer seconds in query text.
+    // - Newer versions store {"milliseconds": <int>} JSON for sub-second sleeps.
+    let millis: u64 = match serde_json::from_str::<serde_json::Value>(duration_str) {
+        Ok(v) => v
+            .get("milliseconds")
+            .and_then(|m| m.as_u64())
+            .ok_or_else(|| format!("Invalid sleep config for node {node_id}: {duration_str}"))?,
+        Err(_) => {
+            let seconds: u64 = duration_str
+                .parse()
+                .map_err(|_| format!("Invalid sleep duration: {duration_str}"))?;
+            seconds.saturating_mul(1000)
+        }
+    };
 
-    ctx.trace_info(format!("Sleeping for {seconds} seconds"));
-    ctx.schedule_timer(Duration::from_secs(seconds)).await;
+    ctx.trace_info(format!("Sleeping for {millis} ms"));
+    ctx.schedule_timer(Duration::from_millis(millis)).await;
 
-    Ok(format!(r#"{{"slept": true, "seconds": {seconds}}}"#))
+    Ok(format!(r#"{{"slept": true, "milliseconds": {millis}}}"#))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RetryConfig {
+    #[serde(default = "default_retry_policy")]
+    policy: String,
+    #[serde(default = "default_retry_attempts")]
+    max_attempts: u32,
+    #[serde(default)]
+    initial_backoff_ms: u64,
+    #[serde(default)]
+    max_backoff_ms: u64,
+    #[serde(default = "default_retry_multiplier")]
+    backoff_multiplier: f64,
+    #[serde(default)]
+    jitter: f64,
+}
+
+fn default_retry_policy() -> String {
+    "transient".to_string()
+}
+
+fn default_retry_attempts() -> u32 {
+    3
+}
+
+fn default_retry_multiplier() -> f64 {
+    2.0
+}
+
+fn parse_retry_config(config: &serde_json::Value) -> Result<Option<RetryConfig>, String> {
+    let Some(retry_raw) = config.get("retry") else {
+        return Ok(None);
+    };
+
+    let retry_cfg: RetryConfig = serde_json::from_value(retry_raw.clone())
+        .map_err(|e| format!("Invalid retry config: {e}"))?;
+
+    if retry_cfg.max_attempts == 0 {
+        return Err("retry.max_attempts must be positive".to_string());
+    }
+    if retry_cfg.max_backoff_ms < retry_cfg.initial_backoff_ms {
+        return Err("retry.max_backoff_ms must be >= retry.initial_backoff_ms".to_string());
+    }
+    if !retry_cfg.backoff_multiplier.is_finite() || retry_cfg.backoff_multiplier < 1.0 {
+        return Err("retry.backoff_multiplier must be finite and >= 1.0".to_string());
+    }
+    if !retry_cfg.jitter.is_finite() || !(0.0..=1.0).contains(&retry_cfg.jitter) {
+        return Err("retry.jitter must be between 0.0 and 1.0".to_string());
+    }
+
+    Ok(Some(retry_cfg))
+}
+
+fn deterministic_jitter_multiplier(node_id: &str, attempt: u32, jitter: f64) -> f64 {
+    if jitter <= 0.0 {
+        return 1.0;
+    }
+
+    // Deterministic FNV-1a hash (replay-safe, no runtime randomness).
+    let mut hash: u64 = 1469598103934665603;
+    for b in node_id.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash ^= attempt as u64;
+    hash = hash.wrapping_mul(1099511628211);
+
+    let unit = (hash % 10_000) as f64 / 10_000.0; // [0, 1)
+    1.0 - jitter + (2.0 * jitter * unit) // [1-jitter, 1+jitter)
+}
+
+fn compute_backoff_ms(cfg: &RetryConfig, node_id: &str, attempt: u32) -> u64 {
+    if cfg.initial_backoff_ms == 0 {
+        return 0;
+    }
+
+    let pow = cfg
+        .backoff_multiplier
+        .powi((attempt.saturating_sub(1)) as i32);
+    let base = (cfg.initial_backoff_ms as f64) * pow;
+    let with_jitter = base * deterministic_jitter_multiplier(node_id, attempt, cfg.jitter);
+    let capped = with_jitter.min(cfg.max_backoff_ms as f64).max(0.0);
+    capped.round() as u64
+}
+
+fn is_retryable_error(policy: &str, err: &str) -> bool {
+    let msg = err.to_ascii_lowercase();
+    let has = |needle: &str| msg.contains(needle);
+
+    match policy.to_ascii_lowercase().as_str() {
+        "all" => true,
+        "on_429" | "rate_limited" => has("429") || has("rate limit") || has("too many requests"),
+        "transient" => {
+            has("429")
+                || has("rate limit")
+                || has("too many requests")
+                || has("timeout")
+                || has("temporar")
+                || has("deadlock")
+                || has("could not serialize")
+                || has("connection reset")
+                || has("connection refused")
+                || has("lock timeout")
+        }
+        _ => false,
+    }
+}
+
+async fn execute_retry_loop_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node_id: &str,
+    body_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+    config: &serde_json::Value,
+    retry_cfg: RetryConfig,
+) -> Result<String, String> {
+    let on_error_node_id = config.get("on_error_node").and_then(|v| v.as_str());
+
+    let mut attempt: u32 = 1;
+    loop {
+        match Box::pin(execute_function_node_with_vars(
+            ctx, graph, body_id, results, exec_ctx,
+        ))
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                let retryable = is_retryable_error(&retry_cfg.policy, &err);
+                let exhausted = attempt >= retry_cfg.max_attempts;
+                ctx.trace_info(format!(
+                    "Retry node {node_id} attempt {attempt} failed (retryable={retryable}, exhausted={exhausted}): {err}"
+                ));
+
+                if !retryable || exhausted {
+                    if let Some(handler_id) = on_error_node_id {
+                        let err_payload = serde_json::json!({
+                            "message": err,
+                            "attempt": attempt,
+                            "retryable": retryable
+                        });
+                        results.insert(RETRY_ERROR_KEY.to_string(), err_payload.to_string());
+                        return Box::pin(execute_function_node_with_vars(
+                            ctx, graph, handler_id, results, exec_ctx,
+                        ))
+                        .await;
+                    }
+                    return Err(err);
+                }
+
+                let delay_ms = compute_backoff_ms(&retry_cfg, node_id, attempt);
+                if delay_ms > 0 {
+                    ctx.trace_info(format!(
+                        "Retry node {node_id} scheduling backoff: {delay_ms}ms before next attempt"
+                    ));
+                    ctx.schedule_timer(Duration::from_millis(delay_ms)).await;
+                }
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
 }
 
 async fn execute_wait_schedule_node(
@@ -435,6 +610,7 @@ async fn execute_wait_schedule_node(
 
 /// Sentinel key used to signal a break from within a loop
 const BREAK_SENTINEL: &str = "__break__";
+const RETRY_ERROR_KEY: &str = "__error__";
 
 /// Minimum wall-clock duration that every loop iteration must take before
 /// `continue_as_new` is called.  If the body (plus any while-condition
@@ -474,6 +650,17 @@ async fn execute_loop_node(
         .left_node
         .as_ref()
         .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
+
+    if let Some(ref config_str) = node.query {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(config_str) {
+            if let Some(retry_cfg) = parse_retry_config(&config)? {
+                return execute_retry_loop_node(
+                    ctx, graph, node_id, body_id, results, exec_ctx, &config, retry_cfg,
+                )
+                .await;
+            }
+        }
+    }
 
     // Capture the iteration start time so we can rate-limit `continue_as_new`
     // below.  `utc_now()` is duroxide's deterministic clock (recorded in
@@ -853,7 +1040,45 @@ async fn execute_race_node(
     })
     .to_string();
 
-    // Schedule sub-orchestrations
+    // timeout wrapper: race the target branch against a durable timer
+    if let Some(config_str) = &node.query {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(config_str) {
+            if config
+                .get("timeout_wrapper")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let timeout_ms = config
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| "RACE timeout wrapper missing timeout_ms".to_string())?;
+
+                let left_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, left_input);
+                let timeout_fut = ctx.schedule_timer(Duration::from_millis(timeout_ms));
+
+                let raw = match ctx.select2(left_fut, timeout_fut).await {
+                    duroxide::Either2::First(Ok(r)) => {
+                        ctx.trace_info("TIMEOUT wrapper completed before deadline");
+                        r
+                    }
+                    duroxide::Either2::First(Err(e)) => {
+                        return Err(format!("TIMEOUT wrapped branch failed: {e}"));
+                    }
+                    duroxide::Either2::Second(()) => {
+                        return Err(format!("Operation timed out after {}ms", timeout_ms));
+                    }
+                };
+
+                let result = parse_subtree_envelope(&raw, "TIMEOUT branch", results)?;
+                if let Some(name) = &node.result_name {
+                    results.insert(name.clone(), result.clone());
+                }
+                return Ok(result);
+            }
+        }
+    }
+
+    // Standard race behavior: schedule both sub-orchestrations
     let left_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, left_input);
     let right_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, right_input);
 

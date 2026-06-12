@@ -1086,6 +1086,22 @@ impl Durofut {
             }
         }
 
+        // LOOP nodes may also embed retry fallback handlers
+        if self.node_type == "LOOP" {
+            if let Some(handler) = config.get("on_error_node") {
+                let handler_node =
+                    serde_json::from_value::<Durofut>(handler.clone()).map_err(|e| {
+                        format!(
+                            "on_error_node in {} must be a valid Durofut object, got {}: {}",
+                            self.node_type,
+                            summarize_json_type(handler),
+                            e
+                        )
+                    })?;
+                f(&handler_node)?;
+            }
+        }
+
         // JOIN nodes: extra_nodes array
         if self.node_type == "JOIN" {
             if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
@@ -1137,6 +1153,23 @@ impl Durofut {
                 })?;
                 let cond_id = f(&cond_node)?;
                 config["condition_node"] = serde_json::json!(cond_id);
+            }
+        }
+
+        // LOOP nodes may also embed retry fallback handlers
+        if self.node_type == "LOOP" {
+            if let Some(handler) = config.get("on_error_node") {
+                let handler_node =
+                    serde_json::from_value::<Durofut>(handler.clone()).map_err(|e| {
+                        format!(
+                            "on_error_node in {} must be a valid Durofut object, got {}: {}",
+                            self.node_type,
+                            summarize_json_type(handler),
+                            e
+                        )
+                    })?;
+                let handler_id = f(&handler_node)?;
+                config["on_error_node"] = serde_json::json!(handler_id);
             }
         }
 

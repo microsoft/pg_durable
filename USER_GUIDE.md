@@ -170,12 +170,18 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `df.sleep(seconds)` | Pause for N seconds | `df.sleep(60)` |
+| `df.sleep(seconds)` | Pause for N seconds (supports fractional seconds) | `df.sleep(0.2)` |
 | `df.wait_for_schedule(cron)` | Wait until cron matches | `df.wait_for_schedule('0 * * * *')` |
 | `df.http(url, method, body, headers, timeout)` | Make HTTP request | `df.http('https://api.example.com', 'POST', '{"key": "value"}')` |
 | `df.join(a, b)` | Execute in parallel, wait for all | `df.join('SELECT 1', 'SELECT 2')` |
 | `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
+| `df.parallel(futures[])` | Set-style parallel join | `df.parallel(ARRAY['SELECT 1','SELECT 2','SELECT 3'])` |
+| `df.join_all(futures[])` | Alias for `df.parallel` | `df.join_all(ARRAY[a,b,c])` |
 | `df.race(a, b)` | Execute in parallel, first wins | `df.race(fast_query, slow_query)` |
+| `df.timeout(fut, seconds)` | Fail if a future exceeds a deadline | `df.timeout(df.sql('SELECT pg_sleep(10)'), 0.5)` |
+| `df.retry(fut, ...)` | Retry with declarative backoff policy | `df.retry(df.sql('SELECT flaky()'), 'on_429', 10, 200, 30000, 2.0, 0.2)` |
+| `df.catch(fut, handler)` | Run fallback branch on failure | `df.catch(df.sql('SELECT risky()'), df.sql('SELECT recover()'))` |
+| `df.on_error(fut, handler)` | Alias for `df.catch` | `df.on_error(fut, handler)` |
 | `df.if(cond, then, else)` | Conditional branch | `df.if('SELECT true', a, b)` |
 | `df.loop(body)` | Repeat forever | `df.loop(body)` |
 | `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
