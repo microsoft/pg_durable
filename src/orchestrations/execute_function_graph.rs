@@ -541,10 +541,7 @@ pub const LOOP_NAME: &str = "pg_durable::orchestration::execute-loop";
 /// own terminator (caught here as `NodeError::Break`), not a break that should unwind past
 /// the loop, so the envelope is always tagged `Normal`. `execute_loop_node` merges `results`
 /// back into the parent map via `parse_subtree_envelope`.
-fn loop_exit_envelope(
-    result: String,
-    results: HashMap<String, String>,
-) -> Result<String, String> {
+fn loop_exit_envelope(result: String, results: HashMap<String, String>) -> Result<String, String> {
     let envelope = SubtreeEnvelope {
         control: Some(SubtreeControl::Normal),
         result,
@@ -625,19 +622,25 @@ pub async fn execute_loop(ctx: OrchestrationContext, input_json: String) -> Resu
     // The loop is where `NodeError::Break` is caught: a break unwinds through the body via
     // `?` and is converted here into the loop's normal exit value.  A `Failure` propagates
     // out of the sub-orchestration unchanged.
-    let body_result =
-        match execute_function_node_with_vars(&ctx, &graph, &body_id, &mut results, &exec_ctx).await
-        {
-            Ok(v) => v,
-            Err(NodeError::Break(break_value)) => {
-                ctx.trace_info(format!(
-                    "Loop terminated by break with value: {break_value}"
-                ));
-                store_named_result(&ctx, node, &break_value, &mut results, "LOOP");
-                return loop_exit_envelope(break_value, results);
-            }
-            Err(NodeError::Failure(e)) => return Err(e),
-        };
+    let body_result = match execute_function_node_with_vars(
+        &ctx,
+        &graph,
+        &body_id,
+        &mut results,
+        &exec_ctx,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(NodeError::Break(break_value)) => {
+            ctx.trace_info(format!(
+                "Loop terminated by break with value: {break_value}"
+            ));
+            store_named_result(&ctx, node, &break_value, &mut results, "LOOP");
+            return loop_exit_envelope(break_value, results);
+        }
+        Err(NodeError::Failure(e)) => return Err(e),
+    };
 
     // While-condition: if present and false, exit the loop.
     if let Some(ref config_str) = node.query {
@@ -708,6 +711,23 @@ pub async fn execute_loop(ctx: OrchestrationContext, input_json: String) -> Resu
         .map_err(|e| format!("continue_as_new failed: {e:?}"))
 }
 
+/// Build a deterministic, generation-qualified child instance ID for a sub-orchestration.
+///
+/// Duroxide's auto-generated child IDs (`{parent}::sub::{event_id}`) reset their event
+/// counter across `continue_as_new` generations. When a loop body itself spawns
+/// sub-orchestrations (a nested `df.loop`, or a parallel/race branch), each loop
+/// generation would otherwise re-derive the *same* child ID, colliding with the previous
+/// (now terminal) generation's child and stalling forever. Embedding the current
+/// execution (generation) ID plus the spawning node ID makes the child ID unique per
+/// generation while staying deterministic across replays of the same generation.
+fn child_instance_id(ctx: &OrchestrationContext, tag: &str, node_id: &str) -> String {
+    format!(
+        "{}::e{}::{tag}::{node_id}",
+        ctx.instance_id(),
+        ctx.execution_id()
+    )
+}
+
 async fn execute_loop_node(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -739,8 +759,9 @@ async fn execute_loop_node(
         "Spawning loop sub-orchestration for node {node_id}"
     ));
 
+    let child_id = child_instance_id(ctx, "loop", node_id);
     let raw = ctx
-        .schedule_sub_orchestration(LOOP_NAME, loop_input)
+        .schedule_sub_orchestration_with_id(LOOP_NAME, child_id, loop_input)
         .await
         .map_err(|e| format!("Loop sub-orchestration failed: {e}"))?;
 
@@ -974,8 +995,11 @@ async fn execute_join_node(
     })
     .to_string();
 
-    // Build list of branch inputs
-    let mut branch_inputs = vec![left_input, right_input];
+    // Build list of (branch node id, branch input) pairs.
+    let mut branch_inputs: Vec<(String, String)> = vec![
+        (left_id.clone(), left_input),
+        (right_id.clone(), right_input),
+    ];
 
     // Check for extra nodes (join3)
     if let Some(config_str) = &node.query {
@@ -991,17 +1015,20 @@ async fn execute_join_node(
                             "label": exec_ctx.label
                         })
                         .to_string();
-                        branch_inputs.push(extra_input);
+                        branch_inputs.push((extra_id.to_string(), extra_input));
                     }
                 }
             }
         }
     }
 
-    // Schedule sub-orchestrations and collect DurableFutures
+    // Schedule sub-orchestrations and collect DurableFutures. Use explicit,
+    // generation-qualified child IDs so a JOIN inside a loop body does not collide
+    // across continue_as_new generations.
     let mut durable_futures = Vec::new();
-    for input in branch_inputs {
-        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, input);
+    for (branch_node_id, input) in branch_inputs {
+        let child_id = child_instance_id(ctx, "subtree", &branch_node_id);
+        let fut = ctx.schedule_sub_orchestration_with_id(SUBTREE_NAME, child_id, input);
         durable_futures.push(fut);
     }
 
@@ -1093,9 +1120,18 @@ async fn execute_race_node(
     })
     .to_string();
 
-    // Schedule sub-orchestrations
-    let left_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, left_input);
-    let right_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, right_input);
+    // Schedule sub-orchestrations with explicit, generation-qualified child IDs so a
+    // RACE inside a loop body does not collide across continue_as_new generations.
+    let left_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        child_instance_id(ctx, "subtree", left_id),
+        left_input,
+    );
+    let right_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        child_instance_id(ctx, "subtree", right_id),
+        right_input,
+    );
 
     // Use ctx.select2() - first to complete wins
     // select2 now returns Either2<Left, Right> instead of (winner_idx, DurableOutput)
