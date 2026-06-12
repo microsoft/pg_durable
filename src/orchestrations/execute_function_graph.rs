@@ -30,6 +30,8 @@ pub const SUBTREE_NAME: &str = "pg_durable::orchestration::execute-subtree";
 struct ExecutionContext {
     vars: HashMap<String, String>,
     label: Option<String>,
+    /// Loop iteration counter (persisted across continue_as_new generations).
+    loop_iteration: u64,
 }
 
 /// Envelope returned by `execute_subtree` containing the SQL result and the updated
@@ -116,6 +118,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     let exec_ctx = ExecutionContext {
         vars: input.vars.clone(),
         label: input.label.clone(),
+        loop_iteration: input.loop_iteration,
     };
 
     let function_result =
@@ -187,7 +190,11 @@ pub async fn execute_subtree(
 
     ctx.trace_info(format!("ExecuteSubtree: executing node {node_id}"));
 
-    let exec_ctx = ExecutionContext { vars, label };
+    let exec_ctx = ExecutionContext {
+        vars,
+        label,
+        loop_iteration: 0,
+    };
 
     let result =
         execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await?;
@@ -442,6 +449,11 @@ const BREAK_SENTINEL: &str = "__break__";
 /// deficit so an empty-bodied loop can't busy-spin via continue_as_new.
 const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
 
+/// Maximum loop iterations before the orchestration is forcibly terminated.
+/// This prevents runaway infinite loops from consuming resources indefinitely.
+/// At the minimum 1-second rate limit, this allows ~27 hours of looping.
+const MAX_LOOP_ITERATIONS: u64 = 100_000;
+
 /// Check if a result contains a break signal
 fn is_break_signal(result: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(result)
@@ -498,34 +510,52 @@ async fn execute_loop_node(
 
     // Check while-condition if present
     if let Some(ref config_str) = node.query {
-        if let Ok(config) = serde_json::from_str::<serde_json::Value>(config_str) {
-            if let Some(condition_node_id) = config["condition_node"].as_str() {
-                ctx.trace_info("Evaluating loop condition");
-                let condition_result = Box::pin(execute_function_node_with_vars(
-                    ctx,
-                    graph,
-                    condition_node_id,
-                    results,
-                    exec_ctx,
-                ))
-                .await?;
+        match serde_json::from_str::<serde_json::Value>(config_str) {
+            Ok(config) => {
+                if let Some(condition_node_id) = config["condition_node"].as_str() {
+                    ctx.trace_info("Evaluating loop condition");
+                    let condition_result = Box::pin(execute_function_node_with_vars(
+                        ctx,
+                        graph,
+                        condition_node_id,
+                        results,
+                        exec_ctx,
+                    ))
+                    .await?;
 
-                // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
-                let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
-                ctx.trace_info(format!(
-                    "Loop condition evaluated to: {condition_result} (continue={should_continue})"
-                ));
+                    // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
+                    let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
+                    ctx.trace_info(format!(
+                        "Loop condition evaluated to: {condition_result} (continue={should_continue})"
+                    ));
 
-                if !should_continue {
-                    ctx.trace_info("Loop condition false, exiting loop");
-                    store_named_result(ctx, node, &body_result, results, "LOOP");
-                    return Ok(body_result);
+                    if !should_continue {
+                        ctx.trace_info("Loop condition false, exiting loop");
+                        store_named_result(ctx, node, &body_result, results, "LOOP");
+                        return Ok(body_result);
+                    }
                 }
+            }
+            Err(e) => {
+                // M8: Malformed condition config should fail the loop rather than
+                // silently creating an infinite loop without exit condition.
+                return Err(format!(
+                    "LOOP node {node_id}: failed to parse condition config: {e}"
+                ));
             }
         }
     }
 
     ctx.trace_info("Continuing as new for next loop iteration");
+
+    // M7: Enforce maximum iteration count to prevent runaway infinite loops
+    let next_iteration = exec_ctx.loop_iteration + 1;
+    if next_iteration >= MAX_LOOP_ITERATIONS {
+        return Err(format!(
+            "Loop exceeded maximum iteration count of {MAX_LOOP_ITERATIONS}. \
+             Use df.break() to exit the loop or restructure the workflow."
+        ));
+    }
 
     // Enforce a minimum per-iteration wall-clock duration to prevent
     // busy-looping (e.g. `df.loop(df.sleep(0))`).  Compute the elapsed time
@@ -551,6 +581,7 @@ async fn execute_loop_node(
         instance_id: graph.instance_id.clone(),
         label: exec_ctx.label.clone(),
         vars: exec_ctx.vars.clone(),
+        loop_iteration: next_iteration,
     };
 
     // duroxide 0.1.1: continue_as_new returns an awaitable future - return it directly

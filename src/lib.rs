@@ -2549,6 +2549,163 @@ mod tests {
         // Cancel immediately so the BGW does not attempt to execute this instance.
         Spi::run(&format!("SELECT df.cancel('{instance_id}')")).unwrap();
     }
+
+    // ========================================================================
+    // Regression Tests - Reliability Hardening
+    // ========================================================================
+
+    // --- C5: Client connection error detection ---
+
+    #[pg_test]
+    fn test_is_connection_error_detects_failures() {
+        // Validates the heuristic used to reset the client on connection-level errors.
+        assert!(crate::client::is_connection_error_for_test(
+            "connection refused"
+        ));
+        assert!(crate::client::is_connection_error_for_test("broken pipe"));
+        assert!(crate::client::is_connection_error_for_test(
+            "pool timed out"
+        ));
+        assert!(crate::client::is_connection_error_for_test("reset by peer"));
+        assert!(crate::client::is_connection_error_for_test(
+            "connection closed"
+        ));
+        // Non-connection errors should NOT trigger a reset
+        assert!(!crate::client::is_connection_error_for_test(
+            "permission denied"
+        ));
+        assert!(!crate::client::is_connection_error_for_test(
+            "Instance not found"
+        ));
+    }
+
+    // --- H6: CGNAT SSRF blocklist ---
+
+    #[pg_test]
+    fn test_ssrf_blocks_cgnat_range() {
+        use std::net::{IpAddr, Ipv4Addr};
+        // 100.64.0.0/10 must be blocked
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))).is_some(),
+            "100.64.0.1 (CGNAT) should be blocked"
+        );
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 254))).is_some(),
+            "100.127.255.254 (CGNAT) should be blocked"
+        );
+        // Outside CGNAT range should be allowed
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))).is_none(),
+            "100.128.0.1 (NOT CGNAT) should be allowed"
+        );
+    }
+
+    // --- M1: Row-set expansion limit ---
+
+    #[pg_test]
+    fn test_row_set_expansion_limit_via_dsl() {
+        // The row-set expansion limit (10,000 rows) is enforced inside
+        // expand_row_set(). This is tested thoroughly in the unit test
+        // types::tests::test_row_set_expansion_rejects_oversized_result.
+        // Here we just verify the types module is accessible and the limit works
+        // at the substitution layer by checking a small expansion works.
+        use crate::types::substitute_all;
+        use std::collections::HashMap;
+
+        let mut results = HashMap::new();
+        let json = r#"{"rows":[{"id":1},{"id":2}],"row_count":2}"#;
+        results.insert("batch".to_string(), json.to_string());
+
+        let sys = crate::types::SystemVars {
+            instance_id: "test1234".to_string(),
+            label: None,
+        };
+        let vars = HashMap::new();
+        let result = substitute_all("SELECT * FROM $batch.*", &results, &vars, &sys);
+        assert!(result.is_ok(), "Small row-set should expand successfully");
+        assert!(
+            result.unwrap().contains("VALUES"),
+            "Should produce a VALUES clause"
+        );
+    }
+
+    // --- M7: Loop iteration counter persisted across continue_as_new ---
+
+    #[pg_test]
+    fn test_function_input_loop_iteration_serialization() {
+        use crate::types::FunctionInput;
+
+        // Verify loop_iteration is preserved through serialization
+        let input = FunctionInput {
+            instance_id: "test123".to_string(),
+            label: Some("test".to_string()),
+            vars: std::collections::HashMap::new(),
+            loop_iteration: 42,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let deserialized: FunctionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.loop_iteration, 42,
+            "loop_iteration must survive serialization round-trip"
+        );
+    }
+
+    #[pg_test]
+    fn test_function_input_loop_iteration_defaults_to_zero() {
+        use crate::types::FunctionInput;
+
+        // Verify backward compat: old FunctionInput JSON without loop_iteration
+        // deserializes with loop_iteration = 0
+        let json = r#"{"instance_id":"abc12345","label":"test","vars":{}}"#;
+        let input: FunctionInput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            input.loop_iteration, 0,
+            "Missing loop_iteration should default to 0 for backward compatibility"
+        );
+    }
+
+    // --- M8: Malformed loop condition config detection ---
+
+    #[pg_test]
+    fn test_malformed_loop_condition_detected_at_validate() {
+        // A LOOP node whose condition_node is a plain string (not a Durofut object)
+        // should be rejected by validate_recursive because for_each_config_child
+        // requires condition_node to deserialize as a valid Durofut.
+        let node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            // Malformed config: valid JSON but condition_node is a string, not a Durofut object.
+            query: Some(r#"{"condition_node": "nonexist"}"#.to_string()),
+            ..Default::default()
+        };
+        // Validate should fail because condition_node is not a valid Durofut object
+        let err = node.validate_recursive().unwrap_err();
+        assert!(
+            err.contains("condition_node"),
+            "Error should mention condition_node, got: {err}"
+        );
+
+        // But if the config is totally not JSON, for_each_config_child skips it
+        // (it's treated as a plain query string, not a config object).
+        let non_json_node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            query: Some("this is not json at all!!!".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            non_json_node.validate_recursive().is_ok(),
+            "LOOP with non-JSON config passes DSL validation (caught at execution time)"
+        );
+    }
 }
 
 /// Required by `cargo pgrx test`

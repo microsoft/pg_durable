@@ -104,6 +104,7 @@ fn check_blocked_ipv4(ip: Ipv4Addr) -> Option<&'static str> {
         match octets {
             [0, ..] => Some("reserved (0.0.0.0/8)"),
             [10, ..] => Some("private (10.0.0.0/8)"),
+            [100, b, ..] if (64..=127).contains(&b) => Some("shared/CGNAT (100.64.0.0/10)"),
             [127, ..] => Some("loopback (127.0.0.0/8)"),
             [169, 254, ..] => Some("link-local (169.254.0.0/16)"),
             [172, b, ..] if (16..=31).contains(&b) => Some("private (172.16.0.0/12)"),
@@ -236,7 +237,10 @@ pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
 /// Extract the hostname (without port or brackets) from a URL.
 ///
 /// Returns `None` for malformed URLs or URLs without a `://` scheme separator.
-#[cfg(not(feature = "http-allow-all"))]
+#[cfg(any(
+    feature = "http-allow-azure-domains",
+    feature = "http-allow-test-domains"
+))]
 fn extract_host(url: &str) -> Option<String> {
     // Strip scheme
     let after_scheme = url.find("://").map(|i| &url[i + 3..])?;
@@ -420,6 +424,21 @@ mod tests {
         assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(0, 255, 255, 255))).is_some());
     }
 
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn blocks_cgnat_rfc6598() {
+        // 100.64.0.0/10 — Carrier-Grade NAT (RFC 6598)
+        // Used by cloud providers for internal routing / metadata
+        assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 0))).is_some());
+        assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))).is_some());
+        assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 100, 100, 100))).is_some());
+        assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 255))).is_some());
+        // Edge: 100.63.x.x is NOT CGNAT
+        assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 63, 255, 255))).is_none());
+        // Edge: 100.128.x.x is NOT CGNAT
+        assert!(check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 0))).is_none());
+    }
+
     // --- IPv4 allowed (public) ---
 
     #[test]
@@ -539,7 +558,10 @@ mod tests {
 
     // --- extract_host helper ---
 
-    #[cfg(not(feature = "http-allow-all"))]
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
     #[test]
     fn extract_host_basic() {
         assert_eq!(
@@ -555,7 +577,10 @@ mod tests {
         assert_eq!(extract_host("http://user:pass@host/p"), Some("host".into()));
     }
 
-    #[cfg(not(feature = "http-allow-all"))]
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
     #[test]
     fn extract_host_query_and_fragment() {
         // Query-only URL (no path slash after authority)
@@ -585,7 +610,10 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "http-allow-all"))]
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
     #[test]
     fn extract_host_none_cases() {
         assert_eq!(extract_host("no-scheme"), None);
