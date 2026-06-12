@@ -1,0 +1,35 @@
+# Dependabot configuration for weekly dependency updates.
+#
+# Dependabot opens dependency PRs through its own permission system, which is
+# NOT governed by the "Allow GitHub Actions to create and approve pull requests"
+# org/repo setting. This lets it raise update PRs even where that setting is
+# disabled by policy.
+#
+# versioning-strategy: lockfile-only keeps Cargo.toml requirements untouched and
+# only refreshes Cargo.lock — equivalent to `cargo update`. This preserves the
+# exact `=` pins on pgrx, duroxide, and duroxide-pg (and the duroxide /
+# duroxide-pg compatible-pair invariant) while still picking up patched
+# transitive and range-versioned dependencies.
+#
+# The single "cargo" group collapses all updates into one weekly PR instead of
+# one PR per crate. That PR is validated by the normal CI workflow.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: "Etc/UTC"
+    versioning-strategy: lockfile-only
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo:
+        patterns:
+          - "*"
