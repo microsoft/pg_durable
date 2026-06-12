@@ -304,7 +304,6 @@ pub fn metrics() -> TableIterator<
     ),
 > {
     let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -315,21 +314,60 @@ pub fn metrics() -> TableIterator<
     };
 
     let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
-            Ok(s) => s,
+        let pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&pg_conn_str)
+            .await
+        {
+            Ok(pool) => pool,
             Err(_) => return vec![],
         };
 
-        let client = Client::new(store);
+        let row: Result<(i64, i64, i64, i64, i64, i64), sqlx::Error> = sqlx::query_as(
+            r#"
+            SELECT
+                i.total_instances,
+                i.running_instances,
+                i.completed_instances,
+                i.failed_instances,
+                e.total_executions,
+                h.total_events
+            FROM (
+                SELECT
+                    COUNT(*)::BIGINT AS total_instances,
+                    COUNT(*) FILTER (WHERE status = 'running')::BIGINT AS running_instances,
+                    COUNT(*) FILTER (WHERE status = 'completed')::BIGINT AS completed_instances,
+                    COUNT(*) FILTER (WHERE status = 'failed')::BIGINT AS failed_instances
+                FROM df.instances
+            ) i
+            CROSS JOIN (
+                SELECT COUNT(*)::BIGINT AS total_executions
+                FROM duroxide.executions
+            ) e
+            CROSS JOIN (
+                SELECT COUNT(*)::BIGINT AS total_events
+                FROM duroxide.history
+            ) h
+            "#,
+        )
+        .fetch_one(&pool)
+        .await;
 
-        match client.get_system_metrics().await {
-            Ok(m) => vec![(
-                m.total_instances as i64,
-                m.running_instances as i64,
-                m.completed_instances as i64,
-                m.failed_instances as i64,
-                m.total_executions as i64,
-                m.total_events as i64,
+        match row {
+            Ok((
+                total_instances,
+                running_instances,
+                completed_instances,
+                failed_instances,
+                total_executions,
+                total_events,
+            )) => vec![(
+                total_instances,
+                running_instances,
+                completed_instances,
+                failed_instances,
+                total_executions,
+                total_events,
             )],
             Err(_) => vec![],
         }

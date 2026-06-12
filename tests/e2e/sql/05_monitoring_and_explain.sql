@@ -57,6 +57,80 @@ END $$;
 
 DROP TABLE _test_state;
 
+-- Regression: rolled-back df.start() should not inflate failed_instances in df.metrics()
+DO $$
+DECLARE
+    total_metrics BIGINT;
+    running_metrics BIGINT;
+    completed_metrics BIGINT;
+    failed_metrics BIGINT;
+    previous_failed_metrics BIGINT := -1;
+    stable_checks INT := 0;
+    attempts INT := 0;
+    total_instances BIGINT;
+    running_instances BIGINT;
+    completed_instances BIGINT;
+    failed_instances BIGINT;
+BEGIN
+    BEGIN
+        PERFORM df.start('SELECT 1', 'rollback-metrics-probe');
+        RAISE EXCEPTION 'force rollback';
+    EXCEPTION
+        WHEN OTHERS THEN NULL;
+    END;
+
+    -- Worker waits up to 5s for an instance row after dequeue. Poll until
+    -- failed_instances stabilizes for 3 checks after at least ~6s.
+    LOOP
+        SELECT m.failed_instances INTO failed_metrics FROM df.metrics() m;
+
+        IF failed_metrics = previous_failed_metrics THEN
+            stable_checks := stable_checks + 1;
+        ELSE
+            stable_checks := 0;
+            previous_failed_metrics := failed_metrics;
+        END IF;
+
+        EXIT WHEN (attempts >= 12 AND stable_checks >= 3) OR attempts >= 60;
+        PERFORM pg_sleep(0.5);
+        attempts := attempts + 1;
+    END LOOP;
+
+    SELECT m.total_instances, m.running_instances, m.completed_instances, m.failed_instances
+      INTO total_metrics, running_metrics, completed_metrics, failed_metrics
+      FROM df.metrics() m;
+
+    SELECT
+        COUNT(*)::BIGINT,
+        COUNT(*) FILTER (WHERE lower(status) = 'running')::BIGINT,
+        COUNT(*) FILTER (WHERE lower(status) = 'completed')::BIGINT,
+        COUNT(*) FILTER (WHERE lower(status) = 'failed')::BIGINT
+      INTO total_instances, running_instances, completed_instances, failed_instances
+      FROM df.instances;
+
+    IF total_metrics != total_instances THEN
+        RAISE EXCEPTION 'TEST FAILED: metrics total_instances=% does not match df.instances=%',
+            total_metrics, total_instances;
+    END IF;
+
+    IF running_metrics != running_instances THEN
+        RAISE EXCEPTION 'TEST FAILED: metrics running_instances=% does not match df.instances=%',
+            running_metrics, running_instances;
+    END IF;
+
+    IF completed_metrics != completed_instances THEN
+        RAISE EXCEPTION 'TEST FAILED: metrics completed_instances=% does not match df.instances=%',
+            completed_metrics, completed_instances;
+    END IF;
+
+    IF failed_metrics != failed_instances THEN
+        RAISE EXCEPTION 'TEST FAILED: metrics failed_instances=% does not match df.instances=%',
+            failed_metrics, failed_instances;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: rollback metrics consistency';
+END $$;
+
 -- === Test: 10_explain ===
 
 -- Test dry-run explain (use $body$ to avoid conflict with inner $$)
