@@ -415,15 +415,36 @@ async fn execute_wait_schedule_node(
         .as_ref()
         .ok_or_else(|| format!("WAIT_SCHEDULE node {node_id} has no config"))?;
 
-    // Parse pre-computed config from DSL time
     let config: serde_json::Value = serde_json::from_str(config_str)
         .map_err(|e| format!("Invalid WAIT_SCHEDULE config: {e}"))?;
 
-    let wait_seconds = config["wait_seconds"]
-        .as_u64()
-        .ok_or_else(|| "WAIT_SCHEDULE missing wait_seconds".to_string())?;
+    let target_timestamp = config["target_timestamp"]
+        .as_str()
+        .ok_or_else(|| "WAIT_SCHEDULE missing target_timestamp".to_string())?;
 
     let cron_expr = config["cron_expr"].as_str().unwrap_or("?");
+
+    // Delegate wall-clock I/O to an activity so the orchestration stays
+    // deterministic.  The activity computes max(0, target - now()) at actual
+    // execution time, correctly accounting for any delay since df.start().
+    let activity_input = serde_json::json!({
+        "target_timestamp": target_timestamp,
+        "cron_expr": cron_expr,
+    });
+
+    let result_json = ctx
+        .schedule_activity(
+            activities::compute_cron_wait::NAME,
+            activity_input.to_string(),
+        )
+        .await?;
+
+    let result: serde_json::Value = serde_json::from_str(&result_json)
+        .map_err(|e| format!("Invalid compute_cron_wait output: {e}"))?;
+
+    let wait_seconds = result["wait_seconds"]
+        .as_u64()
+        .ok_or_else(|| "compute_cron_wait output missing wait_seconds".to_string())?;
 
     ctx.trace_info(format!(
         "Waiting {wait_seconds} seconds until schedule: {cron_expr}"

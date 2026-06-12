@@ -1004,6 +1004,22 @@ mod tests {
         let json = crate::dsl::wait_for_schedule("*/5 * * * *");
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "WAIT_SCHEDULE");
+        // Config must contain target_timestamp (RFC 3339), not a pre-computed wait_seconds
+        let config: serde_json::Value =
+            serde_json::from_str(fut.query.as_ref().expect("query must be set")).unwrap();
+        assert!(
+            config.get("target_timestamp").is_some(),
+            "config should have target_timestamp"
+        );
+        assert!(
+            config.get("wait_seconds").is_none(),
+            "config must not have pre-computed wait_seconds"
+        );
+        assert_eq!(
+            config["cron_expr"].as_str().unwrap(),
+            "*/5 * * * *",
+            "cron_expr should be preserved"
+        );
     }
 
     #[pg_test]

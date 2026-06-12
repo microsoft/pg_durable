@@ -6,6 +6,7 @@
 //! Each activity is in its own file with a co-located NAME constant.
 //! This enables IDE navigation (F12 jumps to implementation).
 
+pub mod compute_cron_wait;
 pub mod execute_http;
 pub mod execute_sql;
 pub mod load_function_graph;
