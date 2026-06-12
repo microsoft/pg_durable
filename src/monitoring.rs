@@ -192,6 +192,14 @@ pub fn instance_info(
 }
 
 /// Get the last N executions for an eternal durable function (loop).
+///
+/// Distinguishes "this instance genuinely has no execution history yet" (empty
+/// rowset) from "the execution-history lookup failed" (explicit error). The
+/// latter — failing to build the runtime, connect to the duroxide store, list
+/// executions, or fetch a specific execution's info — now raises an error
+/// instead of being silently swallowed into an empty rowset. A completed
+/// instance always has at least one execution row, so an empty result for one
+/// previously masked a real lookup failure. See issue #168.
 #[pg_extern(schema = "df")]
 pub fn instance_executions(
     instance_id: &str,
@@ -206,11 +214,18 @@ pub fn instance_executions(
         name!(output, Option<String>),
     ),
 > {
+    if limit_count < 1 {
+        pgrx::error!("limit_count must be at least 1");
+    }
+    let limit_count = limit_count.min(10000);
+
     let pg_conn_str = postgres_connection_string();
     let provider_schema = backend_duroxide_schema();
     let instance_id_owned = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, so non-owned instances are invisible.
+    // A non-existent or non-owned instance legitimately has no history to show,
+    // so an empty rowset (not an error) is the correct response here.
     let exists: bool = Spi::get_one_with_args(
         "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
         &[instance_id.into()],
@@ -228,29 +243,31 @@ pub fn instance_executions(
         .build()
     {
         Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
+        Err(e) => pgrx::error!("failed to create async runtime for instance_executions: {e}"),
     };
 
-    let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
+    let results: Result<Vec<(i64, String, i64, i64, Option<String>)>, String> =
+        rt.block_on(async {
+            let store = new_backend_provider(&pg_conn_str, provider_schema).await?;
 
-        let client = Client::new(store);
+            let client = Client::new(store);
 
-        let execution_ids = match client.list_executions(&instance_id_owned).await {
-            Ok(ids) => ids,
-            Err(_) => return vec![],
-        };
+            let execution_ids = client
+                .list_executions(&instance_id_owned)
+                .await
+                .map_err(|e| format!("failed to list executions: {e:?}"))?;
 
-        let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
-        sorted_ids.sort_by(|a, b| b.cmp(a));
-        let limited: Vec<_> = sorted_ids.into_iter().take(limit_count as usize).collect();
+            let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
+            sorted_ids.sort_by(|a, b| b.cmp(a));
+            let limited: Vec<_> = sorted_ids.into_iter().take(limit_count as usize).collect();
 
-        let mut rows = Vec::new();
-        for exec_id in limited {
-            if let Ok(info) = client.get_execution_info(&instance_id_owned, exec_id).await {
+            let mut rows = Vec::new();
+            for exec_id in limited {
+                let info = client
+                    .get_execution_info(&instance_id_owned, exec_id)
+                    .await
+                    .map_err(|e| format!("failed to fetch info for execution {exec_id}: {e:?}"))?;
+
                 let duration_ms = info
                     .completed_at
                     .map(|end| end.saturating_sub(info.started_at))
@@ -264,11 +281,13 @@ pub fn instance_executions(
                     info.output,
                 ));
             }
-        }
-        rows
-    });
+            Ok(rows)
+        });
 
-    TableIterator::new(results)
+    match results {
+        Ok(rows) => TableIterator::new(rows),
+        Err(e) => pgrx::error!("df.instance_executions: execution history lookup failed: {e}"),
+    }
 }
 
 /// Get system-wide durable function metrics.
