@@ -5,8 +5,6 @@ on:
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]  # Runs on main after merge
-  schedule:
-    - cron: '0 2 * * *'  # Nightly at 2 AM UTC
   workflow_dispatch:
     inputs:
       pg_version:
