@@ -521,6 +521,42 @@ pub async fn execute(
 
 ### Node Execution
 
+Internal node handlers return `NodeResult`, a `Result` whose error arm is a typed
+`NodeError` rather than a plain `String`. This lets `df.break()` propagate through the
+compound nodes (`THEN`, `IF`, `JOIN`, `RACE`) automatically via the `?` operator, instead
+of every handler having to recognise an in-band JSON break sentinel:
+
+```rust
+// src/orchestrations/execute_function_graph.rs
+pub enum NodeError {
+    /// df.break() fired. Carries the break value. Caught only by execute_loop_node.
+    Break(String),
+    /// A genuine failure. Surfaces as a failed instance.
+    Failure(String),
+}
+
+pub type NodeResult = Result<String, NodeError>;
+
+// Any `?` on an existing Result<_, String> auto-converts the error to Failure, so
+// activity calls and helpers need no per-call changes.
+impl From<String> for NodeError {
+    fn from(e: String) -> Self {
+        NodeError::Failure(e)
+    }
+}
+```
+
+`execute_loop_node` is the only handler that catches `NodeError::Break` (turning it into the
+loop's `Ok` result); `NodeError::Failure` keeps propagating. The orchestration boundary
+functions (`execute` / `execute_subtree`) still return `Result<String, String>` because they
+are registered with duroxide:
+
+- `execute`: an uncaught top-level `Break` becomes a clear `Err` ("df.break() was called
+  outside of a loop"), so the instance fails instead of completing with a sentinel value.
+- `execute_subtree` (used by JOIN/RACE branches): a `Break` is carried out-of-band in the
+  subtree envelope's `control` field and re-raised as `NodeError::Break` by
+  `parse_subtree_envelope` in the parent orchestration.
+
 The orchestration walks the graph recursively:
 
 ```rust
@@ -559,7 +595,7 @@ async fn execute_function_node_with_vars(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let node = graph.nodes.get(node_id).ok_or("Node not found")?;
     
     ctx.trace_info(format!("Executing node {} (type: {})", node_id, node.node_type));
@@ -575,7 +611,7 @@ async fn execute_function_node_with_vars(
         "HTTP" => execute_http_node(ctx, node, results, exec_ctx).await?,
         "SIGNAL" => execute_signal_node(ctx, node).await?,
         "BREAK" => execute_break_node(ctx, node, node_id).await?,
-        _ => return Err(format!("Unknown node type: {}", node.node_type)),
+        other => return Err(NodeError::Failure(format!("Unknown node type: {other}"))),
     };
     
     // Store named results for $variable substitution
@@ -754,20 +790,21 @@ async fn execute_loop_node(
     node: &FunctionNode,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let body_id = node.left_node.as_ref().ok_or("LOOP missing body")?;
     
-    // Execute loop body
-    let body_result = execute_function_node_with_vars(
+    // Execute loop body. A df.break() anywhere in the body (including inside nested
+    // IF/JOIN/RACE) surfaces here as Err(NodeError::Break); the loop is the only node
+    // that catches it. NodeError::Failure keeps propagating out via `?`.
+    let body_result = match execute_function_node_with_vars(
         ctx, graph, body_id, results, exec_ctx
-    ).await?;
+    ).await {
+        Ok(v) => v,
+        Err(NodeError::Break(break_value)) => return Ok(break_value), // exit the loop
+        Err(e @ NodeError::Failure(_)) => return Err(e),
+    };
     
-    // Check for BREAK sentinel
-    if is_break_result(&body_result) {
-        return Ok(extract_break_value(&body_result));
-    }
-    
-    // Check while-condition if present
+    // Check while-condition if present (conditions are SQL and cannot break)
     if let Some(condition_node_id) = get_condition_node(node) {
         let condition_result = execute_function_node_with_vars(
             ctx, graph, &condition_node_id, results, exec_ctx
@@ -790,7 +827,7 @@ async fn execute_loop_node(
         .continue_as_new(serde_json::to_string(&new_input)?)
         .await
         .map(|_| body_result)
-        .map_err(|e| format!("continue_as_new failed: {:?}", e));
+        .map_err(|e| NodeError::Failure(format!("continue_as_new failed: {:?}", e)));
 }
 ```
 

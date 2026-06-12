@@ -32,15 +32,74 @@ struct ExecutionContext {
     label: Option<String>,
 }
 
+/// Control-flow-aware error type returned by every node handler.
+///
+/// `Break` is **not** a failure: it unwinds through compound nodes (THEN, IF, JOIN,
+/// RACE, and the subtree boundary) via the `?` operator until the nearest enclosing
+/// `execute_loop_node` catches it. `Failure` is a genuine error that propagates to the
+/// orchestration result. Encoding break this way means forgetting to propagate it is a
+/// compile error rather than a silently-ignored value (see issue #148 / #132).
+#[derive(Debug)]
+enum NodeError {
+    /// A `df.break()` signal carrying its (already-stringified) value, caught by the loop.
+    Break(String),
+    /// A real failure; propagates to the orchestration's `Err` result.
+    Failure(String),
+}
+
+/// All helper functions (`substitute_all`, `evaluate_condition`) and activity scheduling
+/// return `Result<_, String>`. This conversion lets `?` turn those `String` errors into
+/// `NodeError::Failure` automatically, so only genuine control flow needs explicit handling.
+impl From<String> for NodeError {
+    fn from(e: String) -> Self {
+        NodeError::Failure(e)
+    }
+}
+
+/// Mirrors `From<String>` for the many `.ok_or("literal")?` sites that yield `&str` errors,
+/// preserving the ergonomics those calls had when handlers returned `Result<_, String>`.
+impl From<&str> for NodeError {
+    fn from(e: &str) -> Self {
+        NodeError::Failure(e.to_string())
+    }
+}
+
+/// Result type for node handlers: `Ok` value string, or a typed control-flow/failure error.
+type NodeResult = Result<String, NodeError>;
+
+/// Distinguishes a normal subtree result from one that unwound via `df.break()`.
+/// `#[serde(default)]` on the envelope's field keeps envelopes recorded by an older binary
+/// (which had no control field) deserializable as `Normal` across an in-flight upgrade.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+enum SubtreeControl {
+    #[default]
+    Normal,
+    Break,
+}
+
 /// Envelope returned by `execute_subtree` containing the SQL result and the updated
 /// named-results map so the parent orchestration can merge any new entries after join/race.
+/// `control` carries a `df.break()` signal back across the sub-orchestration boundary so the
+/// parent can re-raise it as `NodeError::Break` rather than smuggling a sentinel in `result`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SubtreeEnvelope {
+    #[serde(default)]
+    control: SubtreeControl,
     result: String,
     results: HashMap<String, String>,
 }
 
-/// Execute a complete function graph
+/// Execute a complete function graph — the entry point for a durable function.
+///
+/// # Control flow
+/// Internally every node handler returns `NodeResult`, where `NodeError::Break` is
+/// **intentional control flow** (a `df.break()` signal), not a failure. Break unwinds
+/// through compound nodes via `?` and is caught by the nearest enclosing
+/// `execute_loop_node`; only `NodeError::Failure` represents a genuine error. This
+/// boundary collapses the typed result back to `Result<String, String>`: a `Break`
+/// that reaches here was used outside `df.loop()`, so it is surfaced as a clear failure
+/// rather than completing with a control-flow value. Callers should treat the returned
+/// `Err` strictly as a failure and must not add retry/recovery logic for break.
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
     let input: FunctionInput = serde_json::from_str(&input_json)
         .map_err(|e| format!("Invalid orchestration input: {e}"))?;
@@ -118,9 +177,22 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         label: input.label.clone(),
     };
 
-    let function_result =
+    let function_outcome =
         execute_function_node_with_vars(&ctx, &graph, &graph.root_node_id, &mut results, &exec_ctx)
             .await;
+
+    // Normalize the typed node result into the orchestration's String boundary. A `Break`
+    // that reaches this point was never caught by a loop, i.e. `df.break()` was used outside
+    // of `df.loop()` — surface it as a clear, actionable failure rather than completing with a
+    // control-flow value as the function's result.
+    let function_result: Result<String, String> = match function_outcome {
+        Ok(result) => Ok(result),
+        Err(NodeError::Failure(err)) => Err(err),
+        Err(NodeError::Break(_)) => Err(
+            "df.break() was called outside of a loop. df.break() may only be used inside df.loop()."
+                .to_string(),
+        ),
+    };
 
     match &function_result {
         Ok(result) => {
@@ -189,14 +261,34 @@ pub async fn execute_subtree(
 
     let exec_ctx = ExecutionContext { vars, label };
 
-    let result =
-        execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await?;
+    // Build the envelope carrying the result, the updated named-results map, and a typed
+    // control signal. A `Break` inside the subtree is re-encoded as `control: Break` (not a
+    // sentinel smuggled inside `result`) so the parent can re-raise it as `NodeError::Break`.
+    // A genuine `Failure` propagates as `Err` across the sub-orchestration boundary.
+    let envelope =
+        match execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await
+        {
+            Ok(result) => {
+                ctx.trace_info(format!("ExecuteSubtree: node {node_id} completed"));
+                SubtreeEnvelope {
+                    control: SubtreeControl::Normal,
+                    result,
+                    results,
+                }
+            }
+            Err(NodeError::Break(value)) => {
+                ctx.trace_info(format!(
+                    "ExecuteSubtree: node {node_id} broke (propagating)"
+                ));
+                SubtreeEnvelope {
+                    control: SubtreeControl::Break,
+                    result: value,
+                    results,
+                }
+            }
+            Err(NodeError::Failure(e)) => return Err(e),
+        };
 
-    ctx.trace_info(format!("ExecuteSubtree: node {node_id} completed"));
-
-    // Return an envelope with both the result and the updated results map so the parent
-    // orchestration can merge any named results produced inside this subtree.
-    let envelope = SubtreeEnvelope { result, results };
     serde_json::to_string(&envelope)
         .map_err(|e| format!("Failed to serialize subtree envelope: {e}"))
 }
@@ -208,7 +300,7 @@ async fn execute_function_node_with_vars(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let node = graph
         .nodes
         .get(node_id)
@@ -233,7 +325,10 @@ async fn execute_function_node_with_vars(
 
     let execute_result = execute_node_inner(ctx, graph, node_id, node, results, exec_ctx).await;
 
-    // Update node with final status and result
+    // Update node with final status and result. A `Break` is control flow rather than a
+    // failure: record the node as completed (carrying the break value) so observability is
+    // unchanged from when break travelled as a normal `Ok` sentinel. Only `Failure` marks
+    // the node failed.
     match &execute_result {
         Ok(result) => {
             let completed_input = serde_json::json!({
@@ -248,7 +343,20 @@ async fn execute_function_node_with_vars(
                 )
                 .await;
         }
-        Err(err) => {
+        Err(NodeError::Break(value)) => {
+            let completed_input = serde_json::json!({
+                "node_id": node_id,
+                "status": "completed",
+                "result": value
+            });
+            let _ = ctx
+                .schedule_activity(
+                    activities::update_node_status::NAME,
+                    completed_input.to_string(),
+                )
+                .await;
+        }
+        Err(NodeError::Failure(err)) => {
             let failed_input = serde_json::json!({
                 "node_id": node_id,
                 "status": "failed",
@@ -274,7 +382,7 @@ async fn execute_node_inner(
     node: &FunctionNode,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     // Build system vars
     let sys_vars = SystemVars {
         instance_id: graph.instance_id.clone(),
@@ -293,7 +401,7 @@ async fn execute_node_inner(
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
-        other => Err(format!("Unknown node type: {other}")),
+        other => Err(NodeError::Failure(format!("Unknown node type: {other}"))),
     }
 }
 
@@ -308,7 +416,7 @@ async fn execute_sql_node(
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
     sys_vars: &SystemVars,
-) -> Result<String, String> {
+) -> NodeResult {
     let query = node
         .query
         .as_ref()
@@ -355,7 +463,7 @@ async fn execute_then_node(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let left_id = node
         .left_node
         .as_ref()
@@ -365,15 +473,12 @@ async fn execute_then_node(
         .as_ref()
         .ok_or_else(|| format!("THEN node {node_id} has no right_node"))?;
 
-    let left_result = Box::pin(execute_function_node_with_vars(
+    // A `df.break()` anywhere in the left branch propagates automatically via `?` to the
+    // enclosing loop, skipping the right branch — no explicit sentinel check needed.
+    Box::pin(execute_function_node_with_vars(
         ctx, graph, left_id, results, exec_ctx,
     ))
     .await?;
-
-    // Propagate break signals immediately
-    if is_break_signal(&left_result) {
-        return Ok(left_result);
-    }
 
     let right_result = Box::pin(execute_function_node_with_vars(
         ctx, graph, right_id, results, exec_ctx,
@@ -389,7 +494,7 @@ async fn execute_sleep_node(
     ctx: &OrchestrationContext,
     node: &FunctionNode,
     node_id: &str,
-) -> Result<String, String> {
+) -> NodeResult {
     let seconds_str = node
         .query
         .as_ref()
@@ -409,7 +514,7 @@ async fn execute_wait_schedule_node(
     ctx: &OrchestrationContext,
     node: &FunctionNode,
     node_id: &str,
-) -> Result<String, String> {
+) -> NodeResult {
     let config_str = node
         .query
         .as_ref()
@@ -433,34 +538,11 @@ async fn execute_wait_schedule_node(
     Ok(r#"{"scheduled": true}"#.to_string())
 }
 
-/// Sentinel key used to signal a break from within a loop
-const BREAK_SENTINEL: &str = "__break__";
-
 /// Minimum wall-clock duration that every loop iteration must take before
 /// `continue_as_new` is called.  If the body (plus any while-condition
 /// evaluation) completes faster than this, a compensating timer makes up the
 /// deficit so an empty-bodied loop can't busy-spin via continue_as_new.
 const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
-
-/// Check if a result contains a break signal
-fn is_break_signal(result: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(result)
-        .map(|v| {
-            v.get(BREAK_SENTINEL)
-                .and_then(|b| b.as_bool())
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
-}
-
-/// Extract the break value from a break signal
-fn extract_break_value(result: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(result)
-        .ok()
-        .and_then(|v| v.get("value").cloned())
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "null".to_string())
-}
 
 async fn execute_loop_node(
     ctx: &OrchestrationContext,
@@ -469,7 +551,7 @@ async fn execute_loop_node(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let body_id = node
         .left_node
         .as_ref()
@@ -481,20 +563,25 @@ async fn execute_loop_node(
     let iter_started = ctx.utc_now().await.ok();
 
     ctx.trace_info("Executing loop iteration");
-    let body_result = Box::pin(execute_function_node_with_vars(
+
+    // The loop is the only place that catches `NodeError::Break`: a break unwinds through
+    // every compound node in the body via `?` and is converted here into a normal loop exit.
+    // A `Failure` still propagates out of the loop unchanged.
+    let body_result = match Box::pin(execute_function_node_with_vars(
         ctx, graph, body_id, results, exec_ctx,
     ))
-    .await?;
-
-    // Check for break signal from body
-    if is_break_signal(&body_result) {
-        let break_value = extract_break_value(&body_result);
-        ctx.trace_info(format!(
-            "Loop terminated by break with value: {break_value}"
-        ));
-        store_named_result(ctx, node, &break_value, results, "LOOP");
-        return Ok(break_value);
-    }
+    .await
+    {
+        Ok(v) => v,
+        Err(NodeError::Break(break_value)) => {
+            ctx.trace_info(format!(
+                "Loop terminated by break with value: {break_value}"
+            ));
+            store_named_result(ctx, node, &break_value, results, "LOOP");
+            return Ok(break_value);
+        }
+        Err(e @ NodeError::Failure(_)) => return Err(e),
+    };
 
     // Check while-condition if present
     if let Some(ref config_str) = node.query {
@@ -558,14 +645,14 @@ async fn execute_loop_node(
         .continue_as_new(serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()))
         .await
         .map(|_| body_result)
-        .map_err(|e| format!("continue_as_new failed: {e:?}"));
+        .map_err(|e| NodeError::Failure(format!("continue_as_new failed: {e:?}")));
 }
 
 async fn execute_break_node(
     ctx: &OrchestrationContext,
     node: &FunctionNode,
     node_id: &str,
-) -> Result<String, String> {
+) -> NodeResult {
     let break_value = node
         .query
         .as_ref()
@@ -583,13 +670,18 @@ async fn execute_break_node(
         "BREAK node {node_id} executed with value: {break_value:?}"
     ));
 
-    // Return a special break signal that the loop will detect
-    let result = serde_json::json!({
-        BREAK_SENTINEL: true,
-        "value": break_value.map(|v| serde_json::from_str::<serde_json::Value>(&v).unwrap_or(serde_json::Value::String(v)))
-    });
+    // Encode the break value as the stringified JSON the loop will surface as its result:
+    // a value that parses as JSON is preserved as-is (e.g. `{"status":"done"}`), a bare
+    // string round-trips as a quoted JSON string, and an absent value becomes `null`.
+    // The signal travels as a typed `NodeError::Break`, so `?` unwinds it to the loop.
+    let value = match break_value {
+        Some(v) => serde_json::from_str::<serde_json::Value>(&v)
+            .unwrap_or(serde_json::Value::String(v))
+            .to_string(),
+        None => "null".to_string(),
+    };
 
-    Ok(result.to_string())
+    Err(NodeError::Break(value))
 }
 
 async fn execute_if_node(
@@ -599,7 +691,7 @@ async fn execute_if_node(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let config_str = node
         .query
         .as_ref()
@@ -675,17 +767,57 @@ async fn execute_if_node(
     }
 }
 
+/// Sentinel key used by pre-#148 binaries (<= v0.2.2) to encode a `df.break()` *inside* the
+/// subtree envelope's `result` string, as `{"__break__": true, "value": ...}`. This binary no
+/// longer writes it (break now travels as the typed `control` field), but it is still read on
+/// the in-flight upgrade path: see `parse_subtree_envelope`.
+const LEGACY_BREAK_SENTINEL: &str = "__break__";
+
+/// Decode a pre-#148 break sentinel for in-flight upgrade compatibility.
+///
+/// Returns `Some(value)` if `raw` is a legacy `{"__break__": true, "value": ...}` object,
+/// where `value` is the break value stringified exactly as the old `extract_break_value`
+/// produced it (the JSON value's `to_string()`, or `"null"` when absent). Returns `None` for
+/// any normal result. New breaks never reach this path because they carry `control = Break`.
+fn parse_legacy_break_sentinel(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if value.get(LEGACY_BREAK_SENTINEL).and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(
+        value
+            .get("value")
+            .cloned()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+    )
+}
+
 /// Parse the JSON envelope returned by `execute_subtree`, extract the SQL result string,
-/// and merge the branch's named results into `parent_results`.
+/// and merge the branch's named results into `parent_results`. A branch that broke out via
+/// `df.break()` carries `control = Break`, which is re-raised here as `NodeError::Break` so
+/// the enclosing loop catches it.
 fn parse_subtree_envelope(
     raw: &str,
     context: &str,
     parent_results: &mut HashMap<String, String>,
-) -> Result<String, String> {
+) -> NodeResult {
     let envelope: SubtreeEnvelope =
         serde_json::from_str(raw).map_err(|e| format!("{context} envelope parse error: {e}"))?;
     parent_results.extend(envelope.results);
-    Ok(envelope.result)
+    match envelope.control {
+        SubtreeControl::Break => Err(NodeError::Break(envelope.result)),
+        // `Normal` also covers envelopes recorded by a pre-#148 binary (<= v0.2.2), which had
+        // no `control` field (so it defaults to `Normal`) and instead smuggled a break as a
+        // `{"__break__": true, ...}` sentinel inside `result`. Re-raise such a legacy sentinel
+        // as a typed `Break` so a JOIN/RACE-in-loop break still unwinds correctly when an
+        // orchestration started under the old binary resumes under this one, instead of being
+        // silently swallowed and treated as a normal branch result.
+        SubtreeControl::Normal => match parse_legacy_break_sentinel(&envelope.result) {
+            Some(value) => Err(NodeError::Break(value)),
+            None => Ok(envelope.result),
+        },
+    }
 }
 
 async fn execute_join_node(
@@ -695,7 +827,7 @@ async fn execute_join_node(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let left_id = node
         .left_node
         .as_ref()
@@ -774,21 +906,19 @@ async fn execute_join_node(
         match result {
             Ok(r) => {
                 let context = format!("JOIN branch {}", i + 1);
+                // A break in any branch surfaces as `NodeError::Break` from
+                // `parse_subtree_envelope` and unwinds via `?` to the enclosing loop.
                 let branch_result = parse_subtree_envelope(&r, &context, results)?;
-                // Propagate break signals from any branch immediately
-                if is_break_signal(&branch_result) {
-                    ctx.trace_info(format!(
-                        "JOIN branch {} returned a break signal, propagating",
-                        i + 1
-                    ));
-                    return Ok(branch_result);
-                }
                 let parsed = serde_json::from_str::<serde_json::Value>(&branch_result)
                     .map_err(|e| format!("JOIN branch {} result parse error: {}", i + 1, e))?;
                 join_results.push(parsed);
             }
             Err(e) => {
-                return Err(format!("JOIN branch {} failed: {}", i + 1, e));
+                return Err(NodeError::Failure(format!(
+                    "JOIN branch {} failed: {}",
+                    i + 1,
+                    e
+                )));
             }
         }
     }
@@ -816,7 +946,7 @@ async fn execute_race_node(
     node_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<String, String> {
+) -> NodeResult {
     let left_id = node
         .left_node
         .as_ref()
@@ -873,14 +1003,10 @@ async fn execute_race_node(
     }?;
 
     // Parse the subtree output envelope produced by execute_subtree and merge any named
-    // results from the winning branch into the parent results map.
+    // results from the winning branch into the parent results map. If the winning branch
+    // broke out via `df.break()`, `parse_subtree_envelope` returns `NodeError::Break`, which
+    // unwinds via `?` to the enclosing loop.
     let result = parse_subtree_envelope(&raw, "RACE branch", results)?;
-
-    // Propagate break signals from the winning branch immediately
-    if is_break_signal(&result) {
-        ctx.trace_info("RACE winning branch returned a break signal, propagating");
-        return Ok(result);
-    }
 
     // Store result if named
     if let Some(name) = &node.result_name {
@@ -898,7 +1024,7 @@ async fn execute_http_node(
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
     sys_vars: &SystemVars,
-) -> Result<String, String> {
+) -> NodeResult {
     let config_str = node
         .query
         .as_ref()
@@ -965,7 +1091,7 @@ async fn execute_signal_node(
     node: &FunctionNode,
     node_id: &str,
     results: &mut HashMap<String, String>,
-) -> Result<String, String> {
+) -> NodeResult {
     let parse_signal_data = |data_str: &str| {
         serde_json::from_str::<serde_json::Value>(data_str)
             .unwrap_or_else(|_| serde_json::Value::String(data_str.to_string()))
@@ -1037,4 +1163,164 @@ async fn execute_signal_node(
     }
 
     Ok(result_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an envelope JSON string the way `execute_subtree` serializes a `SubtreeEnvelope`.
+    /// When `control` is `None` the field is omitted entirely, reproducing an envelope recorded
+    /// by a pre-#148 binary (<= v0.2.2) that had no `control` field.
+    fn envelope_json(control: Option<&str>, result: &str, results: serde_json::Value) -> String {
+        let mut obj = serde_json::Map::new();
+        if let Some(c) = control {
+            obj.insert(
+                "control".to_string(),
+                serde_json::Value::String(c.to_string()),
+            );
+        }
+        obj.insert(
+            "result".to_string(),
+            serde_json::Value::String(result.to_string()),
+        );
+        obj.insert("results".to_string(), results);
+        serde_json::Value::Object(obj).to_string()
+    }
+
+    /// Reproduce the exact break sentinel string a pre-#148 binary stored inside the envelope's
+    /// `result` field for a `df.break(value)`.
+    fn legacy_sentinel(value: serde_json::Value) -> String {
+        serde_json::json!({ "__break__": true, "value": value }).to_string()
+    }
+
+    fn expect_break(result: NodeResult) -> String {
+        match result {
+            Err(NodeError::Break(v)) => v,
+            other => panic!("expected NodeError::Break, got {other:?}"),
+        }
+    }
+
+    fn expect_ok(result: NodeResult) -> String {
+        match result {
+            Ok(v) => v,
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_legacy_break_sentinel_decodes_string_value() {
+        // A JSON string value round-trips as the quoted JSON string, matching the old
+        // `extract_break_value` (which called `Value::to_string()` on the `value`).
+        assert_eq!(
+            parse_legacy_break_sentinel(&legacy_sentinel(serde_json::json!("hello"))),
+            Some("\"hello\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_legacy_break_sentinel_decodes_object_value() {
+        assert_eq!(
+            parse_legacy_break_sentinel(&legacy_sentinel(serde_json::json!({"status": "done"}))),
+            Some("{\"status\":\"done\"}".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_legacy_break_sentinel_decodes_null_value() {
+        assert_eq!(
+            parse_legacy_break_sentinel(&legacy_sentinel(serde_json::Value::Null)),
+            Some("null".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_legacy_break_sentinel_ignores_non_break_json() {
+        assert_eq!(parse_legacy_break_sentinel(r#"{"status":"done"}"#), None);
+        assert_eq!(parse_legacy_break_sentinel(r#"{"__break__":false}"#), None);
+        assert_eq!(parse_legacy_break_sentinel(r#""just a string""#), None);
+        assert_eq!(parse_legacy_break_sentinel("not json at all"), None);
+    }
+
+    #[test]
+    fn envelope_new_format_break_is_reraised() {
+        let raw = envelope_json(Some("Break"), "\"done\"", serde_json::json!({}));
+        let mut parent = HashMap::new();
+        assert_eq!(
+            expect_break(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
+            "\"done\""
+        );
+    }
+
+    #[test]
+    fn envelope_new_format_normal_passes_through() {
+        let raw = envelope_json(Some("Normal"), "42", serde_json::json!({}));
+        let mut parent = HashMap::new();
+        assert_eq!(
+            expect_ok(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
+            "42"
+        );
+    }
+
+    // --- In-flight upgrade path (pre-#148 envelopes, no `control` field) ---
+
+    #[test]
+    fn legacy_envelope_break_is_reraised_not_swallowed() {
+        // Regression guard for the v0.2.2 -> 0.2.3 upgrade: an envelope recorded by the old
+        // binary smuggled the break as a sentinel in `result` and had no `control` field. The
+        // new binary must re-raise it as a typed Break instead of returning it as a normal
+        // result (which would silently swallow the break and let the loop keep iterating).
+        let raw = envelope_json(
+            None,
+            &legacy_sentinel(serde_json::json!("v")),
+            serde_json::json!({}),
+        );
+        let mut parent = HashMap::new();
+        assert_eq!(
+            expect_break(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
+            "\"v\""
+        );
+    }
+
+    #[test]
+    fn legacy_envelope_null_break_is_reraised() {
+        let raw = envelope_json(
+            None,
+            &legacy_sentinel(serde_json::Value::Null),
+            serde_json::json!({}),
+        );
+        let mut parent = HashMap::new();
+        assert_eq!(
+            expect_break(parse_subtree_envelope(&raw, "RACE branch", &mut parent)),
+            "null"
+        );
+    }
+
+    #[test]
+    fn legacy_envelope_normal_result_passes_through() {
+        // An old envelope whose result is a real value (not a sentinel) is unaffected.
+        let raw = envelope_json(None, r#"{"rows":1}"#, serde_json::json!({}));
+        let mut parent = HashMap::new();
+        assert_eq!(
+            expect_ok(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
+            r#"{"rows":1}"#
+        );
+    }
+
+    #[test]
+    fn envelope_merges_named_results_even_on_break() {
+        // Named results produced inside the branch must still be merged into the parent map
+        // before the break unwinds, on both the new and legacy paths.
+        let raw = envelope_json(
+            Some("Break"),
+            "\"x\"",
+            serde_json::json!({"branch_result": "stored"}),
+        );
+        let mut parent = HashMap::new();
+        let _ = parse_subtree_envelope(&raw, "JOIN", &mut parent);
+        assert_eq!(
+            parent.get("branch_result").map(String::as_str),
+            Some("stored")
+        );
+    }
 }
