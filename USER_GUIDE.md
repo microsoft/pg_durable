@@ -192,6 +192,8 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.clearvars()` | Clear all durable function variables | `df.clearvars()` |
 | `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
 | `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
+| `df.await_instance(id, timeout)` | Durably wait for another instance | `df.await_instance('a1b2c3d4', 300)` |
+| `df.call_child(func, label, options)` | Start a child workflow and wait for it | `df.call_child('SELECT 1', 'child-job', '{"timeout_seconds":300}')` |
 | `df.signal(id, name, data)` | Send signal to instance | `df.signal('a1b2', 'go', '{}')` |
 | `df.wait_for_completion(id, timeout)` | Block until instance completes (default 30s timeout) | `df.wait_for_completion('a1b2c3d4', 60)` |
 
@@ -1190,6 +1192,22 @@ SELECT df.start(
 -- External system calls back via df.signal when job completes
 -- (e.g., via a webhook endpoint that calls df.signal)
 ```
+
+### Example: Parent waits for child workflow
+
+```sql
+SELECT df.start(
+    df.call_child(
+        'SELECT json_build_object(''report_id'', 42, ''status'', ''ready'')',
+        'generate-report',
+        '{"timeout_seconds": 300}'
+    ) |=> 'child'
+    ~> 'INSERT INTO audit_log(payload) VALUES ($child::jsonb)',
+    'parent-workflow'
+);
+```
+
+`df.call_child(...)` returns a JSON envelope with the child `instance_id`, final `status`, and child `result`. To wait on an already-started instance instead, use `df.await_instance(...)`.
 
 ---
 

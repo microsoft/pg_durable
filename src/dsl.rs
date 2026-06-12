@@ -30,6 +30,32 @@ fn is_in_workflow_context() -> bool {
     result.as_deref() == Some("true")
 }
 
+fn sql_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn hex_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn stable_internal_result_name(parts: &[&str]) -> String {
+    let mut hash = 14695981039346656037u64;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(1099511628211);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("__df_call_child_{hash:016x}")
+}
+
 // ============================================================================
 // Version & Debug Functions
 // ============================================================================
@@ -573,6 +599,135 @@ pub fn wait_for_signal(name: &str, timeout_seconds: default!(Option<i32>, "NULL"
         ..Default::default()
     }
     .to_json()
+}
+
+/// Durably waits for another pg_durable instance to reach a terminal state.
+///
+/// The returned JSON envelope contains the child instance_id, terminal status,
+/// and completed result. Failed/cancelled children raise an error in the parent.
+#[pg_extern(schema = "df")]
+pub fn await_instance(instance_id: &str, timeout_seconds: default!(Option<i32>, "NULL")) -> String {
+    if instance_id.is_empty() {
+        pgrx::error!("Instance ID cannot be empty");
+    }
+
+    if let Some(timeout) = timeout_seconds {
+        if timeout <= 0 {
+            pgrx::error!("Timeout must be positive");
+        }
+    }
+
+    let config = serde_json::json!({
+        "instance_id": instance_id,
+        "timeout_seconds": timeout_seconds
+    });
+
+    Durofut {
+        node_type: "AWAIT_INSTANCE".to_string(),
+        query: Some(config.to_string()),
+        ..Default::default()
+    }
+    .to_json()
+}
+
+/// Starts a child workflow and durably waits for its terminal result.
+///
+/// Supported options today:
+/// - timeout_seconds: integer timeout for the wait phase
+/// - database: target database for the child df.start() call
+/// - on_failure: only "raise" is currently supported
+#[pg_extern(schema = "df")]
+pub fn call_child(
+    fut: &str,
+    label: default!(Option<&str>, "NULL"),
+    options: default!(Option<pgrx::JsonB>, "NULL"),
+) -> String {
+    let child_fut = match Durofut::ensure_strict(fut) {
+        Ok(d) => d,
+        Err(e) => pgrx::error!("Invalid child durable function: {}", e),
+    };
+    if let Err(e) = child_fut.validate_recursive() {
+        pgrx::error!("Invalid child durable function graph: {}", e);
+    }
+
+    let mut timeout_seconds: Option<i32> = None;
+    let mut database: Option<&str> = None;
+
+    if let Some(opts) = options.as_ref().map(|jsonb| &jsonb.0) {
+        let obj = opts
+            .as_object()
+            .unwrap_or_else(|| pgrx::error!("df.call_child options must be a JSON object"));
+
+        for key in obj.keys() {
+            match key.as_str() {
+                "timeout_seconds" | "database" | "on_failure" => {}
+                other => {
+                    pgrx::error!(
+                        "df.call_child: unsupported option '{}'. Supported options: timeout_seconds, database, on_failure",
+                        other
+                    );
+                }
+            }
+        }
+
+        if let Some(timeout_value) = obj.get("timeout_seconds") {
+            let timeout = timeout_value.as_i64().unwrap_or_else(|| {
+                pgrx::error!("df.call_child timeout_seconds must be an integer")
+            });
+            if timeout <= 0 || timeout > i64::from(i32::MAX) {
+                pgrx::error!(
+                    "df.call_child timeout_seconds must be between 1 and {}",
+                    i32::MAX
+                );
+            }
+            timeout_seconds = Some(timeout as i32);
+        }
+
+        if let Some(database_value) = obj.get("database") {
+            database = Some(
+                database_value
+                    .as_str()
+                    .unwrap_or_else(|| pgrx::error!("df.call_child database must be a string")),
+            );
+        }
+
+        if let Some(on_failure_value) = obj.get("on_failure") {
+            let on_failure = on_failure_value
+                .as_str()
+                .unwrap_or_else(|| pgrx::error!("df.call_child on_failure must be a string"));
+            if on_failure != "raise" {
+                pgrx::error!("df.call_child only supports on_failure = 'raise' in this release");
+            }
+        }
+    }
+
+    let child_graph_json = child_fut.to_json();
+    let internal_result_name = stable_internal_result_name(&[
+        &child_graph_json,
+        label.unwrap_or(""),
+        database.unwrap_or(""),
+    ]);
+
+    let label_arg = label
+        .map(sql_text_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+    let database_arg = database
+        .map(sql_text_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+    let start_query = format!(
+        "SELECT df.start(convert_from(decode({}, 'hex'), 'UTF8'), {}, {}) AS instance_id",
+        sql_text_literal(&hex_encode(&child_graph_json)),
+        label_arg,
+        database_arg
+    );
+
+    let start_node = as_named(&sql(&start_query), &internal_result_name);
+    let wait_node = await_instance(
+        &format!("${internal_result_name}.instance_id"),
+        timeout_seconds,
+    );
+
+    then_fn(&start_node, &wait_node)
 }
 
 /// Send a signal to a running durable function instance.
