@@ -14,7 +14,7 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 
 | Identity | Source | Capture Method | Stored In | Used For |
 |---|---|---|---|---|
-| current_user (submitted_by) | PostgreSQL current_user at df.start() time | `GetOuterUserId()` C API | df.instances.submitted_by, df.nodes.submitted_by | Direct connection authentication for per-user SQL execution; RLS policy column |
+| current_user (submitted_by) | PostgreSQL current_user at df.start() time | `GetUserId()` C API | df.instances.submitted_by, df.nodes.submitted_by | Direct connection authentication for per-user SQL execution; RLS policy column |
 | worker_role | GUC `pg_durable.worker_role` | Configuration (default: "postgres") | postgresql.conf | Background worker sqlx pool authentication |
 
 ### Least Privilege Assessment
