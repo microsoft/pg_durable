@@ -498,6 +498,15 @@ async fn initialize_duroxide_runtime(
             }
         };
 
+        if let Err(e) = ensure_history_event_payload_identifiers(mgmt_pool).await {
+            log!(
+                "pg_durable: failed to install history payload identifier guard (will retry): {}",
+                e
+            );
+            tokio::time::sleep(retry_interval).await;
+            continue;
+        }
+
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
         // longer needed — connect_as_user() sets that flag independently.
@@ -511,6 +520,73 @@ async fn initialize_duroxide_runtime(
         log!("pg_durable: duroxide runtime started");
         return Some(duroxide_runtime);
     }
+}
+
+/// Ensures cancellation/failure history payloads always carry the row identifiers.
+///
+/// Some upstream runtime events can contain an empty `instance_id` and/or
+/// `execution_id = 0` in `event_data`. This trigger normalizes those fields on
+/// insert so payload consumers can always correlate the event back to the
+/// owning history row.
+async fn ensure_history_event_payload_identifiers(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION duroxide._normalize_history_event_payload_identifiers()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_data JSONB;
+            v_execution_text TEXT;
+        BEGIN
+            IF NEW.event_data IS NULL OR NEW.event_data = '' THEN
+                RETURN NEW;
+            END IF;
+
+            BEGIN
+                v_data := NEW.event_data::JSONB;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NEW;
+            END;
+
+            IF JSONB_TYPEOF(v_data) != 'object' THEN
+                RETURN NEW;
+            END IF;
+
+            IF COALESCE(v_data->>'instance_id', '') = '' THEN
+                v_data := JSONB_SET(v_data, '{instance_id}', TO_JSONB(NEW.instance_id), true);
+            END IF;
+
+            v_execution_text := v_data->>'execution_id';
+            IF v_execution_text IS NULL OR v_execution_text !~ '^[0-9]+$' THEN
+                v_data := JSONB_SET(v_data, '{execution_id}', TO_JSONB(NEW.execution_id), true);
+            ELSIF v_execution_text::BIGINT = 0 THEN
+                v_data := JSONB_SET(v_data, '{execution_id}', TO_JSONB(NEW.execution_id), true);
+            END IF;
+
+            NEW.event_data := v_data::TEXT;
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("DROP TRIGGER IF EXISTS trg_normalize_history_event_payload_identifiers ON duroxide.history")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TRIGGER trg_normalize_history_event_payload_identifiers
+         BEFORE INSERT ON duroxide.history
+         FOR EACH ROW
+         EXECUTE FUNCTION duroxide._normalize_history_event_payload_identifiers()",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Write the epoch sentinel after a successful runtime init.
