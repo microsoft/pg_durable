@@ -55,5 +55,9 @@ pub fn create_orchestration_registry() -> OrchestrationRegistry {
             orchestrations::execute_function_graph::SUBTREE_NAME,
             orchestrations::execute_function_graph::execute_subtree,
         )
+        .register(
+            orchestrations::execute_function_graph::LOOP_NAME,
+            orchestrations::execute_function_graph::execute_loop,
+        )
         .build()
 }
