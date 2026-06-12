@@ -381,10 +381,18 @@ Return columns:
 **`status_details` JSON contract.** Written by the worker through the
 `update-node-status` activity and stored verbatim in `df.nodes.status_details`:
 
-- `execution_id` — the node's full segmented execution path, e.g.
-  `a1b2c3d4::1::7f9a0012::1`. Parse it positionally: the second `::`-token is the
-  root loop generation (used to detect superseded loop iterations), and the
-  trailing segments encode `JOIN`/`RACE` sub-orchestration lineage.
+- `execution_id` — the node's full execution stamp, `{instance_path}::{generation}`,
+  e.g. `a1b2c3d4::1::7f9a0012::2`. The **last** `::`-token is the generation
+  (continue-as-new count) of the orchestration that transitioned the node, and the
+  preceding `{instance_path}` is that orchestration's instance id. `instance_path`
+  encodes sub-orchestration lineage: it starts with the root function instance id and
+  appends a `::{parent_generation}::{branch_or_loop_node_id}` segment for each nested
+  `JOIN`/`RACE` branch and each non-root `df.loop()` (which runs as its own child
+  sub-orchestration). Instance ids and node ids are 8-char hex and never contain `::`,
+  so the path is unambiguous. Supersession is evaluated **per scope**: a node is
+  superseded when a newer generation exists for its own `instance_path`, or when any
+  ancestor scope in its path has advanced to a newer generation. For a plain root-level
+  loop this reduces to the second `::`-token being the loop generation.
 
 `inferred_status` and `inferred_status_from_ancestor_id` are **computed at read
 time** and are not stored in `df.nodes.status_details`.

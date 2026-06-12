@@ -1065,6 +1065,15 @@ SELECT df.start(
 > )
 > ```
 
+### How Loops Execute
+
+Each loop iteration advances via *continue-as-new*, which restarts the loop with fresh state while preserving durability. Where that restart happens depends on whether the loop is the **root** of the function:
+
+- A **root loop** (the outermost node, e.g. `df.start(df.loop(...))` or the `@>` prefix) runs inline on the function's own orchestration. There is no surrounding work to preserve, so each iteration simply restarts the function.
+- A **non-root loop** (a loop with prefix/suffix nodes, or one nested inside a `df.if()`, JOIN (`&`), or RACE (`|`) branch) runs as its own **child sub-orchestration**. Only the loop body restarts on each iteration — any work *before* the loop runs exactly once and is never re-executed, and a loop nested in a parallel branch gets its own durable instance.
+
+This is transparent to your workflow; it only affects observability. The child sub-orchestration is an internal durable instance: it does **not** appear in `df.list_instances()` (which lists only the instances you started with `df.start()`). Instead, the loop node's status in `df.instance_nodes()` / `df.explain()` reflects the child's progress, so you observe the loop through its parent instance as usual.
+
 ### Stopping a Loop Externally
 
 ```sql

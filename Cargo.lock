@@ -689,8 +689,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 [[package]]
 name = "duroxide"
 version = "0.1.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9377f5bf81d9a8ce56a13f913f60ca0e0ba8a9464349c407e7d11c326488bf0c"
+source = "git+https://github.com/microsoft/duroxide.git?branch=pinodeca%2Fcontinue-parent-link#6650410626110f5e29c32269bec0156b15d6ed7c"
 dependencies = [
  "async-trait",
  "futures",
@@ -702,6 +701,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
