@@ -191,6 +191,7 @@ COMMENT ON COLUMN df.instances.submitted_by IS
 
 -- Index for finding pending instances
 CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);
+CREATE INDEX IF NOT EXISTS idx_instances_created_at_desc_id ON df.instances(created_at DESC, id);
 
 -- Index for finding nodes by instance
 CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
@@ -400,6 +401,7 @@ DECLARE
         'df.wait_for_completion(text, integer)',
         'df.run(text)',
         'df.list_instances(text, integer)',
+        'df.list_instances_paginated(text, integer, text)',
         'df.instance_info(text)',
         'df.instance_nodes(text, integer)',
         'df.instance_executions(text, integer)',
