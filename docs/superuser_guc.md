@@ -100,7 +100,7 @@ GucRegistry::define_bool_guc(
 );
 ```
 
-Note: in pgrx 0.16.1, `GucFlags::NO_SHOW_ALL` is a combined constant that sets both
+Note: in pgrx, `GucFlags::NO_SHOW_ALL` is a combined constant that sets both
 `GUC_NO_SHOW_ALL` (hides from `SHOW ALL` and `pg_settings`) and `GUC_NOT_IN_SAMPLE`
 (hides from the sample `postgresql.conf`). However, `GUC_NO_SHOW_ALL` also hides the
 GUC from `pg_settings`, which breaks any unit tests that query that view to verify

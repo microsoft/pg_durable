@@ -34,8 +34,10 @@ set_pg_conf() {
     local key="$1"
     local value="$2"
 
-    if grep -q "^${key}\s*=" "$PG_CONF" 2>/dev/null; then
-        sed -i "s|^${key}\s*=.*|${key} = '${value}'|" "$PG_CONF"
+    if grep -q "^${key}[[:space:]]*=" "$PG_CONF" 2>/dev/null; then
+        # Use a backup suffix so `sed -i` is portable across GNU and BSD/macOS sed.
+        sed -i.bak "s|^${key}[[:space:]]*=.*|${key} = '${value}'|" "$PG_CONF"
+        rm -f "$PG_CONF.bak"
     else
         echo "${key} = '${value}'" >> "$PG_CONF"
     fi
@@ -95,12 +97,12 @@ wait_for_local_postgres() {
 }
 
 detect_admin_user() {
-    if "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc "SELECT 1" >/dev/null 2>&1; then
+    if "$PSQL" -X -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc "SELECT 1" >/dev/null 2>&1; then
         echo "postgres"
         return 0
     fi
 
-    if "$PSQL" -h localhost -p "$PG_PORT" -U "$USER" -d postgres -Atqc "SELECT 1" >/dev/null 2>&1; then
+    if "$PSQL" -X -h localhost -p "$PG_PORT" -U "$USER" -d postgres -Atqc "SELECT 1" >/dev/null 2>&1; then
         echo "$USER"
         return 0
     fi
@@ -120,7 +122,7 @@ ensure_superuser_role() {
         return 1
     fi
 
-    "$PSQL" -h localhost -p "$PG_PORT" -U "$admin_user" -d postgres \
+    "$PSQL" -X -h localhost -p "$PG_PORT" -U "$admin_user" -d postgres \
         -v ON_ERROR_STOP=1 \
         -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role_name}') THEN EXECUTE format('CREATE ROLE %I WITH LOGIN SUPERUSER', '${role_name}'); END IF; END \$\$;" >/dev/null
 }
@@ -150,17 +152,17 @@ ensure_pg_durable_extension() {
 
     # Create the target database if it doesn't exist (e.g. contrib_regression for pg_regress)
     if [ "$db" != "postgres" ]; then
-        "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
+        "$PSQL" -X -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
             "SELECT 1 FROM pg_database WHERE datname = '${db}'" 2>/dev/null | grep -q 1 || \
-        "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+        "$PSQL" -X -h localhost -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "CREATE DATABASE \"${db}\";" >/dev/null
     fi
 
-    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$db" -v ON_ERROR_STOP=1 \
+    "$PSQL" -X -h localhost -p "$PG_PORT" -U postgres -d "$db" -v ON_ERROR_STOP=1 \
         -c "CREATE EXTENSION IF NOT EXISTS pg_durable;" >/dev/null
 }
 
 pg_durable_version() {
     local db="${PGDATABASE:-postgres}"
-    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$db" -Atqc "SELECT df.version();"
+    "$PSQL" -X -h localhost -p "$PG_PORT" -U postgres -d "$db" -Atqc "SELECT df.version();"
 }

@@ -27,11 +27,11 @@ Rust dependencies declared in Cargo.toml:
   License: MIT
   Source: https://github.com/microsoft/duroxide-pg
 
-- pgrx 0.16.1
+- pgrx 0.18.1
   License: MIT
   Source: https://github.com/pgcentralfoundation/pgrx/
 
-- pgrx-tests 0.16.1
+- pgrx-tests 0.18.1
   License: MIT
   Source: https://github.com/pgcentralfoundation/pgrx/
 

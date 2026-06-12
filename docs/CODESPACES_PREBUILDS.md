@@ -35,7 +35,7 @@ Codespaces has two distinct phases:
   - Duration: depends on cache state and network conditions; it is the slow phase and runs only when the prebuild needs to be refreshed
    - Installs:
      - System dependencies (libssl, clang, bison, etc.)
-     - cargo-pgrx 0.16.1
+     - cargo-pgrx 0.18.1
      - PostgreSQL 17 (downloaded and compiled via pgrx)
    - Rust dependencies from crates.io
     - Builds and installs pg_durable
@@ -95,7 +95,7 @@ When you need to update system dependencies or pgrx version:
 Example: Updating pgrx version
 ```bash
 # In .devcontainer/onCreateCommand.sh
-cargo install cargo-pgrx --version 0.16.1 --locked  # Updated from 0.15.0
+cargo install cargo-pgrx --version 0.18.1 --locked  # Updated from 0.16.1
 ```
 
 ## Troubleshooting

@@ -32,7 +32,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  CARGO_PGRX_VERSION: 0.16.1
+  CARGO_PGRX_VERSION: 0.18.1
   PACKAGE_HTTP_FEATURE: http-allow-azure-domains
 
 concurrency:

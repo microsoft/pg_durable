@@ -147,7 +147,7 @@ Each release also publishes source archives for building from source and a `SHA2
 
 - PostgreSQL 17 or 18
 - Rust (nightly)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.18.1
 
 ### GitHub Codespace
 
