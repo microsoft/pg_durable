@@ -68,11 +68,14 @@ impl From<&str> for NodeError {
 type NodeResult = Result<String, NodeError>;
 
 /// Distinguishes a normal subtree result from one that unwound via `df.break()`.
-/// `#[serde(default)]` on the envelope's field keeps envelopes recorded by an older binary
-/// (which had no control field) deserializable as `Normal` across an in-flight upgrade.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+///
+/// Stored as `Option<SubtreeControl>` in the envelope (see `SubtreeEnvelope::control`): a
+/// missing field deserializes to `None`, which unambiguously marks an envelope recorded by a
+/// pre-#148 binary (`<= v0.2.2`, no control field). A new binary always writes an explicit
+/// `Some(Normal)` / `Some(Break)`, so the legacy break-sentinel fallback can be gated to
+/// `None` only — keeping a user payload from impersonating control flow on a fresh envelope.
+#[derive(serde::Serialize, serde::Deserialize)]
 enum SubtreeControl {
-    #[default]
     Normal,
     Break,
 }
@@ -83,8 +86,11 @@ enum SubtreeControl {
 /// parent can re-raise it as `NodeError::Break` rather than smuggling a sentinel in `result`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SubtreeEnvelope {
+    /// `None` only when deserialized from a pre-#148 envelope that had no `control` field; a
+    /// new binary always serializes `Some(..)`. `parse_subtree_envelope` relies on this to run
+    /// the legacy break-sentinel fallback exclusively on old envelopes.
     #[serde(default)]
-    control: SubtreeControl,
+    control: Option<SubtreeControl>,
     result: String,
     results: HashMap<String, String>,
 }
@@ -271,7 +277,7 @@ pub async fn execute_subtree(
             Ok(result) => {
                 ctx.trace_info(format!("ExecuteSubtree: node {node_id} completed"));
                 SubtreeEnvelope {
-                    control: SubtreeControl::Normal,
+                    control: Some(SubtreeControl::Normal),
                     result,
                     results,
                 }
@@ -281,7 +287,7 @@ pub async fn execute_subtree(
                     "ExecuteSubtree: node {node_id} broke (propagating)"
                 ));
                 SubtreeEnvelope {
-                    control: SubtreeControl::Break,
+                    control: Some(SubtreeControl::Break),
                     result: value,
                     results,
                 }
@@ -328,48 +334,24 @@ async fn execute_function_node_with_vars(
     // Update node with final status and result. A `Break` is control flow rather than a
     // failure: record the node as completed (carrying the break value) so observability is
     // unchanged from when break travelled as a normal `Ok` sentinel. Only `Failure` marks
-    // the node failed.
-    match &execute_result {
-        Ok(result) => {
-            let completed_input = serde_json::json!({
-                "node_id": node_id,
-                "status": "completed",
-                "result": result
-            });
-            let _ = ctx
-                .schedule_activity(
-                    activities::update_node_status::NAME,
-                    completed_input.to_string(),
-                )
-                .await;
-        }
-        Err(NodeError::Break(value)) => {
-            let completed_input = serde_json::json!({
-                "node_id": node_id,
-                "status": "completed",
-                "result": value
-            });
-            let _ = ctx
-                .schedule_activity(
-                    activities::update_node_status::NAME,
-                    completed_input.to_string(),
-                )
-                .await;
-        }
-        Err(NodeError::Failure(err)) => {
-            let failed_input = serde_json::json!({
-                "node_id": node_id,
-                "status": "failed",
-                "result": err
-            });
-            let _ = ctx
-                .schedule_activity(
-                    activities::update_node_status::NAME,
-                    failed_input.to_string(),
-                )
-                .await;
-        }
-    }
+    // the node failed. All three arms schedule exactly one `update_node_status`, so collapse
+    // them to a single (status, result) pair to keep the recorded history identical.
+    let (status, status_result) = match &execute_result {
+        Ok(result) => ("completed", result.as_str()),
+        Err(NodeError::Break(value)) => ("completed", value.as_str()),
+        Err(NodeError::Failure(err)) => ("failed", err.as_str()),
+    };
+    let status_input = serde_json::json!({
+        "node_id": node_id,
+        "status": status,
+        "result": status_result,
+    });
+    let _ = ctx
+        .schedule_activity(
+            activities::update_node_status::NAME,
+            status_input.to_string(),
+        )
+        .await;
 
     execute_result
 }
@@ -778,7 +760,8 @@ const LEGACY_BREAK_SENTINEL: &str = "__break__";
 /// Returns `Some(value)` if `raw` is a legacy `{"__break__": true, "value": ...}` object,
 /// where `value` is the break value stringified exactly as the old `extract_break_value`
 /// produced it (the JSON value's `to_string()`, or `"null"` when absent). Returns `None` for
-/// any normal result. New breaks never reach this path because they carry `control = Break`.
+/// any normal result. Only envelopes with an absent `control` field (pre-#148 binaries) reach
+/// this path; anything written by the new binary carries an explicit `control` and skips it.
 fn parse_legacy_break_sentinel(raw: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
     if value.get(LEGACY_BREAK_SENTINEL).and_then(|b| b.as_bool()) != Some(true) {
@@ -806,14 +789,20 @@ fn parse_subtree_envelope(
         serde_json::from_str(raw).map_err(|e| format!("{context} envelope parse error: {e}"))?;
     parent_results.extend(envelope.results);
     match envelope.control {
-        SubtreeControl::Break => Err(NodeError::Break(envelope.result)),
-        // `Normal` also covers envelopes recorded by a pre-#148 binary (<= v0.2.2), which had
-        // no `control` field (so it defaults to `Normal`) and instead smuggled a break as a
-        // `{"__break__": true, ...}` sentinel inside `result`. Re-raise such a legacy sentinel
-        // as a typed `Break` so a JOIN/RACE-in-loop break still unwinds correctly when an
-        // orchestration started under the old binary resumes under this one, instead of being
-        // silently swallowed and treated as a normal branch result.
-        SubtreeControl::Normal => match parse_legacy_break_sentinel(&envelope.result) {
+        Some(SubtreeControl::Break) => Err(NodeError::Break(envelope.result)),
+        // A new binary always writes an explicit `control`, so `Some(Normal)` is a genuine
+        // normal result and must NOT be run through the legacy sentinel check: otherwise a
+        // branch whose real SQL result happens to be shaped like `{"__break__": true, ...}`
+        // would be falsely re-raised as a `Break` — exactly the payload-impersonates-control
+        // bug class #148 set out to remove.
+        Some(SubtreeControl::Normal) => Ok(envelope.result),
+        // `None` means the envelope was recorded by a pre-#148 binary (`<= v0.2.2`): it had no
+        // `control` field and instead smuggled a break as a `{"__break__": true, ...}`
+        // sentinel inside `result`. Re-raise such a legacy sentinel as a typed `Break` so a
+        // JOIN/RACE-in-loop break still unwinds when an orchestration started under the old
+        // binary resumes under this one, instead of being silently swallowed and treated as a
+        // normal branch result.
+        None => match parse_legacy_break_sentinel(&envelope.result) {
             Some(value) => Err(NodeError::Break(value)),
             None => Ok(envelope.result),
         },
@@ -1259,6 +1248,21 @@ mod tests {
         assert_eq!(
             expect_ok(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
             "42"
+        );
+    }
+
+    #[test]
+    fn envelope_new_format_normal_with_sentinel_shaped_result_is_not_reraised() {
+        // Regression guard for the #229 review finding: a new-binary `Normal` envelope whose
+        // genuine result happens to be shaped like the legacy break sentinel must pass through
+        // untouched. The legacy fallback now runs only when `control` is absent (`None`), so a
+        // JOIN/RACE branch result can no longer impersonate control flow under the new binary.
+        let payload = legacy_sentinel(serde_json::json!("not-a-break"));
+        let raw = envelope_json(Some("Normal"), &payload, serde_json::json!({}));
+        let mut parent = HashMap::new();
+        assert_eq!(
+            expect_ok(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
+            payload
         );
     }
 
