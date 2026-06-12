@@ -204,5 +204,206 @@ END $$;
 DROP TABLE _t3;
 DROP TABLE test_nonroot3_log;
 
+-- === Test 4: Nested loop — a loop body that itself contains a loop ===
+--
+-- Each df.loop() spawns an execute_loop sub-orchestration, so a nested loop spawns a
+-- child execute_loop from *within* another execute_loop generation.  This verifies that
+-- continue_as_new in the outer loop does not disturb the inner loop and vice versa.
+--
+-- Outer loop runs 2 iterations (break when outer_marker has 2 rows); each outer iteration
+-- runs an inner loop that inserts exactly one row and breaks immediately.
+-- Expected: outer_marker = 2 rows, inner_table = 2 rows.
+
+DROP TABLE IF EXISTS test_nested_outer;
+DROP TABLE IF EXISTS test_nested_inner;
+CREATE TABLE test_nested_outer (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+CREATE TABLE test_nested_inner (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+
+CREATE TEMP TABLE _t4 AS
+SELECT df.start(
+    df.loop(
+        'INSERT INTO test_nested_outer DEFAULT VALUES'
+        ~> df.loop(
+            'INSERT INTO test_nested_inner DEFAULT VALUES'
+            ~> df.break()
+        )
+        ~> (
+            'SELECT COUNT(*) >= 2 FROM test_nested_outer'
+                ?> df.break()
+                !> df.sleep(1)
+        )
+    ),
+    'test-nested-loop'
+) AS instance_id;
+
+DO $$
+DECLARE
+    v_id    TEXT;
+    v_status TEXT;
+    v_outer INT;
+    v_inner INT;
+BEGIN
+    SELECT instance_id INTO v_id FROM _t4;
+    RAISE NOTICE 'Test 4 - nested loop: instance %', v_id;
+
+    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+
+    IF v_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [nested]: expected completed, got %', v_status;
+    END IF;
+
+    SELECT COUNT(*) INTO v_outer FROM test_nested_outer;
+    SELECT COUNT(*) INTO v_inner FROM test_nested_inner;
+
+    IF v_outer != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [nested]: outer ran % time(s) (expected 2)', v_outer;
+    END IF;
+
+    IF v_inner != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [nested]: inner ran % time(s) (expected 2)', v_inner;
+    END IF;
+
+    RAISE NOTICE 'PASSED: nested loop — outer ran twice, inner ran once per outer iteration';
+END $$;
+
+DROP TABLE _t4;
+DROP TABLE test_nested_outer;
+DROP TABLE test_nested_inner;
+
+-- === Test 5: Loop inside a JOIN branch ===
+--
+-- JOIN branches execute as execute_subtree sub-orchestrations, so a loop in a branch
+-- spawns an execute_loop child from *within* execute_subtree.  This verifies the loop
+-- sub-orchestration nests correctly under a parallel branch and that the JOIN still
+-- completes once both branches finish.
+--
+-- Left branch inserts one row; right branch loops until join_loop has 2 rows.
+-- Expected: join_left = 1 row, join_loop = 2 rows.
+
+DROP TABLE IF EXISTS test_join_left;
+DROP TABLE IF EXISTS test_join_loop;
+CREATE TABLE test_join_left (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+CREATE TABLE test_join_loop (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+
+CREATE TEMP TABLE _t5 AS
+SELECT df.start(
+    'INSERT INTO test_join_left DEFAULT VALUES'
+    & df.loop(
+        'INSERT INTO test_join_loop DEFAULT VALUES'
+        ~> (
+            'SELECT COUNT(*) >= 2 FROM test_join_loop'
+                ?> df.break()
+                !> df.sleep(1)
+        )
+    ),
+    'test-loop-in-join-branch'
+) AS instance_id;
+
+DO $$
+DECLARE
+    v_id    TEXT;
+    v_status TEXT;
+    v_left  INT;
+    v_loop  INT;
+BEGIN
+    SELECT instance_id INTO v_id FROM _t5;
+    RAISE NOTICE 'Test 5 - loop in JOIN branch: instance %', v_id;
+
+    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+
+    IF v_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [loop-in-join]: expected completed, got %', v_status;
+    END IF;
+
+    SELECT COUNT(*) INTO v_left FROM test_join_left;
+    SELECT COUNT(*) INTO v_loop FROM test_join_loop;
+
+    IF v_left != 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [loop-in-join]: left branch ran % time(s) (expected 1)', v_left;
+    END IF;
+
+    IF v_loop != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED [loop-in-join]: loop branch body ran % time(s) (expected 2)', v_loop;
+    END IF;
+
+    RAISE NOTICE 'PASSED: loop in JOIN branch — left ran once, loop body ran twice';
+END $$;
+
+DROP TABLE _t5;
+DROP TABLE test_join_left;
+DROP TABLE test_join_loop;
+
+-- === Test 6: Non-root while-loop — prefix once, while-condition exit, suffix once ===
+--
+-- The earlier tests exit via df.break(); this one exits via a false while-condition
+-- (df.loop(body, condition)).  The condition node also runs inside the loop
+-- sub-orchestration, so this exercises the while-false exit path across generations.
+--
+-- Graph: INSERT prefix ~> df.loop(body, 'COUNT < 3') ~> INSERT suffix
+-- Expected: prefix = 1 row, body = 3 rows (loop stops when count reaches 3), suffix = 1 row.
+
+DROP TABLE IF EXISTS test_while_prefix;
+DROP TABLE IF EXISTS test_while_body;
+DROP TABLE IF EXISTS test_while_suffix;
+CREATE TABLE test_while_prefix (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+CREATE TABLE test_while_body   (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+CREATE TABLE test_while_suffix (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+
+CREATE TEMP TABLE _t6 AS
+SELECT df.start(
+    df.seq(
+        'INSERT INTO test_while_prefix DEFAULT VALUES',
+        df.seq(
+            df.loop(
+                'INSERT INTO test_while_body DEFAULT VALUES' ~> df.sleep(1),
+                'SELECT COUNT(*) < 3 FROM test_while_body'
+            ),
+            'INSERT INTO test_while_suffix DEFAULT VALUES'
+        )
+    ),
+    'test-nonroot-while-loop'
+) AS instance_id;
+
+DO $$
+DECLARE
+    v_id     TEXT;
+    v_status TEXT;
+    v_prefix INT;
+    v_body   INT;
+    v_suffix INT;
+BEGIN
+    SELECT instance_id INTO v_id FROM _t6;
+    RAISE NOTICE 'Test 6 - non-root while loop: instance %', v_id;
+
+    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+
+    IF v_status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-while]: expected completed, got %', v_status;
+    END IF;
+
+    SELECT COUNT(*) INTO v_prefix FROM test_while_prefix;
+    SELECT COUNT(*) INTO v_body   FROM test_while_body;
+    SELECT COUNT(*) INTO v_suffix FROM test_while_suffix;
+
+    IF v_prefix != 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-while]: prefix ran % time(s) (expected 1)', v_prefix;
+    END IF;
+
+    IF v_body != 3 THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-while]: body ran % time(s) (expected 3)', v_body;
+    END IF;
+
+    IF v_suffix != 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-while]: suffix ran % time(s) (expected 1)', v_suffix;
+    END IF;
+
+    RAISE NOTICE 'PASSED: non-root while loop — prefix once, body 3x via while-condition, suffix once';
+END $$;
+
+DROP TABLE _t6;
+DROP TABLE test_while_prefix;
+DROP TABLE test_while_body;
+DROP TABLE test_while_suffix;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;
