@@ -1,0 +1,57 @@
+name: Update Dependencies
+
+# Weekly automated dependency refresh. Runs `cargo update` and, if Cargo.lock
+# changed, opens a PR with the diff. The PR is validated by the normal CI
+# workflow (clippy, unit, E2E, upgrade tests).
+#
+# Repo prerequisite: Settings > Actions > General > Workflow permissions must
+# have "Allow GitHub Actions to create and approve pull requests" enabled for
+# the create-pull-request step to succeed.
+#
+# CI triggering: a PR created with the default GITHUB_TOKEN does NOT trigger
+# other workflows (GitHub's recursion guard). To have the dependency PR run CI
+# automatically, set a repository secret named DEPS_UPDATE_PAT to a Personal
+# Access Token (or GitHub App token) with `contents: write` and
+# `pull-requests: write`. Without it, the workflow falls back to GITHUB_TOKEN
+# and a maintainer can kick off CI by re-opening or pushing to the PR.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'  # Monday 3 AM UTC
+  workflow_dispatch: # Allow manual trigger
+
+concurrency:
+  group: deps-update
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: Cargo Update
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+
+      - name: Run cargo update
+        run: cargo update
+
+      - name: Create PR if lock file changed
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.DEPS_UPDATE_PAT || github.token }}
+          commit-message: 'chore: update Cargo.lock dependencies'
+          branch: deps/cargo-update
+          delete-branch: true
+          title: 'chore: weekly dependency update'
+          body: |
+            Automated `cargo update` run.
+
+            Review the `Cargo.lock` diff for version changes.
+          labels: dependencies
