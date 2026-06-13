@@ -15,8 +15,9 @@ compose* — the corner of the grammar humans rarely test exhaustively by hand.
 |---|---|---|
 | `generator/` | ✅ yes | The standalone generator crate (std-only Rust, no pgrx dep). |
 | `manifest.json` | ✅ yes | Golden regression baseline: every shape's id, signature, class, reason, DSL, and expected per-path counts. The `--check` determinism guard diffs against this. |
+| `meta-manifest.json` | ✅ yes | Golden baseline for the **Phase 4** metamorphic relations (see below): every relation's id, name, rationale, both DSL programs, and expected observable. The same `--check` guard diffs against this. |
 | `README.md` | ✅ yes | This file. |
-| `sql/` | 🚫 gitignored | Live (clean) E2E tests, regenerated on demand. |
+| `sql/` | 🚫 gitignored | Live (clean) E2E tests, regenerated on demand. Holds both the Phase 2 `gen-*.sql` matrix and the Phase 4 `meta-*.sql` relations. |
 | `quarantine/` | 🚫 gitignored | Known-failing E2E tests for documented product bugs, regenerated on demand. |
 
 The `.sql` files are **derived artifacts** — they are never committed; CI
@@ -171,9 +172,121 @@ When a product bug is fixed:
    commit, so those shapes generate into `sql/` and become **blocking**.
 4. Regenerate, re-run `--check`, commit the refreshed `manifest.json`.
 
+## Phase 4 — metamorphic relations
+
+Part of the same roadmap ([#232](https://github.com/microsoft/pg_durable/issues/232)),
+living in the **same generator crate** (`generator/src/meta.rs`). Where Phase 2
+asks *"does this one program execute the way we computed?"*, Phase 4 asks *"do
+two programs the runtime is **supposed to treat as equivalent** actually produce
+the same observable result?"* — a metamorphic relation. We build a pair
+`(program_a, program_b)` plus an equivalence predicate, run **both**, and assert
+they agree.
+
+### Labels, not paths
+
+Phase 2 tags each marker by its **structural** `node_path` (`r`, `r.t`, `r.b.0`,
+…). That works when comparing a program against *itself*, but two
+structurally-different-yet-equivalent programs have **different** paths for the
+*same logical leaf* — `seq(a, seq(b,c))` vs `seq(seq(a,b), c)` put leaf `b` at
+different paths. So Phase 4 tags markers by a **stable leaf label** (`a`, `b`,
+`c`): the same logical leaf gets the same label in **both** sides of the pair.
+
+The **observable** of a run is the multiset `{label -> completed-count}` — the
+`GROUP BY node_path` count over that run's trace rows. The **equivalence
+predicate** is multiset equality. A leaf that never executes (an untaken `if`
+branch, an abandoned `race` loser) writes no trace rows and so contributes `0`
+automatically — e.g. `if(true, a, b) ≡ a` yields `{a:1}` on both sides.
+
+### The registry
+
+`registry()` returns the relations below; each asserts `observable(A) ==
+observable(B)`. All seven hold under both the *correct* and the *current*
+runtime.
+
+| id | name | A | B | observable |
+|---|---|---|---|---|
+| `meta-0001` | seq-assoc | `seq(a, seq(b,c))` | `seq(seq(a,b), c)` | `{a:1, b:1, c:1}` |
+| `meta-0002` | if-true | `if(T, a, b)` | `a` | `{a:1}` |
+| `meta-0003` | if-false | `if(F, a, b)` | `b` | `{b:1}` |
+| `meta-0004` | join-comm | `join(a, b)` | `join(b, a)` | `{a:1, b:1}` |
+| `meta-0005` | race-winner | `race(a, sleep(N))` | `a` | `{a:1}` |
+| `meta-0006` | do-while-once | `loop(a, COUNT(a) < 1)` | `a` | `{a:1}` |
+| `meta-0007` | loop-break-once | `loop(seq(a, if(COUNT(a) >= 1, break)))` | `a` | `{a:1}` |
+
+### Each relation's test, end to end
+
+`meta.rs` renders one `sql/meta-NNNN.sql` per relation. It reuses Phase 2's exact
+marker / `if` / `loop` / `race` / `break` DSL, so the leaf semantics are
+identical. Both programs run in the **same** `df_gen_trace`, tagged
+`meta-NNNN-a` / `meta-NNNN-b` for isolation. The test:
+
+1. `df.start` **both** programs, then `wait_for_completion` and assert **both**
+   reach `completed`.
+2. Assert `df.assert_structural_invariants` passes for **both** instances (the
+   Phase 1 oracle — each side must be internally well-formed).
+3. **Headline:** `observable(A) == observable(B)` via an `EXCEPT`-based multiset
+   symmetric difference over `(SELECT node_path, COUNT(*) … GROUP BY node_path)`;
+   assert the diff is empty.
+4. **Backstop:** assert each side's per-label counts equal the generator-computed
+   expected multiset, plus a `NOT IN (<labels>)` guard that no **unexpected**
+   label appears.
+
+The backstop matters because the Phase 1 invariants are **pure-state** (they
+never count executions), so the headline `A == B` check alone would pass if
+*both* sides symmetrically **over-executed** (e.g. `{a:2}` on both). The backstop
+pins each side to absolute ground truth and closes that blind spot.
+
+### Why loops don't pollute the observable
+
+A naive bounded loop needs a counter leaf, which would add a spurious label. So
+the loop relations instead make the termination condition count an **existing
+body leaf** (the anchor): `loop(a, COUNT(a) < 1)` runs the body once (loops are
+do-while — body first, then condition — see `docs/dsl-semantics.md`), re-checks,
+finds `COUNT(a) = 1`, and stops. No synthetic counter; the observable stays
+exactly `{a:1}`.
+
+### Why `race(a, sleep(N))` is sound
+
+The race loser is a bare `df.sleep(N)` that contributes nothing: when the marker
+wins, duroxide abandons the sleep the instant the winner completes (no added
+latency). The oracle accepts this — its `race` invariant only requires **≥1**
+completed branch and its reachability check ignores abandoned losers
+(`src/invariants.rs`) — so the winner-only program validates cleanly.
+
+### Live-only, v1
+
+Every relation holds under the **current** runtime because none nests a loop in a
+non-root / `join` / `race` position — the [#227](https://github.com/microsoft/pg_durable/issues/227)
+/ [#230](https://github.com/microsoft/pg_durable/issues/230) /
+[#233](https://github.com/microsoft/pg_durable/issues/233) bug zone. So Phase 4
+needs no quarantine split: `meta-*.sql` are all **live / blocking**. A natural
+future extension is **bug-seeding** metamorphic relations — e.g. a loop-at-root
+program paired with an equivalent loop-nested-non-root one — which would *fail*
+until those loop bugs are fixed; deferred until the relations above are confirmed
+live in CI.
+
+### Running / regenerating
+
+`make generate-matrix` (or the bare `cargo run …`) writes `sql/meta-*.sql`
+alongside `gen-*.sql` and refreshes `meta-manifest.json`. The live harness picks
+them up with the **same** flag — no new flag needed:
+
+```bash
+# runs gen-*.sql AND meta-*.sql (both live in sql/)
+./scripts/test-e2e-local.sh --include-generated
+```
+
+`cargo run … -- --check` diffs **both** `manifest.json` and `meta-manifest.json`,
+so metamorphic-relation drift fails CI exactly like Phase 2 shape drift.
+
 ## CI
 
 CI regenerates the matrix, runs the live set as a blocking gate, runs the
 quarantine set non-blocking (`continue-on-error`), and runs `--check` to enforce
-determinism. The depth-2 live budget is sized to stay within the E2E job's
-time envelope; deeper profiles are available on demand via `--max-depth`.
+determinism. The live set and the determinism guard both cover the Phase 4
+`meta-*.sql` relations and `meta-manifest.json` automatically — the same generate
+step emits them, `--include-generated` runs them, and `--check` diffs their
+golden. The generator's unit tests (run as their own blocking gate) include the
+Phase 4 interpreter and registry tests. The depth-2 live budget is sized to stay
+within the E2E job's time envelope; deeper profiles are available on demand via
+`--max-depth`.

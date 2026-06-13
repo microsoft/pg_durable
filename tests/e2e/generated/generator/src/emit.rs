@@ -154,7 +154,7 @@ WHERE shape_id = '{id}' AND node_path = '{path}');\n"
     out
 }
 
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {

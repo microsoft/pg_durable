@@ -18,10 +18,12 @@
 //!                         [--out DIR] [--check]
 
 mod emit;
+mod meta;
 mod render;
 mod shape;
 
 use emit::{manifest_json, sql_test, MatrixMeta, ShapeRecord};
+use meta::{meta_manifest_json, meta_sql_test, registry, Relation};
 use shape::{build_matrix, Comb};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -232,30 +234,38 @@ fn first_diff_line(committed: &str, fresh: &str) -> Option<usize> {
     None
 }
 
-fn run_check(cfg: &Config, manifest: &str) -> ExitCode {
-    let path = cfg.out.join("manifest.json");
+/// Compares one freshly-generated artifact against its committed copy.
+fn check_artifact(out: &Path, filename: &str, fresh: &str) -> bool {
+    let path = out.join(filename);
     let committed = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("--check: cannot read {}: {e}", path.display());
             eprintln!("Run the generator without --check to create it.");
-            return ExitCode::FAILURE;
+            return false;
         }
     };
     // Normalize line endings so a CRLF checkout never trips the comparison.
     let committed_norm = committed.replace("\r\n", "\n");
-    if committed_norm == *manifest {
-        println!(
-            "--check: manifest.json is up to date ({} bytes).",
-            manifest.len()
-        );
-        ExitCode::SUCCESS
+    if committed_norm == *fresh {
+        println!("--check: {filename} is up to date ({} bytes).", fresh.len());
+        true
     } else {
-        eprintln!("--check: manifest.json is STALE — regenerate it.");
-        if let Some(line) = first_diff_line(&committed_norm, manifest) {
+        eprintln!("--check: {filename} is STALE — regenerate it.");
+        if let Some(line) = first_diff_line(&committed_norm, fresh) {
             eprintln!("First difference at line {line}.");
         }
         eprintln!("Regenerate: cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml");
+        false
+    }
+}
+
+fn run_check(cfg: &Config, manifest: &str, meta_manifest: &str) -> ExitCode {
+    let ok_matrix = check_artifact(&cfg.out, "manifest.json", manifest);
+    let ok_meta = check_artifact(&cfg.out, "meta-manifest.json", meta_manifest);
+    if ok_matrix && ok_meta {
+        ExitCode::SUCCESS
+    } else {
         ExitCode::FAILURE
     }
 }
@@ -265,14 +275,20 @@ fn clean_generated_sql(sql_dir: &Path) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("gen-") && name.ends_with(".sql") {
+            if (name.starts_with("gen-") || name.starts_with("meta-")) && name.ends_with(".sql") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
 }
 
-fn run_generate(cfg: &Config, records: &[ShapeRecord], manifest: &str) -> ExitCode {
+fn run_generate(
+    cfg: &Config,
+    records: &[ShapeRecord],
+    manifest: &str,
+    relations: &[Relation],
+    meta_manifest: &str,
+) -> ExitCode {
     let sql_dir = cfg.out.join("sql");
     let quarantine_dir = cfg.out.join("quarantine");
     for dir in [&sql_dir, &quarantine_dir] {
@@ -300,9 +316,24 @@ fn run_generate(cfg: &Config, records: &[ShapeRecord], manifest: &str) -> ExitCo
         }
     }
 
+    // Phase 4 metamorphic relations are live → sql/ (blocking, collected by the
+    // harness's --include-generated glob alongside the matrix tests).
+    for rel in relations {
+        let path = sql_dir.join(format!("{}.sql", rel.id));
+        if let Err(e) = std::fs::write(&path, meta_sql_test(rel, cfg.wait_timeout)) {
+            eprintln!("cannot write {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+
     let manifest_path = cfg.out.join("manifest.json");
     if let Err(e) = std::fs::write(&manifest_path, manifest) {
         eprintln!("cannot write {}: {e}", manifest_path.display());
+        return ExitCode::FAILURE;
+    }
+    let meta_manifest_path = cfg.out.join("meta-manifest.json");
+    if let Err(e) = std::fs::write(&meta_manifest_path, meta_manifest) {
+        eprintln!("cannot write {}: {e}", meta_manifest_path.display());
         return ExitCode::FAILURE;
     }
 
@@ -314,6 +345,12 @@ fn run_generate(cfg: &Config, records: &[ShapeRecord], manifest: &str) -> ExitCo
         quarantined,
         quarantine_dir.display(),
         manifest_path.display()
+    );
+    println!(
+        "Generated {} metamorphic relation(s) → {} (manifest: {})",
+        relations.len(),
+        sql_dir.display(),
+        meta_manifest_path.display()
     );
     ExitCode::SUCCESS
 }
@@ -329,17 +366,20 @@ fn main() -> ExitCode {
     };
 
     let records = build_records(&cfg);
-    let meta = MatrixMeta {
+    let matrix_meta = MatrixMeta {
         max_depth: cfg.max_depth,
         combinators: &cfg.combinators,
         loop_iters: cfg.loop_iters,
         include_seeds: cfg.include_seeds,
     };
-    let manifest = manifest_json(&records, &meta);
+    let manifest = manifest_json(&records, &matrix_meta);
+
+    let relations = registry();
+    let meta_manifest = meta_manifest_json(&relations);
 
     if cfg.check {
-        run_check(&cfg, &manifest)
+        run_check(&cfg, &manifest, &meta_manifest)
     } else {
-        run_generate(&cfg, &records, &manifest)
+        run_generate(&cfg, &records, &manifest, &relations, &meta_manifest)
     }
 }

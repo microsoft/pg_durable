@@ -58,7 +58,7 @@ pub fn render(shape: &Shape, loop_iters: u64, shape_id: &str) -> Rendered {
 /// single-threaded. The test's real correctness check is the per-path `COUNT(*)`
 /// assertion, not the exact `iteration` value, so no UNIQUE constraint is needed
 /// (and one could only cause spurious failures).
-fn marker_sql(path: &str, shape_id: &str) -> String {
+pub(crate) fn marker_sql(path: &str, shape_id: &str) -> String {
     format!(
         "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) \
 VALUES ('{shape_id}', '{path}', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace \

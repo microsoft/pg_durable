@@ -61,10 +61,12 @@ jobs:
         run: cargo fmt --package pg_durable -- --check
 
   generated-matrix:
-    # Phase 2 (#232): the combinator-nesting matrix generator is a standalone
-    # std-only crate, so its determinism guard and unit tests need no PostgreSQL
-    # build and run fast as their own blocking gate. The live/quarantine SQL is
-    # exercised inside the `test` job, which already has the extension installed.
+    # Phase 2 + Phase 4 (#232): the combinator-nesting matrix generator and the
+    # Phase 4 metamorphic-relations registry live in one standalone std-only
+    # crate, so their determinism guards and unit tests need no PostgreSQL build
+    # and run fast as their own blocking gate. The live/quarantine SQL (incl. the
+    # meta-*.sql relations) is exercised inside the `test` job, which already has
+    # the extension installed.
     name: Generated Matrix (determinism + unit)
     runs-on: ubuntu-latest
     steps:
@@ -72,12 +74,12 @@ jobs:
 
       # std-only stable crate — uses the runner's pre-installed stable toolchain
       # (no nightly needed, unlike the extension's nightly-rustfmt format job).
-      - name: Generator unit tests (incl. classifier contract)
+      - name: Generator unit tests (incl. classifier contract + metamorphic relations)
         run: cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
 
-      # Regenerates the manifest in memory and diffs it against the committed
-      # tests/e2e/generated/manifest.json. Fails if generation drifted or the
-      # committed golden is stale — keeping generation deterministic.
+      # Regenerates the manifests in memory and diffs them against the committed
+      # tests/e2e/generated/{manifest,meta-manifest}.json. Fails if generation
+      # drifted or a committed golden is stale — keeping generation deterministic.
       - name: Check manifest determinism
         run: cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml -- --check
 
@@ -220,10 +222,11 @@ jobs:
       - name: Run unit tests
         run: cargo pgrx test pg${{ matrix.pg_version }} --features http-allow-test-domains
 
-      # Phase 2 (#232): render the combinator-nesting matrix into
-      # tests/e2e/generated/{sql,quarantine}/*.sql before the E2E run. The crate
-      # is std-only and fast; --include-generated below runs the live (sql/) set.
-      - name: Generate Phase 2 combinator matrix
+      # Phase 2 + Phase 4 (#232): render the combinator matrix and the
+      # metamorphic relations into tests/e2e/generated/{sql,quarantine}/*.sql
+      # before the E2E run. The crate is std-only and fast; --include-generated
+      # below runs the live (sql/) set, which holds both gen-*.sql and meta-*.sql.
+      - name: Generate Phase 2 + Phase 4 matrix
         run: cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml
 
       - name: Run E2E tests (default-build phases + generated matrix)

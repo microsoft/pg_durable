@@ -1,0 +1,11 @@
+# Phase 2 + Phase 4 (#232) generated-test artifacts.
+#
+# The committed golden manifests and the generator sources are normalized to LF
+# in the index so a Windows-authored commit and a Linux CI run regenerate them
+# byte-for-byte identically — keeping the `--check` determinism gate stable
+# across platforms regardless of each developer's core.autocrlf setting. (The
+# generator's `check_artifact` also normalizes CRLF on read, so this is
+# defense-in-depth; it additionally keeps the committed goldens diff-clean.)
+*.json text eol=lf
+*.sql text eol=lf
+generator/src/*.rs text eol=lf
