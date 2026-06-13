@@ -1,0 +1,2103 @@
+{
+  "version": 1,
+  "generator": "pg_durable_matrix_gen",
+  "max_depth": 2,
+  "combinators": ["seq", "if", "loop", "join", "race"],
+  "loop_iters": 2,
+  "include_seeds": true,
+  "shape_count": 154,
+  "shapes": [
+    {
+      "id": "gen-0001",
+      "signature": "I(I(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0001', 'r.t.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0001' AND node_path = 'r.t.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0001', 'r.t.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0001' AND node_path = 'r.t.e'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0001', 'r.e.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0001' AND node_path = 'r.e.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0001', 'r.e.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0001' AND node_path = 'r.e.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.e": 0,
+        "r.e.t": 0,
+        "r.t.e": 0,
+        "r.t.t": 1
+      }
+    },
+    {
+      "id": "gen-0002",
+      "signature": "I(I(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0002', 'r.t.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0002' AND node_path = 'r.t.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0002', 'r.t.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0002' AND node_path = 'r.t.e'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0002', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0002' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0002', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0002' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.e": 0,
+        "r.t.t": 1
+      }
+    },
+    {
+      "id": "gen-0003",
+      "signature": "I(I(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0003', 'r.t.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0003' AND node_path = 'r.t.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0003', 'r.t.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0003' AND node_path = 'r.t.e'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0003', 'r.e.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0003' AND node_path = 'r.e.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0003', 'r.e.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0003' AND node_path = 'r.e.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0003' AND node_path = 'r.e.c'$c$))",
+      "expected": {
+        "r.e.b": 0,
+        "r.e.c": 0,
+        "r.t.e": 0,
+        "r.t.t": 1
+      }
+    },
+    {
+      "id": "gen-0004",
+      "signature": "I(I(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0004', 'r.t.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0004' AND node_path = 'r.t.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0004', 'r.t.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0004' AND node_path = 'r.t.e'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0004', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0004' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 0,
+        "r.t.e": 0,
+        "r.t.t": 1
+      }
+    },
+    {
+      "id": "gen-0005",
+      "signature": "I(I(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0005', 'r.t.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0005' AND node_path = 'r.t.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0005', 'r.t.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0005' AND node_path = 'r.t.e'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0005', 'r.e.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0005' AND node_path = 'r.e.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0005', 'r.e.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0005' AND node_path = 'r.e.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.e.l": 0,
+        "r.e.w": 0,
+        "r.t.e": 0,
+        "r.t.t": 1
+      }
+    },
+    {
+      "id": "gen-0006",
+      "signature": "I(I(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0006', 'r.t.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0006' AND node_path = 'r.t.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0006', 'r.t.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0006' AND node_path = 'r.t.e'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0006', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0006' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0006', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0006' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.e": 0,
+        "r.t.t": 1
+      }
+    },
+    {
+      "id": "gen-0007",
+      "signature": "I(J(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0007', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0007' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0007', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0007' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0007', 'r.e.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0007' AND node_path = 'r.e.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0007', 'r.e.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0007' AND node_path = 'r.e.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.e": 0,
+        "r.e.t": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0008",
+      "signature": "I(J(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0008', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0008' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0008', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0008' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0008', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0008' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0008', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0008' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0009",
+      "signature": "I(J(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0009', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0009' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0009', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0009' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0009', 'r.e.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0009' AND node_path = 'r.e.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0009', 'r.e.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0009' AND node_path = 'r.e.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0009' AND node_path = 'r.e.c'$c$))",
+      "expected": {
+        "r.e.b": 0,
+        "r.e.c": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0010",
+      "signature": "I(J(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0010', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0010' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0010', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0010' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0010', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0010' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0011",
+      "signature": "I(J(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0011', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0011' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0011', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0011' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0011', 'r.e.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0011' AND node_path = 'r.e.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0011', 'r.e.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0011' AND node_path = 'r.e.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.e.l": 0,
+        "r.e.w": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0012",
+      "signature": "I(J(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0012', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0012' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0012', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0012' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0012', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0012' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0012', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0012' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0013",
+      "signature": "I(L(M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0013', 'r.t.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0013' AND node_path = 'r.t.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0013', 'r.t.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0013' AND node_path = 'r.t.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0013' AND node_path = 'r.t.c'$c$), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0013', 'r.e.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0013' AND node_path = 'r.e.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0013', 'r.e.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0013' AND node_path = 'r.e.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.e": 0,
+        "r.e.t": 0,
+        "r.t.b": 2,
+        "r.t.c": 2
+      }
+    },
+    {
+      "id": "gen-0014",
+      "signature": "I(L(M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0014', 'r.t.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0014' AND node_path = 'r.t.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0014', 'r.t.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0014' AND node_path = 'r.t.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0014' AND node_path = 'r.t.c'$c$), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0014', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0014' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0014', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0014' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.b": 2,
+        "r.t.c": 2
+      }
+    },
+    {
+      "id": "gen-0015",
+      "signature": "I(L(M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0015', 'r.t.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0015' AND node_path = 'r.t.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0015', 'r.t.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0015' AND node_path = 'r.t.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0015' AND node_path = 'r.t.c'$c$), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0015', 'r.e.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0015' AND node_path = 'r.e.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0015', 'r.e.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0015' AND node_path = 'r.e.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0015' AND node_path = 'r.e.c'$c$))",
+      "expected": {
+        "r.e.b": 0,
+        "r.e.c": 0,
+        "r.t.b": 2,
+        "r.t.c": 2
+      }
+    },
+    {
+      "id": "gen-0016",
+      "signature": "I(L(M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0016', 'r.t.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0016' AND node_path = 'r.t.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0016', 'r.t.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0016' AND node_path = 'r.t.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0016' AND node_path = 'r.t.c'$c$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0016', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0016' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 0,
+        "r.t.b": 2,
+        "r.t.c": 2
+      }
+    },
+    {
+      "id": "gen-0017",
+      "signature": "I(L(M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0017', 'r.t.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0017' AND node_path = 'r.t.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0017', 'r.t.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0017' AND node_path = 'r.t.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0017' AND node_path = 'r.t.c'$c$), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0017', 'r.e.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0017' AND node_path = 'r.e.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0017', 'r.e.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0017' AND node_path = 'r.e.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.e.l": 0,
+        "r.e.w": 0,
+        "r.t.b": 2,
+        "r.t.c": 2
+      }
+    },
+    {
+      "id": "gen-0018",
+      "signature": "I(L(M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0018', 'r.t.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0018' AND node_path = 'r.t.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0018', 'r.t.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0018' AND node_path = 'r.t.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0018' AND node_path = 'r.t.c'$c$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0018', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0018' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0018', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0018' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.b": 2,
+        "r.t.c": 2
+      }
+    },
+    {
+      "id": "gen-0019",
+      "signature": "I(M,I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0019', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0019' AND node_path = 'r.t'), clock_timestamp())$mk$), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0019', 'r.e.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0019' AND node_path = 'r.e.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0019', 'r.e.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0019' AND node_path = 'r.e.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.e": 0,
+        "r.e.t": 0,
+        "r.t": 1
+      }
+    },
+    {
+      "id": "gen-0020",
+      "signature": "I(M,J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0020', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0020' AND node_path = 'r.t'), clock_timestamp())$mk$), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0020', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0020' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0020', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0020' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t": 1
+      }
+    },
+    {
+      "id": "gen-0021",
+      "signature": "I(M,L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0021', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0021' AND node_path = 'r.t'), clock_timestamp())$mk$), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0021', 'r.e.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0021' AND node_path = 'r.e.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0021', 'r.e.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0021' AND node_path = 'r.e.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0021' AND node_path = 'r.e.c'$c$))",
+      "expected": {
+        "r.e.b": 0,
+        "r.e.c": 0,
+        "r.t": 1
+      }
+    },
+    {
+      "id": "gen-0022",
+      "signature": "I(M,M)",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0022', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0022' AND node_path = 'r.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0022', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0022' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 0,
+        "r.t": 1
+      }
+    },
+    {
+      "id": "gen-0023",
+      "signature": "I(M,R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0023', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0023' AND node_path = 'r.t'), clock_timestamp())$mk$), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0023', 'r.e.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0023' AND node_path = 'r.e.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0023', 'r.e.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0023' AND node_path = 'r.e.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.e.l": 0,
+        "r.e.w": 0,
+        "r.t": 1
+      }
+    },
+    {
+      "id": "gen-0024",
+      "signature": "I(M,S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0024', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0024' AND node_path = 'r.t'), clock_timestamp())$mk$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0024', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0024' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0024', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0024' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t": 1
+      }
+    },
+    {
+      "id": "gen-0025",
+      "signature": "I(R(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0025', 'r.t.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0025' AND node_path = 'r.t.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0025', 'r.t.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0025' AND node_path = 'r.t.l'), clock_timestamp())$mk$))), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0025', 'r.e.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0025' AND node_path = 'r.e.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0025', 'r.e.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0025' AND node_path = 'r.e.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.e": 0,
+        "r.e.t": 0,
+        "r.t.l": 0,
+        "r.t.w": 1
+      }
+    },
+    {
+      "id": "gen-0026",
+      "signature": "I(R(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0026', 'r.t.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0026' AND node_path = 'r.t.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0026', 'r.t.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0026' AND node_path = 'r.t.l'), clock_timestamp())$mk$))), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0026', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0026' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0026', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0026' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.l": 0,
+        "r.t.w": 1
+      }
+    },
+    {
+      "id": "gen-0027",
+      "signature": "I(R(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0027', 'r.t.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0027' AND node_path = 'r.t.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0027', 'r.t.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0027' AND node_path = 'r.t.l'), clock_timestamp())$mk$))), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0027', 'r.e.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0027' AND node_path = 'r.e.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0027', 'r.e.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0027' AND node_path = 'r.e.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0027' AND node_path = 'r.e.c'$c$))",
+      "expected": {
+        "r.e.b": 0,
+        "r.e.c": 0,
+        "r.t.l": 0,
+        "r.t.w": 1
+      }
+    },
+    {
+      "id": "gen-0028",
+      "signature": "I(R(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0028', 'r.t.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0028' AND node_path = 'r.t.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0028', 'r.t.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0028' AND node_path = 'r.t.l'), clock_timestamp())$mk$))), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0028', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0028' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 0,
+        "r.t.l": 0,
+        "r.t.w": 1
+      }
+    },
+    {
+      "id": "gen-0029",
+      "signature": "I(R(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0029', 'r.t.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0029' AND node_path = 'r.t.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0029', 'r.t.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0029' AND node_path = 'r.t.l'), clock_timestamp())$mk$))), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0029', 'r.e.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0029' AND node_path = 'r.e.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0029', 'r.e.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0029' AND node_path = 'r.e.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.e.l": 0,
+        "r.e.w": 0,
+        "r.t.l": 0,
+        "r.t.w": 1
+      }
+    },
+    {
+      "id": "gen-0030",
+      "signature": "I(R(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0030', 'r.t.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0030' AND node_path = 'r.t.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0030', 'r.t.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0030' AND node_path = 'r.t.l'), clock_timestamp())$mk$))), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0030', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0030' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0030', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0030' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.l": 0,
+        "r.t.w": 1
+      }
+    },
+    {
+      "id": "gen-0031",
+      "signature": "I(S(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0031', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0031' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0031', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0031' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0031', 'r.e.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0031' AND node_path = 'r.e.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0031', 'r.e.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0031' AND node_path = 'r.e.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.e": 0,
+        "r.e.t": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0032",
+      "signature": "I(S(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0032', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0032' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0032', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0032' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0032', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0032' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0032', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0032' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0033",
+      "signature": "I(S(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0033', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0033' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0033', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0033' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0033', 'r.e.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0033' AND node_path = 'r.e.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0033', 'r.e.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0033' AND node_path = 'r.e.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0033' AND node_path = 'r.e.c'$c$))",
+      "expected": {
+        "r.e.b": 0,
+        "r.e.c": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0034",
+      "signature": "I(S(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0034', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0034' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0034', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0034' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0034', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0034' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0035",
+      "signature": "I(S(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0035', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0035' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0035', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0035' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0035', 'r.e.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0035' AND node_path = 'r.e.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0035', 'r.e.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0035' AND node_path = 'r.e.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.e.l": 0,
+        "r.e.w": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0036",
+      "signature": "I(S(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT true$c$, df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0036', 'r.t.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0036' AND node_path = 'r.t.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0036', 'r.t.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0036' AND node_path = 'r.t.1'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0036', 'r.e.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0036' AND node_path = 'r.e.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0036', 'r.e.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0036' AND node_path = 'r.e.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.e.0": 0,
+        "r.e.1": 0,
+        "r.t.0": 1,
+        "r.t.1": 1
+      }
+    },
+    {
+      "id": "gen-0037",
+      "signature": "Ielse(M,M)",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.if($c$SELECT false$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0037', 'r.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0037' AND node_path = 'r.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0037', 'r.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0037' AND node_path = 'r.e'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.e": 1,
+        "r.t": 0
+      }
+    },
+    {
+      "id": "gen-0038",
+      "signature": "J(I(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0038', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0038' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0038', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0038' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0038', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0038' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0038', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0038' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0039",
+      "signature": "J(I(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0039', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0039' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0039', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0039' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0039', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0039' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0039', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0039' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0040",
+      "signature": "J(I(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0040', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0040' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0040', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0040' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0040', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0040' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0040', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0040' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0040' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0041",
+      "signature": "J(I(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0041', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0041' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0041', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0041' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0041', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0041' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0042",
+      "signature": "J(I(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0042', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0042' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0042', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0042' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0042', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0042' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0042', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0042' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0043",
+      "signature": "J(I(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0043', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0043' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0043', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0043' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0043', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0043' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0043', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0043' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0044",
+      "signature": "J(J(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0044', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0044' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0044', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0044' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0044', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0044' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0044', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0044' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0045",
+      "signature": "J(J(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0045', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0045' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0045', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0045' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0045', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0045' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0045', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0045' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0046",
+      "signature": "J(J(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0046', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0046' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0046', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0046' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0046', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0046' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0046', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0046' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0046' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0047",
+      "signature": "J(J(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0047', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0047' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0047', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0047' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0047', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0047' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0048",
+      "signature": "J(J(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0048', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0048' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0048', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0048' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0048', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0048' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0048', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0048' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0049",
+      "signature": "J(J(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0049', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0049' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0049', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0049' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0049', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0049' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0049', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0049' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0050",
+      "signature": "J(L(M),I(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0050', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0050' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0050', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0050' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0050' AND node_path = 'r.0.c'$c$), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0050', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0050' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0050', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0050' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0051",
+      "signature": "J(L(M),J(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0051', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0051' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0051', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0051' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0051' AND node_path = 'r.0.c'$c$), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0051', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0051' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0051', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0051' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0052",
+      "signature": "J(L(M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0052', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0052' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0052', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0052' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0052' AND node_path = 'r.0.c'$c$), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0052', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0052' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0052', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0052' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0052' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0053",
+      "signature": "J(L(M),M)",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0053', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0053' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0053', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0053' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0053' AND node_path = 'r.0.c'$c$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0053', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0053' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0054",
+      "signature": "J(L(M),R(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0054', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0054' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0054', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0054' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0054' AND node_path = 'r.0.c'$c$), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0054', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0054' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0054', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0054' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0055",
+      "signature": "J(L(M),S(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0055', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0055' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0055', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0055' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0055' AND node_path = 'r.0.c'$c$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0055', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0055' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0055', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0055' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0056",
+      "signature": "J(M,I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0056', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0056' AND node_path = 'r.0'), clock_timestamp())$mk$), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0056', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0056' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0056', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0056' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0057",
+      "signature": "J(M,J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0057', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0057' AND node_path = 'r.0'), clock_timestamp())$mk$), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0057', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0057' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0057', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0057' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0058",
+      "signature": "J(M,L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0058', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0058' AND node_path = 'r.0'), clock_timestamp())$mk$), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0058', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0058' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0058', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0058' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0058' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0059",
+      "signature": "J(M,M)",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0059', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0059' AND node_path = 'r.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0059', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0059' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0060",
+      "signature": "J(M,R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0060', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0060' AND node_path = 'r.0'), clock_timestamp())$mk$), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0060', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0060' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0060', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0060' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0061",
+      "signature": "J(M,S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0061', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0061' AND node_path = 'r.0'), clock_timestamp())$mk$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0061', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0061' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0061', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0061' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0062",
+      "signature": "J(R(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0062', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0062' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0062', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0062' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0062', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0062' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0062', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0062' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0063",
+      "signature": "J(R(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0063', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0063' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0063', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0063' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0063', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0063' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0063', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0063' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0064",
+      "signature": "J(R(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0064', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0064' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0064', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0064' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0064', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0064' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0064', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0064' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0064' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0065",
+      "signature": "J(R(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0065', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0065' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0065', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0065' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0065', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0065' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0066",
+      "signature": "J(R(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0066', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0066' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0066', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0066' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0066', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0066' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0066', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0066' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0067",
+      "signature": "J(R(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0067', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0067' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0067', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0067' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0067', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0067' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0067', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0067' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0068",
+      "signature": "J(S(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0068', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0068' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0068', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0068' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0068', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0068' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0068', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0068' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0069",
+      "signature": "J(S(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0069', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0069' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0069', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0069' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0069', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0069' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0069', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0069' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0070",
+      "signature": "J(S(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-join",
+      "dsl": "df.join(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0070', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0070' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0070', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0070' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0070', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0070' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0070', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0070' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0070' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0071",
+      "signature": "J(S(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0071', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0071' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0071', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0071' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0071', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0071' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0072",
+      "signature": "J(S(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0072', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0072' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0072', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0072' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0072', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0072' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0072', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0072' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0073",
+      "signature": "J(S(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.join(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0073', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0073' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0073', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0073' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0073', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0073' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0073', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0073' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0074",
+      "signature": "L(I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.loop(df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0074', 'r.b.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0074' AND node_path = 'r.b.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0074', 'r.b.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0074' AND node_path = 'r.b.e'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0074', 'r.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0074' AND node_path = 'r.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0074' AND node_path = 'r.c'$c$)",
+      "expected": {
+        "r.b.e": 0,
+        "r.b.t": 2,
+        "r.c": 2
+      }
+    },
+    {
+      "id": "gen-0075",
+      "signature": "L(J(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-body-combinator",
+      "dsl": "df.loop(df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0075', 'r.b.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0075' AND node_path = 'r.b.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0075', 'r.b.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0075' AND node_path = 'r.b.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0075', 'r.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0075' AND node_path = 'r.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0075' AND node_path = 'r.c'$c$)",
+      "expected": {
+        "r.b.0": 2,
+        "r.b.1": 2,
+        "r.c": 2
+      }
+    },
+    {
+      "id": "gen-0076",
+      "signature": "L(L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-body-combinator",
+      "dsl": "df.loop(df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0076', 'r.b.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0076' AND node_path = 'r.b.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0076', 'r.b.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0076' AND node_path = 'r.b.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0076' AND node_path = 'r.b.c'$c$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0076', 'r.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0076' AND node_path = 'r.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0076' AND node_path = 'r.c'$c$)",
+      "expected": {
+        "r.b.b": 4,
+        "r.b.c": 4,
+        "r.c": 2
+      }
+    },
+    {
+      "id": "gen-0077",
+      "signature": "L(M)",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0077', 'r.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0077' AND node_path = 'r.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0077', 'r.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0077' AND node_path = 'r.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0077' AND node_path = 'r.c'$c$)",
+      "expected": {
+        "r.b": 2,
+        "r.c": 2
+      }
+    },
+    {
+      "id": "gen-0078",
+      "signature": "L(R(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-body-combinator",
+      "dsl": "df.loop(df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0078', 'r.b.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0078' AND node_path = 'r.b.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0078', 'r.b.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0078' AND node_path = 'r.b.l'), clock_timestamp())$mk$))), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0078', 'r.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0078' AND node_path = 'r.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0078' AND node_path = 'r.c'$c$)",
+      "expected": {
+        "r.b.l": 0,
+        "r.b.w": 2,
+        "r.c": 2
+      }
+    },
+    {
+      "id": "gen-0079",
+      "signature": "L(S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.loop(df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0079', 'r.b.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0079' AND node_path = 'r.b.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0079', 'r.b.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0079' AND node_path = 'r.b.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0079', 'r.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0079' AND node_path = 'r.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0079' AND node_path = 'r.c'$c$)",
+      "expected": {
+        "r.b.0": 2,
+        "r.b.1": 2,
+        "r.c": 2
+      }
+    },
+    {
+      "id": "gen-0080",
+      "signature": "LB3",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0080', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0080' AND node_path = 'r.0'), clock_timestamp())$mk$), df.if($c$SELECT (SELECT COUNT(*) FROM df_gen_trace WHERE shape_id = 'gen-0080' AND node_path = 'r.0') >= 3$c$, df.break(), $c$SELECT 1$c$)), $c$SELECT true$c$)",
+      "expected": {
+        "r.0": 3
+      }
+    },
+    {
+      "id": "gen-0081",
+      "signature": "M",
+      "depth": 0,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0081', 'r', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0081' AND node_path = 'r'), clock_timestamp())$mk$)",
+      "expected": {
+        "r": 1
+      }
+    },
+    {
+      "id": "gen-0082",
+      "signature": "R(I(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0082', 'r.w.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0082' AND node_path = 'r.w.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0082', 'r.w.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0082' AND node_path = 'r.w.e'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0082', 'r.l.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0082' AND node_path = 'r.l.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0082', 'r.l.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0082' AND node_path = 'r.l.e'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.e": 0,
+        "r.l.t": 0,
+        "r.w.e": 0,
+        "r.w.t": 1
+      }
+    },
+    {
+      "id": "gen-0083",
+      "signature": "R(I(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0083', 'r.w.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0083' AND node_path = 'r.w.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0083', 'r.w.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0083' AND node_path = 'r.w.e'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0083', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0083' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0083', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0083' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.e": 0,
+        "r.w.t": 1
+      }
+    },
+    {
+      "id": "gen-0084",
+      "signature": "R(I(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0084', 'r.w.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0084' AND node_path = 'r.w.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0084', 'r.w.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0084' AND node_path = 'r.w.e'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0084', 'r.l.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0084' AND node_path = 'r.l.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0084', 'r.l.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0084' AND node_path = 'r.l.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0084' AND node_path = 'r.l.c'$c$)))",
+      "expected": {
+        "r.l.b": 0,
+        "r.l.c": 0,
+        "r.w.e": 0,
+        "r.w.t": 1
+      }
+    },
+    {
+      "id": "gen-0085",
+      "signature": "R(I(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0085', 'r.w.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0085' AND node_path = 'r.w.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0085', 'r.w.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0085' AND node_path = 'r.w.e'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0085', 'r.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0085' AND node_path = 'r.l'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.l": 0,
+        "r.w.e": 0,
+        "r.w.t": 1
+      }
+    },
+    {
+      "id": "gen-0086",
+      "signature": "R(I(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0086', 'r.w.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0086' AND node_path = 'r.w.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0086', 'r.w.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0086' AND node_path = 'r.w.e'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0086', 'r.l.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0086' AND node_path = 'r.l.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0086', 'r.l.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0086' AND node_path = 'r.l.l'), clock_timestamp())$mk$)))))",
+      "expected": {
+        "r.l.l": 0,
+        "r.l.w": 0,
+        "r.w.e": 0,
+        "r.w.t": 1
+      }
+    },
+    {
+      "id": "gen-0087",
+      "signature": "R(I(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0087', 'r.w.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0087' AND node_path = 'r.w.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0087', 'r.w.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0087' AND node_path = 'r.w.e'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0087', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0087' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0087', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0087' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.e": 0,
+        "r.w.t": 1
+      }
+    },
+    {
+      "id": "gen-0088",
+      "signature": "R(J(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0088', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0088' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0088', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0088' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0088', 'r.l.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0088' AND node_path = 'r.l.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0088', 'r.l.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0088' AND node_path = 'r.l.e'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.e": 0,
+        "r.l.t": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0089",
+      "signature": "R(J(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0089', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0089' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0089', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0089' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0089', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0089' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0089', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0089' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0090",
+      "signature": "R(J(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0090', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0090' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0090', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0090' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0090', 'r.l.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0090' AND node_path = 'r.l.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0090', 'r.l.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0090' AND node_path = 'r.l.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0090' AND node_path = 'r.l.c'$c$)))",
+      "expected": {
+        "r.l.b": 0,
+        "r.l.c": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0091",
+      "signature": "R(J(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0091', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0091' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0091', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0091' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0091', 'r.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0091' AND node_path = 'r.l'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.l": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0092",
+      "signature": "R(J(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0092', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0092' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0092', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0092' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0092', 'r.l.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0092' AND node_path = 'r.l.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0092', 'r.l.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0092' AND node_path = 'r.l.l'), clock_timestamp())$mk$)))))",
+      "expected": {
+        "r.l.l": 0,
+        "r.l.w": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0093",
+      "signature": "R(J(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0093', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0093' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0093', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0093' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0093', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0093' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0093', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0093' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0094",
+      "signature": "R(L(M),I(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-race-winner",
+      "dsl": "df.race(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0094', 'r.w.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0094' AND node_path = 'r.w.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0094', 'r.w.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0094' AND node_path = 'r.w.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0094' AND node_path = 'r.w.c'$c$), df.seq(df.sleep(2), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0094', 'r.l.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0094' AND node_path = 'r.l.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0094', 'r.l.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0094' AND node_path = 'r.l.e'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.e": 0,
+        "r.l.t": 0,
+        "r.w.b": 2,
+        "r.w.c": 2
+      }
+    },
+    {
+      "id": "gen-0095",
+      "signature": "R(L(M),J(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-race-winner",
+      "dsl": "df.race(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0095', 'r.w.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0095' AND node_path = 'r.w.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0095', 'r.w.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0095' AND node_path = 'r.w.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0095' AND node_path = 'r.w.c'$c$), df.seq(df.sleep(2), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0095', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0095' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0095', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0095' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.b": 2,
+        "r.w.c": 2
+      }
+    },
+    {
+      "id": "gen-0096",
+      "signature": "R(L(M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-race-winner",
+      "dsl": "df.race(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0096', 'r.w.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0096' AND node_path = 'r.w.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0096', 'r.w.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0096' AND node_path = 'r.w.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0096' AND node_path = 'r.w.c'$c$), df.seq(df.sleep(2), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0096', 'r.l.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0096' AND node_path = 'r.l.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0096', 'r.l.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0096' AND node_path = 'r.l.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0096' AND node_path = 'r.l.c'$c$)))",
+      "expected": {
+        "r.l.b": 0,
+        "r.l.c": 0,
+        "r.w.b": 2,
+        "r.w.c": 2
+      }
+    },
+    {
+      "id": "gen-0097",
+      "signature": "R(L(M),M)",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-race-winner",
+      "dsl": "df.race(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0097', 'r.w.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0097' AND node_path = 'r.w.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0097', 'r.w.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0097' AND node_path = 'r.w.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0097' AND node_path = 'r.w.c'$c$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0097', 'r.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0097' AND node_path = 'r.l'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.l": 0,
+        "r.w.b": 2,
+        "r.w.c": 2
+      }
+    },
+    {
+      "id": "gen-0098",
+      "signature": "R(L(M),R(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-race-winner",
+      "dsl": "df.race(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0098', 'r.w.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0098' AND node_path = 'r.w.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0098', 'r.w.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0098' AND node_path = 'r.w.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0098' AND node_path = 'r.w.c'$c$), df.seq(df.sleep(2), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0098', 'r.l.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0098' AND node_path = 'r.l.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0098', 'r.l.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0098' AND node_path = 'r.l.l'), clock_timestamp())$mk$)))))",
+      "expected": {
+        "r.l.l": 0,
+        "r.l.w": 0,
+        "r.w.b": 2,
+        "r.w.c": 2
+      }
+    },
+    {
+      "id": "gen-0099",
+      "signature": "R(L(M),S(M,M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-race-winner",
+      "dsl": "df.race(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0099', 'r.w.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0099' AND node_path = 'r.w.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0099', 'r.w.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0099' AND node_path = 'r.w.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0099' AND node_path = 'r.w.c'$c$), df.seq(df.sleep(2), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0099', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0099' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0099', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0099' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.b": 2,
+        "r.w.c": 2
+      }
+    },
+    {
+      "id": "gen-0100",
+      "signature": "R(M,I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0100', 'r.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0100' AND node_path = 'r.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0100', 'r.l.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0100' AND node_path = 'r.l.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0100', 'r.l.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0100' AND node_path = 'r.l.e'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.e": 0,
+        "r.l.t": 0,
+        "r.w": 1
+      }
+    },
+    {
+      "id": "gen-0101",
+      "signature": "R(M,J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0101', 'r.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0101' AND node_path = 'r.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0101', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0101' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0101', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0101' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w": 1
+      }
+    },
+    {
+      "id": "gen-0102",
+      "signature": "R(M,L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0102', 'r.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0102' AND node_path = 'r.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0102', 'r.l.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0102' AND node_path = 'r.l.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0102', 'r.l.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0102' AND node_path = 'r.l.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0102' AND node_path = 'r.l.c'$c$)))",
+      "expected": {
+        "r.l.b": 0,
+        "r.l.c": 0,
+        "r.w": 1
+      }
+    },
+    {
+      "id": "gen-0103",
+      "signature": "R(M,M)",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0103', 'r.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0103' AND node_path = 'r.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0103', 'r.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0103' AND node_path = 'r.l'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.l": 0,
+        "r.w": 1
+      }
+    },
+    {
+      "id": "gen-0104",
+      "signature": "R(M,R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0104', 'r.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0104' AND node_path = 'r.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0104', 'r.l.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0104' AND node_path = 'r.l.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0104', 'r.l.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0104' AND node_path = 'r.l.l'), clock_timestamp())$mk$)))))",
+      "expected": {
+        "r.l.l": 0,
+        "r.l.w": 0,
+        "r.w": 1
+      }
+    },
+    {
+      "id": "gen-0105",
+      "signature": "R(M,S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0105', 'r.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0105' AND node_path = 'r.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0105', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0105' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0105', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0105' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w": 1
+      }
+    },
+    {
+      "id": "gen-0106",
+      "signature": "R(R(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0106', 'r.w.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0106' AND node_path = 'r.w.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0106', 'r.w.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0106' AND node_path = 'r.w.l'), clock_timestamp())$mk$))), df.seq(df.sleep(2), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0106', 'r.l.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0106' AND node_path = 'r.l.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0106', 'r.l.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0106' AND node_path = 'r.l.e'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.e": 0,
+        "r.l.t": 0,
+        "r.w.l": 0,
+        "r.w.w": 1
+      }
+    },
+    {
+      "id": "gen-0107",
+      "signature": "R(R(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0107', 'r.w.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0107' AND node_path = 'r.w.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0107', 'r.w.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0107' AND node_path = 'r.w.l'), clock_timestamp())$mk$))), df.seq(df.sleep(2), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0107', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0107' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0107', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0107' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.l": 0,
+        "r.w.w": 1
+      }
+    },
+    {
+      "id": "gen-0108",
+      "signature": "R(R(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0108', 'r.w.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0108' AND node_path = 'r.w.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0108', 'r.w.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0108' AND node_path = 'r.w.l'), clock_timestamp())$mk$))), df.seq(df.sleep(2), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0108', 'r.l.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0108' AND node_path = 'r.l.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0108', 'r.l.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0108' AND node_path = 'r.l.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0108' AND node_path = 'r.l.c'$c$)))",
+      "expected": {
+        "r.l.b": 0,
+        "r.l.c": 0,
+        "r.w.l": 0,
+        "r.w.w": 1
+      }
+    },
+    {
+      "id": "gen-0109",
+      "signature": "R(R(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0109', 'r.w.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0109' AND node_path = 'r.w.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0109', 'r.w.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0109' AND node_path = 'r.w.l'), clock_timestamp())$mk$))), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0109', 'r.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0109' AND node_path = 'r.l'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.l": 0,
+        "r.w.l": 0,
+        "r.w.w": 1
+      }
+    },
+    {
+      "id": "gen-0110",
+      "signature": "R(R(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0110', 'r.w.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0110' AND node_path = 'r.w.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0110', 'r.w.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0110' AND node_path = 'r.w.l'), clock_timestamp())$mk$))), df.seq(df.sleep(2), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0110', 'r.l.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0110' AND node_path = 'r.l.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0110', 'r.l.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0110' AND node_path = 'r.l.l'), clock_timestamp())$mk$)))))",
+      "expected": {
+        "r.l.l": 0,
+        "r.l.w": 0,
+        "r.w.l": 0,
+        "r.w.w": 1
+      }
+    },
+    {
+      "id": "gen-0111",
+      "signature": "R(R(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0111', 'r.w.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0111' AND node_path = 'r.w.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0111', 'r.w.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0111' AND node_path = 'r.w.l'), clock_timestamp())$mk$))), df.seq(df.sleep(2), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0111', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0111' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0111', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0111' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.l": 0,
+        "r.w.w": 1
+      }
+    },
+    {
+      "id": "gen-0112",
+      "signature": "R(S(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0112', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0112' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0112', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0112' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0112', 'r.l.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0112' AND node_path = 'r.l.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0112', 'r.l.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0112' AND node_path = 'r.l.e'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.e": 0,
+        "r.l.t": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0113",
+      "signature": "R(S(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0113', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0113' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0113', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0113' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0113', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0113' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0113', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0113' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0114",
+      "signature": "R(S(M,M),L(M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0114', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0114' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0114', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0114' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0114', 'r.l.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0114' AND node_path = 'r.l.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0114', 'r.l.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0114' AND node_path = 'r.l.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0114' AND node_path = 'r.l.c'$c$)))",
+      "expected": {
+        "r.l.b": 0,
+        "r.l.c": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0115",
+      "signature": "R(S(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0115', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0115' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0115', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0115' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0115', 'r.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0115' AND node_path = 'r.l'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.l": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0116",
+      "signature": "R(S(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0116', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0116' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0116', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0116' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0116', 'r.l.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0116' AND node_path = 'r.l.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0116', 'r.l.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0116' AND node_path = 'r.l.l'), clock_timestamp())$mk$)))))",
+      "expected": {
+        "r.l.l": 0,
+        "r.l.w": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0117",
+      "signature": "R(S(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.race(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0117', 'r.w.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0117' AND node_path = 'r.w.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0117', 'r.w.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0117' AND node_path = 'r.w.1'), clock_timestamp())$mk$)), df.seq(df.sleep(2), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0117', 'r.l.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0117' AND node_path = 'r.l.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0117', 'r.l.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0117' AND node_path = 'r.l.1'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.l.0": 0,
+        "r.l.1": 0,
+        "r.w.0": 1,
+        "r.w.1": 1
+      }
+    },
+    {
+      "id": "gen-0118",
+      "signature": "S(I(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0118', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0118' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0118', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0118' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0118', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0118' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0118', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0118' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0119",
+      "signature": "S(I(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0119', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0119' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0119', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0119' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0119', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0119' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0119', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0119' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0120",
+      "signature": "S(I(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-seq-tail",
+      "dsl": "df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0120', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0120' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0120', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0120' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0120', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0120' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0120', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0120' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0120' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0121",
+      "signature": "S(I(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0121', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0121' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0121', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0121' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0121', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0121' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0122",
+      "signature": "S(I(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0122', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0122' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0122', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0122' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0122', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0122' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0122', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0122' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0123",
+      "signature": "S(I(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0123', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0123' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0123', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0123' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0123', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0123' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0123', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0123' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.e": 0,
+        "r.0.t": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0124",
+      "signature": "S(Ielse(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.if($c$SELECT false$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0124', 'r.0.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0124' AND node_path = 'r.0.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0124', 'r.0.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0124' AND node_path = 'r.0.e'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0124', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0124' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.e": 1,
+        "r.0.t": 0,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0125",
+      "signature": "S(J(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0125', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0125' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0125', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0125' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0125', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0125' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0125', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0125' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0126",
+      "signature": "S(J(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0126', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0126' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0126', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0126' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0126', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0126' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0126', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0126' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0127",
+      "signature": "S(J(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-seq-tail",
+      "dsl": "df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0127', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0127' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0127', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0127' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0127', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0127' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0127', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0127' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0127' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0128",
+      "signature": "S(J(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0128', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0128' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0128', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0128' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0128', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0128' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0129",
+      "signature": "S(J(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0129', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0129' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0129', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0129' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0129', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0129' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0129', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0129' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0130",
+      "signature": "S(J(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0130', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0130' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0130', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0130' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0130', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0130' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0130', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0130' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0131",
+      "signature": "S(L(M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0131', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0131' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0131', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0131' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0131' AND node_path = 'r.0.c'$c$), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0131', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0131' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0131', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0131' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0132",
+      "signature": "S(L(M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0132', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0132' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0132', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0132' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0132' AND node_path = 'r.0.c'$c$), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0132', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0132' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0132', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0132' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0133",
+      "signature": "S(L(M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-seq-tail",
+      "dsl": "df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0133', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0133' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0133', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0133' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0133' AND node_path = 'r.0.c'$c$), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0133', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0133' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0133', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0133' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0133' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0134",
+      "signature": "S(L(M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0134', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0134' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0134', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0134' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0134' AND node_path = 'r.0.c'$c$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0134', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0134' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0135",
+      "signature": "S(L(M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0135', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0135' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0135', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0135' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0135' AND node_path = 'r.0.c'$c$), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0135', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0135' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0135', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0135' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0136",
+      "signature": "S(L(M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0136', 'r.0.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0136' AND node_path = 'r.0.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0136', 'r.0.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0136' AND node_path = 'r.0.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0136' AND node_path = 'r.0.c'$c$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0136', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0136' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0136', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0136' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.b": 2,
+        "r.0.c": 2,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0137",
+      "signature": "S(M,I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0137', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0137' AND node_path = 'r.0'), clock_timestamp())$mk$), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0137', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0137' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0137', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0137' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0138",
+      "signature": "S(M,J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0138', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0138' AND node_path = 'r.0'), clock_timestamp())$mk$), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0138', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0138' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0138', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0138' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0139",
+      "signature": "S(M,L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-seq-tail",
+      "dsl": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0139', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0139' AND node_path = 'r.0'), clock_timestamp())$mk$), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0139', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0139' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0139', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0139' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0139' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0140",
+      "signature": "S(M,M)",
+      "depth": 1,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0140', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0140' AND node_path = 'r.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0140', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0140' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0141",
+      "signature": "S(M,R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0141', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0141' AND node_path = 'r.0'), clock_timestamp())$mk$), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0141', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0141' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0141', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0141' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0142",
+      "signature": "S(M,S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0142', 'r.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0142' AND node_path = 'r.0'), clock_timestamp())$mk$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0142', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0142' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0142', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0142' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0143",
+      "signature": "S(R(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0143', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0143' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0143', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0143' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0143', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0143' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0143', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0143' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0144",
+      "signature": "S(R(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0144', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0144' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0144', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0144' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0144', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0144' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0144', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0144' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0145",
+      "signature": "S(R(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-seq-tail",
+      "dsl": "df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0145', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0145' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0145', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0145' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0145', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0145' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0145', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0145' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0145' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0146",
+      "signature": "S(R(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0146', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0146' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0146', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0146' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0146', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0146' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0147",
+      "signature": "S(R(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0147', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0147' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0147', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0147' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0147', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0147' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0147', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0147' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0148",
+      "signature": "S(R(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0148', 'r.0.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0148' AND node_path = 'r.0.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0148', 'r.0.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0148' AND node_path = 'r.0.l'), clock_timestamp())$mk$))), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0148', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0148' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0148', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0148' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.l": 0,
+        "r.0.w": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0149",
+      "signature": "S(S(M,M),I(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0149', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0149' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0149', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0149' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0149', 'r.1.t', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0149' AND node_path = 'r.1.t'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0149', 'r.1.e', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0149' AND node_path = 'r.1.e'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.e": 0,
+        "r.1.t": 1
+      }
+    },
+    {
+      "id": "gen-0150",
+      "signature": "S(S(M,M),J(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0150', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0150' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0150', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0150' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0150', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0150' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0150', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0150' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    },
+    {
+      "id": "gen-0151",
+      "signature": "S(S(M,M),L(M))",
+      "depth": 2,
+      "class": "quarantine",
+      "reason": "loop-in-seq-tail",
+      "dsl": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0151', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0151' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0151', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0151' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0151', 'r.1.b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0151' AND node_path = 'r.1.b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0151', 'r.1.c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0151' AND node_path = 'r.1.c'), clock_timestamp())$mk$)), $c$SELECT COUNT(*) < 2 FROM df_gen_trace WHERE shape_id = 'gen-0151' AND node_path = 'r.1.c'$c$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.b": 2,
+        "r.1.c": 2
+      }
+    },
+    {
+      "id": "gen-0152",
+      "signature": "S(S(M,M),M)",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0152', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0152' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0152', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0152' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0152', 'r.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0152' AND node_path = 'r.1'), clock_timestamp())$mk$))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1": 1
+      }
+    },
+    {
+      "id": "gen-0153",
+      "signature": "S(S(M,M),R(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0153', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0153' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0153', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0153' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0153', 'r.1.w', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0153' AND node_path = 'r.1.w'), clock_timestamp())$mk$), df.seq(df.sleep(2), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0153', 'r.1.l', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0153' AND node_path = 'r.1.l'), clock_timestamp())$mk$))))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.l": 0,
+        "r.1.w": 1
+      }
+    },
+    {
+      "id": "gen-0154",
+      "signature": "S(S(M,M),S(M,M))",
+      "depth": 2,
+      "class": "live",
+      "reason": null,
+      "dsl": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0154', 'r.0.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0154' AND node_path = 'r.0.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0154', 'r.0.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0154' AND node_path = 'r.0.1'), clock_timestamp())$mk$)), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0154', 'r.1.0', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0154' AND node_path = 'r.1.0'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('gen-0154', 'r.1.1', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'gen-0154' AND node_path = 'r.1.1'), clock_timestamp())$mk$)))",
+      "expected": {
+        "r.0.0": 1,
+        "r.0.1": 1,
+        "r.1.0": 1,
+        "r.1.1": 1
+      }
+    }
+  ]
+}

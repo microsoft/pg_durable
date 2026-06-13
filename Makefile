@@ -8,7 +8,7 @@ PG_VERSION ?= pg17
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install
+.PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install generate-matrix
 
 # Default target
 all: build
@@ -28,6 +28,11 @@ test-unit:
 # Run only E2E tests (Docker-based)
 test-e2e:
 	./scripts/test.sh --e2e
+
+# Generate the Phase 2 combinator-nesting E2E matrix.
+# Writes tests/e2e/generated/sql/*.sql (gitignored) and refreshes manifest.json.
+generate-matrix:
+	cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml
 
 # Build Docker image
 docker-build:
@@ -70,6 +75,7 @@ help:
 	@echo "  test          - Run all tests (unit + E2E)"
 	@echo "  test-unit     - Run pgrx unit tests only"
 	@echo "  test-e2e      - Run E2E tests only (Docker)"
+	@echo "  generate-matrix - Generate the Phase 2 combinator-nesting E2E matrix"
 	@echo "  test-regress  - Run pg_regress tests (resets and starts PostgreSQL)"
 	@echo "  installcheck  - Run pg_regress tests (requires PostgreSQL running, via PGXS)"
 	@echo "  docker-build  - Build Docker image"

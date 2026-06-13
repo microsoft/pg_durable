@@ -1,0 +1,18 @@
+# Standalone matrix generator for the Phase 2 combinator-nesting test suite (#232).
+# Deliberately carries an empty [workspace] table so cargo treats this directory as
+# its own workspace root and does NOT fold it into the parent pg_durable extension
+# build. It is std-only (no dependencies, hand-rolled JSON) so it stays fast and has
+# no bearing on the extension's dependency graph.
+[package]
+name = "pg_durable_matrix_gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "PostgreSQL"
+
+[[bin]]
+name = "pg_durable_matrix_gen"
+path = "src/main.rs"
+
+# Empty workspace table: isolates this crate from the parent extension workspace.
+[workspace]

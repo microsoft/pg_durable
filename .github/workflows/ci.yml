@@ -60,6 +60,27 @@ jobs:
       - name: Check formatting
         run: cargo fmt --package pg_durable -- --check
 
+  generated-matrix:
+    # Phase 2 (#232): the combinator-nesting matrix generator is a standalone
+    # std-only crate, so its determinism guard and unit tests need no PostgreSQL
+    # build and run fast as their own blocking gate. The live/quarantine SQL is
+    # exercised inside the `test` job, which already has the extension installed.
+    name: Generated Matrix (determinism + unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # std-only stable crate — uses the runner's pre-installed stable toolchain
+      # (no nightly needed, unlike the extension's nightly-rustfmt format job).
+      - name: Generator unit tests (incl. classifier contract)
+        run: cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
+
+      # Regenerates the manifest in memory and diffs it against the committed
+      # tests/e2e/generated/manifest.json. Fails if generation drifted or the
+      # committed golden is stale — keeping generation deterministic.
+      - name: Check manifest determinism
+        run: cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml -- --check
+
   prepare:
     name: Prepare Matrix
     runs-on: ubuntu-latest
@@ -83,9 +104,13 @@ jobs:
   test:
     name: Clippy & Tests (PG${{ matrix.pg_version }})
     runs-on: ubuntu-latest
-    needs: [azure_example_smoke, format, prepare]
+    needs: [azure_example_smoke, format, generated-matrix, prepare]
     permissions:
       contents: read
+    # Generous bound: this job builds the extension and runs the full E2E suite
+    # (incl. the live generated matrix) plus upgrade tests. Caps a hung backend
+    # worker / stuck instance instead of burning the 6h GitHub default.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -195,9 +220,59 @@ jobs:
       - name: Run unit tests
         run: cargo pgrx test pg${{ matrix.pg_version }} --features http-allow-test-domains
 
-      - name: Run E2E tests (default-build phases)
+      # Phase 2 (#232): render the combinator-nesting matrix into
+      # tests/e2e/generated/{sql,quarantine}/*.sql before the E2E run. The crate
+      # is std-only and fast; --include-generated below runs the live (sql/) set.
+      - name: Generate Phase 2 combinator matrix
+        run: cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml
+
+      - name: Run E2E tests (default-build phases + generated matrix)
         id: e2e_default_build_phases
-        run: ./scripts/test-e2e-local.sh --clean --default-build-phases --pg-version ${{ matrix.pg_version }}
+        run: ./scripts/test-e2e-local.sh --clean --default-build-phases --include-generated --pg-version ${{ matrix.pg_version }}
+
+      # Quarantined shapes (xfail) reproduce known, filed loop-nesting bugs
+      # (#227/#230/#233): each asserts the *correct* behavior, so it fails today.
+      # Non-blocking and gated to nightly/manual so PRs stay fast — its purpose is
+      # to keep those bugs continuously documented, not to gate merges.
+      # The run collects the base tests/e2e/sql suite plus quarantine/ (NOT the
+      # live generated sql/ set), so a `gen-* ... PASS` line can only be a
+      # quarantined shape that unexpectedly passed.
+      - name: Run quarantined matrix (non-blocking, nightly)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        run: |
+          ./scripts/test-e2e-local.sh --clean --include-generated-quarantine --pg-version ${{ matrix.pg_version }} \
+            2>&1 | tee quarantine-pg${{ matrix.pg_version }}.log
+
+      # A quarantined shape asserts the CORRECT behavior for an open bug, so it is
+      # expected to FAIL. If one unexpectedly PASSES, the underlying loop-nesting
+      # bug (#227/#230/#233) may be fixed — surface it loudly so the shape can be
+      # promoted out of quarantine/ into the blocking sql/ set. Never fails the job.
+      - name: Flag unexpectedly-passing quarantined shapes
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          log="quarantine-pg${{ matrix.pg_version }}.log"
+          if [ ! -f "$log" ]; then
+            echo "No quarantine log ($log); nothing to inspect."
+            exit 0
+          fi
+          # Strip ANSI colour codes, then count quarantined (gen-*) PASS lines.
+          stripped=$(sed -r 's/\x1b\[[0-9;]*m//g' "$log")
+          passes=$(printf '%s\n' "$stripped" | grep -cE 'gen-[0-9]+ +\.\.\. +PASS$' || true)
+          if [ "$passes" -gt 0 ]; then
+            msg="$passes quarantined shape(s) unexpectedly PASSED on PG${{ matrix.pg_version }} — a known loop-nesting bug may be fixed; review for promotion out of quarantine/."
+            echo "::warning::$msg"
+            {
+              echo "### ⚠️ Quarantine watch (PG${{ matrix.pg_version }})"
+              echo "$msg"
+              echo ""
+              echo '```'
+              printf '%s\n' "$stripped" | grep -E 'gen-[0-9]+ +\.\.\. +PASS$' || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "All quarantined shapes failed as expected (0 unexpected passes)."
+          fi
 
       - name: Run upgrade tests
         id: upgrade_tests
