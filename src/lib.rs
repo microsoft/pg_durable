@@ -32,8 +32,10 @@ pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::ne
 // Module declarations
 pub mod activities;
 pub mod client;
+pub mod db;
 pub mod dsl;
 pub mod explain;
+pub mod invariants;
 pub mod monitoring;
 pub mod orchestrations;
 pub mod registry;
@@ -413,6 +415,7 @@ DECLARE
         'df.version()',
         'df.debug_connection()',
         'df.explain(text)',
+        'df.assert_structural_invariants(text, boolean)',
         'df.target_database()'
     ];
 BEGIN

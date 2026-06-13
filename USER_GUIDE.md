@@ -186,6 +186,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
 | `df.explain(input)` | Visualize graph | `df.explain('a1b2c3d4')` |
+| `df.assert_structural_invariants(id, fail_on_violation)` | Validate a completed instance's structure | `df.assert_structural_invariants('a1b2c3d4', true)` |
 | `df.setvar(name, value)` | Set durable function variable | `df.setvar('api_url', 'https://...')` |
 | `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
 | `df.unsetvar(name)` | Remove durable function variable | `df.unsetvar('api_url')` |
@@ -1503,6 +1504,47 @@ SELECT started_at, last_seen_at,
 - No rows in `df._worker_epoch` → worker hasn't initialized yet
 
 The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
+
+### Validating Structural Invariants
+
+`df.assert_structural_invariants(instance_id, fail_on_violation => false)` checks a
+**completed** instance's node graph against pg_durable's operational-semantics contract
+(see `docs/dsl-semantics.md`). It is a read-only diagnostic — handy in tests and CI to catch
+regressions in branching, parallelism, and reachability.
+
+```sql
+-- Inspect every invariant (one row each; passed = true when it holds)
+SELECT * FROM df.assert_structural_invariants('a1b2c3d4');
+
+-- Assertion form: raises an error listing any violations (one-line test check)
+SELECT * FROM df.assert_structural_invariants('a1b2c3d4', true);
+```
+
+**Columns:** `invariant`, `passed`, `node_id`, `detail`. When an invariant holds you get a
+single `passed = true` row for it; when it is violated you get one `passed = false` row per
+offending node, with `detail` explaining why.
+
+**Invariants checked** (all derived purely from the `df.nodes` snapshot):
+
+- `every_reachable_node_completed` — every node on a taken path is `completed`/`failed`.
+- `join_all_branches_completed` — every branch of a `JOIN` completed.
+- `race_at_least_one_branch_completed` — a resolved `RACE` has a completed branch.
+- `untaken_if_branch_pending` — the untaken `IF` branch stays `pending`.
+- `join_branch_result_name_disjoint` — parallel `JOIN` branches don't bind the same result name.
+- `query_json_well_formed` — internal query JSON (IF/LOOP condition wiring) parses.
+
+**Caveats:**
+
+- **Terminal only.** It evaluates a *snapshot*, so it skips instances that are still running
+  (returning a single `passed = true` `instance_terminal` row). Run it after the instance
+  reaches `completed`/`failed`/`cancelled` — e.g. after `df.wait_for_completion()`.
+- **Relaxed inside loops.** Because `df.nodes` is current state with no per-iteration history,
+  completeness checks are deliberately relaxed for nodes inside a `LOOP` body to avoid false
+  positives (a `break` can abandon an in-flight sibling; an `IF` can leave both branches
+  `completed` across iterations). It never reports a false violation, but catches fewer issues
+  inside loop bodies. It cannot check execution/iteration counts at all.
+- **RLS-scoped.** It only sees instances visible to the calling role; an unknown or
+  not-visible id returns a `passed = false` `instance_found` row.
 
 ---
 

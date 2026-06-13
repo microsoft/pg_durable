@@ -203,6 +203,15 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.3 → v0.2.4
+
+#### Add df.assert_structural_invariants() structural-invariant oracle (#232, Phase 1)
+- **DDL change (df schema):** Adds `df.assert_structural_invariants(instance_id text, fail_on_violation boolean DEFAULT false)`, a `STRICT` C function returning `TABLE(invariant text, passed bool, node_id text, detail text)`. It is a read-only, RLS-scoped snapshot oracle that validates a terminal instance's `df.nodes` against the operational-semantics contract (`docs/dsl-semantics.md`). Fresh 0.2.4 installs create it via pgrx (`src/invariants.rs`); the upgrade script `sql/pg_durable--0.2.3--0.2.4.sql` creates the identical function so the upgraded catalog matches a fresh one.
+- **DDL change (grant_usage):** The upgrade script re-emits `CREATE OR REPLACE FUNCTION df.grant_usage(...)` with `df.assert_structural_invariants(text, boolean)` added to its `func_sigs` list. Without this, a role granted access via `df.grant_usage()` on an upgraded install would not receive `EXECUTE` on the new function (same pattern used when `df.explain()` was added in v0.2.0).
+- **Scenario A considerations:** The Scenario A equivalence contract compares function signatures (`pg_get_function_arguments`/`pg_get_function_result`) and routine grants, not function bodies. The hand-written `CREATE FUNCTION` block is copied verbatim from the pgrx-emitted DDL, so the signature matches. The new function's `proacl` is `NULL` (default ACL) on both the fresh-install and upgrade paths — `df.grant_usage()` only mutates a role's grants when explicitly called — so the `grant_routine` snapshot matches. The `grant_usage` body differs (new func_sig) but bodies are excluded from the diff.
+- **Scenario B1 considerations:** No `.so` backward-compat risk. The oracle reads only long-present `df.nodes` / `df.instances` columns (`status`, `root_node`, `node_type`, `query`, `left_node`, `right_node`, `result_name`, `result`) and performs no runtime schema detection, so it behaves identically against any previous schema once the function exists.
+- **Scenario B2 considerations:** No data migration. The upgrade only adds one read-only `df` function and refreshes the `grant_usage` body.
+
 ### v0.2.2 → v0.2.3
 
 #### Rename duroxide provider schema to `_duroxide` for fresh installs
