@@ -1624,29 +1624,32 @@ mod tests {
         assert!(result.is_ok(), "should accept graph within depth limit");
     }
 
-    #[test]
-    fn test_validate_recursive_node_count_limit() {
-        // Build a shallow-but-wide graph: a JOIN with many extra_nodes.
-        // This stays at depth 1 but exceeds MAX_GRAPH_NODES.
+    /// Build a wide JOIN node with `n` extra children for testing node-count limits.
+    /// Serializes the template node once and clones, keeping memory predictable.
+    fn build_wide_join(n: usize) -> Durofut {
         let sql_node = Durofut {
             node_type: "SQL".to_string(),
             query: Some("SELECT 1".to_string()),
             ..Default::default()
         };
-
-        let extra_count = MAX_GRAPH_NODES; // exceeds limit when added to root+left+right
-        let extra_nodes: Vec<serde_json::Value> = (0..extra_count)
-            .map(|_| serde_json::to_value(&sql_node).unwrap())
-            .collect();
+        let sql_value = serde_json::to_value(&sql_node).unwrap();
+        let extra_nodes: Vec<serde_json::Value> = vec![sql_value; n];
         let config = serde_json::json!({ "extra_nodes": extra_nodes });
 
-        let join_node = Durofut {
+        Durofut {
             node_type: "JOIN".to_string(),
             left_node: Some(Box::new(sql_node.clone())),
-            right_node: Some(Box::new(sql_node.clone())),
+            right_node: Some(Box::new(sql_node)),
             query: Some(config.to_string()),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn test_validate_recursive_node_count_limit() {
+        // Build a shallow-but-wide graph: a JOIN with many extra_nodes.
+        // This stays at depth 1 but exceeds MAX_GRAPH_NODES.
+        let join_node = build_wide_join(MAX_GRAPH_NODES);
 
         let result = join_node.validate_recursive();
         assert!(result.is_err(), "should reject graph exceeding node count");
@@ -1659,25 +1662,7 @@ mod tests {
     #[test]
     fn test_validate_recursive_node_count_within_limit() {
         // A graph with a moderate number of nodes should pass
-        let sql_node = Durofut {
-            node_type: "SQL".to_string(),
-            query: Some("SELECT 1".to_string()),
-            ..Default::default()
-        };
-
-        let extra_count = 50;
-        let extra_nodes: Vec<serde_json::Value> = (0..extra_count)
-            .map(|_| serde_json::to_value(&sql_node).unwrap())
-            .collect();
-        let config = serde_json::json!({ "extra_nodes": extra_nodes });
-
-        let join_node = Durofut {
-            node_type: "JOIN".to_string(),
-            left_node: Some(Box::new(sql_node.clone())),
-            right_node: Some(Box::new(sql_node.clone())),
-            query: Some(config.to_string()),
-            ..Default::default()
-        };
+        let join_node = build_wide_join(50);
 
         let result = join_node.validate_recursive();
         assert!(

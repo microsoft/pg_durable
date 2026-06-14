@@ -2672,24 +2672,21 @@ mod tests {
 
         // Build a shallow-but-wide graph using a JOIN node with many extra_nodes.
         // This exceeds MAX_GRAPH_NODES without exceeding MAX_GRAPH_DEPTH (stays at depth 1).
+        // Serialize the template node once and clone via vec![...; N] for predictable memory.
         let sql_node = Durofut {
             node_type: "SQL".to_string(),
             query: Some("SELECT 1".to_string()),
             ..Default::default()
         };
 
-        // Construct extra_nodes JSON array with enough entries to exceed the limit.
-        // The JOIN node itself + left + right + extra_nodes = 3 + N nodes.
-        let extra_count = MAX_GRAPH_NODES; // guarantees we exceed the limit
-        let extra_nodes: Vec<serde_json::Value> = (0..extra_count)
-            .map(|_| serde_json::to_value(&sql_node).unwrap())
-            .collect();
+        let sql_value = serde_json::to_value(&sql_node).unwrap();
+        let extra_nodes: Vec<serde_json::Value> = vec![sql_value; MAX_GRAPH_NODES];
         let config = serde_json::json!({ "extra_nodes": extra_nodes });
 
         let join_node = Durofut {
             node_type: "JOIN".to_string(),
             left_node: Some(Box::new(sql_node.clone())),
-            right_node: Some(Box::new(sql_node.clone())),
+            right_node: Some(Box::new(sql_node)),
             query: Some(config.to_string()),
             ..Default::default()
         };
