@@ -19,6 +19,16 @@
 -- to its func_sigs list, so that delegated roles granted via df.grant_usage()
 -- on an upgraded install also receive EXECUTE on the new diagnostic function.
 
+-- pgspot's SQL security gate (scripts/pgspot-gate.sh) trusts a schema named in a
+-- function's SET search_path only when that schema is created in the same script
+-- (pgspot state.py is_secure_searchpath). df already exists on any install being
+-- upgraded, so this IF NOT EXISTS is a harmless runtime no-op; it is present so the
+-- df.grant_usage() re-emit below -- which relies on SET search_path = pg_catalog,
+-- df, pg_temp -- is recognized as secure by the gate, exactly as the fresh-install
+-- SQL achieves it (pgrx emits CREATE SCHEMA IF NOT EXISTS df there). The resulting
+-- PS010 finding for df is on the gate's allowlist.
+CREATE SCHEMA IF NOT EXISTS df;
+
 /* <begin connected objects> */
 -- pg_durable::invariants::assert_structural_invariants
 CREATE  FUNCTION df."assert_structural_invariants"(
