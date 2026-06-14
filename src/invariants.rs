@@ -780,6 +780,10 @@ type InvariantRow = (
 /// ```sql
 /// SELECT * FROM df.assert_structural_invariants('abc12345', true);
 /// ```
+///
+/// The function is `STRICT`: a NULL argument returns the empty set instead of
+/// running, so `df.assert_structural_invariants(id, NULL)` is a silent no-op
+/// that never raises. Always pass a non-NULL boolean — the default is `false`.
 #[pg_extern(schema = "df")]
 pub fn assert_structural_invariants(
     instance_id: &str,

@@ -163,15 +163,25 @@ WHERE shape_id = '{id}' AND node_path = '{path}');\n"
 
     if emit_order {
         // Phase 5 (#232) causal-order oracle. Each VALUES row is one happens-
-        // before (≺) edge from the reference interpreter; the double self-join
-        // resolves both endpoints to their trace rows and the WHERE keeps only
-        // edges the runtime VIOLATED (earlier fired at-or-after later). Markers
-        // run in distinct duroxide activities milliseconds apart, so an honored
-        // edge always shows a strict clock_timestamp() gap. CONCURRENT siblings
+        // before (≺) edge from the reference interpreter; the two LEFT JOINs
+        // resolve both endpoints to their trace rows and the WHERE keeps every
+        // edge the runtime VIOLATED. An edge is a violation when EITHER endpoint
+        // never executed at its (path, iteration) — the LEFT JOIN leaves its
+        // wall_clock NULL — OR the earlier marker fired at-or-after the later
+        // one. The LEFT (not INNER) JOIN is deliberate and fail-closed: an INNER
+        // JOIN silently DROPS an edge whose endpoint row is missing, so a dropped
+        // or duplicated iteration could pass unflagged; treating a missing
+        // endpoint as the violation means the oracle never trusts the marker's
+        // own MAX(iteration)+1 numbering (the very thing under test). Markers run
+        // in distinct duroxide activities milliseconds apart, so an honored edge
+        // always shows a strict clock_timestamp() gap. CONCURRENT siblings
         // (join/race branches) carry no edge, so this can never flake on them.
         out.push('\n');
         out.push_str("    -- Phase 1+2 counts pin WHAT ran; this pins the ORDER it ran in.\n");
-        out.push_str("    SELECT string_agg(v.descr, ', ' ORDER BY v.descr)\n");
+        out.push_str("    SELECT string_agg(\n");
+        out.push_str("             CASE WHEN tu.wall_clock IS NULL OR tv.wall_clock IS NULL\n");
+        out.push_str("                  THEN v.descr || ' (missing endpoint)' ELSE v.descr END,\n");
+        out.push_str("             ', ' ORDER BY v.descr)\n");
         out.push_str("      INTO ord_viol\n");
         out.push_str("      FROM (VALUES\n");
         let n = rec.ordered_pairs.len();
@@ -183,14 +193,17 @@ WHERE shape_id = '{id}' AND node_path = '{path}');\n"
         }
         out.push_str("      ) AS v(pu, iu, pv, iv, descr)\n");
         out.push_str(&format!(
-            "      JOIN df_gen_trace tu ON tu.shape_id = '{id}' \
+            "      LEFT JOIN df_gen_trace tu ON tu.shape_id = '{id}' \
 AND tu.node_path = v.pu AND tu.iteration = v.iu\n"
         ));
         out.push_str(&format!(
-            "      JOIN df_gen_trace tv ON tv.shape_id = '{id}' \
+            "      LEFT JOIN df_gen_trace tv ON tv.shape_id = '{id}' \
 AND tv.node_path = v.pv AND tv.iteration = v.iv\n"
         ));
-        out.push_str("     WHERE tu.wall_clock >= tv.wall_clock;\n");
+        out.push_str(
+            "     WHERE tu.wall_clock IS NULL OR tv.wall_clock IS NULL \
+OR tu.wall_clock >= tv.wall_clock;\n",
+        );
         out.push_str("    IF ord_viol IS NOT NULL THEN\n");
         out.push_str(&format!(
             "        RAISE EXCEPTION 'TEST FAILED [{id}]: causal-order violation(s): %', ord_viol;\n"
@@ -432,7 +445,15 @@ mod tests {
         // edge as a VALUES row, joins both endpoints, and raises on violation.
         assert!(t.contains("    ord_viol TEXT;\n"));
         assert!(t.contains("('r.0', 1, 'r.1', 1, 'r.0#1 -> r.1#1')"));
-        assert!(t.contains("WHERE tu.wall_clock >= tv.wall_clock;"));
+        // Hardened (fail-closed): LEFT JOINs make a missing endpoint a violation
+        // in its own right, so a dropped/duplicated iteration cannot slip past an
+        // INNER JOIN that would silently drop the unresolved edge.
+        assert!(t.contains("LEFT JOIN df_gen_trace tu ON"));
+        assert!(t.contains("LEFT JOIN df_gen_trace tv ON"));
+        assert!(t.contains(
+            "WHERE tu.wall_clock IS NULL OR tv.wall_clock IS NULL OR tu.wall_clock >= tv.wall_clock;"
+        ));
+        assert!(t.contains("(missing endpoint)"));
         assert!(t.contains("causal-order violation(s)"));
         // The order ORACLE BLOCK is the LAST assertion, after the
         // unexpected-path guard (the `ord_viol TEXT` declare precedes both).

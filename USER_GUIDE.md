@@ -186,7 +186,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
 | `df.explain(input)` | Visualize graph | `df.explain('a1b2c3d4')` |
-| `df.assert_structural_invariants(id, fail_on_violation)` | Validate a completed instance's structure | `df.assert_structural_invariants('a1b2c3d4', true)` |
+| `df.assert_structural_invariants(id, fail_on_violation)` | Validate a completed instance's structure (`STRICT`: a NULL arg returns no rows, so pass a non-NULL boolean) | `df.assert_structural_invariants('a1b2c3d4', true)` |
 | `df.setvar(name, value)` | Set durable function variable | `df.setvar('api_url', 'https://...')` |
 | `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
 | `df.unsetvar(name)` | Remove durable function variable | `df.unsetvar('api_url')` |
