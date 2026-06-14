@@ -14,7 +14,7 @@ compose* — the corner of the grammar humans rarely test exhaustively by hand.
 | Path | Committed? | What it is |
 |---|---|---|
 | `generator/` | ✅ yes | The standalone generator crate (std-only Rust, no pgrx dep). |
-| `manifest.json` | ✅ yes | Golden regression baseline: every shape's id, signature, class, reason, DSL, and expected per-path counts. The `--check` determinism guard diffs against this. |
+| `manifest.json` | ✅ yes | Golden regression baseline: every shape's id, signature, class, reason, DSL, expected per-path counts, and (Phase 5) `order` — the reference interpreter's happens-before edges. The `--check` determinism guard diffs against this. |
 | `meta-manifest.json` | ✅ yes | Golden baseline for the **Phase 4** metamorphic relations (see below): every relation's id, name, rationale, both DSL programs, and expected observable. The same `--check` guard diffs against this. |
 | `README.md` | ✅ yes | This file. |
 | `sql/` | 🚫 gitignored | Live (clean) E2E tests, regenerated on demand. Holds both the Phase 2 `gen-*.sql` matrix and the Phase 4 `meta-*.sql` relations. |
@@ -77,7 +77,10 @@ generator and commit the refreshed `manifest.json` in the same change.
 4. **Emit** — `emit.rs` writes a self-contained `.sql` test (truncate this
    shape's trace → `df.start` → `wait_for_completion` → assert
    `df.assert_structural_invariants` all pass → assert per-path counts match the
-   generator's expectation → `TEST PASSED`) and a `manifest.json` entry.
+   generator's expectation → assert no unexpected paths → **(Phase 5, live shapes
+   only) assert the causal order**: for every happens-before edge the reference
+   interpreter derived, `earlier.wall_clock < later.wall_clock` → `TEST PASSED`)
+   and a `manifest.json` entry (now including the `order` edge list).
 5. **Run** — the E2E harness picks the files up (see below).
 
 ### Node path scheme
@@ -345,9 +348,11 @@ because no property has failed.
 ### Isolation — goldens stay byte-identical
 
 `proptest` is a **`[dev-dependencies]`** entry only. The generation binary
-(`cargo run` / `--check`) never links it, so `manifest.json` (187896 B) and
-`meta-manifest.json` (7730 B) stay byte-for-byte identical, and `prop.rs` is
-`#[cfg(test)] mod prop;` — it compiles only under `cargo test`.
+(`cargo run` / `--check`) never links it, so adding it left `manifest.json` and
+`meta-manifest.json` (7730 B) byte-for-byte unchanged, and `prop.rs` is
+`#[cfg(test)] mod prop;` — it compiles only under `cargo test`. (Phase 5 Step 2
+later changed `manifest.json` deliberately by adding the `order` field — now
+198914 B — but that is the *binary's* output, independent of the proptest dep.)
 
 ### Running
 
@@ -417,21 +422,52 @@ on. 14 further unit tests (`refinterp::tests`) pin each combinator against the
 
 ### Staged scope
 
-This slice is **Step 1**: the model-level interpreter, its differential, and the
-causal-order properties — all of which run in-process and need no live PostgreSQL.
-`refinterp.rs` is `#[cfg(test)] mod refinterp;` and `emit.rs` is untouched, so the
-generation binary never links it and **both goldens stay byte-identical**
-(`manifest.json` 187896 B, `meta-manifest.json` 7730 B).
+**Step 1** built the model-level interpreter, its differential, and the
+causal-order properties — all in-process, no live PostgreSQL.
 
-**Step 2** (deliberately *not* in this slice) would close the loop to the live
-runtime: emit a causal-order assertion block into each **clean** (non-quarantined)
-Phase 2 `.sql` test — for every `≺` edge, assert `u.wall_clock < v.wall_clock`,
-leaving concurrent pairs unconstrained so there is no flakiness. Because the
-live loop already pauses `LOOP_MIN_ITER_DURATION` (≥1s) between iterations, cross-
-iteration margins are robust. Step 2 regenerates `manifest.json` and requires a
-live-PG matrix run, so it is gated behind an explicit decision rather than folded
-in here. `Pomset::ordered_pairs()` already exposes exactly the edge list that
-block would consume.
+**Step 2 (this slice) closes the loop to the live runtime.** The generation
+binary now links `refinterp` (no longer `#[cfg(test)]`; only its count-projection
+helpers — `path_counts`, `counts_match_render` — stay test-only). For every shape
+the binary derives the happens-before edges via `Pomset::ordered_pairs()` and:
+
+- records them as an **`order` golden** in `manifest.json` (one `["earlier_path",
+  iter, "later_path", iter]` entry per `≺` edge) for **all** 88 edge-bearing
+  shapes — live *and* quarantined — since the interpreter computes order
+  regardless of class; and
+- emits a **causal-order assertion block** into each **live** (non-quarantined)
+  `.sql` test (62 of the 128 live shapes — the rest are pure marker/join/race/if
+  trees with no `≺` edge). The block is one set-based aggregate: it joins each
+  edge's two endpoints back to `df_gen_trace` and raises iff any edge ran with
+  `earlier.wall_clock >= later.wall_clock`. Concurrent (join/race) siblings carry
+  **no** edge, so they are never compared — the partial order is exactly what
+  makes the assertion flake-free.
+
+The per-path COUNT assertions run **first**, so by the time the order block runs
+every referenced `(node_path, iteration)` row is guaranteed to exist (iterations
+are dense `1..=count`) — the inner joins can never silently drop an edge. Markers
+run in distinct duroxide activities milliseconds apart, far above
+`clock_timestamp()`'s microsecond resolution, so an honored edge always shows a
+strict gap.
+
+**Clock assumptions (known limitation).** The oracle compares `clock_timestamp()`
+values, which track wall-clock time rather than a monotonic counter. It is sound
+under the assumption that the clock advances strictly between two *sequentially
+scheduled* activities — which holds in practice because each duroxide activity
+round-trip (orchestration await → re-dispatch → SQL) takes milliseconds, dwarfing
+`clock_timestamp()`'s microsecond resolution, so a collision (equal timestamps)
+is implausible. The one theoretical way an *honored* edge could be flagged is a
+backward wall-clock step — e.g. an NTP correction — landing inside a single test's
+sub-second window; this has not been observed, and it would surface as a loud,
+reproducible `TEST FAILED [...]: causal-order violation(s)` rather than silent
+corruption. Concurrent (join/race) siblings carry no edge and are never compared,
+so the assumption applies only to genuinely ordered events. A fully
+clock-independent variant (assert on a monotonic per-trace sequence instead of
+`wall_clock`) is possible but deferred — it would require a `df_gen_trace` schema
+change and is unwarranted at the observed timing margins.
+
+Step 2 regenerates `manifest.json` (now 198914 B — the added `order` field; this
+intentionally breaks Steps 2–5-Step-1's byte-identical property). `meta-manifest.json`
+(7730 B) is untouched.
 
 ### Running
 

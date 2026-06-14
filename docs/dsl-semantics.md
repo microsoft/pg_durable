@@ -4,7 +4,9 @@
 of every DSL combinator, especially under nesting. It is the acceptance contract for
 the structural-invariant oracle (issue #232 Phase 1) and the reference interpreter
 (Phase 5, `tests/e2e/generated/generator/src/refinterp.rs` — §4 Seq, §5 If, §6 Loop,
-and §7 Join/Race below are its happens-before rules verbatim), and it states explicitly
+and §7 Join/Race below are its happens-before rules verbatim; the generated live
+`.sql` matrix asserts each of those `≺` edges against the real runtime as
+`earlier.wall_clock < later.wall_clock`), and it states explicitly
 the nesting contracts that bugs
 [#227](https://github.com/microsoft/pg_durable/issues/227) and
 [#230](https://github.com/microsoft/pg_durable/issues/230) violate.

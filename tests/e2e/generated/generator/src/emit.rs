@@ -20,6 +20,11 @@ pub struct ShapeRecord {
     pub reason: Option<&'static str>,
     pub dsl: String,
     pub expected: BTreeMap<String, u64>,
+    /// Phase 5 (#232): the reference interpreter's happens-before (`≺`) edges as
+    /// `((earlier_path, earlier_iter), (later_path, later_iter))` pairs. Live
+    /// `.sql` tests assert each pair as `earlier.wall_clock < later.wall_clock`;
+    /// the manifest records them as the committed causal-order golden.
+    pub ordered_pairs: Vec<((String, u64), (String, u64))>,
 }
 
 /// Parameters that describe how a matrix was generated (manifest header).
@@ -33,10 +38,16 @@ pub struct MatrixMeta<'a> {
 /// Renders the full text of a self-contained `.sql` E2E test for one shape.
 ///
 /// The test starts the durable instance, waits for completion, asserts the
-/// Phase 1 structural-invariant oracle passes, then asserts the exact per-path
-/// execution counts and that no unexpected node paths appear.
+/// Phase 1 structural-invariant oracle passes, asserts the exact per-path
+/// execution counts, asserts no unexpected node paths appear, and — for live
+/// shapes — asserts the Phase 5 causal-order oracle: every happens-before edge
+/// the reference interpreter derived holds as `earlier.wall_clock < later`.
 pub fn sql_test(rec: &ShapeRecord, wait_timeout: u32) -> String {
     let id = &rec.id;
+    // Phase 5 (#232): only live shapes get the causal-order block — quarantined
+    // shapes already fail their COUNT assertions, and an empty edge set (a lone
+    // marker, or concurrent-only join) has nothing to assert.
+    let emit_order = rec.reason.is_none() && !rec.ordered_pairs.is_empty();
     let mut out = String::new();
 
     out.push_str("-- Copyright (c) Microsoft Corporation.\n");
@@ -84,6 +95,9 @@ wall_clock TIMESTAMPTZ);\n",
     out.push_str("    all_passed BOOLEAN;\n");
     out.push_str("    viol TEXT;\n");
     out.push_str("    unexpected TEXT;\n");
+    if emit_order {
+        out.push_str("    ord_viol TEXT;\n");
+    }
     out.push_str("BEGIN\n");
     out.push_str("    SELECT instance_id INTO inst_id FROM _gen_state;\n");
     out.push_str(&format!(
@@ -147,6 +161,43 @@ WHERE shape_id = '{id}' AND node_path = '{path}');\n"
     ));
     out.push_str("    END IF;\n");
 
+    if emit_order {
+        // Phase 5 (#232) causal-order oracle. Each VALUES row is one happens-
+        // before (≺) edge from the reference interpreter; the double self-join
+        // resolves both endpoints to their trace rows and the WHERE keeps only
+        // edges the runtime VIOLATED (earlier fired at-or-after later). Markers
+        // run in distinct duroxide activities milliseconds apart, so an honored
+        // edge always shows a strict clock_timestamp() gap. CONCURRENT siblings
+        // (join/race branches) carry no edge, so this can never flake on them.
+        out.push('\n');
+        out.push_str("    -- Phase 1+2 counts pin WHAT ran; this pins the ORDER it ran in.\n");
+        out.push_str("    SELECT string_agg(v.descr, ', ' ORDER BY v.descr)\n");
+        out.push_str("      INTO ord_viol\n");
+        out.push_str("      FROM (VALUES\n");
+        let n = rec.ordered_pairs.len();
+        for (i, ((pu, iu), (pv, iv))) in rec.ordered_pairs.iter().enumerate() {
+            let sep = if i + 1 < n { "," } else { "" };
+            out.push_str(&format!(
+                "        ('{pu}', {iu}, '{pv}', {iv}, '{pu}#{iu} -> {pv}#{iv}'){sep}\n"
+            ));
+        }
+        out.push_str("      ) AS v(pu, iu, pv, iv, descr)\n");
+        out.push_str(&format!(
+            "      JOIN df_gen_trace tu ON tu.shape_id = '{id}' \
+AND tu.node_path = v.pu AND tu.iteration = v.iu\n"
+        ));
+        out.push_str(&format!(
+            "      JOIN df_gen_trace tv ON tv.shape_id = '{id}' \
+AND tv.node_path = v.pv AND tv.iteration = v.iv\n"
+        ));
+        out.push_str("     WHERE tu.wall_clock >= tv.wall_clock;\n");
+        out.push_str("    IF ord_viol IS NOT NULL THEN\n");
+        out.push_str(&format!(
+            "        RAISE EXCEPTION 'TEST FAILED [{id}]: causal-order violation(s): %', ord_viol;\n"
+        ));
+        out.push_str("    END IF;\n");
+    }
+
     out.push_str("END $GEN$;\n\n");
     out.push_str("DROP TABLE _gen_state;\n");
     out.push_str("SELECT 'TEST PASSED' AS result;\n");
@@ -207,7 +258,7 @@ pub fn manifest_json(records: &[ShapeRecord], meta: &MatrixMeta) -> String {
         out.push_str(&format!("      \"dsl\": \"{}\",\n", json_escape(&rec.dsl)));
 
         if rec.expected.is_empty() {
-            out.push_str("      \"expected\": {}\n");
+            out.push_str("      \"expected\": {},\n");
         } else {
             out.push_str("      \"expected\": {\n");
             let entries: Vec<String> = rec
@@ -216,7 +267,32 @@ pub fn manifest_json(records: &[ShapeRecord], meta: &MatrixMeta) -> String {
                 .map(|(p, c)| format!("        \"{}\": {}", json_escape(p), c))
                 .collect();
             out.push_str(&entries.join(",\n"));
-            out.push_str("\n      }\n");
+            out.push_str("\n      },\n");
+        }
+
+        // Phase 5 (#232): the committed causal-order golden — the reference
+        // interpreter's happens-before edges as `["earlier_path", iter,
+        // "later_path", iter]`. Present for every shape (the interpreter derives
+        // order regardless of class); only the live `.sql` emission is gated.
+        if rec.ordered_pairs.is_empty() {
+            out.push_str("      \"order\": []\n");
+        } else {
+            out.push_str("      \"order\": [\n");
+            let entries: Vec<String> = rec
+                .ordered_pairs
+                .iter()
+                .map(|((pu, iu), (pv, iv))| {
+                    format!(
+                        "        [\"{}\", {}, \"{}\", {}]",
+                        json_escape(pu),
+                        iu,
+                        json_escape(pv),
+                        iv
+                    )
+                })
+                .collect();
+            out.push_str(&entries.join(",\n"));
+            out.push_str("\n      ]\n");
         }
 
         if i + 1 < records.len() {
@@ -247,6 +323,7 @@ mod tests {
             reason: None,
             dsl: "df.seq(df.sql($mk$...$mk$), df.sql($mk$...$mk$))".to_string(),
             expected,
+            ordered_pairs: vec![(("r.0".to_string(), 1), ("r.1".to_string(), 1))],
         }
     }
 
@@ -261,6 +338,7 @@ mod tests {
             reason: Some("loop-in-join"),
             dsl: "df.join(df.sql($mk$...$mk$), df.loop(df.sql($mk$...$mk$)))".to_string(),
             expected,
+            ordered_pairs: vec![(("r.1.b".to_string(), 1), ("r.1.b".to_string(), 2))],
         }
     }
 
@@ -345,5 +423,58 @@ mod tests {
         // Even quarantined, the assertions still encode correct behavior.
         assert!(t.contains("df.assert_structural_invariants(inst_id)"));
         assert!(t.trim_end().ends_with("SELECT 'TEST PASSED' AS result;"));
+    }
+
+    #[test]
+    fn sql_test_emits_causal_order_block_for_live_shape() {
+        let t = sql_test(&sample(), 60);
+        // Live shape with edges: the order oracle declares its var, emits the
+        // edge as a VALUES row, joins both endpoints, and raises on violation.
+        assert!(t.contains("    ord_viol TEXT;\n"));
+        assert!(t.contains("('r.0', 1, 'r.1', 1, 'r.0#1 -> r.1#1')"));
+        assert!(t.contains("WHERE tu.wall_clock >= tv.wall_clock;"));
+        assert!(t.contains("causal-order violation(s)"));
+        // The order ORACLE BLOCK is the LAST assertion, after the
+        // unexpected-path guard (the `ord_viol TEXT` declare precedes both).
+        let order_at = t.find("causal-order violation").unwrap();
+        let unexpected_at = t.find("unexpected path(s)").unwrap();
+        assert!(order_at > unexpected_at);
+    }
+
+    #[test]
+    fn sql_test_omits_causal_order_block_when_quarantined() {
+        // A quarantined shape fails its COUNT assertions first; emitting an
+        // order oracle on a known-buggy trace would be noise.
+        let t = sql_test(&quarantined_sample(), 10);
+        assert!(!t.contains("ord_viol"));
+        assert!(!t.contains("causal-order violation"));
+    }
+
+    #[test]
+    fn sql_test_omits_causal_order_block_when_no_edges() {
+        // A lone marker (or a purely-concurrent join) has no happens-before
+        // edge, so there is nothing to assert.
+        let mut rec = sample();
+        rec.ordered_pairs = Vec::new();
+        let t = sql_test(&rec, 60);
+        assert!(!t.contains("ord_viol"));
+    }
+
+    #[test]
+    fn manifest_carries_order_field() {
+        let meta = MatrixMeta {
+            max_depth: 2,
+            combinators: &[Comb::Seq],
+            loop_iters: 2,
+            include_seeds: false,
+        };
+        let m = manifest_json(&[sample()], &meta);
+        assert!(m.contains("\"order\": [\n"));
+        assert!(m.contains("[\"r.0\", 1, \"r.1\", 1]"));
+        // An edge-free shape records an empty array, never omits the key.
+        let mut bare = sample();
+        bare.ordered_pairs = Vec::new();
+        let m2 = manifest_json(&[bare], &meta);
+        assert!(m2.contains("\"order\": []\n"));
     }
 }

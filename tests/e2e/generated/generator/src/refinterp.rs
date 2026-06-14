@@ -38,9 +38,11 @@
 //! The live runtime records `(node_path, iteration)` (plus a `wall_clock`
 //! column) into `df_gen_trace`, so the event set here is directly comparable to
 //! the live trace, and each `≺` edge is directly checkable as
-//! `earlier.wall_clock < later.wall_clock`. Emitting those order assertions into
-//! the generated live tests is the gated Step 2 of this phase.
+//! `earlier.wall_clock < later.wall_clock`. Step 2 of this phase emits those
+//! order assertions into the generated live `.sql` tests from
+//! [`Pomset::ordered_pairs`] (see `emit.rs`).
 
+#[cfg(test)]
 use crate::render::render;
 use crate::shape::{Cond, Shape};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,6 +75,11 @@ impl Pomset {
     /// multiset the COUNT-based oracles check (`render::Rendered::expected` in
     /// Phase 2, `meta::observable` in Phase 4); Phase 5 additionally pins the
     /// order via [`Pomset::ordered_pairs`].
+    ///
+    /// Test-only: the binary's live oracle uses [`Pomset::ordered_pairs`]; the
+    /// count projection is exercised only by the model-level differential and
+    /// the unit/proptest suites.
+    #[cfg(test)]
     pub fn path_counts(&self) -> BTreeMap<String, u64> {
         let mut m = BTreeMap::new();
         for e in &self.events {
@@ -295,6 +302,12 @@ pub(crate) fn interpret(shape: &Shape, k: u64) -> Pomset {
 /// (`render::build`) and step-by-step execution simulation (this interpreter)
 /// are two independent implementations of the same semantics; their agreement
 /// is the oracle.
+///
+/// Test-only: this is the model-level differential, exercised by the unit and
+/// proptest suites. The live `.sql` tests assert the same counts against the
+/// runtime directly (Phase 2) and additionally assert the causal ORDER derived
+/// here via [`Pomset::ordered_pairs`].
+#[cfg(test)]
 pub(crate) fn counts_match_render(shape: &Shape, k: u64) -> bool {
     let pomset = interpret(shape, k);
     let rendered = render(shape, k, "diff");

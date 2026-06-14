@@ -30,11 +30,10 @@ mod prop;
 
 // Phase 5 (#232): synchronous tree-walking REFERENCE INTERPRETER over `Shape`,
 // producing the expected causal trace (a pomset of (node_path, iteration) events
-// + happens-before order). Test-only for this slice — it is consumed by the unit
-// + proptest differential checks and never enters the generation binary, so the
-// goldens stay byte-identical. (Step 2 will promote it to a non-test module when
-// `emit.rs` emits live causal-order assertions from it.)
-#[cfg(test)]
+// + happens-before order). Step 2 promotes it into the generation binary: each
+// live shape's happens-before edges become a causal-order assertion block in its
+// `.sql` test and an `order` golden in `manifest.json`. Its count-projection
+// helpers remain `#[cfg(test)]` (the model-level differential).
 mod refinterp;
 
 use emit::{manifest_json, sql_test, MatrixMeta, ShapeRecord};
@@ -219,6 +218,14 @@ fn build_records(cfg: &Config) -> Vec<ShapeRecord> {
             let id = format!("gen-{:04}", idx + 1);
             let rendered = render::render(shape, cfg.loop_iters, &id);
             let reason = shape.is_problematic();
+            // Phase 5 (#232): derive the happens-before edges from the reference
+            // interpreter at the SAME K the renderer used, then flatten each
+            // edge to ((earlier_path, earlier_iter), (later_path, later_iter)).
+            let ordered_pairs = refinterp::interpret(shape, cfg.loop_iters)
+                .ordered_pairs()
+                .into_iter()
+                .map(|(a, b)| ((a.node_path, a.iteration), (b.node_path, b.iteration)))
+                .collect();
             ShapeRecord {
                 id,
                 signature: shape.signature(),
@@ -231,6 +238,7 @@ fn build_records(cfg: &Config) -> Vec<ShapeRecord> {
                 reason,
                 dsl: rendered.dsl,
                 expected: rendered.expected,
+                ordered_pairs,
             }
         })
         .collect()
