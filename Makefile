@@ -8,7 +8,7 @@ PG_VERSION ?= pg17
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install generate-matrix
+.PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install generate-matrix proptest
 
 # Default target
 all: build
@@ -34,6 +34,14 @@ test-e2e:
 # refreshes manifest.json + meta-manifest.json.
 generate-matrix:
 	cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml
+
+# Phase 3 (#232): run the model-level proptest properties (random labeled-leaf
+# trees over the Phase 4 reference interpreter + renderer, with shrinking). The
+# committed proptest-regressions/ corpus replays first; PROPTEST_CASES sets the
+# fresh-exploration budget (override for a deeper local hunt, e.g.
+# `PROPTEST_CASES=8192 make proptest`).
+proptest:
+	PROPTEST_CASES=$${PROPTEST_CASES:-1024} cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
 
 # Build Docker image
 docker-build:
@@ -77,6 +85,7 @@ help:
 	@echo "  test-unit     - Run pgrx unit tests only"
 	@echo "  test-e2e      - Run E2E tests only (Docker)"
 	@echo "  generate-matrix - Generate the Phase 2 + Phase 4 generated E2E matrix"
+	@echo "  proptest      - Run the Phase 3 model-level proptest properties (shrinking)"
 	@echo "  test-regress  - Run pg_regress tests (resets and starts PostgreSQL)"
 	@echo "  installcheck  - Run pg_regress tests (requires PostgreSQL running, via PGXS)"
 	@echo "  docker-build  - Build Docker image"

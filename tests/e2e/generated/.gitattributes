@@ -1,4 +1,4 @@
-# Phase 2 + Phase 4 (#232) generated-test artifacts.
+# Phase 2 + Phase 4 + Phase 3 (#232) generated-test artifacts.
 #
 # The committed golden manifests and the generator sources are normalized to LF
 # in the index so a Windows-authored commit and a Linux CI run regenerate them
@@ -6,6 +6,11 @@
 # across platforms regardless of each developer's core.autocrlf setting. (The
 # generator's `check_artifact` also normalizes CRLF on read, so this is
 # defense-in-depth; it additionally keeps the committed goldens diff-clean.)
+#
+# The Phase 3 proptest failure corpus (proptest-regressions/*.txt) is likewise
+# pinned to LF: proptest hashes each seed line, and a committed CRLF copy read
+# back on Linux CI would not match, silently dropping the regression guard.
 *.json text eol=lf
 *.sql text eol=lf
 generator/src/*.rs text eol=lf
+generator/proptest-regressions/*.txt text eol=lf

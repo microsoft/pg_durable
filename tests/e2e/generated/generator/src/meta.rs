@@ -107,7 +107,7 @@ pub fn observable(prog: &Meta) -> BTreeMap<String, u64> {
 /// Reuses the exact Phase 2 constructs (`marker_sql`, `df.seq`, `df.if`,
 /// `df.join`, `df.race`, `df.loop`, `df.break`) so the two infrastructures stay
 /// semantically identical.
-fn render_prog(prog: &Meta, tag: &str) -> String {
+pub(crate) fn render_prog(prog: &Meta, tag: &str) -> String {
     match prog {
         Meta::Leaf(label) => marker_sql(label, tag),
         Meta::Seq(a, b) => format!("df.seq({}, {})", render_prog(a, tag), render_prog(b, tag)),
@@ -517,8 +517,7 @@ mod tests {
     /// Strips `$tag$…$tag$` dollar-quoted spans so paren-balance checks ignore
     /// SQL text. Only the two tags the renderer emits (`$mk$`, `$c$`) are used.
     fn strip_quoted(mut s: String, tag: &str) -> String {
-        loop {
-            let Some(start) = s.find(tag) else { break };
+        while let Some(start) = s.find(tag) {
             let Some(rel) = s[start + tag.len()..].find(tag) else {
                 break;
             };

@@ -14,5 +14,13 @@ license = "PostgreSQL"
 name = "pg_durable_matrix_gen"
 path = "src/main.rs"
 
+# Phase 3 (#232): proptest drives the recursive random-tree property suite in
+# src/prop.rs. It is a DEV-dependency ONLY, so it compiles solely under
+# `cargo test` — the generation binary (`cargo run`/`cargo build`) and the
+# `--check` determinism gate stay dependency-free and the committed goldens
+# (manifest.json / meta-manifest.json) remain byte-identical.
+[dev-dependencies]
+proptest = "1"
+
 # Empty workspace table: isolates this crate from the parent extension workspace.
 [workspace]

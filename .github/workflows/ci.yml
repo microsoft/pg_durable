@@ -61,27 +61,66 @@ jobs:
         run: cargo fmt --package pg_durable -- --check
 
   generated-matrix:
-    # Phase 2 + Phase 4 (#232): the combinator-nesting matrix generator and the
-    # Phase 4 metamorphic-relations registry live in one standalone std-only
-    # crate, so their determinism guards and unit tests need no PostgreSQL build
-    # and run fast as their own blocking gate. The live/quarantine SQL (incl. the
-    # meta-*.sql relations) is exercised inside the `test` job, which already has
-    # the extension installed.
-    name: Generated Matrix (determinism + unit)
+    # Phase 2 + Phase 4 + Phase 3 (#232): the combinator-nesting matrix
+    # generator, the Phase 4 metamorphic-relations registry, and the Phase 3
+    # model-level proptest properties all live in one standalone std-only crate,
+    # so their lint, determinism, unit, and property gates need no PostgreSQL
+    # build and run fast as their own blocking gate. The live/quarantine SQL
+    # (incl. the meta-*.sql relations) is exercised inside the `test` job, which
+    # already has the extension installed.
+    name: Generated Matrix (lint + determinism + unit + proptest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       # std-only stable crate — uses the runner's pre-installed stable toolchain
       # (no nightly needed, unlike the extension's nightly-rustfmt format job).
-      - name: Generator unit tests (incl. classifier contract + metamorphic relations)
+
+      # Lints the whole generator crate INCLUDING the #[cfg(test)] Phase 3
+      # proptest module (--all-targets), so prop.rs stays clippy-clean alongside
+      # the generation binary.
+      - name: Generator clippy (-D warnings, lints the proptest module)
+        run: cargo clippy --manifest-path tests/e2e/generated/generator/Cargo.toml --all-targets -- -D warnings
+
+      # `cargo test` runs the std unit tests AND the Phase 3 proptest properties.
+      # proptest ALWAYS replays the committed proptest-regressions/ corpus first
+      # (the deterministic regression guard for every past counterexample), then
+      # explores PROPTEST_CASES fresh random trees per property within the PR
+      # time budget. The nightly step below widens that budget for deeper search.
+      - name: Generator unit + property tests (classifier, metamorphic, proptest)
+        env:
+          PROPTEST_CASES: 256
         run: cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
 
       # Regenerates the manifests in memory and diffs them against the committed
       # tests/e2e/generated/{manifest,meta-manifest}.json. Fails if generation
       # drifted or a committed golden is stale — keeping generation deterministic.
+      # (proptest is a dev-dependency only, so it never perturbs these goldens.)
       - name: Check manifest determinism
         run: cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml -- --check
+
+      # Nightly / on-demand deep proptest exploration: a far larger case budget
+      # and a fresh random seed each run, to hunt for counterexamples the 256-case
+      # PR gate misses. Non-blocking (mirrors the quarantine nightly) — any NEW
+      # minimal counterexample is printed AND written to proptest-regressions/;
+      # commit that seed to turn it into a blocking regression guard.
+      - name: Deep proptest exploration (non-blocking, nightly)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        env:
+          PROPTEST_CASES: 8192
+        run: cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
+
+      - name: Surface nightly proptest counterexamples
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          corpus=tests/e2e/generated/generator/proptest-regressions/prop.txt
+          if [ -f "$corpus" ] && grep -qE '^cc ' "$corpus"; then
+            echo "::warning::Phase 3 proptest corpus has saved counterexample seed(s) — review and commit any new ones:"
+            grep -E '^cc ' "$corpus"
+          else
+            echo "No proptest counterexample seeds present — nightly found nothing beyond the committed corpus."
+          fi
 
   prepare:
     name: Prepare Matrix

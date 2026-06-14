@@ -22,6 +22,12 @@ mod meta;
 mod render;
 mod shape;
 
+// Phase 3 (#232): recursive proptest Strategy<Meta> + property suite. Test-only
+// (depends on the `proptest` dev-dependency), so it never enters the generation
+// binary and has no bearing on `--check` determinism or the committed goldens.
+#[cfg(test)]
+mod prop;
+
 use emit::{manifest_json, sql_test, MatrixMeta, ShapeRecord};
 use meta::{meta_manifest_json, meta_sql_test, registry, Relation};
 use shape::{build_matrix, Comb};

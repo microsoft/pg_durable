@@ -279,6 +279,86 @@ them up with the **same** flag — no new flag needed:
 `cargo run … -- --check` diffs **both** `manifest.json` and `meta-manifest.json`,
 so metamorphic-relation drift fails CI exactly like Phase 2 shape drift.
 
+## Phase 3 — property-based testing (proptest)
+
+Phase 2 enumerates a *fixed, exhaustive* depth-2 matrix; Phase 4 pins *seven
+hand-written* equivalences. Phase 3 generalizes both: a recursive
+[`proptest`](https://proptest-rs.github.io/proptest/) `Strategy<Meta>`
+(`generator/src/prop.rs`) emits **thousands of random labeled-leaf trees per
+run** and asserts algebraic + structural properties over them — and, when a
+property fails, proptest **shrinks** the random tree down to a *minimal*
+counterexample.
+
+### Why the model, not live PostgreSQL
+
+Phase 3's headline value-add over Phase 2 (per the issue) is **shrinking**, and
+shrinking only works when the property executes **in-process**: proptest drives
+the reduction loop by re-running the predicate on progressively smaller inputs.
+A property that round-trips through a live `df.start()` cannot shrink. So the
+properties run over the same pure reference model Phase 4 already trusts — the
+`Meta` interpreter (`eval`/`observable`) and the renderer (`render_prog`) — which
+is the std-only analogue of the issue's `FunctionGraph`. This is not a coverage
+downgrade: exhaustive depth-2 **live** oracle coverage already exists (Phases
+2+4), and because Phase 4's live ground-truth is *computed by `eval`*, every
+property that hardens `eval` strengthens the live suite transitively.
+
+### What it checks
+
+`proptest! { … }` runs 12 properties (each shrinking-enabled,
+`PROPTEST_CASES` random trees apiece):
+
+| # | Property | Catches |
+|---|----------|---------|
+| 1 | `eval` is deterministic | hidden state / ordering bugs |
+| 2 | **differential**: `eval` vs an independent functional `ref_observable` over the whole random space | interpreter logic errors (anti-circular; a Phase-5 bridge) |
+| 3–8 | metamorphic **algebra** on random subtrees: seq-assoc, join-comm, join-assoc, seq≡join multiset, if-true/false selection, race→winner | generalizes Phase 4's 7 hand cases to thousands |
+| 9 | loop multiplier scales body counts (DoWhile `k` / LoopBreak `n`, 1..=4) | off-by-one / saturating-mul bugs |
+| 10 | total completed-count is conserved across equivalent forms | silent over/under-execution |
+| 11 | `render_prog` is deterministic | non-reproducible SQL |
+| 12 | rendered SQL is **well-formed**: balanced parens (ignoring `$mk$`/`$c$` dollar-quoted spans), even dollar-quote counts, no leaked `df.start`, `df.race(`/`df.sleep(` and `df.loop(`/`df.break()` arity matches the tree, every label present | renderer corruption |
+
+Four helper unit tests (`mod helper_tests`) cross-check the *independent oracles*
+themselves (`ref_observable`, `first_executing_label`, `node_counts`, the
+paren-balancer) against hand cases, so a bug in the test scaffolding can't mask a
+bug in the model.
+
+### The strategy
+
+`arb_meta()` is a `prop_recursive(4, 48, 3, …)` over weighted `prop_oneof!`
+knobs (seq=3, join=2, if=2, race=1, dowhile=1, loopbreak=1) with labels from a
+small alphabet (`a`–`e`). Loop anchors are chosen via `first_executing_label`
+(the first leaf the body actually executes), so every generated loop terminates
+and counts a real leaf — keeping the observable pure, exactly like Phase 4. The
+strategy can emit `loop`-in-`join`/`race` shapes (the
+[#227](https://github.com/microsoft/pg_durable/issues/227)/[#230](https://github.com/microsoft/pg_durable/issues/230)/[#233](https://github.com/microsoft/pg_durable/issues/233)
+defect zone), so a future live harness inherits corpus coverage there.
+
+### Failure corpus
+
+When a property fails, proptest writes the minimal seed to
+`generator/proptest-regressions/prop.txt` and **replays it first on every
+subsequent run**. That file is committed (LF-normalized via `.gitattributes`) so
+a counterexample becomes a permanent, shared regression guard. It is empty today
+because no property has failed.
+
+### Isolation — goldens stay byte-identical
+
+`proptest` is a **`[dev-dependencies]`** entry only. The generation binary
+(`cargo run` / `--check`) never links it, so `manifest.json` (187896 B) and
+`meta-manifest.json` (7730 B) stay byte-for-byte identical, and `prop.rs` is
+`#[cfg(test)] mod prop;` — it compiles only under `cargo test`.
+
+### Running
+
+```bash
+# committed corpus + 1024 fresh random trees per property (override the budget):
+make proptest
+PROPTEST_CASES=8192 make proptest
+
+# or directly — the default in-code budget is 256 cases:
+cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
+```
+
 ## CI
 
 CI regenerates the matrix, runs the live set as a blocking gate, runs the
@@ -290,3 +370,12 @@ golden. The generator's unit tests (run as their own blocking gate) include the
 Phase 4 interpreter and registry tests. The depth-2 live budget is sized to stay
 within the E2E job's time envelope; deeper profiles are available on demand via
 `--max-depth`.
+
+The same `Generated Matrix` job also gates Phase 3: a `cargo clippy --all-targets
+-D warnings` step lints the `#[cfg(test)]` proptest module, and the existing
+`cargo test` step runs the properties — replaying the committed
+`proptest-regressions/` corpus first, then exploring `PROPTEST_CASES` (256 on
+PRs) fresh random trees per property. A **nightly / on-demand** step widens that
+budget with a fresh seed to hunt for new counterexamples; it is non-blocking
+(mirroring the quarantine nightly) and surfaces any minimal counterexample it
+writes for a human to commit as a permanent regression seed.
