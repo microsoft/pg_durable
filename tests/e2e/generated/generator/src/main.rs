@@ -28,6 +28,15 @@ mod shape;
 #[cfg(test)]
 mod prop;
 
+// Phase 5 (#232): synchronous tree-walking REFERENCE INTERPRETER over `Shape`,
+// producing the expected causal trace (a pomset of (node_path, iteration) events
+// + happens-before order). Test-only for this slice — it is consumed by the unit
+// + proptest differential checks and never enters the generation binary, so the
+// goldens stay byte-identical. (Step 2 will promote it to a non-test module when
+// `emit.rs` emits live causal-order assertions from it.)
+#[cfg(test)]
+mod refinterp;
+
 use emit::{manifest_json, sql_test, MatrixMeta, ShapeRecord};
 use meta::{meta_manifest_json, meta_sql_test, registry, Relation};
 use shape::{build_matrix, Comb};

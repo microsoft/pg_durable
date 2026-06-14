@@ -304,8 +304,9 @@ property that hardens `eval` strengthens the live suite transitively.
 
 ### What it checks
 
-`proptest! { … }` runs 12 properties (each shrinking-enabled,
-`PROPTEST_CASES` random trees apiece):
+`proptest! { … }` runs 12 properties over `Meta` trees (each shrinking-enabled,
+`PROPTEST_CASES` random trees apiece); the same block also runs Phase 5's 6
+causal-order properties over `Shape` trees — see [Phase 5](#phase-5--reference-interpreter--causal-order-oracle):
 
 | # | Property | Catches |
 |---|----------|---------|
@@ -357,6 +358,87 @@ PROPTEST_CASES=8192 make proptest
 
 # or directly — the default in-code budget is 256 cases:
 cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
+```
+
+## Phase 5 — reference interpreter & causal-order oracle
+
+Phases 2 and 4 differential-test **counts** and **multisets** against the live
+duroxide runtime (via `df_gen_trace`). Neither checks **order**: that two events
+on the same path happened in iteration order, that a `seq` ran its left side
+*before* its right, or that two `join` branches were genuinely *unordered*.
+Phase 5 adds that missing dimension with a **reference interpreter**
+(`generator/src/refinterp.rs`) — a synchronous, single-threaded tree-walker over
+`Shape` that produces, per program, a **pomset** (partially-ordered multiset):
+
+- **events** — a deterministic linearization of `(node_path, iteration)` rows,
+  exactly the columns the live marker writes into `df_gen_trace`; and
+- **edges** — the happens-before (`≺`) relation as forward index pairs
+  `(earlier, later)`.
+
+It implements the [`docs/dsl-semantics.md`](../../../docs/dsl-semantics.md)
+ordering contract *directly* (§4 Seq: all-of-`a` ≺ all-of-`b`; §6 do-while loop:
+body ≺ counter and iteration `i` ≺ `i+1`; §7 Join/Join3: branches **concurrent**,
+no edge; §7 Race: winner-only; §5 If: taken branch only). Concurrent siblings get
+**no** edge, so the relation is a DAG by construction (`all_edges_point_forward`).
+
+### A third, independent interpreter
+
+The renderer (`render`) computes per-path counts in **closed form** (arithmetic
+`mult`). The interpreter computes them by **step-by-step simulation**. They are
+written independently, so agreement is strong evidence both are correct —
+`counts_match_render(shape, k)` projects the pomset to per-path counts and
+asserts equality with `render(shape, k, …).expected` (filtered to the reachable
+paths the interpreter emits). The headline unit test runs that differential over
+the **entire depth-2 matrix** (`shapes_up_to(&ALL_COMBS, 2)` + seeds) × every
+`k ∈ {1, 2, 3}`. This is a *third* interpreter alongside Phase 4's `eval` and
+Phase 3's `ref_observable` — three implementations of the same semantics, each
+guarding the others.
+
+### Causal-order properties (proptest)
+
+The same `proptest! { … }` block adds **6 properties over random `Shape` trees**
+(`arb_shape()`, the node-path-tagged analogue of `arb_meta()`), each shrinking-
+enabled:
+
+| # | Property | Catches |
+|---|----------|---------|
+| 13 | **differential**: interpreter counts == `render`'s closed-form `expected`, for every tree and every `k ∈ 1..=3` | divergence between simulation and arithmetic |
+| 14 | interpreter is deterministic (identical events **and** edges) | hidden ordering / state bugs |
+| 15 | every happens-before edge points strictly forward (`u < v`) | cyclic / self-contradictory order |
+| 16 | per path, iterations are the dense range `1..=count` | gaps / duplicate iteration numbers |
+| 17 | **causal-order law (Seq)**: `Seq(a,b)` preserves each child's edge set exactly and adds only forward `a ≺ b` cross edges — non-empty iff both sides execute | sequencing that drops, reorders, or fails to impose happens-before |
+| 18 | **causal-order law (Join)**: `Join(a,b)`'s edge set is **exactly** `a`'s edges ∪ `b`'s (shifted) — no cross edge either way | spurious ordering between parallel branches |
+
+Properties 17–18 are the order-level analogues of Phase 4's count laws and are
+Phase 5's unique value-add: 17 proves `seq` *introduces* happens-before, 18 proves
+`join` *introduces none* — the two facts a live wall-clock assertion would rely
+on. 14 further unit tests (`refinterp::tests`) pin each combinator against the
+§4–§7 contract by hand.
+
+### Staged scope
+
+This slice is **Step 1**: the model-level interpreter, its differential, and the
+causal-order properties — all of which run in-process and need no live PostgreSQL.
+`refinterp.rs` is `#[cfg(test)] mod refinterp;` and `emit.rs` is untouched, so the
+generation binary never links it and **both goldens stay byte-identical**
+(`manifest.json` 187896 B, `meta-manifest.json` 7730 B).
+
+**Step 2** (deliberately *not* in this slice) would close the loop to the live
+runtime: emit a causal-order assertion block into each **clean** (non-quarantined)
+Phase 2 `.sql` test — for every `≺` edge, assert `u.wall_clock < v.wall_clock`,
+leaving concurrent pairs unconstrained so there is no flakiness. Because the
+live loop already pauses `LOOP_MIN_ITER_DURATION` (≥1s) between iterations, cross-
+iteration margins are robust. Step 2 regenerates `manifest.json` and requires a
+live-PG matrix run, so it is gated behind an explicit decision rather than folded
+in here. `Pomset::ordered_pairs()` already exposes exactly the edge list that
+block would consume.
+
+### Running
+
+```bash
+# the interpreter's unit tests + the 6 causal-order properties run with the suite:
+cargo test --manifest-path tests/e2e/generated/generator/Cargo.toml
+PROPTEST_CASES=8192 make proptest   # widen the random Shape budget too
 ```
 
 ## CI

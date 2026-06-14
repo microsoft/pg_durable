@@ -44,7 +44,9 @@
 //! a larger `PROPTEST_CASES` for a fresh-seed exploratory sweep.
 
 use crate::meta::{observable, render_prog, Meta};
-use crate::shape::Cond;
+use crate::refinterp::{counts_match_render, interpret};
+use crate::render::render;
+use crate::shape::{Cond, Shape};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -261,6 +263,43 @@ fn parens_balanced(dsl: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5 (#232): random `Shape` trees, for differential + causal-order checks
+// against the reference interpreter. `Shape` is the node-path-tagged model the
+// live `df_gen_trace` records, so these properties harden the SAME ground truth
+// the live Phase 2 matrix asserts.
+// ---------------------------------------------------------------------------
+
+/// A recursive strategy producing random `Shape` trees. Mirrors `arb_meta`'s
+/// shape budget (depth 4, ~48 nodes, ~3 children) and combinator weighting. A
+/// single loop iteration count `K` is applied uniformly at interpret/render
+/// time (see the properties below), bounded small so nested loops never approach
+/// `u64` overflow.
+fn arb_shape() -> impl Strategy<Value = Shape> {
+    let leaf = prop_oneof![
+        3 => Just(Shape::Marker),
+        1 => (1u32..=4).prop_map(|n| Shape::LoopBreak { n }),
+    ];
+    leaf.prop_recursive(4, 48, 3, |inner| {
+        prop_oneof![
+            3 => (inner.clone(), inner.clone())
+                .prop_map(|(a, b)| Shape::Seq(Box::new(a), Box::new(b))),
+            2 => (any::<bool>(), inner.clone(), inner.clone()).prop_map(|(c, t, e)| Shape::If {
+                then_b: Box::new(t),
+                else_b: Box::new(e),
+                cond: cond(c),
+            }),
+            1 => inner.clone().prop_map(|b| Shape::Loop(Box::new(b))),
+            2 => (inner.clone(), inner.clone())
+                .prop_map(|(a, b)| Shape::Join(Box::new(a), Box::new(b))),
+            1 => (inner.clone(), inner.clone(), inner.clone())
+                .prop_map(|(a, b, c)| Shape::Join3(Box::new(a), Box::new(b), Box::new(c))),
+            1 => (inner.clone(), inner)
+                .prop_map(|(a, b)| Shape::Race(Box::new(a), Box::new(b))),
+        ]
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Properties.
 // ---------------------------------------------------------------------------
 
@@ -387,6 +426,129 @@ proptest! {
         for l in labels {
             prop_assert!(dsl.contains(&format!("'{}'", l)), "label {} missing: {}", l, dsl);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: reference-interpreter differential + causal-order laws over
+    // random `Shape` trees. The interpreter (`refinterp`) is a THIRD,
+    // independently-written semantics; these properties cross-check it against
+    // the renderer's closed-form counts and assert the happens-before structure
+    // the live wall-clock trace must obey.
+    // -----------------------------------------------------------------------
+
+    /// DIFFERENTIAL: the interpreter's per-path completion counts equal the
+    /// renderer's closed-form `expected` map on every random tree and every
+    /// `k`. Two independent implementations (step-by-step simulation vs.
+    /// arithmetic `mult`) — agreement is strong evidence both are correct.
+    #[test]
+    fn interp_counts_match_render(shape in arb_shape(), k in 1u64..=3) {
+        prop_assert!(
+            counts_match_render(&shape, k),
+            "count mismatch k={}: interp={:?} render={:?}",
+            k,
+            interpret(&shape, k).path_counts(),
+            render(&shape, k, "prop").expected,
+        );
+    }
+
+    /// The interpreter is a pure function: same tree + same `k`, identical
+    /// pomset (events AND happens-before edges).
+    #[test]
+    fn interp_is_deterministic(shape in arb_shape(), k in 1u64..=3) {
+        prop_assert_eq!(interpret(&shape, k), interpret(&shape, k));
+    }
+
+    /// Acyclicity, structurally: every happens-before edge points strictly
+    /// forward in the linearization (`u < v`), so the relation is a DAG and
+    /// the live wall-clock assertions can never be self-contradictory.
+    #[test]
+    fn interp_edges_point_forward(shape in arb_shape(), k in 1u64..=3) {
+        let pom = interpret(&shape, k);
+        for &(u, v) in &pom.edges {
+            prop_assert!(u < v, "non-forward edge ({}, {}) in {:?}", u, v, shape);
+        }
+    }
+
+    /// Per node_path, the recorded `iteration` values are exactly the dense
+    /// range `1..=count` — no gaps, no duplicates — mirroring the live
+    /// `MAX(iteration) == count` contract the loop oracle relies on.
+    #[test]
+    fn interp_iterations_are_dense(shape in arb_shape(), k in 1u64..=3) {
+        let pom = interpret(&shape, k);
+        let mut per_path: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for ev in &pom.events {
+            per_path.entry(ev.node_path.clone()).or_default().push(ev.iteration);
+        }
+        for (path, mut iters) in per_path {
+            iters.sort_unstable();
+            let expected: Vec<u64> = (1..=iters.len() as u64).collect();
+            prop_assert_eq!(&iters, &expected, "iterations for {} not dense: {:?}", path, iters);
+        }
+    }
+
+    /// CAUSAL-ORDER LAW (Seq), structurally: `Seq(a, b)` linearizes all of `a`
+    /// (event indices `0..na`) strictly before all of `b` (`na..`), PRESERVES
+    /// each child's happens-before relation untouched, and adds only forward
+    /// `a ≺ b` cross edges — at least one iff both sides execute. Asserting the
+    /// edge *partition* (not just its size) is the order-level analogue of
+    /// Phase 4's count laws and Phase 5's unique value-add: a size-only check
+    /// could pass while a dropped child edge masks a spurious cross edge.
+    #[test]
+    fn interp_seq_introduces_order(a in arb_shape(), b in arb_shape(), k in 1u64..=3) {
+        let pa = interpret(&a, k);
+        let pb = interpret(&b, k);
+        let na = pa.events.len();
+        let seq = Shape::Seq(Box::new(a.clone()), Box::new(b.clone()));
+        let ps = interpret(&seq, k);
+
+        // Seq concatenates a's events then b's, so the index space partitions at
+        // `na`. Split seq's edges into within-a, within-b (shifted back), and the
+        // cross edges, asserting every cross edge runs strictly a → b.
+        prop_assert_eq!(ps.events.len(), na + pb.events.len());
+        let mut within_a: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let mut within_b: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let mut cross = 0usize;
+        for &(u, v) in &ps.edges {
+            if v < na {
+                within_a.insert((u, v));
+            } else if u >= na {
+                within_b.insert((u - na, v - na));
+            } else {
+                prop_assert!(u < na && v >= na, "stray seq edge ({}, {})", u, v);
+                cross += 1;
+            }
+        }
+        // Both child relations survive composition byte-for-byte.
+        prop_assert_eq!(&within_a, &pa.edges, "seq altered a's happens-before");
+        prop_assert_eq!(&within_b, &pb.edges, "seq altered b's happens-before");
+        // Sequencing introduces happens-before iff both sides actually execute.
+        if na == 0 || pb.events.is_empty() {
+            prop_assert_eq!(cross, 0, "empty side must add no cross edge");
+        } else {
+            prop_assert!(cross > 0, "seq added no happens-before edge");
+        }
+    }
+
+    /// CAUSAL-ORDER LAW (Join), structurally: parallel branches are CONCURRENT.
+    /// `Join(a, b)`'s happens-before relation is EXACTLY a's edges unioned with
+    /// b's edges (shifted into the second index block) — no cross edge in either
+    /// direction. Asserting the edge *set* (not just its size) proves the
+    /// harness imposes no wall-clock ordering between branches and so stays
+    /// flake-free regardless of interleaving.
+    #[test]
+    fn interp_join_adds_no_order(a in arb_shape(), b in arb_shape(), k in 1u64..=3) {
+        let pa = interpret(&a, k);
+        let pb = interpret(&b, k);
+        let na = pa.events.len();
+        let join = Shape::Join(Box::new(a), Box::new(b));
+        let pj = interpret(&join, k);
+
+        prop_assert_eq!(pj.events.len(), na + pb.events.len());
+        let mut expected: BTreeSet<(usize, usize)> = pa.edges.clone();
+        for &(u, v) in &pb.edges {
+            expected.insert((u + na, v + na));
+        }
+        prop_assert_eq!(pj.edges, expected);
     }
 }
 
