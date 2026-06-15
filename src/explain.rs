@@ -197,7 +197,7 @@ fn explain_expression(expr: &str) -> String {
     use crate::types::Durofut;
 
     // First try to parse as Durofut JSON
-    if let Ok(root) = serde_json::from_str::<Durofut>(expr) {
+    if let Ok(root) = Durofut::try_from_json(expr) {
         // Build in-memory node map from nested structure with generated IDs
         let mut nodes = HashMap::new();
         let mut id_counter = 0;
@@ -236,9 +236,9 @@ fn explain_expression(expr: &str) -> String {
     };
 
     // Parse the resulting JSON
-    let root = match serde_json::from_str::<Durofut>(&root_json) {
+    let root = match Durofut::try_from_json(&root_json) {
         Ok(d) => d,
-        Err(e) => return format!("Failed to parse Durofut JSON: {e:?}"),
+        Err(e) => return format!("Failed to parse Durofut JSON: {e}"),
     };
 
     // Build in-memory node map from nested structure with generated IDs
