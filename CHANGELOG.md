@@ -1,6 +1,46 @@
 # Changelog
 
+All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
+
+## [0.2.3] - 2026-06-17
+
+Provider-line note: v0.2.3 stays in the `duroxide-pg` provider compatibility line started in v0.2.2, so the upgrade source is v0.2.2 (`sql/pg_durable--0.2.2--0.2.3.sql`).
+
+### Added
+
+- **Debian release packages:** AMD64 `.deb` packages for PostgreSQL 17 and 18, built and validated by the Package Release workflow on tagged releases (#190, #203).
+- **Public Docker images:** `ghcr.io/microsoft/pg_durable` images are published from the released `.deb` packages for PG 17 and 18. These images are for evaluating and learning pg_durable only - not for production (#218, #222, #223).
+
+### Changed
+
+- **duroxide provider schema:** fresh installs now use `_duroxide` as the duroxide-pg provider schema, while installations upgraded from earlier versions keep the legacy `duroxide` schema. The active schema is resolved at runtime via `df.duroxide_schema()`, so the change is transparent to existing deployments (#201).
+- **Default worker role:** the background worker's default role is now `postgres` instead of `azuresu` (#206).
+- **`df.break()` internals:** `df.break()` now carries its value as a typed `NodeError` instead of a JSON sentinel, with a compatibility fallback for envelopes written before #148 (#229).
+- **JSON conversion:** internal SQL-to-JSON value conversion now goes through `try_from_json()` for more robust error handling (#235).
+- **Dependencies:** bumped `reqwest` to 0.13 to match the lockfile (#237) and updated five crates in the cargo dependency group (#236). Added Dependabot for weekly cargo updates (#231).
+
+### Fixed
+
+- **Reliability audit:** fixed a set of correctness and safety bugs found during a reliability audit (#220):
+  - `df.if()` / `df.loop()` conditions whose SQL returns zero rows now correctly evaluate as false instead of true (previously the empty result envelope was treated as truthy).
+  - Graphs nested deeper than 256 levels are now rejected, preventing stack overflow from deeply nested operator chains.
+  - Graphs with more than 10,000 nodes are now rejected, preventing unbounded INSERT storms and out-of-memory conditions.
+  - Per-user SQL connections now have a 30-second connect timeout, so a stalled connection can no longer hold an execution slot indefinitely.
+- **Non-finite floats:** SQL columns containing `NaN` or `Infinity` now map to JSON `null` instead of failing the workflow (#144).
+- **Execution-history errors:** `df.instance_executions` now surfaces execution-history lookup failures instead of silently hiding them (#225, closes #168).
+
+### Security
+
+- **Docker/GHCR hardening:** hardened the published Docker image and the GHCR publish workflow, including least-privilege permissions and provenance/SBOM attestations on published images (#223).
+
+### Documentation
+
+- Clarified `df.http()` security scope versus SQL extension execution (#216).
+- Corrected stale identity-model documentation and examples (#219, #224).
+- Added the documentation website, refreshed the README, and standardized terminology to "durable functions" (#198, #204, #205, #207, #208, #211).
+- Referenced the `pg_durable.database` GUC instead of the `PGDATABASE` environment variable (#200).
 
 ## [0.2.2] - 2026-05-28
 
