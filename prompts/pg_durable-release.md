@@ -19,7 +19,7 @@ prompt therefore:
 > (static, reusable); the issue titled "Release vX.Y.Z" is the *state + audit
 > trail* for one release — a checklist of gates plus links (changelog PR, tag,
 > draft Release, GHCR run) and who approved tag/publish. Step 0 creates it from
-> the template in the appendix, and every step ends by ticking its box. Keep the
+> the checklist in that step, and every step ends by ticking its box. Keep the
 > issue to checkboxes + links; it must **not** re-narrate these instructions.
 
 > **Releases are cut from the head of `main`.** All release content (changelog,
@@ -51,18 +51,39 @@ Key consequences:
 
 ## Step 0: Open the tracking issue and decide the cut line
 
-Create (or reuse) the release tracking issue from the checklist template in the
-appendix — this is where you record progress for the rest of the workflow:
+Create (or reuse) the release tracking issue — this is where you record progress
+for the rest of the workflow. It is intentionally **state + links only** (the
+procedure lives in this prompt, not the issue):
 
 ```bash
-# Reuse an existing "Release vX.Y.Z" issue if one is already open; otherwise create it
+# Reuse an existing "Release vX.Y.Z" issue if one is already open
 gh issue list --search "Release vX.Y.Z in:title" --state open
+
+# Otherwise, write the checklist and open the issue (substitute X.Y.Z):
+cat > /tmp/release-vX.Y.Z-checklist.md <<'EOF'
+Tracking issue for the **vX.Y.Z** release. Procedure: `prompts/pg_durable-release.md`.
+
+**Cut line (PRs in this release):** _…_
+**Tag commit:** _<sha>_
+**Published by:** _…_
+
+- [ ] Cut line confirmed
+- [ ] Changelog merged (PR #…)
+- [ ] Version/upgrade-script sanity
+- [ ] CI green on tag commit (<sha>)
+- [ ] Tagged vX.Y.Z → draft Release (run #…, release: …)
+- [ ] Release published (approved by: …)
+- [ ] GHCR images confirmed (run #…)
+- [ ] Next-cycle PR opened (#…)
+EOF
 gh issue create --title "Release vX.Y.Z" --body-file /tmp/release-vX.Y.Z-checklist.md
 ```
 
 Then confirm which PRs are in vs. out. Anything not merged to `main` before
 tagging slips to the next version. Everything below assumes the release commit is
-on `main`. Record the cut line in the issue and tick **Cut line confirmed**.
+on `main`. Record the cut line in the issue and tick **Cut line confirmed**. Tick
+the remaining boxes as you go with `gh issue edit <n> --body-file …` (or in the
+UI); each step below names which box to check and what link to drop in.
 
 ## Step 1: Is the CHANGELOG up to date?  (do this first)
 
@@ -181,22 +202,29 @@ then publish. The release-body content already lives in the committed
 temp file — **do not** create or commit a separate `release-notes-*.md`.
 
 ```bash
-# Extract the "## [X.Y.Z]" block from CHANGELOG.md (stops at the next "## [" heading)
+# 1. Extract the "## [X.Y.Z]" block from CHANGELOG.md (stops at the next "## [" heading)
 awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes-X.Y.Z.md
 
-gh release edit vX.Y.Z \
-  --notes-file /tmp/notes-X.Y.Z.md \
-  --generate-notes        # appends GitHub's "What's Changed" + "New Contributors"
+# 2. Fetch GitHub's auto "What's Changed / New Contributors" via the API.
+#    `gh release edit` has NO --generate-notes flag (only `gh release create`
+#    does), so generate the block separately and concatenate it.
+gh api repos/microsoft/pg_durable/releases/generate-notes \
+  -f tag_name=vX.Y.Z --jq '.body' > /tmp/auto-notes-X.Y.Z.md
+
+# 3. Combine curated changelog + auto notes, then set the release body
+cat /tmp/notes-X.Y.Z.md /tmp/auto-notes-X.Y.Z.md > /tmp/release-body-X.Y.Z.md
+gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
 ```
 
-- The temp file is transient (e.g. under `/tmp`); it is **not** part of any PR
-  and the Package Release workflow never reads it. The single source of truth is
-  the committed `CHANGELOG.md`.
+- The temp files are transient (e.g. under `/tmp`); they are **not** part of any
+  PR and the Package Release workflow never reads them. The single source of
+  truth for curated content is the committed `CHANGELOG.md`.
 - `--notes-file` sets **only the GitHub Release body** — it does not touch
   `CHANGELOG.md`. The curated text comes from the changelog you already merged.
-- `--generate-notes` appends the auto "What's Changed / **New Contributors**"
-  block computed from the tag range. Keep that list in the **Release**, not in
-  `CHANGELOG.md` (Keep a Changelog groups by change type, not by people).
+- The `releases/generate-notes` API returns GitHub's "What's Changed / **New
+  Contributors**" block for the tag range. Keep that list in the **Release**, not
+  in `CHANGELOG.md` (Keep a Changelog groups by change type, not by people). If
+  the tag isn't pushed yet, the API can't compute it — run this after Step 4.
 
 Review the draft in the GitHub UI, confirm the `.deb`/source assets are attached
 and ordered sensibly, then **Publish** (ask the user before publishing). For a
@@ -250,41 +278,6 @@ Do **not** perform these without explicit user confirmation, and never use
 - Pushing images / deploying
 
 ---
-
-## Appendix: release tracking issue template
-
-Create the Step 0 issue from this checklist. It is intentionally **state + links
-only** — the procedure lives in this prompt, not the issue. Write it out (with
-`X.Y.Z` substituted) and pass it to `gh issue create --body-file`:
-
-```markdown
-Tracking issue for the **vX.Y.Z** release. Procedure: `prompts/pg_durable-release.md`.
-
-**Cut line (PRs in this release):** _…_
-**Tag commit:** _<sha>_
-**Published by:** _…_
-
-- [ ] Cut line confirmed
-- [ ] Changelog merged (PR #…)
-- [ ] Version/upgrade-script sanity
-- [ ] CI green on tag commit (<sha>)
-- [ ] Tagged vX.Y.Z → draft Release (run #…, release: …)
-- [ ] Release published (approved by: …)
-- [ ] GHCR images confirmed (run #…)
-- [ ] Next-cycle PR opened (#…)
-```
-
-Generate it and open the issue in one go:
-
-```bash
-cat > /tmp/release-vX.Y.Z-checklist.md <<'EOF'
-# (paste the template above, substituting X.Y.Z)
-EOF
-gh issue create --title "Release vX.Y.Z" --body-file /tmp/release-vX.Y.Z-checklist.md
-```
-
-Tick boxes as you go with `gh issue edit <n> --body-file …` (or just edit in the
-UI). Each step above tells you which box to check and what link to drop in.
 
 ## Appendix: optional pre-publish container check
 
