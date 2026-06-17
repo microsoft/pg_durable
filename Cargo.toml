@@ -1,6 +1,6 @@
 [package]
 name = "pg_durable"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "PostgreSQL"
 repository = "https://github.com/microsoft/pg_durable"
