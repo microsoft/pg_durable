@@ -11,6 +11,8 @@
 #   --keep                    Leave PostgreSQL running after tests for investigation
 #   --clean                   Start with a fresh database cluster
 #   --verbose, -v             Show NOTICE messages and full test output
+#   --include-generated       Also run the Phase 2 generated matrix (tests/e2e/generated/sql)
+#   --include-generated-quarantine  Also run the quarantined matrix (known-failing; tests/e2e/generated/quarantine)
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
 #   --default-build-phases    Run all phases that share the standard build artifact
 #   --http-disabled           Run only the HTTP-disabled (no http Cargo feature) phase
@@ -35,10 +37,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
+GENERATED_SQL_DIR="$PROJECT_DIR/tests/e2e/generated/sql"
+QUARANTINE_SQL_DIR="$PROJECT_DIR/tests/e2e/generated/quarantine"
 
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
+INCLUDE_GENERATED=false
+INCLUDE_QUARANTINE=false
 TEST_FILTER=""
 REPEAT_COUNT=1
 PG_VERSION="17"
@@ -194,6 +200,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verbose|-v)
             VERBOSE=true
+            shift
+            ;;
+        --include-generated)
+            INCLUDE_GENERATED=true
+            shift
+            ;;
+        --include-generated-quarantine)
+            INCLUDE_QUARANTINE=true
             shift
             ;;
         --pg-version)
@@ -438,6 +452,14 @@ configure_phase() {
     # Clear stale ALTER SYSTEM overrides from prior phases/runs.
     : > "$DATA_DIR/postgresql.auto.conf"
     set_conf_line "port" "$PG_PORT"
+    # Pin the socket dir to this cluster's own data dir (writable, and isolated
+    # from other processes). A fresh `initdb` (via --clean) must not inherit a
+    # packager default like /var/run/postgresql that the test user cannot write
+    # to, and a per-cluster dir avoids colliding on a world-writable /tmp socket
+    # with concurrent runs. Clients connect over TCP (-h localhost) regardless,
+    # and $DATA_DIR lives under $HOME/.pgrx so the socket path stays well within
+    # the ~107-char sun_path limit.
+    set_conf_line "unix_socket_directories" "'$DATA_DIR'"
     clear_connlimit_gucs
 
     case "$phase" in
@@ -567,6 +589,37 @@ prepare_phase() {
     esac
 }
 
+# Append every *.sql in $1 to MATCHED_TESTS, honoring TEST_FILTER and skipping
+# non-files. $2 is the CLI flag that requested the dir and $3 a human label;
+# both appear only in the "nothing generated yet" error, which points the user
+# at the generator command. Errors out if the flag was set but the dir is empty.
+collect_sql_from_dir() {
+    local dir="$1"
+    local flag="$2"
+    local label="$3"
+    local test_file
+    local test_name
+
+    if ! compgen -G "$dir/*.sql" >/dev/null; then
+        echo "Error: $flag was set but no $label tests exist in"
+        echo "  $dir"
+        echo "Generate them first:"
+        echo "  cargo run --manifest-path tests/e2e/generated/generator/Cargo.toml"
+        exit 1
+    fi
+
+    for test_file in "$dir"/*.sql; do
+        [ -f "$test_file" ] || continue
+        test_name=$(basename "$test_file" .sql)
+
+        if [ -n "$TEST_FILTER" ] && [[ "$test_name" != *"$TEST_FILTER"* ]]; then
+            continue
+        fi
+
+        MATCHED_TESTS+=("$test_file")
+    done
+}
+
 collect_matched_tests() {
     local test_file
     local test_name
@@ -587,6 +640,14 @@ collect_matched_tests() {
 
         MATCHED_TESTS+=("$test_file")
     done
+
+    if [ "$INCLUDE_GENERATED" = true ]; then
+        collect_sql_from_dir "$GENERATED_SQL_DIR" "--include-generated" "generated"
+    fi
+
+    if [ "$INCLUDE_QUARANTINE" = true ]; then
+        collect_sql_from_dir "$QUARANTINE_SQL_DIR" "--include-generated-quarantine" "quarantined"
+    fi
 
     if [ "${#MATCHED_TESTS[@]}" -eq 0 ]; then
         echo "Error: no E2E tests matched the current selection"

@@ -365,6 +365,11 @@ pub fn instance_nodes(
     let provider_schema = backend_duroxide_schema();
 
     // Get node definitions from PostgreSQL (including status, result and updated_at)
+    //
+    // Projection note: columns 1–7 match `crate::db::NodeSnapshot` (the canonical
+    // base projection); this query intentionally adds `result::text` and
+    // `updated_at` (columns 8–9). Keep the positional reads in sync with
+    // `crate::db::load_node_snapshots` when the `df.nodes` column order changes.
     let node_defs: Vec<(
         String,
         String,

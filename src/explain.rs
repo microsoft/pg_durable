@@ -299,6 +299,11 @@ fn collect_nodes(
 }
 
 /// Load nodes from a table into a HashMap
+///
+/// Projection note: columns 1–7 match [`crate::db::NodeSnapshot`] (the canonical
+/// base projection); this loader intentionally adds `result::text` (column 8).
+/// Keep the positional reads in sync with `crate::db::load_node_snapshots` when
+/// the `df.nodes` column order changes.
 fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<String, ExplainNode> {
     // Note: table name is always a hardcoded value ("df.nodes") from internal callers,
     // so it is safe to interpolate. Only instance_id is parameterized.

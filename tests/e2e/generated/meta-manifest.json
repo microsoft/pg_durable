@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "generator": "pg_durable_matrix_gen",
+  "kind": "metamorphic",
+  "relation_count": 7,
+  "relations": [
+    {
+      "id": "meta-0001",
+      "name": "seq-assoc",
+      "rationale": "Sequence is associative: re-grouping nested seq does not change the order or the set of side effects.",
+      "dsl_a": "df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0001-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0001-a' AND node_path = 'a'), clock_timestamp())$mk$), df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0001-a', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0001-a' AND node_path = 'b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0001-a', 'c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0001-a' AND node_path = 'c'), clock_timestamp())$mk$)))",
+      "dsl_b": "df.seq(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0001-b', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0001-b' AND node_path = 'a'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0001-b', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0001-b' AND node_path = 'b'), clock_timestamp())$mk$)), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0001-b', 'c', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0001-b' AND node_path = 'c'), clock_timestamp())$mk$))",
+      "expected": {
+        "a": 1,
+        "b": 1,
+        "c": 1
+      }
+    },
+    {
+      "id": "meta-0002",
+      "name": "if-true",
+      "rationale": "A constant-true if reduces to its then-branch; the else-branch never runs.",
+      "dsl_a": "df.if($c$SELECT true$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0002-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0002-a' AND node_path = 'a'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0002-a', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0002-a' AND node_path = 'b'), clock_timestamp())$mk$))",
+      "dsl_b": "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0002-b', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0002-b' AND node_path = 'a'), clock_timestamp())$mk$)",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "meta-0003",
+      "name": "if-false",
+      "rationale": "A constant-false if reduces to its else-branch; the then-branch never runs.",
+      "dsl_a": "df.if($c$SELECT false$c$, df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0003-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0003-a' AND node_path = 'a'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0003-a', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0003-a' AND node_path = 'b'), clock_timestamp())$mk$))",
+      "dsl_b": "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0003-b', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0003-b' AND node_path = 'b'), clock_timestamp())$mk$)",
+      "expected": {
+        "b": 1
+      }
+    },
+    {
+      "id": "meta-0004",
+      "name": "join-comm",
+      "rationale": "Parallel join is commutative: swapping branches yields the same multiset of side effects.",
+      "dsl_a": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0004-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0004-a' AND node_path = 'a'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0004-a', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0004-a' AND node_path = 'b'), clock_timestamp())$mk$))",
+      "dsl_b": "df.join(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0004-b', 'b', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0004-b' AND node_path = 'b'), clock_timestamp())$mk$), df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0004-b', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0004-b' AND node_path = 'a'), clock_timestamp())$mk$))",
+      "expected": {
+        "a": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "meta-0005",
+      "name": "race-winner",
+      "rationale": "A race whose only other branch is a long sleep reduces to its deterministic winner.",
+      "dsl_a": "df.race(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0005-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0005-a' AND node_path = 'a'), clock_timestamp())$mk$), df.sleep(30))",
+      "dsl_b": "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0005-b', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0005-b' AND node_path = 'a'), clock_timestamp())$mk$)",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "meta-0006",
+      "name": "do-while-once",
+      "rationale": "A do-while loop whose condition is already false after the first body run reduces to its body.",
+      "dsl_a": "df.loop(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0006-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0006-a' AND node_path = 'a'), clock_timestamp())$mk$), $c$SELECT COUNT(*) < 1 FROM df_gen_trace WHERE shape_id = 'meta-0006-a' AND node_path = 'a'$c$)",
+      "dsl_b": "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0006-b', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0006-b' AND node_path = 'a'), clock_timestamp())$mk$)",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "meta-0007",
+      "name": "loop-break-once",
+      "rationale": "A loop that breaks immediately after its first body run reduces to its body.",
+      "dsl_a": "df.loop(df.seq(df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0007-a', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0007-a' AND node_path = 'a'), clock_timestamp())$mk$), df.if($c$SELECT (SELECT COUNT(*) FROM df_gen_trace WHERE shape_id = 'meta-0007-a' AND node_path = 'a') >= 1$c$, df.break(), $c$SELECT 1$c$)), $c$SELECT true$c$)",
+      "dsl_b": "df.sql($mk$INSERT INTO df_gen_trace (shape_id, node_path, iteration, wall_clock) VALUES ('meta-0007-b', 'a', (SELECT COALESCE(MAX(iteration), 0) + 1 FROM df_gen_trace WHERE shape_id = 'meta-0007-b' AND node_path = 'a'), clock_timestamp())$mk$)",
+      "expected": {
+        "a": 1
+      }
+    }
+  ]
+}

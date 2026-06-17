@@ -1,0 +1,26 @@
+# Standalone matrix generator for the Phase 2 combinator-nesting test suite (#232).
+# Deliberately carries an empty [workspace] table so cargo treats this directory as
+# its own workspace root and does NOT fold it into the parent pg_durable extension
+# build. It is std-only (no dependencies, hand-rolled JSON) so it stays fast and has
+# no bearing on the extension's dependency graph.
+[package]
+name = "pg_durable_matrix_gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "PostgreSQL"
+
+[[bin]]
+name = "pg_durable_matrix_gen"
+path = "src/main.rs"
+
+# Phase 3 (#232): proptest drives the recursive random-tree property suite in
+# src/prop.rs. It is a DEV-dependency ONLY, so it compiles solely under
+# `cargo test` — the generation binary (`cargo run`/`cargo build`) and the
+# `--check` determinism gate stay dependency-free and the committed goldens
+# (manifest.json / meta-manifest.json) remain byte-identical.
+[dev-dependencies]
+proptest = "1"
+
+# Empty workspace table: isolates this crate from the parent extension workspace.
+[workspace]
