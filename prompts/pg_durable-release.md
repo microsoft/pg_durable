@@ -1,547 +1,326 @@
 # Release Workflow
 
 ## Objective
-Prepare and release a new version of pg_durable with quality checks, documentation updates, and optional Docker deployment.
 
-## Step 1: Check for Dependency Updates
+Guide an AI agent or a human through releasing a new version of `pg_durable`. By
+the time you reach the tagging step, the code is already merged and tested on
+`main` — releasing is mostly **verification + publishing**, not testing. This
+prompt therefore:
 
-### 1.1 Check duroxide Dependencies
+1. Makes sure the **CHANGELOG is up to date** for the version being released
+   (this is the first thing to check, and it may itself require a PR).
+2. Confirms the version/upgrade-script metadata is consistent.
+3. Confirms the relevant CI workflows already **succeeded on the commit** being
+   tagged (no fresh test runs required at tag time).
+4. Drives the **tag → draft GitHub Release → publish → GHCR image** automation.
+5. Opens the **next-development-cycle** PR.
 
-The project uses these duroxide dependencies from `Cargo.toml`:
-- `duroxide` (crates.io version)
-- `duroxide-pg` (crates.io version)
+> **This prompt owns a per-release tracking issue.** The prompt is the *procedure*
+> (static, reusable); the issue titled "Release vX.Y.Z" is the *state + audit
+> trail* for one release — a checklist of gates plus links (changelog PR, tag,
+> draft Release, GHCR run) and who approved tag/publish. Step 0 creates it from
+> the template in the appendix, and every step ends by ticking its box. Keep the
+> issue to checkboxes + links; it must **not** re-narrate these instructions.
 
-**Check for new duroxide version:**
+> **Releases are cut from the head of `main`.** All release content (changelog,
+> version bump, upgrade script, doc updates) lands via PRs merged to `main`
+> first; the `vX.Y.Z` tag is then placed on the tip of `main`. This prompt assumes
+> you are operating on an up-to-date `main` (`git checkout main && git pull`),
+> not a feature branch.
+
+## The release automation (mental model)
+
+Most of the heavy lifting is already wired into GitHub Actions. Know what fires
+when, so you only do by hand what isn't automated:
+
+| Trigger | Workflow | What it does |
+|---------|----------|--------------|
+| Push tag `v*` | **Package Release** (`.github/workflows/package-release.yml`) | Builds + validates the AMD64 `.deb` for PG 17 and 18, then **creates a *draft* GitHub Release** for the tag and attaches the `.deb` / source tarballs / `SHA256SUMS`. |
+| Release **published** | **Docker Publish** (`.github/workflows/docker-publish.yml`) | Builds `ghcr.io/microsoft/pg_durable` from the released `.deb` (PG 17 + 18, amd64) and pushes the immutable `X.Y.Z-pg<major>` tags plus floating `pg<major>`/`latest` when it's the highest stable release. **The `.deb` assets must already be attached before this runs.** |
+| Pull request | **CI** (`.github/workflows/ci.yml`), **Package Release** (PR validation), **Upgrade tests** | fmt/clippy, unit + E2E, `.deb` build validation, and `scripts/test-upgrade.sh`. |
+
+Key consequences:
+
+- **Tagging is the action that builds the draft Release** — you don't create it
+  by hand. You fill in its notes and click **Publish**.
+- **Publishing is a manual gate.** Until you publish, nothing has reached GHCR
+  and no consumer has seen the release, so a botched tag is still recoverable
+  (see "If the tag run fails").
+- **No testing happens at tag time.** Verify the checks were already green on the
+  commit you are tagging.
+
+## Step 0: Open the tracking issue and decide the cut line
+
+Create (or reuse) the release tracking issue from the checklist template in the
+appendix — this is where you record progress for the rest of the workflow:
+
 ```bash
-# Check current version in Cargo.toml
-grep "duroxide" Cargo.toml
-
-# Check latest version on crates.io
-cargo search duroxide --limit 5
+# Reuse an existing "Release vX.Y.Z" issue if one is already open; otherwise create it
+gh issue list --search "Release vX.Y.Z in:title" --state open
+gh issue create --title "Release vX.Y.Z" --body-file /tmp/release-vX.Y.Z-checklist.md
 ```
 
-**Check for new duroxide-pg version:**
+Then confirm which PRs are in vs. out. Anything not merged to `main` before
+tagging slips to the next version. Everything below assumes the release commit is
+on `main`. Record the cut line in the issue and tick **Cut line confirmed**.
+
+## Step 1: Is the CHANGELOG up to date?  (do this first)
+
+The changelog is curated prose, not a generated commit dump, so it is authored
+here (by the agent or human) and lands via a PR — it is **not** automated.
+
+1. Read the version in `Cargo.toml` (e.g. `0.2.3`).
+2. Open `CHANGELOG.md` and check for a complete `## [X.Y.Z]` section for that
+   version, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+   (grouped Added / Changed / Fixed / Security / Documentation, plus a Breaking
+   Changes callout when relevant).
+3. **If the section is missing or empty**, draft it:
+   ```bash
+   # Merged, user-facing changes since the previous tag
+   git log --oneline --no-merges vX.Y.<prev>..main
+   # Resolve a squashed commit to its PR when the number isn't in the subject
+   gh api repos/microsoft/pg_durable/commits/<sha>/pulls --jq '.[].number'
+   ```
+   Curate into user-facing entries with PR references. **Exclude** pure CI/infra
+   noise (e.g. adding a linter, Dependabot config) — that lives in git history,
+   not the changelog. Verify dependency lines against `Cargo.toml` (don't claim a
+   `duroxide`/`duroxide-pg` bump that didn't happen).
+4. Open a PR with the changelog (and any docs sweep from Step 2), get it merged
+   to `main`. **Do not tag until the changelog for the release is on `main`.**
+
+> **Update the tracking issue:** link the changelog PR and tick **Changelog
+> merged** once it lands on `main`.
+
+> Dependency updates (`duroxide`/`duroxide-pg`, etc.) and doc updates belong in
+> normal PRs merged before the release — not in the tagging step. If a dependency
+> bump is still wanted, do it as its own PR first, then reflect it in the
+> changelog (see the dependency-update appendix).
+
+## Step 2: Version & upgrade-script sanity
+
+Confirm these are consistent on the release commit:
+
+- `Cargo.toml` `version = "X.Y.Z"` matches the tag you intend to push.
+- `pg_durable.control` is consistent.
+- The upgrade script `sql/pg_durable--<prev>--X.Y.Z.sql` exists (even if it only
+  carries the license header + upgrade stub).
+- Any version-stamped `expected/` fixtures are consistent.
+
+> **Update the tracking issue:** tick **Version/upgrade-script sanity**.
+
+## Step 3: Confirm CI is green on the release commit
+
+No new local test runs are required at tag time — just confirm the automation
+already passed on the exact commit you're about to tag:
+
 ```bash
-# Check latest version on crates.io
+# Checks on the tip of main (the commit you'll tag)
+gh pr checks <last-release-PR>           # or:
+gh run list --branch main --limit 10
+```
+
+Confirm green: **CI** (fmt/clippy, unit, E2E), **Package Release** PR validation
+(the `.deb` builds), and **Upgrade tests** (`scripts/test-upgrade.sh` — Scenario
+A == fresh schema, B1 new `.so` vs all previous schemas in the provider line, B2
+chain). Only if something looks stale should you re-run locally:
+
+```bash
+cargo fmt -p pg_durable -- --check
+cargo clippy --features pg17
+./scripts/test-unit.sh
+./scripts/test-e2e-local.sh
+./scripts/test-upgrade.sh
+```
+
+> **Update the tracking issue:** record the tag-candidate `<sha>` and tick **CI
+> green on tag commit**.
+
+## Step 4: Tag the release (builds the draft Release)
+
+With the changelog merged and checks green, create and push the annotated tag.
+**Ask the user before pushing the tag.**
+
+```bash
+git checkout main && git pull origin main
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Pushing the tag triggers **Package Release**, which builds/validates the PG 17 +
+PG 18 `.deb` packages and then **creates a draft GitHub Release** with the assets
+attached. Watch it:
+
+```bash
+gh run watch "$(gh run list --workflow package-release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+> **Update the tracking issue:** link the Package Release run and the draft
+> Release, and tick **Tagged → draft Release**.
+
+### If the tag run fails
+
+- **Failure before the final `release` job** (the common case — a `.deb` build or
+  validation error): the draft Release is **not** created. Fix forward on `main`,
+  then **move the tag** to the new commit (safe while unpublished):
+  ```bash
+  git tag -f vX.Y.Z <new-commit>
+  git push -f origin vX.Y.Z
+  ```
+  Re-running reuses an existing draft if one was created and just refreshes the
+  assets (`--clobber`).
+- **Rule:** moving a `v*` tag is only acceptable while the Release is still an
+  unpublished draft. Once published, treat the tag as immutable and ship the next
+  patch instead.
+
+## Step 5: Fill release notes and publish
+
+The Package Release run creates the draft with placeholder notes. Replace them
+with the curated changelog **plus** GitHub's auto-generated contributor section,
+then publish. The release-body content already lives in the committed
+`CHANGELOG.md`, so extract this version's section on the fly into a throwaway
+temp file — **do not** create or commit a separate `release-notes-*.md`.
+
+```bash
+# Extract the "## [X.Y.Z]" block from CHANGELOG.md (stops at the next "## [" heading)
+awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes-X.Y.Z.md
+
+gh release edit vX.Y.Z \
+  --notes-file /tmp/notes-X.Y.Z.md \
+  --generate-notes        # appends GitHub's "What's Changed" + "New Contributors"
+```
+
+- The temp file is transient (e.g. under `/tmp`); it is **not** part of any PR
+  and the Package Release workflow never reads it. The single source of truth is
+  the committed `CHANGELOG.md`.
+- `--notes-file` sets **only the GitHub Release body** — it does not touch
+  `CHANGELOG.md`. The curated text comes from the changelog you already merged.
+- `--generate-notes` appends the auto "What's Changed / **New Contributors**"
+  block computed from the tag range. Keep that list in the **Release**, not in
+  `CHANGELOG.md` (Keep a Changelog groups by change type, not by people).
+
+Review the draft in the GitHub UI, confirm the `.deb`/source assets are attached
+and ordered sensibly, then **Publish** (ask the user before publishing). For a
+pre-release (e.g. `vX.Y.Z-rc1`), mark it as a pre-release so floating image tags
+don't move.
+
+> **Update the tracking issue:** tick **Release published** and record who
+> approved publishing (the audit point that matters most).
+
+## Step 6: Confirm GHCR images
+
+Publishing the Release triggers **Docker Publish**. Confirm it pushed the image
+tags:
+
+```bash
+gh run list --workflow docker-publish.yml --limit 1
+```
+
+Verify the tags at
+<https://github.com/microsoft/pg_durable/pkgs/container/pg_durable>: immutable
+`X.Y.Z-pg17` / `X.Y.Z-pg18`, and floating `pg17`/`pg18`/`latest` if this is the
+highest stable release. To verify before publishing, you can dispatch Docker
+Publish manually with `ref=vX.Y.Z`, `dry_run=true` (builds + smoke-tests, pushes
+nothing).
+
+> **Update the tracking issue:** link the Docker Publish run and tick **GHCR
+> images confirmed**.
+
+## Step 7: Open the next development cycle
+
+After the Release is published, open a PR to start the next cycle:
+
+- Bump `Cargo.toml` `X.Y.Z` → `X.Y.(Z+1)` and refresh `Cargo.lock`.
+- Create an **empty** upgrade script `sql/pg_durable--X.Y.Z--X.Y.(Z+1).sql`
+  (license header + upgrade-comment stub, no DDL yet).
+- Optionally add a `## [X.Y.(Z+1)] - Unreleased` placeholder to `CHANGELOG.md`.
+- Update `docs/upgrade-testing.md` "Version-Specific Changes" if its convention
+  expects a new entry.
+
+> **Update the tracking issue:** link the next-cycle PR, tick **Next-cycle PR
+> opened**, and **close the issue** once every box is checked.
+
+## ⚠️ Git operations require user approval
+
+Do **not** perform these without explicit user confirmation, and never use
+`--no-verify`:
+
+- Committing or merging to `main`
+- Pushing commits or tags (including moving a tag with `-f`)
+- Publishing the GitHub Release
+- Pushing images / deploying
+
+---
+
+## Appendix: release tracking issue template
+
+Create the Step 0 issue from this checklist. It is intentionally **state + links
+only** — the procedure lives in this prompt, not the issue. Write it out (with
+`X.Y.Z` substituted) and pass it to `gh issue create --body-file`:
+
+```markdown
+Tracking issue for the **vX.Y.Z** release. Procedure: `prompts/pg_durable-release.md`.
+
+**Cut line (PRs in this release):** _…_
+**Tag commit:** _<sha>_
+**Published by:** _…_
+
+- [ ] Cut line confirmed
+- [ ] Changelog merged (PR #…)
+- [ ] Version/upgrade-script sanity
+- [ ] CI green on tag commit (<sha>)
+- [ ] Tagged vX.Y.Z → draft Release (run #…, release: …)
+- [ ] Release published (approved by: …)
+- [ ] GHCR images confirmed (run #…)
+- [ ] Next-cycle PR opened (#…)
+```
+
+Generate it and open the issue in one go:
+
+```bash
+cat > /tmp/release-vX.Y.Z-checklist.md <<'EOF'
+# (paste the template above, substituting X.Y.Z)
+EOF
+gh issue create --title "Release vX.Y.Z" --body-file /tmp/release-vX.Y.Z-checklist.md
+```
+
+Tick boxes as you go with `gh issue edit <n> --body-file …` (or just edit in the
+UI). Each step above tells you which box to check and what link to drop in.
+
+## Appendix: optional pre-publish container check
+
+The release `.deb` and GHCR images are validated by CI and the Docker Publish
+smoke test, so a local Docker run is optional. If you want an extra check before
+publishing:
+
+```bash
+./scripts/test-e2e-docker.sh --rebuild
+```
+
+## Appendix: dependency-update reference
+
+Use these when a dependency bump is part of the pre-release PRs (Step 1's note),
+not at tag time. Treat `duroxide` and `duroxide-pg` as a **compatible pair** —
+check the `duroxide-pg` release notes/compatibility matrix before bumping either.
+
+```bash
+# Current pinned versions
+grep -E '^(duroxide|duroxide-pg)' Cargo.toml
+
+# Latest published versions
+cargo search duroxide --limit 5
 cargo search duroxide-pg --limit 5
 ```
 
-Before proposing a `duroxide-pg` update, check its release notes or compatibility matrix to determine whether the `duroxide` crate must also be updated. Treat the two versions as a compatible pair, not independent choices.
+After updating the version(s) in `Cargo.toml`, refresh `Cargo.lock`:
 
-### 1.2 Ask User About Updates
-
-If new versions are available, present them to the user:
-
-```
-📦 Dependency Update Check:
-
-Current versions:
-  - duroxide: 0.1.6
-  - duroxide-pg: v0.1.1
-
-New versions available:
-  - duroxide: [new_version] ✨
-  - duroxide-pg: [new_version] ✨
-
-Would you like to update to the new versions? (y/n)
-```
-
-**If user approves updates:**
-
-Update the dependency versions in `Cargo.toml`:
-```toml
-# duroxide = "NEW_VERSION"
-# duroxide-pg = "NEW_VERSION"
-```
-
-Then refresh `Cargo.lock`:
 ```bash
 # If only duroxide-pg changed:
 cargo update -p duroxide-pg
-
 # If both changed:
 cargo update -p duroxide -p duroxide-pg
 ```
 
-## Step 2: Update Package Version (if releasing)
-
-### 2.1 Ask User About Version Bump
-
-If this is a release (not just a dependency update), ask:
-
-```
-📦 Version Update:
-
-Current version in Cargo.toml: X.Y.Z
-
-Would you like to bump the version? (y/n)
-  1. Patch bump (X.Y.Z → X.Y.Z+1) - for bug fixes, dependency updates
-  2. Minor bump (X.Y.Z → X.Y+1.0) - for new features
-  3. Major bump (X.Y.Z → X+1.0.0) - for breaking changes
-  4. Custom version
-  5. Skip version bump
-```
-
-### 2.2 Update Cargo.toml Version
-
-If user approves, update the version in `Cargo.toml`:
-```toml
-[package]
-name = "pg_durable"
-version = "NEW_VERSION"
-```
-
-## Step 3: Build and Clean Warnings
-
-### 3.1 Build the Extension
-```bash
-cargo build --features pg17
-```
-
-- Check for compilation errors
-- Note any new warnings
-
-### 3.2 Run Clippy
-```bash
-cargo clippy --features pg17 -- -W clippy::all
-```
-
-- Address all clippy warnings
-- Do NOT silence warnings with `#[allow(...)]` without understanding them
-
-### 3.3 Fix Warnings
-
-Follow the guidance in `@pg_durable-clean-warnings.md`:
-
-**❌ DO NOT:**
-- Add `#[allow(unused)]` without understanding why
-- Prefix with `_` just to silence warnings
-- Remove code that's part of public API
-
-**✅ DO:**
-- Investigate why code is unused
-- Check if it's used in feature gates or tests
-- Delete genuinely unused code
-- Use `_name` for trait-required but unused parameters
-
-### 3.4 Format Code
-```bash
-cargo fmt
-```
-
-### 3.5 Verify Clean Build
-```bash
-# Should produce no warnings
-cargo build --features pg17 2>&1 | grep -c "warning:" || echo "0 warnings"
-cargo clippy --features pg17 2>&1 | grep -c "warning:" || echo "0 warnings"
-```
-
-## Step 4: Update Documentation and Tests
-
-Follow `@pg_durable-update-docs-tests.md` for comprehensive documentation updates.
-
-### 4.1 Scan Changes
-```bash
-# See what changed since last release
-git log --oneline main..HEAD
-
-# Or if on main, see recent changes
-git log --oneline -20
-
-# See detailed diff
-git diff --stat HEAD~10..HEAD
-```
-
-### 4.2 Update Documentation
-
-Check and update as needed:
-- **USER_GUIDE.md** - Main user documentation
-- **README.md** - Project overview
-- **docs/api-reference.md** - API documentation
-
-### 4.3 Propose New Tests
-
-For each significant change, propose tests:
-- New DSL functions → E2E tests in `tests/e2e/sql/`
-- New operators → E2E tests with both variants
-- Bug fixes → Regression tests
-
-**Ask user before implementing tests:**
-```
-📋 Proposed Tests:
-
-Based on changes found, I recommend adding these tests:
-1. [Test description] - tests/e2e/sql/NN_name.sql
-2. [Test description] - tests/e2e/sql/NN_name.sql
-
-Would you like me to implement these tests? (y/n/select numbers)
-```
-
-## Step 5: Run Tests
-
-### 5.1 Unit Tests
-```bash
-./scripts/test-unit.sh
-```
-
-Expected output: All pgrx tests pass.
-
-### 5.2 Local E2E Tests
-```bash
-./scripts/test-e2e-local.sh
-```
-
-Expected output: All SQL tests show `TEST PASSED`.
-
-### 5.3 Handle Test Failures
-
-If tests fail:
-1. Review the error output
-2. Check `~/.pgrx/17.log` for background worker logs
-3. Fix issues and re-run
-4. Do NOT proceed to Docker/release until all tests pass
-
-## Step 6: Docker Testing (Optional)
-
-### 6.1 Ask User
-```
-✅ All local tests passed!
-
-Would you like to build and test the Docker container? (y/n)
-  - This will build a fresh Docker image with the extension
-  - Run E2E tests inside the container
-  - Useful for verifying the release will work in production
-```
-
-### 6.2 Build and Test Docker
-```bash
-# Build and run E2E tests in Docker
-./scripts/test-e2e-docker.sh --rebuild
-```
-
-This will:
-- Build a new Docker image with pg_durable
-- Start a container with PostgreSQL
-- Run all E2E tests
-- Report results
-
-### 6.3 Handle Docker Test Failures
-
-If Docker tests fail but local tests passed:
-- Check for environment differences
-- Review Docker logs: `docker logs <container_id>`
-- Ensure all dependencies are properly included
-
-## Step 7: Deploy to ACR (Optional)
-
-### 7.1 Ask User
-```
-✅ Docker tests passed!
-
-Would you like to push the image to Azure Container Registry? (y/n)
-  - Registry: ${ACR_REGISTRY:-myregistry.azurecr.io}
-  - Image: ${ACR_IMAGE:-pg_durable}
-  
-Options:
-  1. Push as :latest only
-  2. Push as :latest AND with a version tag (e.g., :v0.1.0)
-  3. Push with version tag only (specify tag)
-  4. Skip
-```
-
-If user selects option 2 or 3, ask for the version tag:
-```
-Enter version tag (e.g., v0.1.6): 
-```
-
-### 7.2 Login to ACR (if needed)
-```bash
-# Check if already logged in
-docker pull ${ACR_REGISTRY:-myregistry.azurecr.io}/${ACR_IMAGE:-pg_durable}:latest 2>/dev/null && echo "Already logged in" || az acr login --name ${ACR_REGISTRY%%.*}
-```
-
-### 7.3 Deploy
-```bash
-# Push as latest
-./scripts/deploy-acr.sh
-
-# Or with a specific tag
-./scripts/deploy-acr.sh --tag v0.1.0
-
-# Force rebuild before push
-./scripts/deploy-acr.sh --rebuild --tag v0.1.0
-```
-
-### 7.4 Verify Deployment
-```bash
-# List images in registry
-az acr repository show-tags --name ${ACR_REGISTRY%%.*} --repository ${ACR_IMAGE:-pg_durable} --output table
-```
-
-## Step 7b: Publish the Public Image to GHCR
-
-The `Docker Publish` workflow (`.github/workflows/docker-publish.yml`) builds the
-public `ghcr.io/microsoft/pg_durable` image by installing the released `.deb`
-on top of the official `postgres` image (PG 17 and 18, `linux/amd64`). It runs
-automatically when a GitHub release is **published**, and can also be triggered
-manually for re-runs or backfills.
-
-> The matching `.deb` assets must already be attached to the GitHub release
-> before this workflow runs.
-
-### Automatic (release event)
-
-Publishing a GitHub release triggers the workflow with no inputs. It pushes the
-immutable `X.Y.Z-pg<major>` / `vX.Y.Z-pg<major>` tags, and moves the floating
-`pg<major>` (and `latest` for PG 17) tags only if the release is the highest
-stable version.
-
-### Manual (`workflow_dispatch`) inputs
-
-| Input | Default | When to set it |
-|-------|---------|----------------|
-| `ref` | *(required)* | The release tag to publish, e.g. `v0.2.2`. |
-| `dry_run` | `true` | Leave `true` to build + smoke-test without pushing. Set `false` to actually publish. |
-| `overwrite` | `false` | Set `true` only to deliberately replace an already-published immutable `X.Y.Z-pg<major>` tag. Floating tags (`pg<major>`, `latest`) always move regardless. |
-
-Typical flows:
-
-- **Verify only:** dispatch with `ref=vX.Y.Z`, `dry_run=true` (default) — builds and runs the end-to-end smoke test, pushes nothing.
-- **Publish:** dispatch with `ref=vX.Y.Z`, `dry_run=false`.
-- **Re-publish a botched immutable tag:** `ref=vX.Y.Z`, `dry_run=false`, `overwrite=true`.
-
-### Verify
-
-Confirm the new tags at
-<https://github.com/microsoft/pg_durable/pkgs/container/pg_durable>.
-
-## Step 8: Review, Commit, and Push
-
-### 8.1 Review All Changes
-
-Present changes to the user for review:
-```bash
-git status
-git diff --stat
-```
-
-**Ask user to review:**
-```
-📋 Changes Summary:
-
-Files modified:
-  - Cargo.toml (dependency updates, version bump)
-  - src/*.rs (import changes)
-  - [other files]
-
-Please review the changes above. 
-
-Options:
-  1. Show full diff (git diff)
-  2. Show diff for specific file
-  3. Accept changes and continue
-  4. Abort release
-```
-
-### 8.2 Show Detailed Diff (if requested)
-```bash
-# Full diff
-git diff
-
-# Specific file
-git diff path/to/file.rs
-```
-
-### 8.3 Compose Commit Message
-
-**Ask user for commit message:**
-```
-📝 Compose commit message:
-
-Suggested message based on changes:
-  "Release v0.1.X: Update duroxide dependencies
-
-  - Bump version from X.Y.Z to X.Y.Z+1
-  - Upgrade duroxide from vA.B.C to vX.Y.Z
-  - Upgrade duroxide-pg from vA.B.C to vX.Y.Z
-  - [other changes]"
-
-Would you like to:
-  1. Use suggested message
-  2. Edit message
-  3. Cancel
-```
-
-### 8.4 Commit Changes (with user approval)
-```bash
-git add -A
-git commit -m "Your commit message here"
-```
-
-### 8.5 Merge to Main (if on feature branch)
-
-Check current branch:
-```bash
-git branch --show-current
-```
-
-If not on main:
-```bash
-# Checkout main
-git checkout main
-
-# Pull latest
-git pull origin main
-
-# Merge feature branch
-git merge <feature-branch>
-```
-
-### 8.6 Push to Remote
-
-**Ask user before pushing:**
-```
-🚀 Ready to push to remote:
-
-Branch: main
-Remote: origin
-Commits to push: [number]
-
-Would you like to push? (y/n)
-```
-
-```bash
-git push origin main
-```
-
-### 8.7 Create Release Tag (Optional)
-
-**Ask user about tagging:**
-```
-🏷️ Would you like to create a release tag? (y/n)
-
-Suggested tag: v0.1.X (based on version in Cargo.toml)
-```
-
-```bash
-# Create annotated tag
-git tag -a v0.1.X -m "Release v0.1.X: [description]"
-
-# Push tag
-git push origin v0.1.X
-```
-
-### 8.8 Verify Push
-```bash
-# Check remote status
-git log --oneline origin/main -5
-
-# Verify tag (if created)
-git ls-remote --tags origin | tail -5
-```
-
-## Step 9: Final Verification
-
-### 9.1 Display Expected Version
-
-At the end of the release, display the expected version string for verification:
-
-```
-✅ Release Complete!
-
-Expected df.version() output:
-  X.Y.Z (built YYYY-MM-DDTHH:MM:SSZ)
-
-To verify after deployment, connect to a pg_durable instance and run:
-  SELECT df.version();
-
-The version should match the build timestamp from:
-  - Docker build: check the "pg_durable version:" line from E2E test output
-  - ACR image: the image was pushed at [timestamp]
-```
-
-### 9.2 Get Version Info
-```bash
-# Get version from Cargo.toml
-grep '^version' Cargo.toml
-
-# Get build timestamp from most recent Docker build
-docker inspect pg_durable:latest --format '{{.Created}}'
-```
-
-## Checklist Summary
-
-### Pre-Release Checklist
-- [ ] Check for dependency updates (duroxide, duroxide-pg)
-- [ ] Update dependencies if user approves
-- [ ] Bump version in Cargo.toml if releasing
-- [ ] `cargo build --features pg17` - no errors
-- [ ] `cargo clippy --features pg17` - no warnings
-- [ ] `cargo fmt` - code formatted
-- [ ] Documentation reviewed and updated
-- [ ] New tests proposed and implemented (if applicable)
-- [ ] `./scripts/test-unit.sh` - all pass
-- [ ] `./scripts/test-e2e-local.sh` - all pass
-
-### Optional Deployment Checklist
-- [ ] `./scripts/test-e2e-docker.sh --rebuild` - all pass
-- [ ] `./scripts/deploy-acr.sh` - image pushed
-- [ ] Verify image in registry
-
-### Post-Release
-- [ ] User reviewed all changes
-- [ ] Changes committed with descriptive message
-- [ ] Merged to main (if on feature branch)
-- [ ] Pushed to remote
-- [ ] Tag created for release (optional)
-- [ ] Changelog updated (optional)
-
-## Common Issues
-
-### 1. Dependency Update Fails
-```bash
-# Clear cargo cache and retry
-cargo clean
-cargo update
-cargo build --features pg17
-```
-
-### 2. pgrx Version Mismatch
-If updating duroxide causes pgrx conflicts:
-- Check both use same pgrx version
-- May need to update pgrx in Cargo.toml
-
-### 3. Docker Build Fails
-```bash
-# Check Docker daemon is running
-docker info
-
-# Clean Docker cache
-docker builder prune -f
-
-# Rebuild from scratch
-docker build --no-cache -t pg_durable_e2e_test .
-```
-
-### 4. ACR Push Fails
-```bash
-# Re-authenticate
-az acr login --name ${ACR_REGISTRY%%.*}
-
-# Check network/permissions
-az acr show --name ${ACR_REGISTRY%%.*} --query "loginServer"
-```
-
-## ⚠️ IMPORTANT: User Approval Required
-
-**DO NOT** proceed with these actions without explicit user approval:
-- Updating dependencies in Cargo.toml
-- Implementing new tests
-- Building Docker images
-- Pushing to ACR
-- Committing changes
-- Merging to main
-- Pushing to remote
-- Creating tags
-
-Always present options and wait for user confirmation before proceeding.
+The background worker's embedded duroxide migrations update automatically via
+`include_dir!`; no extension SQL or upgrade-script changes are needed for a
+duroxide/duroxide-pg bump alone. Land the bump as its own PR, then reflect it in
+the `### Changed` section of the changelog.
