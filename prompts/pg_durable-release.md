@@ -196,8 +196,8 @@ gh run watch "$(gh run list --workflow package-release.yml --limit 1 --json data
 ## Step 5: Fill release notes and publish
 
 The Package Release run creates the draft with placeholder notes. Replace them
-with the curated changelog **plus** GitHub's auto-generated contributor section,
-then publish. The release-body content already lives in the committed
+with the curated changelog **plus** GitHub's auto-generated **New Contributors**
+section, then publish. The release-body content already lives in the committed
 `CHANGELOG.md`, so extract this version's section on the fly into a throwaway
 temp file — **do not** create or commit a separate `release-notes-*.md`.
 
@@ -205,14 +205,22 @@ temp file — **do not** create or commit a separate `release-notes-*.md`.
 # 1. Extract the "## [X.Y.Z]" block from CHANGELOG.md (stops at the next "## [" heading)
 awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes-X.Y.Z.md
 
-# 2. Fetch GitHub's auto "What's Changed / New Contributors" via the API.
-#    `gh release edit` has NO --generate-notes flag (only `gh release create`
-#    does), so generate the block separately and concatenate it.
+# 2. Fetch GitHub's auto-generated notes via the API, then keep ONLY the
+#    "New Contributors" + "Full Changelog" parts. `gh release edit` has NO
+#    --generate-notes flag (only `gh release create` does), so we generate the
+#    block separately. We deliberately DROP the auto "## What's Changed" PR dump:
+#    it just re-lists the PRs the curated CHANGELOG already covers (redundant
+#    noise). The awk skips from the "What's Changed" heading until the next
+#    "## " heading or the "**Full Changelog**" line.
 gh api repos/microsoft/pg_durable/releases/generate-notes \
-  -f tag_name=vX.Y.Z --jq '.body' > /tmp/auto-notes-X.Y.Z.md
+  -f tag_name=vX.Y.Z --jq '.body' \
+  | awk '/^## What.s Changed/{skip=1; next} /^## /{skip=0} /^\*\*Full Changelog\*\*/{skip=0} !skip' \
+  > /tmp/auto-notes-X.Y.Z.md
 
-# 3. Combine curated changelog + auto notes, then set the release body
-cat /tmp/notes-X.Y.Z.md /tmp/auto-notes-X.Y.Z.md > /tmp/release-body-X.Y.Z.md
+# 3. Combine curated changelog + trimmed auto notes (separated by a rule),
+#    then set the release body
+printf '%s\n\n---\n\n' "$(cat /tmp/notes-X.Y.Z.md)" > /tmp/release-body-X.Y.Z.md
+cat /tmp/auto-notes-X.Y.Z.md >> /tmp/release-body-X.Y.Z.md
 gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
 ```
 
@@ -221,10 +229,15 @@ gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
   truth for curated content is the committed `CHANGELOG.md`.
 - `--notes-file` sets **only the GitHub Release body** — it does not touch
   `CHANGELOG.md`. The curated text comes from the changelog you already merged.
-- The `releases/generate-notes` API returns GitHub's "What's Changed / **New
-  Contributors**" block for the tag range. Keep that list in the **Release**, not
-  in `CHANGELOG.md` (Keep a Changelog groups by change type, not by people). If
-  the tag isn't pushed yet, the API can't compute it — run this after Step 4.
+- The `releases/generate-notes` API returns a "## What's Changed" PR dump, a
+  "## New Contributors" section, and a "Full Changelog" link. We **drop**
+  "What's Changed" (it re-lists the same PRs the curated changelog already
+  describes, just ungrouped) and keep only **New Contributors** + the
+  **Full Changelog** compare link in the **Release** (not in `CHANGELOG.md` —
+  Keep a Changelog groups by change type, not by people). Anyone wanting the
+  exhaustive per-PR list with attribution can follow the Full Changelog link.
+  If the tag isn't pushed yet, the API can't compute the block — run this after
+  Step 4.
 
 Review the draft in the GitHub UI, confirm the `.deb`/source assets are attached
 and ordered sensibly, then **Publish** (ask the user before publishing). For a
