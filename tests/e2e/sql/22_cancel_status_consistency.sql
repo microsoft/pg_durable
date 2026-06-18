@@ -67,7 +67,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _t_complete;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF lower(status) != 'completed' THEN
         RAISE EXCEPTION 'Scenario 1 setup failed: expected completed, got %', status;
@@ -175,7 +175,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _t_noop;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF lower(status) != 'completed' THEN
         RAISE EXCEPTION 'Scenario 4 setup failed: expected completed, got %', status;

@@ -16,7 +16,7 @@ SELECT df.start(
     'test-cond-true-func'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Test B: ?> !> operators with true condition
 SELECT df.start(
@@ -26,7 +26,7 @@ SELECT df.start(
     'test-cond-true-op'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Test C: df.if() with false condition (else branch executes)
 SELECT df.start(
@@ -38,7 +38,7 @@ SELECT df.start(
     'test-cond-false-func'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Test D: ?> !> operators with false condition
 SELECT df.start(
@@ -48,7 +48,7 @@ SELECT df.start(
     'test-cond-false-op'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Verify results (deterministic output, ordered by id)
 SELECT branch, variant FROM test_cond_log ORDER BY id;

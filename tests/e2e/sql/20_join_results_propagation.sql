@@ -29,7 +29,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_join_prop;
     RAISE NOTICE 'Testing join results propagation: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: status = %', status;
@@ -70,7 +70,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_join_named;
     RAISE NOTICE 'Testing named JOIN result: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: status = %', status;

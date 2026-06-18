@@ -757,7 +757,7 @@ mod tests {
     }
 
     /// Wait for a durable function to complete, polling Duroxide status
-    fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
+    fn poll_until_terminal(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
         use crate::types::{
             backend_duroxide_schema, new_backend_provider, postgres_connection_string,
         };
@@ -1521,9 +1521,52 @@ mod tests {
         );
     }
 
-    // Note: Testing that setvar fails in workflow context requires E2E test
-    // because it depends on the background worker setting df.in_workflow='true'
-    // on its connections. See tests/e2e/sql/20_vars.sql for E2E coverage.
+    #[pg_test]
+    fn test_wait_for_completion_cannot_be_used_in_seq_composition() {
+        // df.await_instance polls df.instances and would block on a
+        // missing instance, so we can't actually call it in a unit test
+        // (the background worker isn't running under pg_test). Instead we
+        // exercise the same machinery directly: write the marker GUC that
+        // await_instance would have written, then thread its plain-text
+        // return value ("completed") into df.seq. Durofut::ensure should
+        // detect the marker and reject the composition by name.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            "SELECT pg_temp.capture_error($body$
+                 WITH _mark AS (
+                     SELECT pg_catalog.set_config(
+                         'df.non_future_helper',
+                         'df.await_instance' || E'\\n' || pg_catalog.statement_timestamp()::text,
+                         true
+                     )
+                 )
+                 SELECT df.seq('completed', df.sql('SELECT 1')) FROM _mark
+             $body$)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("df.await_instance cannot be used as a workflow step"),
+            "Unexpected error: {msg}"
+        );
+    }
+
+    // Note: Testing that setvar / await_instance fail in workflow context
+    // requires E2E tests because it depends on the background worker setting
+    // df.in_workflow='true' on its connections. See
+    // tests/e2e/sql/04_variables_and_results.sql (setvar) and
+    // tests/e2e/sql/09_graph_and_validation.sql (await_instance).
 
     // ========================================================================
     // Unit Tests - Explain Functionality
@@ -1782,7 +1825,7 @@ mod tests {
         let instance_id = crate::dsl::start(&sql, Some("test-e2e-simple"), None);
 
         // Wait for completion
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify result contains the inserted row
@@ -1817,7 +1860,7 @@ mod tests {
         let instance_id = crate::dsl::start(&seq, Some("test-e2e-seq"), None);
 
         // Wait for completion
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify both rows exist in order
@@ -1857,7 +1900,7 @@ mod tests {
         let instance_id = crate::dsl::start(&seq, Some("test-e2e-vars"), None);
 
         // Wait for completion
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify the value was copied
@@ -1884,7 +1927,7 @@ mod tests {
         let instance_id = crate::dsl::start(&seq, Some("test-e2e-sleep"), None);
 
         // Wait for completion (with extra time for sleep)
-        let result = wait_for_completion(&instance_id, 15);
+        let result = poll_until_terminal(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let elapsed = start_time.elapsed();
@@ -1905,7 +1948,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-true"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
@@ -1922,7 +1965,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-false"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
@@ -1940,7 +1983,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-zero"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
@@ -1967,7 +2010,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join"), None);
 
-        let result = wait_for_completion(&instance_id, 15);
+        let result = poll_until_terminal(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify both branches executed
@@ -1997,7 +2040,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join3"), None);
 
-        let result = wait_for_completion(&instance_id, 15);
+        let result = poll_until_terminal(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Result should be an array of 3 results
@@ -2051,8 +2094,8 @@ mod tests {
         let id2 = crate::dsl::start(&sql2, Some("test-list-2"), None);
 
         // Wait for both to complete
-        let _ = wait_for_completion(&id1, 10);
-        let _ = wait_for_completion(&id2, 10);
+        let _ = poll_until_terminal(&id1, 10);
+        let _ = poll_until_terminal(&id2, 10);
 
         // Query list_instances
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM df.list_instances()")
@@ -2075,7 +2118,7 @@ mod tests {
         let sql = crate::dsl::sql("SELECT 'info-test'");
         let instance_id = crate::dsl::start(&sql, Some("test-info-label"), None);
 
-        let _ = wait_for_completion(&instance_id, 10);
+        let _ = poll_until_terminal(&instance_id, 10);
 
         // Query instance_info
         let orch_name = Spi::get_one::<String>(&format!(
@@ -2097,7 +2140,7 @@ mod tests {
         let seq = crate::dsl::then_fn(&a, &b);
         let instance_id = crate::dsl::start(&seq, None, None);
 
-        let _ = wait_for_completion(&instance_id, 10);
+        let _ = poll_until_terminal(&instance_id, 10);
 
         // Query instance_nodes - should have 3 nodes (2 SQL + 1 THEN)
         let node_count = Spi::get_one::<i64>(&format!(
@@ -2119,7 +2162,7 @@ mod tests {
         let sql = crate::dsl::sql("SELECT * FROM nonexistent_table_xyz_12345");
         let instance_id = crate::dsl::start(&sql, Some("test-sql-error"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
 
         // Should fail
         assert!(result.is_err(), "Expected function to fail");
@@ -2136,7 +2179,7 @@ mod tests {
         let sql = crate::dsl::sql("SELECT 'sync-test'");
         let instance_id = crate::dsl::start(&sql, Some("test-status-sync"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Check PostgreSQL table status

@@ -58,7 +58,7 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 | `df.getvar(name)` | Key text | PostgreSQL role | SELECT df.vars (owner filter) | None | Low |
 | `df.unsetvar(name)` | Key text | PostgreSQL role | DELETE df.vars (owner filter) | None | Low |
 | `df.clearvars()` | None | PostgreSQL role | DELETE df.vars (owner filter) | None | Low |
-| `df.wait_for_completion(id, timeout?)` | Instance ID, timeout | PostgreSQL role | SELECT df.instances | Timeout > 0 | Low |
+| `df.await_instance(id, timeout?)` | Instance ID, timeout | PostgreSQL role | SELECT df.instances | Timeout > 0 | Low |
 | `df.sleep(seconds)` | bigint | None (in-memory) | N/A | seconds >= 0 | Low |
 | `df.if(cond, then, else)` | Three Durofut args | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.loop(body, cond?)` | Durofut, optional condition | None (in-memory) | N/A | Validates Durofut JSON | Low |

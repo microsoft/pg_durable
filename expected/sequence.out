@@ -12,7 +12,7 @@ SELECT df.start(
     ~> 'INSERT INTO test_sequence_log (step, variant) VALUES (3, ''op'')',
     'test-sequence-op'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed
@@ -29,7 +29,7 @@ SELECT df.start(
     ),
     'test-sequence-fn'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed

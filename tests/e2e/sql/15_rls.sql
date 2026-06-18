@@ -51,12 +51,12 @@ BEGIN
     SELECT instance_id INTO alice_id FROM _rls_alice_state;
     SELECT instance_id INTO bob_id FROM _rls_bob_state;
 
-    SELECT df.wait_for_completion(alice_id, 30) INTO s;
+    SELECT df.await_instance(alice_id, 30) INTO s;
     IF s != 'completed' THEN
         RAISE EXCEPTION 'Setup failed: Alice job status = %', s;
     END IF;
 
-    SELECT df.wait_for_completion(bob_id, 30) INTO s;
+    SELECT df.await_instance(bob_id, 30) INTO s;
     IF s != 'completed' THEN
         RAISE EXCEPTION 'Setup failed: Bob job status = %', s;
     END IF;
@@ -494,12 +494,12 @@ BEGIN
     SELECT instance_id INTO alice_id FROM _vars_alice_state;
     SELECT instance_id INTO bob_id FROM _vars_bob_state;
 
-    SELECT df.wait_for_completion(alice_id, 30) INTO s;
+    SELECT df.await_instance(alice_id, 30) INTO s;
     IF s != 'completed' THEN
         RAISE EXCEPTION 'TEST 2 FAILED: Alice workflow status = %', s;
     END IF;
 
-    SELECT df.wait_for_completion(bob_id, 30) INTO s;
+    SELECT df.await_instance(bob_id, 30) INTO s;
     IF s != 'completed' THEN
         RAISE EXCEPTION 'TEST 2 FAILED: Bob workflow status = %', s;
     END IF;
@@ -622,7 +622,7 @@ DECLARE
     su_msg TEXT;
 BEGIN
     SELECT instance_id INTO su_id FROM _vars_su_state;
-    SELECT df.wait_for_completion(su_id, 30) INTO s;
+    SELECT df.await_instance(su_id, 30) INTO s;
 
     IF s != 'completed' THEN
         RAISE EXCEPTION 'TEST 5b FAILED: Superuser workflow status = %', s;

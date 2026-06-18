@@ -214,6 +214,13 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario A considerations:** Signatures are identical on the fresh-install and upgrade paths (only the bodies differ), so the function-signature equivalence contract passes.
 - **Scenario B1/B2 considerations:** No schema/data migration and no new objects. The replaced bodies work against the existing schema and change no privileges already granted.
 
+#### Rename `df.wait_for_completion()` to `df.await_instance()`
+- **DDL change (df schema):** Adds `df.await_instance(text, integer)` as the canonical C binding for the helper formerly exposed as `df.wait_for_completion(text, integer)`. The old SQL function remains present and the new `.so` continues exporting `wait_for_completion_wrapper` as a shim, so existing customer scripts keep working.
+- **Grant behavior:** No explicit grant migration is required. PostgreSQL grants `EXECUTE` on newly created functions to `PUBLIC` by default, and `df.await_instance` is not a sensitive helper whose default PUBLIC grant is revoked.
+- **Scenario A considerations:** Fresh installs and upgraded schemas must both expose `df.await_instance(text, integer)` and `df.wait_for_completion(text, integer)`.
+- **Scenario B1 considerations:** The new `.so` remains compatible with v0.2.3 schemas that have not run `ALTER EXTENSION UPDATE`: existing catalog entries still bind `df.wait_for_completion` to `wait_for_completion_wrapper`, which is retained as a Rust shim to `df.await_instance`.
+- **Scenario B2 considerations:** No data migration. Existing instances are unaffected; the upgrade only adds a SQL function binding.
+
 ### v0.2.2 → v0.2.3
 
 #### Rename duroxide provider schema to `_duroxide` for fresh installs

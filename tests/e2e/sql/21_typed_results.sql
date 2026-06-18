@@ -31,7 +31,7 @@ DECLARE
     val_str TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t1;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-numeric]: status=%', status;
@@ -79,7 +79,7 @@ DECLARE
     val_str TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t2;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-uuid]: status=%', status;
@@ -120,7 +120,7 @@ DECLARE
     val_str TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t3;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-tstz]: status=%', status;
@@ -162,7 +162,7 @@ DECLARE
     val_str TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t4;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-ts]: status=%', status;
@@ -203,7 +203,7 @@ DECLARE
     val_str TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t5;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-date]: status=%', status;
@@ -244,7 +244,7 @@ DECLARE
     val_obj JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t6;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-jsonb]: status=%', status;
@@ -290,7 +290,7 @@ DECLARE
     val_n   JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t7;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-int2]: status=%', status;
@@ -335,7 +335,7 @@ DECLARE
     f8_val  JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t8;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-float]: status=%', status;
@@ -379,7 +379,7 @@ DECLARE
     row0    JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t9;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-null]: status=%', status;
@@ -426,7 +426,7 @@ DECLARE
     node_error TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t10;
-    SELECT df.wait_for_completion(inst_id) INTO wf_status;
+    SELECT df.await_instance(inst_id) INTO wf_status;
 
     IF wf_status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-unsupported]: expected failed, got %', wf_status;
@@ -462,7 +462,7 @@ DECLARE
     row0       JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t11;
-    SELECT df.wait_for_completion(inst_id) INTO wf_status;
+    SELECT df.await_instance(inst_id) INTO wf_status;
 
     IF wf_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-nan]: expected completed, got %', wf_status;
@@ -513,7 +513,7 @@ DECLARE
     stored  NUMERIC;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t12;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [typed-roundtrip]: status=%', status;

@@ -85,11 +85,11 @@ expected/             # Expected output files (generated)
 Makefile              # PGXS configuration (at repo root)
 ```
 
-### New Helper Function: df.wait_for_completion()
+### New Helper Function: df.await_instance()
 
 **Signature:**
 ```sql
-df.wait_for_completion(
+df.await_instance(
     instance_id TEXT,
     timeout_seconds INT DEFAULT 30
 ) RETURNS TEXT
@@ -114,7 +114,7 @@ df.wait_for_completion(
 SELECT df.start('SELECT 42', 'test') AS instance_id \gset
 
 -- Wait for completion (deterministic timeout)
-SELECT df.wait_for_completion(:'instance_id');
+SELECT df.await_instance(:'instance_id');
 
 -- Output: 'completed'
 ```
@@ -149,7 +149,7 @@ CREATE TABLE test_log (id SERIAL, step INT, ts TIMESTAMP DEFAULT now());
 
 **Solutions:**
 
-1. **Use `df.wait_for_completion()` instead of polling loops**
+1. **Use `df.await_instance()` instead of polling loops**
 2. **Remove timestamps from test tables**
 3. **Avoid RAISE NOTICE with instance IDs**
 4. **Order all SELECT results explicitly**
@@ -271,7 +271,7 @@ SELECT df.start(
     'test-sequence-op'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id');
+SELECT df.await_instance(:'instance_id');
 
 -- Test B: Using df.seq() function
 SELECT df.start(
@@ -285,7 +285,7 @@ SELECT df.start(
     'test-sequence-fn'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id');
+SELECT df.await_instance(:'instance_id');
 
 -- Verify results (deterministic output)
 SELECT step, variant FROM test_sequence_log ORDER BY id;
@@ -299,13 +299,13 @@ DROP TABLE test_sequence_log;
 ```
 DROP TABLE
 CREATE TABLE
- wait_for_completion 
----------------------
+ await_instance 
+----------------
  completed
 (1 row)
 
- wait_for_completion 
----------------------
+ await_instance 
+----------------
  completed
 (1 row)
 
@@ -324,14 +324,14 @@ DROP TABLE
 
 ## Implementation Plan
 
-### Step 1: Add df.wait_for_completion()
+### Step 1: Add df.await_instance()
 
 **File:** `src/dsl.rs`
 
 Add new function:
 ```rust
 #[pg_extern(schema = "df")]
-fn wait_for_completion(
+fn await_instance(
     instance_id: &str,
     timeout_seconds: default!(i32, 30),
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -389,7 +389,7 @@ Update `.github/workflows/ci.yml`:
 
 ## Success Criteria
 
-- [ ] `df.wait_for_completion()` function implemented and tested
+- [ ] `df.await_instance()` function implemented and tested
 - [ ] 5 Phase 1 tests converted and passing
 - [ ] Expected output files generated and committed
 - [ ] `make installcheck` works against running PostgreSQL instance
@@ -415,7 +415,7 @@ s/\d+\.\d+ ms/N ms/g
 1. **Not standard pg_regress** - Requires custom Rust code and build infrastructure
 2. **Harder debugging** - Test failures show normalized output, not actual values
 3. **Fork complexity** - PostgreSQL forks wouldn't recognize this approach
-4. **Unnecessary** - Making tests truly deterministic (via `df.wait_for_completion()`, removing timestamps, avoiding UUID output) is simpler and more maintainable
+4. **Unnecessary** - Making tests truly deterministic (via `df.await_instance()`, removing timestamps, avoiding UUID output) is simpler and more maintainable
 
 **When normalization might be useful:**
 - If testing EXPLAIN output with variable costs/timing
@@ -431,14 +431,14 @@ s/\d+\.\d+ ms/N ms/g
 
 ## Open Questions
 
-1. Should `df.wait_for_completion()` return just status, or include additional metadata (execution time, node count)?
+1. Should `df.await_instance()` return just status, or include additional metadata (execution time, node count)?
    - **Answer:** Return only status for simplicity. Use `df.result()` for metadata if needed.
 
 2. Should we support `make check` (in-tree build) or only `make installcheck` (installed extension)?
    - **Answer:** Both. pg_regress supports both modes.
 
 3. What should happen if background worker is not running?
-   - **Answer:** `df.wait_for_completion()` should timeout with clear error message.
+   - **Answer:** `df.await_instance()` should timeout with clear error message.
 
 ## References
 

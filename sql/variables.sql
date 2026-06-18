@@ -13,7 +13,7 @@ SELECT df.start(
     'test-variables-op'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Test B: Using df.as() function
 SELECT df.start(
@@ -24,7 +24,7 @@ SELECT df.start(
     'test-variables-fn'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Verify results (deterministic output, ordered by id)
 SELECT val, variant FROM test_vars_log ORDER BY id;

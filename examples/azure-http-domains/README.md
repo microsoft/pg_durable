@@ -125,7 +125,7 @@ examples/azure-http-domains/
    service's `test.sql` via `psql`.
 3. Each **test.sql** uses `\getenv` to load variables, calls `df.setvar()`,
    then `df.start()` with `df.http()` targeting the service endpoint.
-4. The test polls `df.wait_for_completion()` and asserts the HTTP response.
+4. The test polls `df.await_instance()` and asserts the HTTP response.
 5. **cleanup.sh** deletes the entire resource group.
 
 ## Estimated Cost

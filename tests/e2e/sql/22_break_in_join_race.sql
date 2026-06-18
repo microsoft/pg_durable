@@ -30,7 +30,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test_break_join_state;
     RAISE NOTICE 'Test 1 - df.break() in JOIN branch: instance %', v_instance_id;
 
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
 
     SELECT COUNT(*) INTO v_cnt FROM test_break_join_log;
 
@@ -72,7 +72,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test_break_race_state;
     RAISE NOTICE 'Test 2 - df.break() in RACE branch: instance %', v_instance_id;
 
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
 
     SELECT COUNT(*) INTO v_cnt FROM test_break_race_log;
 
@@ -110,7 +110,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test_break_toplevel_state;
     RAISE NOTICE 'Test 3 - top-level df.break(): instance %', v_instance_id;
 
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
 
     -- The key behavioural change: an uncaught break is a failure, not a completed
     -- instance carrying a break sentinel as its result.
@@ -158,7 +158,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test_break_nested_state;
     RAISE NOTICE 'Test 4 - df.break() in IF in JOIN in loop: instance %', v_instance_id;
 
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
 
     SELECT COUNT(*) INTO v_cnt FROM test_break_nested_log;
     SELECT df.result(v_instance_id) INTO v_result;

@@ -13,7 +13,7 @@ SELECT df.start(
     ),
     'test-parallel-func'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed
@@ -25,7 +25,7 @@ SELECT df.start(
     & 'INSERT INTO test_parallel_log (branch, variant) VALUES (''B'', ''op'')',
     'test-parallel-op'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed

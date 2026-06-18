@@ -103,7 +103,7 @@ DECLARE
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _dg_admin_state;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST 2 FAILED: admin workflow expected completed, got %', status;
@@ -272,7 +272,7 @@ DECLARE
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _dg_app_state;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST 6 FAILED: app workflow expected completed, got %', status;

@@ -1006,12 +1006,23 @@ pub fn result(instance_id: &str) -> Option<String> {
     .flatten()
 }
 
-/// Waits for a durable function to complete, returning its final status.
-/// Polls the instance status every 100ms until it reaches a terminal state
-/// (completed, failed, or cancelled) or the timeout is exceeded.
+/// Blocks the calling backend until a durable function instance reaches a
+/// terminal state, returning its final status as plain text
+/// ('completed', 'failed', or 'cancelled'). Polls `df.instances` every 100ms
+/// until the instance terminates or the timeout is exceeded.
 ///
-/// This is a helper function for pg_regress tests to simplify polling logic
-/// and ensure deterministic test output.
+/// Intended for test drivers and ad-hoc inspection from a regular client
+/// session. It is **not** a composable durable primitive:
+///
+/// * Its return value is plain text, not a `Durofut`, so it must not be
+///   threaded into `df.seq` / `df.join` / `df.race` / `~>` / `&` / `|` etc.
+///   Attempting to do so raises an error at composition time.
+/// * Calling it from inside a workflow would block a background worker
+///   thread for up to `timeout_seconds`, risk a long-running transaction
+///   blocking VACUUM, and -- if the instance being waited on is the
+///   caller's own -- deadlock the workflow on itself. The function therefore
+///   refuses to run inside a workflow context. Use `df.signal()` /
+///   `df.wait_for_signal()` for cross-workflow coordination.
 ///
 /// # Arguments
 /// * `instance_id` - The durable function instance ID to wait for
@@ -1021,12 +1032,25 @@ pub fn result(instance_id: &str) -> Option<String> {
 /// The final status as a string: 'completed', 'failed', or 'cancelled'
 ///
 /// # Errors
-/// Raises an error if the timeout is exceeded without reaching a terminal state
+/// Raises an error if called inside a workflow, if `timeout_seconds <= 0`,
+/// if the instance is not found, or if the timeout is exceeded without
+/// reaching a terminal state.
 #[pg_extern(schema = "df")]
-pub fn wait_for_completion(
+pub fn await_instance(
     instance_id: &str,
     timeout_seconds: default!(i32, "30"),
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Refuse to run inside a workflow: blocking the worker thread on
+    // df.instances would hold a worker slot for up to `timeout_seconds`,
+    // and waiting on the current instance would deadlock the workflow on
+    // itself (the polling loop never sees a terminal state because the
+    // worker is stuck here instead of advancing the instance).
+    if is_in_workflow_context() {
+        pgrx::error!(
+            "df.await_instance() cannot be called inside a workflow - it would block a worker thread (and self-deadlock if waiting on the current instance). Use df.signal() and df.wait_for_signal() for cross-workflow coordination."
+        );
+    }
+
     if timeout_seconds <= 0 {
         pgrx::error!("Timeout must be positive");
     }
@@ -1045,6 +1069,13 @@ pub fn wait_for_completion(
         if let Some(ref s) = status {
             let s_lower = s.to_lowercase();
             if s_lower == "completed" || s_lower == "failed" || s_lower == "cancelled" {
+                // Mark this call so that if its plain-text return value is
+                // accidentally threaded into a DSL composer in the same
+                // statement (e.g. `SELECT df.seq(df.await_instance(id),
+                // df.sql(...))`), Durofut::ensure can attribute the error
+                // to df.await_instance rather than silently treating
+                // "completed" as a SQL string to execute.
+                mark_non_future_helper_call("df.await_instance");
                 return Ok(s_lower);
             }
         } else {
@@ -1065,6 +1096,20 @@ pub fn wait_for_completion(
         // Sleep 100ms
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+/// **Deprecated alias for `df.await_instance`.** Retained so that the new
+/// `.so` keeps servicing the `df.wait_for_completion` binding present in
+/// schemas installed at or before v0.2.3, where the catalog entry references
+/// the C symbol `wait_for_completion_wrapper`. New code should call
+/// `df.await_instance` directly.
+#[pg_extern(schema = "df")]
+pub fn wait_for_completion(
+    instance_id: &str,
+    timeout_seconds: default!(i32, "30"),
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    warning!("df.wait_for_completion() is deprecated; use df.await_instance() instead");
+    await_instance(instance_id, timeout_seconds)
 }
 
 #[cfg(test)]

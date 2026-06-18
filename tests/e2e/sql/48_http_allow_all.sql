@@ -27,7 +27,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_allowall1;
     RAISE NOTICE 'Testing non-Azure domain allowed under http-allow-all: %', inst_id;
 
-    PERFORM df.wait_for_completion(inst_id);
+    PERFORM df.await_instance(inst_id);
 
     -- Must NOT fail due to allow-list; network/DNS failure is acceptable
     SELECT result::text INTO node_result
@@ -67,7 +67,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_allowall2;
     RAISE NOTICE 'Testing bare public IP allowed under http-allow-all: %', inst_id;
 
-    PERFORM df.wait_for_completion(inst_id);
+    PERFORM df.await_instance(inst_id);
 
     SELECT result::text INTO node_result
     FROM df.nodes

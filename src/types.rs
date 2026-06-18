@@ -951,7 +951,16 @@ pub struct Durofut {
 
 impl Durofut {
     fn same_statement_non_future_helper_name(s: &str) -> Option<String> {
-        if s != "OK" {
+        // Fast path: legitimate Durofut envelopes are JSON objects starting
+        // with '{'. Anything else (plain text such as "OK", "completed",
+        // "failed", "cancelled", error messages, etc.) might be the return
+        // value of a non-future helper, so we look up the marker GUC to
+        // attribute it by name. Restricting the SPI lookup to non-JSON inputs
+        // keeps the common case (JSON envelopes flowing through composers)
+        // free of an extra catalog query, while letting *any* helper that
+        // calls mark_non_future_helper_call surface a precise error -- not
+        // just the ones that happen to return "OK".
+        if s.trim_start().starts_with('{') {
             return None;
         }
 
