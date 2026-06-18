@@ -85,6 +85,21 @@ rows, `status`-mirror drift).
 activities, and signal/cancel until they are migrated). **Chosen as a
 complementary backstop.**
 
+### Comparison
+
+| Option | Atomic with `df.*` | Atomic with caller tx | Kills 5 s load race | Fixes crash-time drift | Effort |
+|--------|:--:|:--:|:--:|:--:|:--:|
+| 1 — single source of truth in `_duroxide` | n/a (one store) | no¹ | yes | yes | Large |
+| 2 — our SQL in duroxide's tx | yes | **no** | yes | no | Medium |
+| 3 — enqueue in caller's tx (SPI) | yes | **yes** | **yes** | no | Small–Med |
+| 4 — async GC / reconciler | repairs | — | no | **yes** | Small–Med |
+
+¹ Option 1 also decouples from the caller's transaction unless the enqueue is
+itself done via SPI — at which point its start path converges with Option 3.
+"Fixes crash-time drift" = repairs divergence from a crash *mid-execution* (not
+just at start); only Options 1 and 4 do this, which is why Option 4 is kept as a
+backstop alongside Option 3.
+
 ### Decision
 
 Implement **Option 3 + Option 4**. Option 3 removes the dual-write at the source
