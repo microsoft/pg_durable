@@ -125,8 +125,7 @@ async fn run_duroxide_runtime() {
     );
 
     // Management pool: consolidates former polling and activity pools into one.
-    // Used for extension-existence polling, epoch sentinels, worker-ready writes,
-    // graph loading, and status updates. Sized by the max_management_connections GUC.
+    // Used for graph loading and status updates. Sized by the max_management_connections GUC.
     // Retry in a loop so the worker survives the target database not yet existing
     // (e.g. pg_regress creates `contrib_regression` after PostgreSQL starts).
     let mgmt_pool = loop {
@@ -150,13 +149,38 @@ async fn run_duroxide_runtime() {
         }
     };
 
+    // Dedicated polling pool: a separate 1-connection pool used exclusively for
+    // extension-existence checks and epoch sentinel heartbeats. This isolation
+    // prevents activity work (graph loading, status updates) from starving the
+    // health-check loop and causing spurious runtime shutdowns under high load.
+    let poll_pool = loop {
+        if is_shutdown_requested() {
+            log!("pg_durable: shutdown requested before poll pool created, exiting");
+            return;
+        }
+        match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&pg_conn_str)
+            .await
+        {
+            Ok(pool) => break pool,
+            Err(e) => {
+                log!(
+                    "pg_durable: failed to create poll pool (will retry in 5s): {}",
+                    e
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    };
+
     loop {
         if is_shutdown_requested() {
             log!("pg_durable: shutdown requested, exiting");
             break;
         }
 
-        if !wait_for_extension_creation(&mgmt_pool, WAIT_FOR_EXTENSION_POLL_INTERVAL).await {
+        if !wait_for_extension_creation(&poll_pool, WAIT_FOR_EXTENSION_POLL_INTERVAL).await {
             break;
         }
 
@@ -191,7 +215,7 @@ async fn run_duroxide_runtime() {
 
         // Write a sentinel so we can detect drop+recreate even if the
         // extension is always present in pg_extension between polls.
-        let epoch_id = match write_epoch_sentinel(&mgmt_pool).await {
+        let epoch_id = match write_epoch_sentinel(&poll_pool).await {
             Ok(id) => {
                 log!("pg_durable: epoch sentinel written ({})", id);
                 Some(id)
@@ -203,7 +227,7 @@ async fn run_duroxide_runtime() {
         };
 
         run_until_extension_dropped_or_shutdown(
-            &mgmt_pool,
+            &poll_pool,
             duroxide_runtime,
             EXTENSION_DROP_POLL_INTERVAL,
             SHUTDOWN_CHECK_INTERVAL,
@@ -213,6 +237,7 @@ async fn run_duroxide_runtime() {
     }
 
     mgmt_pool.close().await;
+    poll_pool.close().await;
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
