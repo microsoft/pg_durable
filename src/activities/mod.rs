@@ -9,5 +9,6 @@
 pub mod execute_http;
 pub mod execute_sql;
 pub mod load_function_graph;
+pub mod mark_pending_nodes_skipped;
 pub mod update_instance_status;
 pub mod update_node_status;

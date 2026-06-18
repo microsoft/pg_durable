@@ -219,8 +219,28 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         }
         Err(err) => {
             ctx.trace_info(format!("Function failed with error: {err}"));
+            let instance_id = input.instance_id.clone();
+
+            // If this was a node-level failure, mark any remaining pending nodes
+            // as skipped for clearer terminal observability.
+            let skipped_input = serde_json::json!({
+                "instance_id": instance_id,
+            });
+            if let Err(e) = ctx
+                .schedule_activity(
+                    activities::mark_pending_nodes_skipped::NAME,
+                    skipped_input.to_string(),
+                )
+                .await
+            {
+                ctx.trace_info(format!(
+                    "Failed to mark pending nodes as skipped for instance {}: {}",
+                    input.instance_id, e
+                ));
+            }
+
             let status_input = serde_json::json!({
-                "instance_id": input.instance_id,
+                "instance_id": instance_id,
                 "status": "failed"
             });
             let _ = ctx

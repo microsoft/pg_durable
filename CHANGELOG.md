@@ -6,9 +6,14 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.4] - Unreleased
 
+### Added
+
+- **Skipped node terminal status:** downstream nodes that are not executed after an upstream node failure are now marked `skipped` instead of remaining indefinitely `pending` (#240).
+
 ### Changed
 
 - **`df.grant_usage()` / `df.revoke_usage()`:** dropped the explicit per-function `EXECUTE` allowlist. Schema `USAGE` on `df` is the real access gate for ordinary `df.*` functions, so the helpers now grant/revoke schema `USAGE`, the table privileges, and `EXECUTE` only on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`). Function signatures are unchanged and existing privileges are unaffected (#242).
+- **Failure observability:** on node-level workflow failure, pg_durable now performs a terminal reconciliation pass to mark remaining `pending` nodes as `skipped` when supported by the installed schema.
 
 ### Removed
 
