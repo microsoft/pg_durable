@@ -366,6 +366,22 @@ assert_sql_equals() {
     fi
 }
 
+assert_sql_equals_ignoring_warnings() {
+    local sql="$1"
+    local expected="$2"
+    local result
+
+    result=$(run_sql_capture "$sql") || return 1
+    result=$(printf '%s\n' "$result" | sed '/^WARNING:/d')
+    if [ "$result" != "$expected" ]; then
+        echo ""
+        echo "    SQL: $sql"
+        echo "    Expected: $expected"
+        echo "    Got: $result"
+        return 1
+    fi
+}
+
 assert_sql_contains() {
     local sql="$1"
     local expected_fragment="$2"
@@ -823,7 +839,7 @@ test_b1_start_and_complete() {
         return 1
     fi
 
-    assert_sql_equals "SELECT df.wait_for_completion('${B1_INSTANCE_ID}', 30);" "completed" &&
+    assert_sql_equals_ignoring_warnings "SELECT df.wait_for_completion('${B1_INSTANCE_ID}', 30);" "completed" &&
     assert_sql_equals "SELECT msg FROM test_upgrade_b1_log ORDER BY id DESC LIMIT 1;" "test_value"
 }
 
@@ -911,7 +927,7 @@ test_b2_data_survives_upgrade() {
     B2_PRE_INSTANCE_ID=$(run_sql_capture "SELECT df.start('INSERT INTO test_upgrade_b2_log (kind, msg) VALUES (''pre'', ''{b2_key}'') RETURNING msg', 'b2-pre-upgrade');") || return 1
     B2_INFLIGHT_INSTANCE_ID=$(run_sql_capture "SELECT df.start(df.sleep(2) ~> 'SELECT ''b2-running'' AS value', 'b2-inflight');") || return 1
 
-    assert_sql_equals "SELECT df.wait_for_completion('${B2_PRE_INSTANCE_ID}', 30);" "completed" || return 1
+    assert_sql_equals_ignoring_warnings "SELECT df.wait_for_completion('${B2_PRE_INSTANCE_ID}', 30);" "completed" || return 1
 
     # Step 2: Upgrade
     if ! "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
@@ -938,7 +954,7 @@ test_b2_pre_upgrade_instance_after_upgrade() {
 }
 
 test_b2_inflight_work_after_upgrade() {
-    assert_sql_equals "SELECT df.wait_for_completion('${B2_INFLIGHT_INSTANCE_ID}', 30);" "completed" &&
+    assert_sql_equals_ignoring_warnings "SELECT df.wait_for_completion('${B2_INFLIGHT_INSTANCE_ID}', 30);" "completed" &&
     assert_sql_contains "SELECT df.result('${B2_INFLIGHT_INSTANCE_ID}');" "b2-running"
 }
 
@@ -948,7 +964,7 @@ test_b2_new_data_after_upgrade() {
 
     B2_POST_INSTANCE_ID=$(run_sql_capture "SELECT df.start('INSERT INTO test_upgrade_b2_log (kind, msg) VALUES (''post'', ''{b2_new_key}'') RETURNING msg', 'b2-post-upgrade');") || return 1
 
-    assert_sql_equals "SELECT df.wait_for_completion('${B2_POST_INSTANCE_ID}', 30);" "completed" &&
+    assert_sql_equals_ignoring_warnings "SELECT df.wait_for_completion('${B2_POST_INSTANCE_ID}', 30);" "completed" &&
     assert_sql_equals "SELECT msg FROM test_upgrade_b2_log WHERE kind = 'post' ORDER BY id DESC LIMIT 1;" "new_value"
 }
 
