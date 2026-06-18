@@ -97,7 +97,7 @@ The model is intentionally SQL-shaped. If a step needs arbitrary code, a non-HTT
 -- A durable function that processes data in steps
 SELECT df.start(
     'SELECT id FROM documents WHERE processed = false LIMIT 100' |=> 'batch'
-    ~> 'UPDATE documents SET processed = true WHERE id = ANY($batch)'
+    ~> 'UPDATE documents SET processed = true WHERE id IN (SELECT id FROM $batch.*)'
 );
 ```
 
