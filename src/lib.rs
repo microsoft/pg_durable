@@ -2714,6 +2714,27 @@ mod tests {
             "Instance not found"
         ));
     }
+
+    // --- H6: CGNAT SSRF blocklist ---
+
+    #[pg_test]
+    fn test_ssrf_blocks_cgnat_range() {
+        use std::net::{IpAddr, Ipv4Addr};
+        // 100.64.0.0/10 must be blocked
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))).is_some(),
+            "100.64.0.1 (CGNAT) should be blocked"
+        );
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 254))).is_some(),
+            "100.127.255.254 (CGNAT) should be blocked"
+        );
+        // Outside CGNAT range should be allowed
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))).is_none(),
+            "100.128.0.1 (NOT CGNAT) should be allowed"
+        );
+    }
 }
 
 /// Required by `cargo pgrx test`
