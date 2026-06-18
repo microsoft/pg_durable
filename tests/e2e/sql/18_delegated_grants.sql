@@ -385,4 +385,16 @@ BEGIN
     DROP ROLE dg_http_target;
 END $cleanup$;
 
+-- === Fresh-install surface check (issue #110): df.debug_connection() removed ===
+-- v0.2.4 drops df.debug_connection() from the SQL surface. On a fresh install it
+-- is never created (its #[pg_extern] is annotated sql = false). Assert it is
+-- absent so a future change that re-emits the function is caught here.
+DO $surface$
+BEGIN
+    IF to_regprocedure('df.debug_connection()') IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: df.debug_connection() should not exist on a fresh install (#110)';
+    END IF;
+    RAISE NOTICE 'SURFACE CHECK PASSED: df.debug_connection() absent on fresh install';
+END $surface$;
+
 SELECT 'TEST PASSED: 18_delegated_grants' AS result;

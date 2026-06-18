@@ -138,7 +138,7 @@ The extension demonstrates strong security design for its core threat model:
 | I-4 | **HTTP headers (incl. auth tokens) stored in df.nodes query column**: When df.http() is called with Authorization headers, the full config JSON including credentials is stored in df.nodes. RLS-protected but no encryption. | High | ⛔ Recommend credential separation |
 | I-5 | **TLS not enforced on PostgreSQL connections**: Wire protocol uses whatever pg_hba.conf specifies. Extension does not enforce TLS. | Medium | ⚠️ Document requirement |
 | I-6 | **Worker role (GUC) visible via current_setting()**: pg_durable.worker_role is readable by any user | Low | ✅ Acceptable — not a secret |
-| I-7 | **df.debug_connection() exposes connection string**: This function returns the duroxide connection string. Should be restricted in production. | Medium | ⚠️ Recommend REVOKE or restrict |
+| I-7 | **df.debug_connection() exposed connection string**: This function returned the worker connection string (`postgres://role@host:port/db`) — no password or credential. Reclassified as **non-security**: the worker role is already exposed to any role via native PostgreSQL channels (world-readable `pg_durable.worker_role` GUC and `pg_stat_activity.usename`, per I-6), and the remaining fields (database, host/port, fixed schema) are connection-topology metadata, not credentials — the host is read from `PGHOST` (defaults to loopback). | Info | ✅ Resolved — function removed in v0.2.4 (#110) as surface-reduction cleanup, not a vulnerability |
 | I-8 | **Superuser bypasses RLS**: By design, superuser sees all users' data. Appropriate for single-tenant. | Info | ✅ Accepted |
 
 ### 3.5 Denial of Service
@@ -248,7 +248,7 @@ The extension demonstrates strong security design for its core threat model:
 | 3 | **Parameterize activity SQL**: Convert update_instance_status and update_node_status to use sqlx bind parameters instead of format!() | Low | T-2 |
 | 4 | **Add statement_timeout to per-user connections**: Set `statement_timeout` on user SQL connections to prevent runaway queries | Low | D-4 |
 | 5 | **Add rate limiting on df.http()**: Implement `df.max_http_requests_per_instance` or per-user HTTP rate limit | Medium | D-3 |
-| 6 | **Restrict df.debug_connection()**: REVOKE EXECUTE from PUBLIC or gate behind superuser check | Low | I-7 |
+| 6 | ~~**Restrict df.debug_connection()**: REVOKE EXECUTE from PUBLIC or gate behind superuser check~~ → **Superseded.** Reclassified non-security (see I-7); function **removed** in v0.2.4 (#110) rather than restricted. | Low | I-7 |
 
 ### 5.3 Medium Priority — Before GA (P2)
 

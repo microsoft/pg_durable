@@ -7,6 +7,28 @@
 -- requirements (Scenario A / B1 / B2).
 
 -- ============================================================================
+-- Remove df.debug_connection() (issue #110, reclassified non-security cleanup).
+--
+-- The function returned the worker connection string (postgres://role@host:port/db)
+-- — no password or credential. The worker role is already exposed to any role
+-- through native PostgreSQL channels (the world-readable pg_durable.worker_role
+-- GUC and pg_stat_activity.usename — see security-review item I-6); the remaining
+-- fields (database, host/port, schema) are connection-topology metadata, not
+-- secrets (the host comes from PGHOST, defaulting to loopback). It is dropped
+-- purely to shrink the public function surface and future-proof against the
+-- connection builder ever gaining a secret.
+--
+-- The background worker builds its connection from the internal Rust helper, not
+-- this SQL function, so dropping it changes no runtime behavior. The new .so
+-- keeps the underlying C symbol (debug_connection_wrapper) compiled in via a
+-- #[pg_extern(sql = false)] shim, so pre-0.2.4 schemas still resolve the function
+-- until ALTER EXTENSION UPDATE runs (Scenario B1). df.grant_usage() no longer
+-- references this function — its per-function allowlist is removed in this same
+-- release (see below) — so the drop needs no further grant_usage change.
+-- ============================================================================
+DROP FUNCTION IF EXISTS df.debug_connection();
+
+-- ============================================================================
 -- Simplify df.grant_usage(): drop the explicit per-function allowlist.
 --
 -- The previous body looped over a hard-coded list of df.* function signatures
