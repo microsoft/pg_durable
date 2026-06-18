@@ -12,11 +12,15 @@
 --   3. Non-superuser admin CAN set with_grant => true (delegated admin can create sub-admins)
 --   4. Non-superuser admin CANNOT set include_http => true without HTTP grant permission
 --   5. admin_role can call df.grant_usage() to grant app_role access
+--   5b. granted app_role reaches ordinary df.* functions via schema USAGE
+--       (no per-function EXECUTE grant) and is NOT granted df.http()
 --   6. app_role can use pg_durable (start + complete a workflow)
 --   7. app_role CANNOT call df.grant_usage() (no EXECUTE privilege)
 --   8. admin_role can revoke app_role access
 --   9. app_role can no longer use pg_durable
---   10. Self-revoke protection: admin_role cannot revoke its own access
+--   10. Self-revoke is harmless: PostgreSQL's REVOKE only removes grants the
+--       current role made, so admin_role cannot revoke its own postgres-granted
+--       access (no explicit guard needed)
 --
 -- Note: cross-admin revoke is intentionally not tested here. These helper
 -- functions are SECURITY INVOKER, and PostgreSQL revoke semantics are scoped
@@ -222,6 +226,37 @@ BEGIN
     RAISE NOTICE 'TEST 5 verification PASSED: app role does not have admin helper access';
 END $$;
 
+-- === Test 5b: granted app_role reaches ordinary functions via schema USAGE,
+-- and a plain grant (no include_http) does NOT expose df.http() ===
+-- This pins the access model after dropping the explicit func_sigs allowlist
+-- from df.grant_usage(): schema USAGE is the gate for ordinary df.* functions
+-- (which retain PostgreSQL's default PUBLIC EXECUTE), while df.http() stays
+-- opt-in because its PUBLIC EXECUTE is revoked at install time.
+DO $$
+DECLARE
+    has_usage BOOLEAN;
+    can_start BOOLEAN;
+    can_http BOOLEAN;
+BEGIN
+    SELECT has_schema_privilege('dg_app', 'df', 'USAGE') INTO has_usage;
+    SELECT has_function_privilege('dg_app', 'df.start(text, text, text)', 'EXECUTE') INTO can_start;
+    SELECT has_function_privilege('dg_app', 'df.http(text, text, text, jsonb, integer)', 'EXECUTE') INTO can_http;
+
+    IF NOT has_usage THEN
+        RAISE EXCEPTION 'TEST 5b FAILED: dg_app should have USAGE on schema df after grant_usage';
+    END IF;
+
+    IF NOT can_start THEN
+        RAISE EXCEPTION 'TEST 5b FAILED: dg_app should reach df.start via schema USAGE + default PUBLIC EXECUTE';
+    END IF;
+
+    IF can_http THEN
+        RAISE EXCEPTION 'SECURITY FAILURE: dg_app granted without include_http should NOT have EXECUTE on df.http';
+    END IF;
+
+    RAISE NOTICE 'TEST 5b PASSED: USAGE gates ordinary functions; df.http remains opt-in for a plain grant';
+END $$;
+
 -- === Test 6: app_role can use pg_durable ===
 SET SESSION AUTHORIZATION dg_app;
 
@@ -268,9 +303,18 @@ RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION dg_admin;
 
 DO $$
+DECLARE
+    still_has_usage BOOLEAN;
 BEGIN
     PERFORM df.revoke_usage('dg_app');
     RAISE NOTICE 'TEST 8 PASSED: admin role successfully called df.revoke_usage for app role';
+
+    -- Schema USAGE is the access gate; revoke_usage() must remove it.
+    SELECT has_schema_privilege('dg_app', 'df', 'USAGE') INTO still_has_usage;
+    IF still_has_usage THEN
+        RAISE EXCEPTION 'TEST 8 FAILED: dg_app still has USAGE on schema df after revoke_usage';
+    END IF;
+    RAISE NOTICE 'TEST 8 PASSED: dg_app lost USAGE on schema df (access gate closed)';
 END $$;
 
 RESET SESSION AUTHORIZATION;
@@ -297,22 +341,25 @@ END $$;
 
 RESET SESSION AUTHORIZATION;
 
--- === Test 10: Self-revoke protection ===
+-- === Test 10: Self-revoke is harmless (PostgreSQL built-in protection) ===
+-- We don't have an explicit self-revoke guard. None is needed: PostgreSQL's
+-- REVOKE only removes grants made by the current role, and dg_admin's
+-- privileges were granted by postgres (not by dg_admin itself). So a
+-- self-revoke attempt is a no-op and dg_admin retains its access.
 SET SESSION AUTHORIZATION dg_admin;
 
 DO $$
+DECLARE
+    still_has_usage BOOLEAN;
 BEGIN
-    BEGIN
-        PERFORM df.revoke_usage('dg_admin');
-        RAISE EXCEPTION 'SECURITY FAILURE: admin was able to revoke its own access';
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLERRM ILIKE '%cannot revoke df privileges%' AND SQLERRM ILIKE '%member of it%' THEN
-                RAISE NOTICE 'TEST 10 PASSED: self-revoke prevented with clear error';
-            ELSE
-                RAISE EXCEPTION 'TEST 10 UNEXPECTED ERROR: %', SQLERRM;
-            END IF;
-    END;
+    -- Attempt to revoke own access; PostgreSQL leaves it intact.
+    PERFORM df.revoke_usage('dg_admin');
+
+    SELECT has_schema_privilege('dg_admin', 'df', 'USAGE') INTO still_has_usage;
+    IF NOT still_has_usage THEN
+        RAISE EXCEPTION 'TEST 10 FAILED: dg_admin lost USAGE after self-revoke (expected PostgreSQL to keep it)';
+    END IF;
+    RAISE NOTICE 'TEST 10 PASSED: self-revoke is a no-op; dg_admin retains access (built into PostgreSQL)';
 END $$;
 
 RESET SESSION AUTHORIZATION;

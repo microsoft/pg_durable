@@ -203,6 +203,17 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.3 → v0.2.4
+
+#### Simplify `df.grant_usage()` — drop the explicit function allowlist
+- **DDL change (df schema):** `df.grant_usage()` no longer loops over a hard-coded `func_sigs` array issuing `GRANT EXECUTE` per function. Fresh installs (`src/lib.rs`) and the upgrade script (`sql/pg_durable--0.2.3--0.2.4.sql`) both `CREATE OR REPLACE` the function with a body that grants `USAGE ON SCHEMA df` plus the table privileges, and conditionally grants `df.http()` / the admin helpers. The signature `df.grant_usage(text, boolean, boolean)` is unchanged.
+- **DDL change (df schema):** `df.revoke_usage()` is made symmetric with the new `grant_usage()`. It no longer loops over every `df.*` function in `pg_proc` issuing `REVOKE EXECUTE` (which, post-simplification, only produced "no privileges could be revoked" warnings since ordinary functions are never granted per-function EXECUTE). The new body revokes only what `grant_usage()` grants: schema `USAGE`, EXECUTE on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`), and the table privileges. The signature `df.revoke_usage(text)` is unchanged.
+- **Rationale:** The ordinary `df.*` functions retain PostgreSQL's default PUBLIC `EXECUTE`, so schema `USAGE` is the real access gate; the per-function grants/revokes were redundant. The sensitive functions have PUBLIC `EXECUTE` revoked at install time and were never in the allowlist, so their protection is unchanged.
+- **Behavioral note:** A newly added `df.*` function is now callable by any role with schema `USAGE` by default. To keep a future function private, `REVOKE EXECUTE ... FROM PUBLIC` at install time and grant it explicitly in `df.grant_usage()`.
+- **Legacy cleanup caveat:** A role that was granted under the *old* `grant_usage()` (explicit per-function EXECUTE) and is later revoked under the new `revoke_usage()` may retain inert EXECUTE entries on ordinary functions. These are harmless — revoking schema `USAGE` fully locks the role out — and clear on the next drop/regrant cycle.
+- **Scenario A considerations:** Signatures are identical on the fresh-install and upgrade paths (only the bodies differ), so the function-signature equivalence contract passes.
+- **Scenario B1/B2 considerations:** No schema/data migration and no new objects. The replaced bodies work against the existing schema and change no privileges already granted.
+
 ### v0.2.2 → v0.2.3
 
 #### Rename duroxide provider schema to `_duroxide` for fresh installs
