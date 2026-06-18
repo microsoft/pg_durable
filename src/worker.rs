@@ -456,12 +456,17 @@ async fn initialize_duroxide_runtime(
     log!("pg_durable: initializing duroxide runtime...");
 
     // Control duroxide provider pool size via env var (the only mechanism
-    // without modifying duroxide-pg). BGW is single-threaded so no
-    // concurrent readers. Note: std::env::set_var becomes unsafe in Rust 2024 edition.
-    std::env::set_var(
-        "DUROXIDE_PG_POOL_MAX",
-        get_max_duroxide_connections().to_string(),
-    );
+    // without modifying duroxide-pg).
+    //
+    // SAFETY: The BGW tokio runtime uses new_current_thread() — no additional
+    // OS threads are spawned. PostgreSQL's fork model means this process has no
+    // other threads that could be reading the environment concurrently.
+    unsafe {
+        std::env::set_var(
+            "DUROXIDE_PG_POOL_MAX",
+            get_max_duroxide_connections().to_string(),
+        );
+    }
 
     // Create the user-execution semaphore once — the GUC is Postmaster-context
     // so the value never changes within a worker lifetime.

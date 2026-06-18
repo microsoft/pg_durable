@@ -104,7 +104,13 @@ where
         let client = rt.block_on(async {
             // Limit backend provider to 1 connection — backends need minimal
             // duroxide access (start/cancel/signal only).
-            std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
+            //
+            // SAFETY: Each PostgreSQL backend is a separate process (fork model).
+            // This code runs in a single-threaded tokio runtime with no worker
+            // threads. No concurrent thread can be reading env simultaneously.
+            unsafe {
+                std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
+            }
 
             let store = new_backend_provider(&pg_conn_str, schema).await?;
             Ok::<Client, String>(Client::new(store))
