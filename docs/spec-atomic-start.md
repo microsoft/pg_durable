@@ -21,9 +21,12 @@ corresponding `df.*` rows. The background worker then repeatedly tries to load a
 graph that does not exist, fails after a 5 s timeout, and the orphan persists in
 `_duroxide.instances`.
 
-This spec proposes making the duroxide start-enqueue part of the caller's
-backend transaction (design **Option 3** from the design exploration), so that
-`df.start()` is atomic: either everything commits, or nothing does.
+Four designs were explored to keep the two stores consistent (see **Design
+options considered** below). This spec **implements Option 3 (primary) plus
+Option 4 (complementary backstop)**: make the duroxide start-enqueue part of the
+caller's backend transaction so `df.start()` is atomic — either everything
+commits or nothing does — and add an asynchronous reconciler to repair any
+residual drift that start-time atomicity cannot prevent.
 
 ### Evidence (observed during investigation)
 
@@ -37,6 +40,60 @@ backend transaction (design **Option 3** from the design exploration), so that
   well under 1M instances (observed first-collision draws: 9248, 34845, 40445,
   60776). That abort is *safe* today (it happens before the duroxide enqueue),
   but it exercises the same dual-write seam.
+
+## Design options considered
+
+Four approaches were explored for keeping the `df.*` control plane and the
+`_duroxide` runtime consistent. The mechanics of the chosen approach are detailed
+in **Design** below; this section records all four and the decision.
+
+**Option 1 — Single source of truth in `_duroxide`.** Drop the `df.instances` /
+`df.nodes` control tables entirely, keep all instance state in `_duroxide`,
+serialize the graph into the orchestration input, and have duroxide expose
+whatever state pg_durable needs (via views / read APIs).
+*Guarantee:* total — there is only one store, so nothing can diverge.
+*Cost:* large — moves the `submitted_by` security boundary, requires rebuilding
+per-user RLS over duroxide-owned tables, re-exposing every `df.*` read surface,
+and a destructive migration with B1 backward-compat implications. A possible
+long-term direction, not this change.
+
+**Option 2 — Hand duroxide-pg our SQL to run inside *its* transaction.** Keep
+both schemas; extend duroxide-pg so the start-enqueue also executes the
+pg_durable `df.*` writes in the same (sqlx, worker-pool) transaction.
+*Guarantee:* `df.*` ↔ `_duroxide` atomic — but on the worker-pool connection, so
+`df.start()` stops participating in the *caller's* transaction and the `df.*`
+writes run as the pool role, breaking `current_user` / `submitted_by` capture and
+RLS. Strictly weaker than Option 3.
+
+**Option 3 — Hand duroxide-pg *our* (the caller's) transaction.** Keep both
+schemas; run duroxide's start-enqueue inside the caller's backend transaction via
+SPI, alongside the `df.*` writes.
+*Guarantee:* strongest — `df.nodes` + `df.instances` + the queue row + the
+caller's surrounding statements all commit or roll back together; identity
+capture and the `df.*` read surface are untouched; the 5 s load race disappears.
+*Cost:* small — the start is a single SQL-function call — with one wrinkle: a
+`SECURITY DEFINER` enqueue entrypoint is needed because the queue INSERT is
+owner-only. **Chosen as the primary fix.**
+
+**Option 4 — Tolerate divergence; repair asynchronously.** Accept a transient
+window and add a reconciler — ideally a built-in durable function — that detects
+and repairs mismatches (orphaned `_duroxide` instances, stuck `df.instances`
+rows, `status`-mirror drift).
+*Guarantee:* none added; eventual consistency with bounded repair latency.
+*Value:* the only option that also catches divergence from crashes
+*mid-execution* and from paths Option 3 does not cover (the worker-side mirror
+activities, and signal/cancel until they are migrated). **Chosen as a
+complementary backstop.**
+
+### Decision
+
+Implement **Option 3 + Option 4**. Option 3 removes the dual-write at the source
+for backend-initiated starts (and, in a later phase, `df.cancel`); Option 4 is a
+lightweight safety net for the residual divergence that no start-time atomicity
+can prevent (crashes mid-execution, the best-effort `df.*` mirror, and
+not-yet-migrated signal/cancel). Options 1 and 2 are rejected — Option 1 is
+disproportionate to the problem, and Option 2 is a strictly weaker variant of
+Option 3.
 
 ## Background: how a start is written today
 
@@ -147,23 +204,6 @@ This is the "best-effort mirror"; any persistent drift is the reconciler's job
   separately. This spec makes a collision a clean, fully-atomic abort.)
 - Migrating `df.signal()` / `df.cancel()` to the in-transaction path — same
   mechanism, scoped as a follow-up (see Phasing).
-
-## Considered alternatives (summary)
-
-1. **Single source of truth in `_duroxide`** — remove `df.*`, serialize the graph
-   into the orchestration input, re-expose reads as views over `_duroxide`.
-   Strongest invariant but large; security/RLS/read-API rework and a destructive
-   migration. Rejected for this change.
-2. **duroxide-pg runs pg_durable's SQL inside *its* sqlx transaction** — makes
-   `df.*` ↔ `_duroxide` atomic but on the worker-pool connection, so `df.start`
-   stops participating in the caller's transaction, and the `df.*` writes run as
-   the pool role (breaks `current_user` capture). Strictly weaker than Option 3.
-3. **Run the enqueue inside the caller's backend transaction via SPI (this
-   spec)** — smallest change, strongest guarantee, keeps `df.*` and identity
-   capture intact.
-4. **Tolerate divergence + async GC/reconciler** — additive safety net; does not
-   prevent transient inconsistency. Recommended as a *complementary* backstop,
-   not a replacement.
 
 ## Design
 
@@ -335,15 +375,15 @@ See the Dual-write inventory above for the precise classification. In short:
   "don't deliver if my tx rolls back" semantics, but that is a nice-to-have, not
   a consistency fix — lowest priority.
 
-## Complementary backstop (optional, recommended)
+## Complementary backstop — Option 4 (in scope, Phase 3)
 
-Independently of this change, a lightweight **reconciler** — ideally a built-in
-durable function (a `@>` loop + `df.wait_for_schedule`) — should sweep for
-residual divergence that an atomic start cannot prevent (crashes mid-execution,
+As part of the chosen approach, a lightweight **reconciler** — ideally a built-in
+durable function (a `@>` loop + `df.wait_for_schedule`) — sweeps for residual
+divergence that an atomic start cannot prevent (crashes mid-execution,
 not-yet-migrated signal/cancel paths, `status` mirror drift), using existing
 `_duroxide` read functions (`list_instances`, `get_instance_info`,
-`get_queue_depths`) and `delete_instances_atomic`. Tracked separately as
-"Option 4"; not required for this spec but cheap insurance.
+`get_queue_depths`) and `delete_instances_atomic`. It complements Option 3 rather
+than replacing it, and is sequenced as Phase 3 (see Phasing).
 
 ## Upgrade & Migration
 
@@ -404,7 +444,7 @@ E2E (tests/e2e/sql/) and unit coverage:
    `load-function-graph` retry; docs + tests.
 2. **Phase 2:** apply the same in-transaction enqueue to `df.signal()` /
    `df.cancel()`.
-3. **Phase 3 (optional):** ship the reconciler backstop (Option 4).
+3. **Phase 3:** ship the reconciler backstop (Option 4).
 
 ## Open questions / risks
 
