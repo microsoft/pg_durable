@@ -12,7 +12,6 @@ use std::str::FromStr;
 use std::cell::RefCell;
 use std::time::Instant;
 
-use crate::client::start_durable_function;
 use crate::types::{
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
 };
@@ -912,23 +911,48 @@ pub fn start(
         vars
     });
 
-    // Start the orchestration via duroxide
+    // Start the orchestration durably.
+    //
+    // Option 3 (atomic start): the StartOrchestration work item is enqueued via
+    // SPI inside the CALLER'S transaction, so the df.nodes/df.instances INSERTs
+    // above and this orchestrator-queue INSERT commit or roll back together. A
+    // rolled-back df.start() therefore leaves no _duroxide orphan, and the worker
+    // only observes the queue row after the df.* rows are visible (which also
+    // removes the load-function-graph "wait for commit" race).
     let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
         vars,
     };
-    let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
+    let input_json = serde_json::to_string(&input).unwrap_or_else(|_| instance_id.clone());
 
-    if let Err(e) = start_durable_function(
-        crate::orchestrations::execute_function_graph::NAME,
-        &instance_id,
-        &input_json,
+    // Fail clearly (and atomically — the df.* INSERTs roll back) if the worker
+    // has not yet initialised the duroxide schema.
+    if !crate::client::is_worker_ready() {
+        pgrx::error!("pg_durable background worker not yet initialized — try again in a moment");
+    }
+
+    // Build the exact same work item the duroxide client would enqueue, by
+    // serializing the real duroxide type (guarantees wire compatibility).
+    let work_item = duroxide::providers::WorkItem::StartOrchestration {
+        instance: instance_id.clone(),
+        orchestration: crate::orchestrations::execute_function_graph::NAME.to_string(),
+        input: input_json,
+        version: None,
+        parent_instance: None,
+        parent_id: None,
+        execution_id: duroxide::INITIAL_EXECUTION_ID,
+    };
+    let work_item_json = serde_json::to_string(&work_item)
+        .unwrap_or_else(|e| pgrx::error!("Failed to serialize start work item: {}", e));
+
+    // SECURITY DEFINER wrapper performs the privileged orchestrator-queue INSERT
+    // on the caller's transaction. Raising on failure aborts the whole df.start.
+    if let Err(e) = Spi::run_with_args(
+        "SELECT df._enqueue_orchestrator_start($1, $2)",
+        &[instance_id.as_str().into(), work_item_json.as_str().into()],
     ) {
-        pgrx::log!(
-            "pg_durable: Warning - failed to start durable function: {}",
-            e
-        );
+        pgrx::error!("Failed to enqueue durable function start: {:?}", e);
     }
 
     instance_id

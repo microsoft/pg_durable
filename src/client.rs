@@ -27,7 +27,7 @@ static DUROXIDE_CLIENT: OnceLock<Client> = OnceLock::new();
 /// row, or has a `schema_version` below `WORKER_SCHEMA_VERSION`. This is a fast
 /// SPI read called once per session on the first call to any `df.*` function
 /// that needs the duroxide client.
-fn is_worker_ready() -> bool {
+pub(crate) fn is_worker_ready() -> bool {
     let schema = backend_duroxide_schema();
 
     // First check if the readiness table exists via the catalogue.  Querying
@@ -133,29 +133,6 @@ async fn list_running_descendants(client: &Client, root_instance_id: &str) -> Ve
     }
 
     descendants
-}
-
-/// Start a durable function via the shared PostgreSQL store.
-pub fn start_durable_function(
-    function_name: &str,
-    instance_id: &str,
-    input: &str,
-) -> Result<(), String> {
-    log!(
-        "pg_durable: start_durable_function for instance {}",
-        instance_id
-    );
-
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
-
-    rt.block_on(async {
-        client
-            .start_orchestration(instance_id, function_name, input)
-            .await
-            .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
-        Ok(())
-    })
 }
 
 /// Cancel a durable function.

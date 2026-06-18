@@ -413,7 +413,9 @@ DECLARE
         'df.version()',
         'df.debug_connection()',
         'df.explain(text)',
-        'df.target_database()'
+        'df.target_database()',
+        -- Atomic-start enqueue wrapper (called by df.start() via SPI)
+        'df._enqueue_orchestrator_start(text, text)'
     ];
 BEGIN
     -- Validate the role exists
@@ -559,6 +561,46 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
     requires = ["create_tables", dsl::http]
+);
+
+// ============================================================================
+// Atomic start enqueue (Option 3) — SECURITY DEFINER wrapper
+// ============================================================================
+//
+// df.start() enqueues the StartOrchestration work item by calling this wrapper
+// via SPI, inside the caller's transaction. The duroxide orchestrator queue
+// grants INSERT to its owner only, so the privileged INSERT must run as a
+// definer that owns the _duroxide tables; the call still commits/rolls back as
+// part of the caller's transaction, giving an atomic df.start().
+//
+// The body references _duroxide.enqueue_orchestrator_work, which is created by
+// the background worker's migrations (not this extension). plpgsql resolves it
+// at call time, by which point df.start()'s worker-readiness gate guarantees the
+// _duroxide schema exists.
+//
+// SECURITY (POC): this wrapper can enqueue an arbitrary orchestrator work item.
+// EXECUTE is revoked from PUBLIC and granted only via df.grant_usage(). A
+// production version should move this entrypoint into duroxide-pg (owned by the
+// _duroxide schema owner) and/or validate the work item — see
+// docs/spec-atomic-start.md. The _duroxide schema name is also hard-coded here
+// for the POC (it is resolved dynamically elsewhere).
+extension_sql!(
+    r#"
+CREATE FUNCTION df._enqueue_orchestrator_start(p_instance_id text, p_work_item text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $fn$
+BEGIN
+    PERFORM _duroxide.enqueue_orchestrator_work(p_instance_id, p_work_item, pg_catalog.now());
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text) FROM PUBLIC;
+"#,
+    name = "atomic_start_enqueue",
+    requires = ["create_tables"]
 );
 
 // ============================================================================
