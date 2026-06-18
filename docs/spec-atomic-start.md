@@ -76,11 +76,55 @@ Key facts that make the fix small:
 | Execution history | `_duroxide.history` | duroxide-internal; transactional per turn via `ack_orchestration_item`. |
 | Control plane (`root_node`, `submitted_by`, `database`, `label`) | `df.instances` | needed by the worker to load + authenticate. |
 | `df.instances.status` | best-effort mirror | written by the `update-instance-status` activity; not atomic with duroxide, self-heals. |
+| `df.nodes.status/result/error` | best-effort mirror | written by the `update-node-status` activity; same properties as above. |
 
 `submitted_by` is a **security boundary**: it is captured as `current_user` at
 `df.start()` time and pinned by a composite FK; the worker re-checks the
 superuser policy (src/activities/load_function_graph.rs). Any change must keep it
 unforgeable.
+
+### Dual-write inventory
+
+Auditing every `df.*` writer against every duroxide-client call, the cross-store
+seams are bounded and fall into two distinct classes.
+
+**Backend (session) side — `df.*` on the caller's transaction + an out-of-band
+duroxide-client enqueue.** This is the class Option 3 fixes.
+
+| Site | `df.*` write (user tx, SPI) | `_duroxide` write (out-of-band pool) | Dual-write? |
+|------|------|------|------|
+| `df.start()` | INSERT `df.nodes` + `df.instances` (src/dsl.rs:842,888) | enqueue `StartOrchestration` (src/dsl.rs:923) | **Yes** — Phase 1 |
+| `df.cancel()` | UPDATE `df.instances.status='cancelled'` (src/dsl.rs:966) | `cancel_instance` enqueue (src/dsl.rs:955) | **Yes** — Phase 2 |
+| `df.signal()` | **none** (only an RLS read of `df.instances`) | `raise_event` + descendant fan-out (src/dsl.rs:616) | **No** — single store |
+
+Notes:
+
+- **`df.cancel()` is a genuine dual-write** with two twists vs `df.start()`: it
+  enqueues to duroxide **first** and then does the `df.*` UPDATE (opposite
+  order), and the UPDATE is only an *optimistic* mirror — the authoritative
+  `cancelled` status is re-applied when the worker processes the cancel via
+  `update-instance-status`, so divergence here is usually transient and
+  self-healing. It still belongs in the same in-transaction treatment for strict
+  atomicity.
+- **`df.signal()` is not a dual-write**: it writes only `_duroxide`. There is no
+  cross-store inconsistency to create; moving it in-transaction only changes
+  "don't deliver the signal if my surrounding tx rolls back" semantics — a
+  nice-to-have, not a consistency fix.
+- Not seams: `df.run()` is a no-op stub; `df.result/status/explain/monitoring`
+  are reads; `df.vars` and `df._worker_epoch` touch only `df.*`.
+
+**Worker side — `df.*` mirror maintained by activities, on a connection separate
+from duroxide's history ack.** Option 3 does **not** address this class.
+
+| Activity | `df.*` write | Property |
+|----------|--------------|----------|
+| `update-instance-status` | UPDATE `df.instances.status` | eventually consistent, self-healing |
+| `update-node-status` | UPDATE `df.nodes.status/result/error` | eventually consistent, self-healing |
+
+These are at-least-once activities re-applied on replay, so a crash between the
+duroxide ack and the mirror update is transient lag, not permanent divergence.
+This is the "best-effort mirror"; any persistent drift is the reconciler's job
+(see Complementary backstop), not Option 3's.
 
 ## Goals
 
@@ -275,12 +319,21 @@ called out in `USER_GUIDE.md`.
 
 ## Signals & cancellation (follow-up)
 
-`df.signal()` (ExternalRaised) and `df.cancel()` (CancelInstance) are also single
-orchestrator enqueues and can use the same in-transaction SPI path for the same
-consistency benefit. They are **out of scope** here (signal/cancel target
-already-committed instances, so the rolled-back-start leak does not apply), but
-the `SECURITY DEFINER` enqueue entrypoint should be designed to serve them too
-(generalize to `client_enqueue(instance, work_item, visible_at)`).
+See the Dual-write inventory above for the precise classification. In short:
+
+- **`df.cancel()` is a genuine dual-write** (`df.instances.status` + a
+  `CancelInstance` enqueue) and should get the same in-transaction treatment as
+  `df.start()`. It is scoped as **Phase 2** rather than Phase 1 only because it
+  targets an already-committed instance (so the rolled-back-*start* leak does not
+  apply) and because the worker's `update-instance-status` activity already
+  re-applies the authoritative `cancelled` status, making its divergence
+  transient. The `SECURITY DEFINER` enqueue entrypoint should be generalized to
+  carry an arbitrary work item (e.g. `client_enqueue(instance, work_item,
+  visible_at)`) so it serves cancel directly.
+- **`df.signal()` is not a dual-write** (it writes only `_duroxide`), so it
+  creates no cross-store inconsistency. It can ride on the same entrypoint for
+  "don't deliver if my tx rolls back" semantics, but that is a nice-to-have, not
+  a consistency fix — lowest priority.
 
 ## Complementary backstop (optional, recommended)
 
