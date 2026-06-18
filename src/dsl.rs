@@ -917,6 +917,7 @@ pub fn start(
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
         vars,
+        loop_iteration: 0,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 

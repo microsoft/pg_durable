@@ -2764,6 +2764,84 @@ mod tests {
             "Should produce a VALUES clause"
         );
     }
+
+    // --- M7: Loop iteration counter persisted across continue_as_new ---
+
+    #[pg_test]
+    fn test_function_input_loop_iteration_serialization() {
+        use crate::types::FunctionInput;
+
+        // Verify loop_iteration is preserved through serialization
+        let input = FunctionInput {
+            instance_id: "test123".to_string(),
+            label: Some("test".to_string()),
+            vars: std::collections::HashMap::new(),
+            loop_iteration: 42,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let deserialized: FunctionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.loop_iteration, 42,
+            "loop_iteration must survive serialization round-trip"
+        );
+    }
+
+    #[pg_test]
+    fn test_function_input_loop_iteration_defaults_to_zero() {
+        use crate::types::FunctionInput;
+
+        // Verify backward compat: old FunctionInput JSON without loop_iteration
+        // deserializes with loop_iteration = 0
+        let json = r#"{"instance_id":"abc12345","label":"test","vars":{}}"#;
+        let input: FunctionInput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            input.loop_iteration, 0,
+            "Missing loop_iteration should default to 0 for backward compatibility"
+        );
+    }
+
+    // --- M8: Malformed loop condition config detection ---
+
+    #[pg_test]
+    fn test_malformed_loop_condition_detected_at_validate() {
+        // A LOOP node whose condition_node is a plain string (not a Durofut object)
+        // should be rejected by validate_recursive because for_each_config_child
+        // requires condition_node to deserialize as a valid Durofut.
+        let node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            // Malformed config: valid JSON but condition_node is a string, not a Durofut object.
+            query: Some(r#"{"condition_node": "nonexist"}"#.to_string()),
+            ..Default::default()
+        };
+        // Validate should fail because condition_node is not a valid Durofut object
+        let err = node.validate_recursive().unwrap_err();
+        assert!(
+            err.contains("condition_node"),
+            "Error should mention condition_node, got: {err}"
+        );
+
+        // But if the config is totally not JSON, for_each_config_child skips it
+        // (it's treated as a plain query string, not a config object).
+        let non_json_node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            query: Some("this is not json at all!!!".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            non_json_node.validate_recursive().is_ok(),
+            "LOOP with non-JSON config passes DSL validation (caught at execution time)"
+        );
+    }
 }
 
 /// Required by `cargo pgrx test`

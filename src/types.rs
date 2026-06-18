@@ -895,6 +895,10 @@ pub struct FunctionInput {
     pub label: Option<String>,
     #[serde(default)]
     pub vars: std::collections::HashMap<String, String>,
+    /// Loop iteration counter, incremented on each `continue_as_new`.
+    /// Used to enforce a maximum iteration safeguard.
+    #[serde(default)]
+    pub loop_iteration: u64,
 }
 
 /// Configuration for HTTP requests
