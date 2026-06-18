@@ -55,7 +55,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: Workflow should complete in correct database, got status: %', status;
@@ -134,7 +134,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [multi-db]: status = %', status;
@@ -236,7 +236,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state2;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [regression]: status = %', status;
@@ -275,7 +275,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state3;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [multi-node seq]: status = %', status;

@@ -40,7 +40,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -91,7 +91,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_vars_simple;
     RAISE NOTICE 'Testing simple vars: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: simple vars status = %', status;
@@ -127,7 +127,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_sys_vars;
     RAISE NOTICE 'Testing system vars: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: sys vars status = %', status;
@@ -166,7 +166,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_vars_http;
     RAISE NOTICE 'Testing vars in HTTP: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: vars HTTP status = %', status;
@@ -198,7 +198,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_vars_multi;
     RAISE NOTICE 'Testing multiple vars: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: multi vars status = %', status;
@@ -228,7 +228,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_setvar_blocked;
     RAISE NOTICE 'Testing setvar blocked in workflow: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected workflow to fail but status = %', status;
@@ -273,7 +273,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO rec FROM _test_state WHERE variant = 'dot';
 
-    SELECT df.wait_for_completion(rec.instance_id) INTO status;
+    SELECT df.await_instance(rec.instance_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [dot-notation]: status = %', status;
@@ -315,7 +315,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state2;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [null-safe]: status = %', status;
@@ -349,7 +349,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state3;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED [strict-fail]: expected failed, got %', status;
@@ -407,7 +407,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state ORDER BY variant LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -464,7 +464,7 @@ DECLARE
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state WHERE variant = 'valid_name';
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [valid_name]: status = %', status;

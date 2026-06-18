@@ -62,7 +62,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_bypass;
 
     -- Wait up to 30 s; the request must fail (not complete or time out).
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected status = failed, got %', status;

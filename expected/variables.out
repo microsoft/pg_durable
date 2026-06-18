@@ -11,7 +11,7 @@ SELECT df.start(
     ~> 'INSERT INTO test_vars_log (val, variant) VALUES ($x::text, ''op'')',
     'test-variables-op'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed
@@ -25,7 +25,7 @@ SELECT df.start(
     ),
     'test-variables-fn'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed

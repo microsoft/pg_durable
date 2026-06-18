@@ -38,7 +38,7 @@ BEGIN
     SELECT instance_id INTO victim_id FROM _test_state WHERE label = 'victim';
 
     -- Wait for the victim to fail (should fail within ~5s: 3s head start + 2s timeout)
-    SELECT df.wait_for_completion(victim_id, 30) INTO victim_status;
+    SELECT df.await_instance(victim_id, 30) INTO victim_status;
 
     IF victim_status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: victim status = %, expected failed', victim_status;
@@ -63,7 +63,7 @@ BEGIN
     RAISE NOTICE 'PASSED: timeout error message correct: %', victim_output;
 
     -- Wait for the blocker to finish too (it will complete after 15s)
-    SELECT df.wait_for_completion(blocker_id, 30) INTO blocker_status;
+    SELECT df.await_instance(blocker_id, 30) INTO blocker_status;
 
     IF blocker_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: blocker status = %, expected completed', blocker_status;

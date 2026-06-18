@@ -14,7 +14,7 @@ SELECT df.start(
     ),
     'test-cond-true-func'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed
@@ -27,7 +27,7 @@ SELECT df.start(
         !> 'INSERT INTO test_cond_log (branch, variant) VALUES (''else'', ''true-op'')',
     'test-cond-true-op'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed
@@ -42,7 +42,7 @@ SELECT df.start(
     ),
     'test-cond-false-func'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed
@@ -55,7 +55,7 @@ SELECT df.start(
         !> 'INSERT INTO test_cond_log (branch, variant) VALUES (''else'', ''false-op'')',
     'test-cond-false-op'
 ) AS instance_id \gset
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
   status   
 -----------
  completed

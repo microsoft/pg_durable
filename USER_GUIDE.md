@@ -193,8 +193,8 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.wait_for_signal(name)` | Wait for external signal | `df.wait_for_signal('approval')` |
 | `df.wait_for_signal(name, timeout)` | Wait with timeout (seconds) | `df.wait_for_signal('approval', 3600)` |
 | `df.signal(id, name, data)` | Send signal to instance | `df.signal('a1b2', 'go', '{}')` |
-| `df.wait_for_completion(id)` | Block until instance completes (default 30s timeout) | `df.wait_for_completion('a1b2c3d4')` |
-| `df.wait_for_completion(id, timeout)` | Block until instance completes with explicit timeout in seconds | `df.wait_for_completion('a1b2c3d4', 60)` |
+| `df.await_instance(id)` | Block until instance completes (default 30s timeout) | `df.await_instance('a1b2c3d4')` |
+| `df.await_instance(id, timeout)` | Block until instance completes with explicit timeout in seconds | `df.await_instance('a1b2c3d4', 60)` |
 
 ### Operators
 
@@ -1655,7 +1655,6 @@ The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep Postgr
 ```sql
 -- Access gate: schema USAGE makes every ordinary df.* function callable
 GRANT USAGE ON SCHEMA df TO app_role;
-
 -- Optional: HTTP access (include_http => true)
 -- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
 

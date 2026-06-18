@@ -82,7 +82,7 @@ DECLARE
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _su_guc_t2;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST 2 FAILED: non-superuser blocked when GUC is off, status=%', status;
     END IF;
@@ -130,7 +130,7 @@ DECLARE
     status  TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _su_guc_t3;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF lower(status) != 'failed' THEN
         RAISE EXCEPTION 'TEST 3 FAILED: expected failed, got: %', status;
@@ -204,7 +204,7 @@ DECLARE
     status     TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _su_guc_t4;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     -- The instance must complete: execute_sql ran with the cached (clean)
     -- identity and never saw the tampered superuser in df.nodes.
@@ -299,7 +299,7 @@ DECLARE
     iter_count INT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _su_guc_t5;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     -- load_function_graph for iteration 2 must have blocked the tampered identity.
     IF lower(status) != 'failed' THEN

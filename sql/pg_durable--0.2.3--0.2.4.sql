@@ -127,3 +127,20 @@ BEGIN
     RAISE NOTICE 'pg_durable: revoked df usage privileges granted by "%" from "%"', current_user, p_role;
 END;
 $fn$;
+
+-- Renames df.wait_for_completion → df.await_instance. The old name is retained
+-- as a deprecated alias for backward compatibility: the new .so still exports
+-- both functions (df.await_instance is the canonical name;
+-- df.wait_for_completion is a thin Rust shim). Existing customer scripts that
+-- call df.wait_for_completion continue to work unchanged.
+
+-- New canonical name for the test/inspection helper formerly known as
+-- df.wait_for_completion. Bound to the C symbol await_instance_wrapper exported
+-- by the new .so.
+CREATE FUNCTION df."await_instance"(
+		"instance_id" TEXT,
+		"timeout_seconds" INT DEFAULT 30
+) RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'await_instance_wrapper';

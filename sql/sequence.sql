@@ -14,7 +14,7 @@ SELECT df.start(
     'test-sequence-op'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Test B: Using df.seq() function
 SELECT df.start(
@@ -28,7 +28,7 @@ SELECT df.start(
     'test-sequence-fn'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Verify results (deterministic output, ordered by id)
 SELECT step, variant FROM test_sequence_log ORDER BY id;

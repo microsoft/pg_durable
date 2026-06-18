@@ -40,7 +40,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -96,7 +96,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -230,7 +230,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -284,7 +284,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state2;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [if_rows+dot]: status = %', status;
@@ -325,7 +325,7 @@ DECLARE
     chosen_val INT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_if_named;
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [if-named]: status = %', status;

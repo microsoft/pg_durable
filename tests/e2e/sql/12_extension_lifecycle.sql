@@ -56,7 +56,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected completed, got %', status;
@@ -106,7 +106,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state2;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected completed after recreate, got %', status;
@@ -330,7 +330,7 @@ DECLARE
     final_status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_25;
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST SETUP FAILED: worker did not recover after extension recreate (status=%)', final_status;

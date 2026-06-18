@@ -53,7 +53,7 @@ DECLARE
     result  TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_blob;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         SELECT r.result::text INTO result
@@ -90,7 +90,7 @@ DECLARE
     result  TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_queue;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         SELECT r.result::text INTO result
@@ -127,7 +127,7 @@ DECLARE
     result  TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_table;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         SELECT r.result::text INTO result
@@ -164,7 +164,7 @@ DECLARE
     result  TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_file;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         SELECT r.result::text INTO result
@@ -208,7 +208,7 @@ DECLARE
     node_result TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_blob_alt;
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     -- Success or a non-allowlist failure both count as passing.
     IF status = 'completed' THEN

@@ -47,7 +47,7 @@ DECLARE
     cnt INT;
 BEGIN
     FOR rec IN SELECT instance_id, label FROM _test_state LOOP
-        SELECT df.wait_for_completion(rec.instance_id, 60) INTO status;
+        SELECT df.await_instance(rec.instance_id, 60) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %, expected completed', rec.label, status;

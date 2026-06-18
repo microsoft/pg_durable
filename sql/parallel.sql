@@ -15,7 +15,7 @@ SELECT df.start(
     'test-parallel-func'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Test B: & operator
 SELECT df.start(
@@ -24,7 +24,7 @@ SELECT df.start(
     'test-parallel-op'
 ) AS instance_id \gset
 
-SELECT df.wait_for_completion(:'instance_id') AS status;
+SELECT df.await_instance(:'instance_id') AS status;
 
 -- Verify results (deterministic output, ordered by branch then variant)
 -- Both branches should have executed
