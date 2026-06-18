@@ -5,7 +5,11 @@
 //!
 //! This module provides cached Tokio runtime and Duroxide client for efficient
 //! df.start(), df.signal(), and df.cancel() calls from user sessions.
+//!
+//! The client is lazily initialized on first use and can automatically
+//! recover from connection failures by re-creating the pool on next call.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use duroxide::Client;
@@ -17,8 +21,13 @@ use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_conne
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// Cached Duroxide client with connection pool.
-static DUROXIDE_CLIENT: OnceLock<Client> = OnceLock::new();
+// Per-backend cached Duroxide client. Uses thread_local + RefCell because
+// PostgreSQL backends are single-threaded forked processes. This allows
+// the client to be reset on connection failures (unlike OnceLock which
+// is permanent).
+thread_local! {
+    static DUROXIDE_CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+}
 
 /// Check whether the background worker has finished initializing the duroxide
 /// schema for the current binary's expected schema version.
@@ -68,35 +77,79 @@ fn get_client_runtime() -> &'static Runtime {
     })
 }
 
-/// Get or create the cached Duroxide client.
-fn get_duroxide_client() -> Result<&'static Client, String> {
-    if let Some(client) = DUROXIDE_CLIENT.get() {
-        return Ok(client);
-    }
-
-    if !is_worker_ready() {
-        return Err(
-            "pg_durable background worker not yet initialized — try again in a moment".to_string(),
-        );
-    }
-
+/// Initialize or get the cached Duroxide client, executing `f` with it.
+/// If the client doesn't exist yet, creates it. If `f` returns an error
+/// that looks like a connection failure, resets the client so the next
+/// call will re-initialize.
+fn with_duroxide_client<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce(&Client, &Runtime) -> Result<T, String>,
+{
     let rt = get_client_runtime();
-    let pg_conn_str = postgres_connection_string();
-    let schema = backend_duroxide_schema();
 
-    rt.block_on(async {
-        // Limit backend provider to 1 connection — backends need minimal duroxide
-        // access (start/cancel/signal only). The runtime is single-threaded
-        // (new_current_thread). Note: std::env::set_var becomes unsafe in Rust 2024 edition.
-        std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
+    // Try to use existing client
+    let has_client = DUROXIDE_CLIENT.with(|cell| cell.borrow().is_some());
 
-        let store = new_backend_provider(&pg_conn_str, schema).await?;
+    if !has_client {
+        // Need to create a new client
+        if !is_worker_ready() {
+            return Err(
+                "pg_durable background worker not yet initialized — try again in a moment"
+                    .to_string(),
+            );
+        }
 
-        let _ = DUROXIDE_CLIENT.set(Client::new(store));
-        DUROXIDE_CLIENT
-            .get()
-            .ok_or_else(|| "Failed to initialize client".to_string())
-    })
+        let pg_conn_str = postgres_connection_string();
+        let schema = backend_duroxide_schema();
+        let client = rt.block_on(async {
+            // Limit backend provider to 1 connection — backends need minimal
+            // duroxide access (start/cancel/signal only).
+            std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
+
+            let store = new_backend_provider(&pg_conn_str, schema).await?;
+            Ok::<Client, String>(Client::new(store))
+        })?;
+
+        DUROXIDE_CLIENT.with(|cell| {
+            *cell.borrow_mut() = Some(client);
+        });
+    }
+
+    // Execute the operation with the client
+    let result = DUROXIDE_CLIENT.with(|cell| {
+        let borrow = cell.borrow();
+        let client = borrow
+            .as_ref()
+            .ok_or_else(|| "Client unexpectedly missing".to_string())?;
+        f(client, rt)
+    });
+
+    // On connection-level errors, reset the client so next call retries
+    if let Err(ref e) = result {
+        if is_connection_error(e) {
+            DUROXIDE_CLIENT.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        }
+    }
+
+    result
+}
+
+/// Heuristic to detect connection-level errors that warrant client reset.
+fn is_connection_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("connection")
+        || lower.contains("pool timed out")
+        || lower.contains("broken pipe")
+        || lower.contains("reset by peer")
+        || lower.contains("closed")
+}
+
+/// Test-accessible wrapper for is_connection_error.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn is_connection_error_for_test(err: &str) -> bool {
+    is_connection_error(err)
 }
 
 async fn list_running_descendants(client: &Client, root_instance_id: &str) -> Vec<String> {
@@ -146,57 +199,109 @@ pub fn start_durable_function(
         instance_id
     );
 
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
+    let fn_name = function_name.to_string();
+    let inst_id = instance_id.to_string();
+    let inp = input.to_string();
 
-    rt.block_on(async {
-        client
-            .start_orchestration(instance_id, function_name, input)
-            .await
-            .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
-        Ok(())
+    with_duroxide_client(|client, rt| {
+        rt.block_on(async {
+            client
+                .start_orchestration(&inst_id, &fn_name, &inp)
+                .await
+                .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
+            Ok(())
+        })
     })
 }
 
 /// Cancel a durable function.
 pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), String> {
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
+    let inst_id = instance_id.to_string();
+    let rsn = reason.to_string();
 
-    rt.block_on(async {
-        client
-            .cancel_instance(instance_id, reason)
-            .await
-            .map_err(|e| format!("Failed to cancel durable function: {e:?}"))?;
-        Ok(())
+    with_duroxide_client(|client, rt| {
+        rt.block_on(async {
+            client
+                .cancel_instance(&inst_id, &rsn)
+                .await
+                .map_err(|e| format!("Failed to cancel durable function: {e:?}"))?;
+            Ok(())
+        })
     })
 }
 
 /// Raise an external event (signal) to a running orchestration.
 pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> Result<(), String> {
-    let rt = get_client_runtime();
-    let client = get_duroxide_client()?;
+    let inst_id = instance_id.to_string();
+    let evt_name = event_name.to_string();
+    let evt_data = data.to_string();
 
-    rt.block_on(async {
-        client
-            .raise_event(instance_id, event_name, data)
-            .await
-            .map_err(|e| format!("Failed to raise event: {e:?}"))?;
-
-        for child_instance_id in list_running_descendants(client, instance_id).await {
-            if let Err(e) = client
-                .raise_event(&child_instance_id, event_name, data)
+    with_duroxide_client(|client, rt| {
+        rt.block_on(async {
+            client
+                .raise_event(&inst_id, &evt_name, &evt_data)
                 .await
-            {
-                warning!(
-                    "pg_durable: failed to fan out signal '{}' to child instance {}: {:?}",
-                    event_name,
-                    child_instance_id,
-                    e
-                );
-            }
-        }
+                .map_err(|e| format!("Failed to raise event: {e:?}"))?;
 
-        Ok(())
+            for child_instance_id in list_running_descendants(client, &inst_id).await {
+                if let Err(e) = client
+                    .raise_event(&child_instance_id, &evt_name, &evt_data)
+                    .await
+                {
+                    warning!(
+                        "pg_durable: failed to fan out signal '{}' to child instance {}: {:?}",
+                        evt_name,
+                        child_instance_id,
+                        e
+                    );
+                }
+            }
+
+            Ok(())
+        })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_connection_error;
+
+    #[test]
+    fn detects_connection_refused() {
+        assert!(is_connection_error(
+            "Failed to start durable function: connection refused"
+        ));
+    }
+
+    #[test]
+    fn detects_broken_pipe() {
+        assert!(is_connection_error("IO error: broken pipe"));
+    }
+
+    #[test]
+    fn detects_pool_timeout() {
+        assert!(is_connection_error(
+            "pool timed out while waiting for an open connection"
+        ));
+    }
+
+    #[test]
+    fn detects_connection_reset() {
+        assert!(is_connection_error("reset by peer"));
+    }
+
+    #[test]
+    fn detects_connection_closed() {
+        assert!(is_connection_error("connection closed unexpectedly"));
+    }
+
+    #[test]
+    fn does_not_match_normal_errors() {
+        assert!(!is_connection_error("Instance not found"));
+        assert!(!is_connection_error("permission denied for table foo"));
+        assert!(!is_connection_error("syntax error at position 42"));
+        assert!(!is_connection_error(
+            "Orchestration already exists for instance abc123"
+        ));
+    }
 }

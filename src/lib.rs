@@ -2741,6 +2741,31 @@ mod tests {
             "try_from_json should return Err on structurally invalid Durofut"
         );
     }
+
+    // --- C5: Client connection error detection ---
+
+    #[pg_test]
+    fn test_is_connection_error_detects_failures() {
+        // Validates the heuristic used to reset the client on connection-level errors.
+        assert!(crate::client::is_connection_error_for_test(
+            "connection refused"
+        ));
+        assert!(crate::client::is_connection_error_for_test("broken pipe"));
+        assert!(crate::client::is_connection_error_for_test(
+            "pool timed out"
+        ));
+        assert!(crate::client::is_connection_error_for_test("reset by peer"));
+        assert!(crate::client::is_connection_error_for_test(
+            "connection closed"
+        ));
+        // Non-connection errors should NOT trigger a reset
+        assert!(!crate::client::is_connection_error_for_test(
+            "permission denied"
+        ));
+        assert!(!crate::client::is_connection_error_for_test(
+            "Instance not found"
+        ));
+    }
 }
 
 /// Required by `cargo pgrx test`
