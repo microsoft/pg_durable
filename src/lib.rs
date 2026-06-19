@@ -430,7 +430,7 @@ DECLARE
         'df.explain(text)',
         'df.target_database()',
         -- Atomic-start enqueue wrapper (called by df.start() via SPI)
-        'df._enqueue_orchestrator_start(text, text)'
+        'df._enqueue_orchestrator_start(text, text, text)'
     ];
 BEGIN
     -- Validate the role exists
@@ -598,28 +598,74 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 // The function is created by the worker's migrations (not this extension);
 // plpgsql resolves it at call time.
 //
-// SECURITY (POC): this wrapper can enqueue an arbitrary orchestrator work item.
-// EXECUTE is revoked from PUBLIC and granted only via df.grant_usage(). A
-// production version should move this entrypoint into duroxide-pg (owned by the
-// duroxide schema owner) and/or validate the work item — see
-// docs/spec-atomic-start.md.
+// SECURITY: this wrapper is SECURITY DEFINER and granted to every df user via
+// df.grant_usage() (df.start() runs SECURITY INVOKER and calls it via SPI). To
+// avoid handing users an arbitrary-work-item enqueue primitive (which would let
+// a caller forge CancelInstance/ExternalRaised/etc. against another user's
+// instance), it (1) constructs the StartOrchestration work item server-side from
+// the caller's arguments — the caller cannot choose the variant or a foreign
+// target — and (2) authorizes the enqueue only for a brand-new, not-yet-started
+// instance (pending df.instances row, no queue entry, no duroxide instance),
+// which under atomic-start semantics is reachable only for the row df.start just
+// inserted in the current transaction. Hardening direction (move the entrypoint
+// into duroxide-pg, owned by the schema owner) is in docs/spec-atomic-start.md.
 extension_sql!(
     r#"
-CREATE FUNCTION df._enqueue_orchestrator_start(p_instance_id text, p_work_item text)
+CREATE FUNCTION df._enqueue_orchestrator_start(
+    p_instance_id   text,
+    p_orchestration text,
+    p_input         text)
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $fn$
 DECLARE
-    sch text := df.duroxide_schema();
+    sch       text := df.duroxide_schema();
+    work_item text;
+    v_blocked boolean;
 BEGIN
+    -- Authorization. This runs as the (privileged) definer, so it must not
+    -- trust the caller to only target their own instance. Permit the enqueue
+    -- only for a brand-new, not-yet-started instance: a 'pending' df.instances
+    -- row with no orchestrator-queue entry and no duroxide instance. Under the
+    -- atomic-start path a committed df.instances row always has its queue row in
+    -- the same transaction, so this state is reachable only for the instance the
+    -- caller (df.start) just inserted in the current transaction — never another
+    -- user's committed instance. This is what stops a caller from forging work
+    -- against a foreign instance.
+    EXECUTE pg_catalog.format(
+        'SELECT NOT EXISTS (SELECT 1 FROM df.instances i WHERE i.id = $1 AND i.status = ''pending'') '
+        '    OR EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = $1) '
+        '    OR EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = $1)',
+        sch, sch)
+    INTO v_blocked
+    USING p_instance_id;
+
+    IF v_blocked THEN
+        RAISE EXCEPTION 'pg_durable: not authorized to enqueue a start for instance %', p_instance_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Build the StartOrchestration work item server-side so the caller cannot
+    -- choose the work-item variant (no CancelInstance/ExternalRaised/etc.) or
+    -- target a different instance. Mirrors duroxide's WorkItem::StartOrchestration.
+    work_item := pg_catalog.json_build_object(
+        'StartOrchestration', pg_catalog.json_build_object(
+            'instance',        p_instance_id,
+            'orchestration',   p_orchestration,
+            'input',           p_input,
+            'version',         NULL,
+            'parent_instance', NULL,
+            'parent_id',       NULL,
+            'execution_id',    1))::text;
+
     EXECUTE pg_catalog.format('SELECT %I.enqueue_orchestrator_work($1, $2, $3)', sch)
-        USING p_instance_id, p_work_item, pg_catalog.now();
+        USING p_instance_id, work_item, pg_catalog.now();
 END;
 $fn$;
 
-REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) FROM PUBLIC;
 "#,
     name = "atomic_start_enqueue",
     requires = ["create_tables"]
@@ -659,40 +705,71 @@ AS $fn$
 DECLARE
     sch        text := df.duroxide_schema();
     orphan_ids text[];
+    deleted    bigint := 0;
     stuck      bigint := 0;
 BEGIN
-    -- 1) Root duroxide instances with no df.instances row, older than the grace
-    --    window → orphans (e.g. rolled-back starts on the fallback path). Delete.
-    EXECUTE pg_catalog.format(
-        'SELECT pg_catalog.array_agg(d.instance_id) '
-        'FROM %I.instances d '
-        'LEFT JOIN df.instances i ON i.id = d.instance_id '
-        'WHERE i.id IS NULL '
-        '  AND d.parent_instance_id IS NULL '
-        '  AND d.created_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1)',
-        sch)
-    INTO orphan_ids
-    USING p_grace_seconds;
+    -- 1) Delete orphaned duroxide subtrees: every duroxide instance whose ROOT
+    --    ancestor has no df.instances row and is older than the grace window.
+    --    We must gather the FULL subtree (root + all descendants) because
+    --    delete_instances_atomic refuses (even with force) to delete a parent
+    --    whose children are not also in the list. Sub-orchestrations (JOIN/RACE
+    --    branches, loop generations) have no df.instances row and would be
+    --    mis-detected as roots if we keyed on "no df row" alone, so the orphan
+    --    seed is restricted to parent_instance_id IS NULL.
+    --    Wrapped so a GC failure never aborts reconcile or kills the built-in
+    --    reconciler loop.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'WITH RECURSIVE orphan_root AS ( '
+            '    SELECT d.instance_id '
+            '    FROM %1$I.instances d '
+            '    LEFT JOIN df.instances i ON i.id = d.instance_id '
+            '    WHERE i.id IS NULL '
+            '      AND d.parent_instance_id IS NULL '
+            '      AND d.created_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '), subtree AS ( '
+            '    SELECT instance_id FROM orphan_root '
+            '    UNION '
+            '    SELECT c.instance_id FROM %1$I.instances c '
+            '    JOIN subtree s ON c.parent_instance_id = s.instance_id '
+            ') SELECT pg_catalog.array_agg(instance_id) FROM subtree',
+            sch)
+        INTO orphan_ids
+        USING p_grace_seconds;
 
-    IF orphan_ids IS NOT NULL AND pg_catalog.array_length(orphan_ids, 1) > 0 THEN
-        EXECUTE pg_catalog.format('SELECT %I.delete_instances_atomic($1, $2)', sch)
+        IF orphan_ids IS NOT NULL AND pg_catalog.array_length(orphan_ids, 1) > 0 THEN
+            EXECUTE pg_catalog.format(
+                'SELECT instances_deleted FROM %I.delete_instances_atomic($1, $2)', sch)
+            INTO deleted
             USING orphan_ids, true;
-    END IF;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        deleted := 0;
+        RAISE WARNING 'pg_durable: reconcile orphan-GC pass failed: %', SQLERRM;
+    END;
 
     -- 2) df.instances stuck non-terminal with no live duroxide instance and no
-    --    queued start (lost enqueue) → mark failed.
-    EXECUTE pg_catalog.format(
-        'UPDATE df.instances i '
-        'SET status = ''failed'', updated_at = pg_catalog.now() '
-        'WHERE i.status IN (''pending'', ''running'') '
-        '  AND i.updated_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
-        '  AND NOT EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = i.id) '
-        '  AND NOT EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = i.id)',
-        sch, sch)
-    USING p_grace_seconds;
-    GET DIAGNOSTICS stuck = ROW_COUNT;
+    --    queued start (lost enqueue) → mark failed. The duroxide queue row
+    --    persists (locked) until ack, and the instance row is created at ack, so
+    --    a healthy in-flight start always matches one of the NOT EXISTS guards
+    --    and is never failed here. Best-effort; wrapped like step 1.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'UPDATE df.instances i '
+            'SET status = ''failed'', updated_at = pg_catalog.now() '
+            'WHERE i.status IN (''pending'', ''running'') '
+            '  AND i.updated_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.instances d WHERE d.instance_id = i.id) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.orchestrator_queue q WHERE q.instance_id = i.id)',
+            sch)
+        USING p_grace_seconds;
+        GET DIAGNOSTICS stuck = ROW_COUNT;
+    EXCEPTION WHEN OTHERS THEN
+        stuck := 0;
+        RAISE WARNING 'pg_durable: reconcile stuck-failover pass failed: %', SQLERRM;
+    END;
 
-    duroxide_orphans_deleted := COALESCE(pg_catalog.array_length(orphan_ids, 1), 0);
+    duroxide_orphans_deleted := deleted;
     stuck_instances_failed := stuck;
     RETURN NEXT;
 END;

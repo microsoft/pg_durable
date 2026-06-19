@@ -70,7 +70,8 @@ schemas; run duroxide's start-enqueue inside the caller's backend transaction vi
 SPI, alongside the `df.*` writes.
 *Guarantee:* strongest — `df.nodes` + `df.instances` + the queue row + the
 caller's surrounding statements all commit or roll back together; identity
-capture and the `df.*` read surface are untouched; the 5 s load race disappears.
+capture and the `df.*` read surface are untouched; the 5 s load race disappears
+on the atomic path.
 *Cost:* small — the start is a single SQL-function call — with one wrinkle: a
 `SECURITY DEFINER` enqueue entrypoint is needed because the queue INSERT is
 owner-only. **Chosen as the primary fix.**
@@ -205,7 +206,7 @@ This is the "best-effort mirror"; any persistent drift is the reconciler's job
   and the worker picks the instance up only after the `df.*` rows are visible.
 - Eliminate the rolled-back-start orphan leak at the source.
 - Eliminate the `load-function-graph` "wait up to 5 s for the row to appear"
-  race (it becomes structurally impossible).
+  race on the atomic path (the retry is retained for the non-atomic fallback).
 - No change to the `df.*` schema's read surface (status/result/monitoring/explain
   keep working unchanged).
 
@@ -322,9 +323,17 @@ AS $$ BEGIN
 END $$;
 ```
 
-The wrapper takes **only** an opaque `instance_id`, a `work_item` string, and a
-timestamp — it executes no caller-supplied SQL, so the `SECURITY DEFINER`
-surface is a single fixed INSERT.
+The wrapper takes the caller's `instance_id`, orchestration name, and input
+string; it **constructs the `StartOrchestration` work item server-side** (so the
+caller cannot choose the work-item variant or target a foreign instance) and
+**authorizes** the enqueue only for a brand-new, not-yet-started instance
+(`pending` `df.instances` row, no orchestrator-queue entry, no duroxide
+instance — under atomic-start semantics reachable only for the row `df.start`
+just inserted in the current transaction). It executes no caller-supplied SQL.
+This is what prevents the wrapper from being a generic, cross-tenant
+arbitrary-work-item enqueue primitive (which would otherwise let any df user
+forge `CancelInstance`/`ExternalRaised`/`ActivityCompleted` against another
+user's instance, bypassing the RLS gate `df.signal`/`df.cancel` enforce).
 
 ### Identity / security
 
@@ -345,15 +354,17 @@ authenticate using `df.instances.submitted_by` and re-check the superuser policy
   `df.nodes`/`df.instances` still aborts before it (no behavior change for the
   collision case, now fully inside one transaction).
 
-### Consequence: the 5 s load race disappears
+### Consequence: the 5 s load race disappears (on the atomic path)
 
-`load-function-graph` currently polls for up to `MAX_WAIT_SECS = 5` because the
-worker could dequeue a start item before the caller's `df.*` rows committed
-(src/activities/load_function_graph.rs:21,60). With an atomic start, a queue row
+`load-function-graph` polls for up to `MAX_WAIT_SECS = 5` because the worker
+could dequeue a start item before the caller's `df.*` rows committed
+(src/activities/load_function_graph.rs:21,60). On the **atomic path** a queue row
 becomes visible to the worker **only** after the `df.*` rows commit in the same
 transaction, so the "not yet visible / rolled back" branch cannot occur. The
-retry loop can be simplified to a single read (optionally retain a short grace
-for replication scenarios). This also removes the worker-saturation failure mode.
+retry is **retained** rather than removed, because the non-atomic **fallback**
+path can still enqueue before the `df.*` rows commit; it is a no-op on the atomic
+path. So this removes the worker-saturation failure mode for atomic starts while
+staying correct for the fallback.
 
 ## Proof of concept (validated)
 
@@ -434,6 +445,43 @@ The probe + fallback make this non-breaking for any other provider.
 | Scheduled loop GCs a planted orphan on its next tick, without self-GC'ing | pass |
 | E2E subset unaffected with the reconciler running (incl. heartbeat + join) | 6/6 |
 | `cargo fmt --check`; no new clippy warnings | pass |
+
+### Review hardening (applied)
+
+A source-of-truth code review surfaced and fixed several issues:
+
+- **Cross-tenant enqueue bypass (HIGH).** The wrapper originally accepted an
+  opaque `work_item` and was granted to every df user, letting a caller forge
+  `CancelInstance`/`ExternalRaised`/`ActivityCompleted` against another user's
+  instance. Fixed: the wrapper now **builds the `StartOrchestration` server-side**
+  and **authorizes** only a brand-new, not-yet-started instance — verified that a
+  non-superuser can no longer forge an enqueue for a foreign or arbitrary id.
+- **Reconciler self-destruct on parallel-workflow orphans (HIGH).**
+  `delete_instances_atomic` refuses to delete a parent without its children (even
+  with `force`), so deleting only orphan **roots** raised on any JOIN/RACE/loop
+  orphan and aborted GC. Fixed: gather the **full subtree** (recursive on
+  `parent_instance_id`) and wrap each pass in an exception block so one failure
+  never aborts reconcile or kills the loop — verified root+child GC with no error.
+- **GC-suppression via user label (HIGH).** The singleton key was the
+  user-writable `label`; any user could park a `df_reconciler`-labelled instance
+  to stop the GC from starting. Fixed: key liveness on the unforgeable
+  `submitted_by = df_reconciler` role.
+- **Cron busy-loop (MED/HIGH).** `df.wait_for_schedule` baked a fixed offset at
+  build time that a `df.loop` replayed every generation (worst case ~1 s spin).
+  Fixed: the WAIT_SCHEDULE node now recomputes the delay from the orchestration's
+  deterministic clock (`ctx.utc_now()`) each generation — verified the reconciler
+  fires on the cron tick and does not spin. (Note: adding the clock read changes
+  the orchestration history shape, so a wait-in-loop instance in flight across the
+  upgrade may need to restart.)
+- **No in-epoch self-healing (MED).** The reconciler was (re)started only per
+  epoch. Fixed: `ensure_reconciler` is also re-asserted from the steady-state poll
+  loop — verified a cancelled reconciler restarts within the poll interval.
+- **Silent non-atomic fallback (MED).** `df.start()` now emits a `WARNING` when it
+  takes the non-atomic fallback path.
+- **Debated/rejected:** the `df_reconciler` role keeps `LOGIN` — the worker
+  executes the reconcile node by connecting *as* the role via `connect_as_user`,
+  exactly like every other durable-function role; the proposed `NOLOGIN` would
+  break node execution.
 
 **POC scope / deferred to productionization:** fresh install only (no upgrade
 script); the atomic-start wrapper hardening (move the entrypoint into duroxide-pg

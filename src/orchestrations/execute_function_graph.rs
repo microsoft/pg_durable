@@ -506,16 +506,31 @@ async fn execute_wait_schedule_node(
     let config: serde_json::Value = serde_json::from_str(config_str)
         .map_err(|e| format!("Invalid WAIT_SCHEDULE config: {e}"))?;
 
-    let wait_seconds = config["wait_seconds"]
-        .as_u64()
-        .ok_or_else(|| "WAIT_SCHEDULE missing wait_seconds".to_string())?;
+    let baked_wait_seconds = config["wait_seconds"].as_u64().unwrap_or(0);
+    let cron_expr = config["cron_expr"].as_str();
 
-    let cron_expr = config["cron_expr"].as_str().unwrap_or("?");
+    // Recompute the delay from the orchestration's deterministic clock on each
+    // execution, so a df.loop around df.wait_for_schedule waits until the NEXT
+    // cron tick rather than replaying the fixed offset baked at DSL-build time
+    // (which would make every loop generation wait the same — possibly ~0s —
+    // interval, busy-looping). ctx.utc_now() is recorded in history, so this
+    // stays deterministic on replay. Falls back to the baked seconds if the
+    // clock read or cron parse is unavailable.
+    let wait = match (cron_expr, ctx.utc_now().await) {
+        (Some(cron), Ok(now_st)) => {
+            let now_dt: chrono::DateTime<chrono::Utc> = now_st.into();
+            crate::types::calculate_cron_wait_from(cron, now_dt)
+                .unwrap_or_else(|_| Duration::from_secs(baked_wait_seconds))
+        }
+        _ => Duration::from_secs(baked_wait_seconds),
+    };
 
     ctx.trace_info(format!(
-        "Waiting {wait_seconds} seconds until schedule: {cron_expr}"
+        "Waiting {}s until schedule: {}",
+        wait.as_secs(),
+        cron_expr.unwrap_or("?")
     ));
-    ctx.schedule_timer(Duration::from_secs(wait_seconds)).await;
+    ctx.schedule_timer(wait).await;
 
     Ok(r#"{"scheduled": true}"#.to_string())
 }

@@ -957,33 +957,31 @@ pub fn start(
             );
         }
 
-        // Build the exact same work item the duroxide client would enqueue, by
-        // serializing the real duroxide type (guarantees wire compatibility).
-        let work_item = duroxide::providers::WorkItem::StartOrchestration {
-            instance: instance_id.clone(),
-            orchestration: crate::orchestrations::execute_function_graph::NAME.to_string(),
-            input: input_json,
-            version: None,
-            parent_instance: None,
-            parent_id: None,
-            execution_id: duroxide::INITIAL_EXECUTION_ID,
-        };
-        let work_item_json = serde_json::to_string(&work_item)
-            .unwrap_or_else(|e| pgrx::error!("Failed to serialize start work item: {}", e));
-
-        // SECURITY DEFINER wrapper performs the privileged orchestrator-queue
-        // INSERT on the caller's transaction. Raising on failure aborts df.start.
+        // The SECURITY DEFINER wrapper builds the StartOrchestration work item
+        // server-side from these trusted arguments (the caller cannot choose the
+        // work-item variant or target a foreign instance) and performs the
+        // privileged orchestrator-queue INSERT on the caller's transaction.
+        // Raising on failure aborts the whole df.start atomically.
         if let Err(e) = Spi::run_with_args(
-            "SELECT df._enqueue_orchestrator_start($1, $2)",
-            &[instance_id.as_str().into(), work_item_json.as_str().into()],
+            "SELECT df._enqueue_orchestrator_start($1, $2, $3)",
+            &[
+                instance_id.as_str().into(),
+                crate::orchestrations::execute_function_graph::NAME.into(),
+                input_json.as_str().into(),
+            ],
         ) {
             pgrx::error!("Failed to enqueue durable function start: {:?}", e);
         }
     } else {
         // Fallback: no duroxide-pg SQL enqueue surface detected (a non-pg
         // provider, or a schema predating the wrapper). Enqueue out-of-band via
-        // the duroxide client. NOTE: this is the legacy path and is NOT atomic
-        // with the caller's transaction.
+        // the duroxide client. NOTE: this path is NOT atomic with the caller's
+        // transaction — a rollback will NOT undo the start. Warn so the
+        // non-atomic semantics are observable.
+        pgrx::warning!(
+            "pg_durable: df.start() is using the non-atomic fallback enqueue \
+             (duroxide-pg SQL surface not detected); a rollback will not undo this start"
+        );
         if let Err(e) = crate::client::start_durable_function(
             crate::orchestrations::execute_function_graph::NAME,
             &instance_id,

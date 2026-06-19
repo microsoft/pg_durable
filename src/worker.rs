@@ -219,16 +219,19 @@ async fn run_duroxide_runtime() {
     mgmt_pool.close().await;
 }
 
-/// Built-in durable reconciler (Option 4). Ensures exactly one reconciler
-/// instance is running per cluster: an infinite durable loop that calls
-/// `df.reconcile()` on the `pg_durable.reconciler_cron` schedule.
+/// Built-in durable reconciler (Option 4). Ensures one reconciler instance is
+/// running per cluster: an infinite durable loop that calls `df.reconcile()` on
+/// the `pg_durable.reconciler_cron` schedule.
 ///
 /// Idempotent — does nothing if a reconciler is already pending/running, and
-/// (re)starts one if it has died. The instance is submitted by a dedicated
-/// **non-superuser** role (`pg_durable_reconciler`) granted only df usage plus
-/// EXECUTE on the SECURITY DEFINER `df.reconcile()`. Using a non-superuser
-/// identity avoids the enable_superuser_instances guard, and bounds the blast
-/// radius to "trigger GC" even if the instance were forged.
+/// (re)starts one if it has died. Called once per epoch and then periodically
+/// from the steady-state poll loop, so a reconciler that fails mid-epoch is
+/// restarted within the poll interval rather than only at the next epoch. The
+/// instance is submitted by a dedicated **non-superuser** role
+/// (`df_reconciler`) granted only df usage plus EXECUTE on the SECURITY DEFINER
+/// `df.reconcile()`. Using a non-superuser identity avoids the
+/// enable_superuser_instances guard, and bounds the blast radius to "trigger GC"
+/// even if the instance were forged.
 async fn ensure_reconciler(pool: &sqlx::PgPool) {
     const ROLE: &str = "df_reconciler";
     const LABEL: &str = "df_reconciler";
@@ -242,14 +245,20 @@ async fn ensure_reconciler(pool: &sqlx::PgPool) {
         return; // built-in reconciler disabled
     }
 
-    // Skip if a reconciler is already pending/running (idempotent across epochs;
-    // self-heals if a previous one failed/was cancelled). Runs as the worker
-    // role, which bypasses RLS, so it sees the instance regardless of owner.
+    // Skip if a reconciler is already pending/running (idempotent; self-heals if
+    // a previous one failed/was cancelled). Runs as the worker role (bypasses
+    // RLS). The liveness key is the unforgeable submitted_by = df_reconciler
+    // role, NOT the user-supplied `label`: any df user can call df.start() with
+    // label 'df_reconciler', so keying on label would let an unprivileged user
+    // suppress the GC by parking a look-alike instance. A regular user cannot
+    // submit as df_reconciler (submitted_by = current_user at start time), so
+    // submitted_by is a sound singleton key. `::text` avoids a regrole cast
+    // error before the role exists (it simply matches no rows).
     let already_running: i64 = match sqlx::query_scalar(
         "SELECT count(*) FROM df.instances \
-         WHERE label = $1 AND status IN ('pending', 'running')",
+         WHERE submitted_by::text = $1 AND status IN ('pending', 'running')",
     )
-    .bind(LABEL)
+    .bind(ROLE)
     .fetch_one(pool)
     .await
     {
@@ -299,6 +308,13 @@ async fn ensure_reconciler(pool: &sqlx::PgPool) {
 
 /// Create the dedicated non-superuser reconciler role (if absent) and grant it
 /// df usage plus EXECUTE on df.reconcile(). Idempotent.
+///
+/// The role is `LOGIN` on purpose: the worker executes the reconcile SQL node by
+/// opening a real connection AS submitted_by via `connect_as_user` (see
+/// types.rs), exactly as for every other durable-function role, so it must be
+/// connectable. It is non-superuser and holds only df usage + EXECUTE on
+/// df.reconcile(); password/auth exposure is governed by the deployment's
+/// pg_hba.conf, the same as any other df submitted_by role.
 async fn ensure_reconciler_role(pool: &sqlx::PgPool, role: &str) -> Result<(), sqlx::Error> {
     // role is a fixed compile-time constant, so the format! is injection-safe.
     sqlx::query(&format!(
@@ -734,6 +750,10 @@ async fn run_until_extension_dropped_or_shutdown(
                     log!("pg_durable: epoch sentinel gone — extension dropped or recreated");
                     break;
                 }
+                // Self-heal: re-assert the built-in reconciler so a loop that
+                // died mid-epoch is restarted within the poll interval rather
+                // than only at the next epoch. Idempotent (no-op while alive).
+                ensure_reconciler(poll_pool).await;
             }
         }
     }
