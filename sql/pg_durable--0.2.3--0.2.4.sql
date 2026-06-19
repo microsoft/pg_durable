@@ -322,11 +322,24 @@ AS $fn$
 DECLARE
     sch       text := df.duroxide_schema();
     owner_oid oid;
+    root_exists boolean;
 BEGIN
     SELECT i.submitted_by::oid INTO owner_oid FROM df.instances i WHERE i.id = p_instance_id;
     IF owner_oid IS NULL OR NOT pg_catalog.pg_has_role(session_user, owner_oid, 'MEMBER') THEN
         RAISE EXCEPTION 'pg_durable: not authorized to signal instance %', p_instance_id
             USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Duroxide does not buffer external events until an orchestration has a
+    -- pending subscription. If the root runtime row is not materialized yet, a
+    -- signal would be accepted but dropped before the workflow can observe it.
+    EXECUTE pg_catalog.format(
+        'SELECT EXISTS (SELECT 1 FROM %I.instances WHERE instance_id = $1)', sch)
+    INTO root_exists
+    USING p_instance_id;
+    IF NOT root_exists THEN
+        RAISE EXCEPTION 'pg_durable: instance % is not ready to receive signals', p_instance_id
+            USING ERRCODE = 'object_not_in_prerequisite_state';
     END IF;
 
     -- Raise the event for the target instance and every RUNNING descendant

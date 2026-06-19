@@ -171,4 +171,37 @@ DROP TABLE _t_signal;
 
 RESET SESSION AUTHORIZATION;
 
+-- ===========================================================================
+-- Scenario 4: a signal sent before runtime materialization is rejected
+-- ===========================================================================
+
+SET SESSION AUTHORIZATION df_e2e_user;
+
+DO $$
+DECLARE inst_id TEXT;
+BEGIN
+    BEGIN
+        inst_id := df.start(
+            'SELECT 1' ~> (df.wait_for_signal('go') |=> 'sig') ~> 'SELECT 1',
+            'atomic-signal-before-runtime-ready'
+        );
+
+        -- The worker cannot have materialized the root _duroxide.instances row
+        -- yet (we are still inside the same backend statement/transaction). A
+        -- signal here would be accepted by the runtime but skipped before the
+        -- workflow subscribes, so df.signal must fail instead of returning OK.
+        PERFORM df.signal(inst_id, 'go', '{}');
+        RAISE EXCEPTION 'TEST FAILED: df.signal accepted instance % before runtime materialization', inst_id;
+    EXCEPTION
+        WHEN object_not_in_prerequisite_state THEN
+            IF SQLERRM LIKE '%not ready to receive signals%' THEN
+                RAISE NOTICE 'PASSED [signal_before_runtime_ready_rejected]: %', SQLERRM;
+            ELSE
+                RAISE EXCEPTION 'TEST FAILED: unexpected not-ready signal error: %', SQLERRM;
+            END IF;
+    END;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+
 SELECT 'TEST PASSED: atomic rollback (start/cancel/signal)' AS result;

@@ -219,10 +219,13 @@ the caller. Two safeguards make them safe to grant to every user:
 
 A signal must reach the root instance **and** every running sub-orchestration,
 because a child (a `JOIN`/`RACE` branch or a loop generation) may be the one waiting
-on it. The `df.signal` wrapper walks the instance tree from the root
-(`_duroxide.instances.parent_instance_id`), keeps the instances whose current
-execution is still running, and enqueues one `ExternalRaised` per surviving
-instance — all on the caller's transaction, so the whole fan-out is atomic.
+on it. Duroxide does not buffer external events until an orchestration has a pending
+subscription, so `df.signal` first requires the root runtime row to exist; a signal
+sent in the same transaction as `df.start()` is rejected instead of returning `OK`
+and being skipped before the workflow can observe it. Once the root is materialized,
+the wrapper walks the instance tree (`_duroxide.instances.parent_instance_id`) and
+enqueues one event for the root plus each running descendant — all on the caller's
+transaction, so the whole fan-out is atomic.
 
 ### Worker readiness and ordering
 
@@ -347,8 +350,10 @@ uses the atomic path only when both the duroxide-pg SQL enqueue function **and**
 out-of-band path. This keeps the binary compatible with every prior schema while
 the upgrade rolls out.
 
-**Data migration.** None. No table shapes change, and in-flight instances are
-unaffected (their queue items were already enqueued).
+**Data migration.** None. No table shapes change, and already-enqueued work items
+are left in place. One caveat: the `df.wait_for_schedule` fix changes the recorded
+history shape for a wait-in-loop orchestration, so such in-flight instances may need
+to be restarted after upgrade if they replay across the change.
 
 **Rollback.** Reverting the binary restores the out-of-band enqueue; the wrappers, if
 left in place, are simply unused.
