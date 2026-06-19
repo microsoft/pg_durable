@@ -154,6 +154,32 @@ transaction: a rollback drops the queue row along with the `df.*` rows, and a co
 makes them visible together. `df.cancel()` and `df.signal()` work the same way
 through their own wrappers.
 
+### Why this reaches into duroxide-pg directly (and needs the PG provider)
+
+Everywhere else, pg_durable talks to the runtime through duroxide's Rust
+provider/client API — the out-of-band start/cancel/signal fallback (`src/client.rs`)
+and the monitoring/explain reads (`src/monitoring.rs`, `src/explain.rs`) all go
+through `Client`/`Provider` methods, which are provider-agnostic at the API level.
+The in-transaction enqueue and `df.reconcile()` are the **first places pg_durable
+calls duroxide-pg's SQL surface directly**: `enqueue_orchestrator_work` and
+`delete_instances_atomic`, plus reads of `_duroxide.orchestrator_queue`,
+`instances`, and `executions`. They therefore depend on duroxide-pg's table shapes
+and function signatures, not just on the runtime existing.
+
+This is deliberate, and it is the whole point of the change: only direct SQL (via
+SPI) can run inside the **caller's** transaction. The Rust client uses a separate
+connection pool, so it can never be atomic with the backend's SPI work. The trade is
+a deeper coupling to duroxide-pg in exchange for atomicity.
+
+It would not work for a non-PostgreSQL provider — there would be no SQL functions to
+call — but pg_durable already assumes a duroxide-pg provider in a known schema: it
+places its own `_worker_ready` table inside `_duroxide`, resolves the schema via
+`df.duroxide_schema()`, and relies on duroxide-pg applying its migrations at startup.
+In the pg_durable context — a PostgreSQL extension whose runtime state lives in the
+same database — there is no real use case for another provider. The probe-and-
+fallback (below) keeps any non-PG provider working, non-atomically, rather than
+broken.
+
 ### Why a privileged wrapper is needed
 
 `_duroxide.orchestrator_queue` is writable by its owner only (the worker role), so a
@@ -265,12 +291,12 @@ but it *is* a change from "fires the moment the statement runs." `df.cancel()` a
 
 ## Implementation notes
 
-- The atomic path only works with the **duroxide-pg (SQL-backed) provider**, because
-  it calls the provider's SQL functions directly. `df.start` / `df.cancel` /
-  `df.signal` each probe for that surface (`enqueue_orchestrator_work` in the
-  resolved schema); when it is absent — a different provider, or a schema predating
-  the wrappers — they fall back to the old out-of-band path and emit a warning, so
-  the change never breaks another provider.
+- The atomic path requires the duroxide-pg provider (see *Why this reaches into
+  duroxide-pg directly* above). `df.start` / `df.cancel` / `df.signal` each probe for
+  its SQL surface (`enqueue_orchestrator_work` in the resolved schema); when it is
+  absent — a different provider, or a schema predating the wrappers — they fall back
+  to the old out-of-band path and emit a warning, so the change never breaks another
+  provider.
 - `visible_at = now()` (transaction time) is enough for immediate starts.
 - The work items are byte-compatible with duroxide's `WorkItem` JSON, so the worker
   behaves exactly as before.
