@@ -248,12 +248,13 @@ BEGIN
     -- Authorization. This runs as the (privileged) definer, so it must not
     -- trust the caller to only target their own instance. Permit the enqueue
     -- only for a brand-new, not-yet-started instance: a 'pending' df.instances
-    -- row with no orchestrator-queue entry and no duroxide instance. Under the
-    -- atomic-start path a committed df.instances row always has its queue row in
-    -- the same transaction, so this state is reachable only for the instance the
-    -- caller (df.start) just inserted in the current transaction — never another
-    -- user's committed instance. This is what stops a caller from forging work
-    -- against a foreign instance.
+    -- row with no orchestrator-queue entry and no duroxide instance. A df user
+    -- can create such a pending instance directly (not only through df.start),
+    -- so this is a same-owner/not-yet-started check rather than proof that the
+    -- row was inserted in this transaction. The wrapper is safe because it also
+    -- fixes the orchestration to the root graph executor and validates the input
+    -- instance id, so callers cannot start internal orchestrations or target
+    -- someone else's already-started instance.
     EXECUTE pg_catalog.format(
         'SELECT NOT EXISTS (SELECT 1 FROM df.instances i WHERE i.id = $1 AND i.status = ''pending'') '
         '    OR EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = $1) '
