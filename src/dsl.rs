@@ -642,7 +642,7 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
         }
         "OK".to_string()
     } else {
-        pgrx::warning!(
+        pgrx::log!(
             "pg_durable: df.signal() is using the non-atomic fallback enqueue \
              (duroxide-pg SQL surface not detected)"
         );
@@ -657,17 +657,34 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 // Orchestration Control Functions
 // ============================================================================
 
-/// True when the duroxide store exposes the SQL enqueue surface — i.e. the
-/// duroxide-pg (PostgreSQL) provider — in the given schema. Detected by the
-/// presence of `enqueue_orchestrator_work`. When false (a non-pg provider, or a
-/// schema predating the wrapper), df.start() falls back to the out-of-band
-/// client path. The catalog probe never raises, so it is safe in a backend
-/// session even when the schema is absent.
+/// True when both required pieces of the in-transaction enqueue path exist:
+/// the duroxide-pg SQL enqueue surface in the provider schema and the df-schema
+/// SECURITY DEFINER wrappers created by the extension/upgrade script. When
+/// false (a non-pg provider, or a schema that predates the wrappers), callers
+/// fall back to the out-of-band client path. The catalog probe never raises, so
+/// it is safe in a backend session even when the schema is absent.
 fn in_tx_enqueue_supported(schema: &str) -> bool {
     Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
-         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = $1 AND p.proname = 'enqueue_orchestrator_work')",
+        "SELECT \
+            EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                   JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                   WHERE n.nspname = $1 \
+                     AND p.proname = 'enqueue_orchestrator_work') \
+            AND EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                       WHERE n.nspname = 'df' \
+                         AND p.proname = '_enqueue_orchestrator_start' \
+                         AND p.pronargs = 3) \
+            AND EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                       WHERE n.nspname = 'df' \
+                         AND p.proname = '_enqueue_orchestrator_cancel' \
+                         AND p.pronargs = 2) \
+            AND EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                       WHERE n.nspname = 'df' \
+                         AND p.proname = '_enqueue_orchestrator_signal' \
+                         AND p.pronargs = 3)",
         &[schema.into()],
     )
     .ok()
@@ -1014,7 +1031,7 @@ pub fn start(
         // the duroxide client. NOTE: this path is NOT atomic with the caller's
         // transaction — a rollback will NOT undo the start. Warn so the
         // non-atomic semantics are observable.
-        pgrx::warning!(
+        pgrx::log!(
             "pg_durable: df.start() is using the non-atomic fallback enqueue \
              (duroxide-pg SQL surface not detected); a rollback will not undo this start"
         );
@@ -1064,7 +1081,7 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
             pgrx::error!("Failed to cancel: {:?}", e);
         }
     } else {
-        pgrx::warning!(
+        pgrx::log!(
             "pg_durable: df.cancel() is using the non-atomic fallback enqueue \
              (duroxide-pg SQL surface not detected)"
         );

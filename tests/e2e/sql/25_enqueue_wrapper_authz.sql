@@ -1,22 +1,43 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
--- Tests: authorization on the in-transaction enqueue wrappers used by
--- df.cancel() / df.signal().
+-- Tests: authorization and hardening on the in-transaction enqueue wrappers.
 --
--- df._enqueue_orchestrator_cancel/_signal are SECURITY DEFINER (the runtime
+-- The df._enqueue_orchestrator_* functions are SECURITY DEFINER (the runtime
 -- queue is writable by its owner only) and granted to every df user via
 -- df.grant_usage(). They must therefore refuse to enqueue work against an
--- instance the caller does not own. Ownership is checked with
--- pg_has_role(session_user, <instance owner>, 'MEMBER'): session_user cannot be
--- spoofed inside a SECURITY DEFINER function, and membership lets a role that
--- owns the instance through SET ROLE still qualify.
+-- instance the caller does not own, and the start wrapper must not become a
+-- generic "start any internal orchestration with arbitrary input" primitive.
+-- Cancel/signal ownership is checked with pg_has_role(session_user,
+-- <instance owner>, 'MEMBER'): session_user cannot be spoofed inside a
+-- SECURITY DEFINER function, and membership lets a role that owns the instance
+-- through SET ROLE still qualify.
 --
 -- Without the change these wrappers do not exist, so the forge attempts below
 -- raise undefined_function and the test fails.
 
 -- Fresh, non-superuser roles. (Superusers bypass pg_has_role, so the denial can
 -- only be exercised by a non-superuser caller.)
+DO $precleanup$
+DECLARE
+    inst_id TEXT;
+BEGIN
+    -- A failed/interrupted prior run can leave a loop instance submitted by one
+    -- of these roles. Cancel it before DROP ROLE so the worker stops reconnecting
+    -- as that role while this test rebuilds privileges.
+    FOR inst_id IN
+        SELECT i.id
+        FROM df.instances i
+        JOIN pg_catalog.pg_roles r ON r.oid = i.submitted_by::oid
+        WHERE r.rolname IN ('authz_owner', 'authz_other')
+          AND i.status NOT IN ('completed', 'failed', 'cancelled')
+    LOOP
+        PERFORM df.cancel(inst_id, 'authz-test-precleanup');
+    END LOOP;
+END $precleanup$;
+
+SELECT pg_sleep(0.5);
+
 DO $setup$
 BEGIN
     BEGIN DROP OWNED BY authz_owner; EXCEPTION WHEN undefined_object THEN NULL; END;
@@ -97,6 +118,49 @@ BEGIN
     END;
 END $$;
 RESET SESSION AUTHORIZATION;
+
+-- =========================================================================== 
+-- A caller cannot use the start wrapper as a generic privileged entrypoint.
+-- =========================================================================== 
+
+SET SESSION AUTHORIZATION authz_other;
+DO $$
+DECLARE
+    inst_id CONSTANT TEXT := 'feedf00d';
+    root_id CONSTANT TEXT := 'deadbeef';
+BEGIN
+    -- Create a legitimate brand-new, pending instance owned by authz_other. The
+    -- start wrapper's state check should pass for this row; the test verifies
+    -- the wrapper still rejects a non-root internal orchestration name.
+    INSERT INTO df.instances (id, label, root_node, submitted_by, database)
+    VALUES (inst_id, 'authz-start-wrapper-hardening', root_id, current_user::regrole, 'postgres');
+
+    INSERT INTO df.nodes (id, instance_id, node_type, query, submitted_by, database)
+    VALUES (root_id, inst_id, 'SQL', 'SELECT 1', current_user::regrole, 'postgres');
+
+    BEGIN
+        PERFORM df._enqueue_orchestrator_start(
+            inst_id,
+            'pg_durable::orchestration::execute-subtree',
+            json_build_object('instance_id', inst_id)::text);
+        RAISE EXCEPTION 'TEST FAILED: start wrapper accepted a non-root orchestration for instance %', inst_id;
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            IF SQLERRM LIKE '%invalid start orchestration%' THEN
+                RAISE NOTICE 'PASSED [start_wrapper_rejects_internal_orchestration]: %', SQLERRM;
+            ELSE
+                RAISE EXCEPTION 'TEST FAILED: start wrapper rejected with an unexpected validation error: %', SQLERRM;
+            END IF;
+        WHEN undefined_function THEN
+            RAISE EXCEPTION 'TEST FAILED: df._enqueue_orchestrator_start is missing (change not present): %', SQLERRM;
+    END;
+END $$;
+RESET SESSION AUTHORIZATION;
+
+BEGIN;
+DELETE FROM df.instances WHERE id = 'feedf00d';
+DELETE FROM df.nodes WHERE instance_id = 'feedf00d';
+COMMIT;
 
 -- ===========================================================================
 -- The owner can still cancel its own instance (the authorized path works).

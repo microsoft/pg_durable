@@ -195,11 +195,12 @@ with `%I`. They are revoked from `PUBLIC` and granted through `df.grant_usage()`
 Because a `SECURITY DEFINER` function runs as its owner, the wrappers cannot trust
 the caller. Two safeguards make them safe to grant to every user:
 
-- **The work item is built inside the wrapper**, from the caller's arguments — never
+- **The work item is built inside the wrapper**, from validated arguments — never
   passed in. A caller cannot choose the work-item type or smuggle in a foreign
-  target. (`df.start` builds `StartOrchestration`, `df.cancel` builds
-  `CancelInstance`, `df.signal` builds `ExternalRaised`, each with
-  `json_build_object`, matching duroxide's wire format.)
+  target. `df.start` only accepts the public root graph-executor orchestration and
+  requires the input JSON's `instance_id` to match the target id; `df.cancel` builds
+  `CancelInstance`; `df.signal` builds `ExternalRaised`. All three use
+  `json_build_object`, matching duroxide's wire format.
 - **The caller is authorized before any enqueue**, by two different rules:
   - *Start* targets a brand-new instance, so it authorizes by *state*: it permits
     the enqueue only for a `pending` `df.instances` row that has no queue entry and
@@ -294,9 +295,9 @@ but it *is* a change from "fires the moment the statement runs." `df.cancel()` a
 - The atomic path requires the duroxide-pg provider (see *Why this reaches into
   duroxide-pg directly* above). `df.start` / `df.cancel` / `df.signal` each probe for
   its SQL surface (`enqueue_orchestrator_work` in the resolved schema); when it is
-  absent — a different provider, or a schema predating the wrappers — they fall back
-  to the old out-of-band path and emit a warning, so the change never breaks another
-  provider.
+  absent — a different provider, or a schema predating the wrappers — they log and
+  fall back to the old out-of-band path, so the change never breaks another provider
+  or contaminates `SELECT df.start(...)` output with client-visible warnings.
 - `visible_at = now()` (transaction time) is enough for immediate starts.
 - The work items are byte-compatible with duroxide's `WorkItem` JSON, so the worker
   behaves exactly as before.
@@ -322,7 +323,7 @@ but it *is* a change from "fires the moment the statement runs." `df.cancel()` a
 - **Self-healing (medium).** The reconciler is re-checked from the steady-state poll
   loop, not only once per worker epoch, so a cancelled one comes back within the poll
   interval.
-- **Silent fallback (medium).** `df.start` now warns when it uses the non-atomic
+- **Silent fallback (medium).** `df.start` now logs when it uses the non-atomic
   fallback.
 - **Kept `LOGIN` on `df_reconciler`** (debated): the worker runs the reconcile node
   by connecting *as* the role, like every other durable-function role, so `NOLOGIN`
@@ -341,9 +342,10 @@ they ship in the extension's install SQL and an upgrade script
 (`sql/pg_durable--<prev>--<current>.sql`, `CREATE FUNCTION` + `GRANT`), with a
 "Version-Specific Changes" entry in `docs/upgrade-testing.md`. A new binary running
 against an older `df` schema that predates the wrappers must still work: each caller
-probes for the enqueue surface and falls back to the old out-of-band path when it is
-missing. This keeps the binary compatible with every prior schema while the upgrade
-rolls out.
+uses the atomic path only when both the duroxide-pg SQL enqueue function **and** the
+`df._enqueue_orchestrator_*` wrappers exist; otherwise it falls back to the old
+out-of-band path. This keeps the binary compatible with every prior schema while
+the upgrade rolls out.
 
 **Data migration.** None. No table shapes change, and in-flight instances are
 unaffected (their queue items were already enqueued).

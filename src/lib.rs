@@ -554,6 +554,20 @@ DECLARE
     work_item text;
     v_blocked boolean;
 BEGIN
+    -- This wrapper is not a generic privileged "start any orchestration" entry
+    -- point. df.start() passes the root graph-executor name and FunctionInput
+    -- JSON; reject anything else so a caller cannot use the SECURITY DEFINER
+    -- privilege to enqueue an internal sub-orchestration with crafted input.
+    IF p_orchestration OPERATOR(pg_catalog.<>) 'pg_durable::orchestration::execute-function-graph' THEN
+        RAISE EXCEPTION 'pg_durable: invalid start orchestration %', p_orchestration
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF (p_input::jsonb ->> 'instance_id') IS DISTINCT FROM p_instance_id THEN
+        RAISE EXCEPTION 'pg_durable: start input instance_id does not match %', p_instance_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
     -- Authorization. This runs as the (privileged) definer, so it must not
     -- trust the caller to only target their own instance. Permit the enqueue
     -- only for a brand-new, not-yet-started instance: a 'pending' df.instances
@@ -582,7 +596,7 @@ BEGIN
     work_item := pg_catalog.json_build_object(
         'StartOrchestration', pg_catalog.json_build_object(
             'instance',        p_instance_id,
-            'orchestration',   p_orchestration,
+        'orchestration',   'pg_durable::orchestration::execute-function-graph',
             'input',           p_input,
             'version',         NULL,
             'parent_instance', NULL,
