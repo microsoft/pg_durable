@@ -4,15 +4,8 @@
 comment = 'pg_durable: SQL-native durable orchestrations for PostgreSQL'
 default_version = '@CARGO_VERSION@'
 module_pathname = 'pg_durable'
+schema = pg_catalog
+# pgrx's control-file parser requires `relocatable` and `superuser` to be
+# present explicitly (they are otherwise PostgreSQL defaults).
 relocatable = false
 superuser = true
-trusted = false
-# Note: 'schema' is intentionally omitted. This extension manages two schemas
-# (df and the duroxide provider schema), and PostgreSQL's control file only
-# supports a single schema directive. The df schema is created by pgrx
-# (#[pg_schema]); the duroxide provider schema is created by the
-# create_duroxide_schema extension_sql block in src/lib.rs (named '_duroxide'
-# on fresh installs, or the legacy 'duroxide' on installs upgraded from
-# <= 0.2.2). relocatable = false prevents schema relocation attacks.
-
-

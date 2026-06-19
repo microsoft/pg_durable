@@ -142,7 +142,35 @@ pub extern "C-unwind" fn _PG_init() {
 // Schema Declaration
 // ============================================================================
 
-/// The 'df' schema contains all pg_durable functions (df = durable functions)
+// Create both extension-owned schemas as the very first statements of the
+// install script. `bootstrap` guarantees this runs before every other extension
+// object, including the redundant `CREATE SCHEMA IF NOT EXISTS df` that pgrx
+// emits for the `#[pg_schema] mod df` entity below.
+extension_sql!(
+    r#"
+CREATE SCHEMA df;
+CREATE SCHEMA _duroxide;
+
+-- Returns the name of the duroxide provider schema selected for this install.
+-- Fresh installs return '_duroxide'. The body is version-specific: the upgrade
+-- script pg_durable--0.2.2--0.2.3.sql replaces it to return 'duroxide' for
+-- installs that originated on pg_durable <= 0.2.2 (which keep the legacy
+-- 'duroxide' schema). Both backend sessions and the background worker call
+-- df.duroxide_schema() to discover which schema to use, falling back to
+-- 'duroxide' when the helper is absent (installs predating it).
+CREATE FUNCTION df.duroxide_schema() RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $$ SELECT '_duroxide'::text $$;
+"#,
+    name = "bootstrap_schemas",
+    bootstrap
+);
+
+/// The 'df' schema contains all pg_durable functions (df = durable functions).
+/// pgrx requires this entity so that `#[pg_extern(schema = "df")]` functions can
+/// resolve their target schema. It emits a redundant `CREATE SCHEMA IF NOT
+/// EXISTS df` that no-ops after the bootstrap block above has already created df.
 #[pg_schema]
 mod df {}
 
@@ -153,7 +181,7 @@ mod df {}
 extension_sql!(
     r#"
 -- Table to store function nodes (SQL steps, THEN chains, etc.)
-CREATE TABLE IF NOT EXISTS df.nodes (
+CREATE TABLE df.nodes (
     id VARCHAR(8) PRIMARY KEY,
     instance_id VARCHAR(8),
     node_type TEXT NOT NULL,
@@ -174,7 +202,7 @@ COMMENT ON COLUMN df.nodes.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
 -- Table to store function instances
-CREATE TABLE IF NOT EXISTS df.instances (
+CREATE TABLE df.instances (
     id VARCHAR(8) PRIMARY KEY,
     label TEXT,
     root_node VARCHAR(8) NOT NULL,
@@ -190,14 +218,14 @@ COMMENT ON COLUMN df.instances.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
 -- Index for finding pending instances
-CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);
+CREATE INDEX idx_instances_status ON df.instances(status);
 
 -- Index for finding nodes by instance
-CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
+CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);
 
 -- Table to store workflow variables (captured at df.start())
 -- Per-user scoping: each user has their own variable namespace.
-CREATE TABLE IF NOT EXISTS df.vars (
+CREATE TABLE df.vars (
     name TEXT NOT NULL,
     value TEXT,
     owner REGROLE NOT NULL DEFAULT pg_catalog.quote_ident(current_user)::pg_catalog.regrole,
@@ -208,7 +236,7 @@ CREATE TABLE IF NOT EXISTS df.vars (
 -- initialising.  If the extension is DROP-ed and re-CREATEd between
 -- two poll ticks the epoch row disappears, so the worker detects the
 -- recreation even though the extension is always "present" in pg_extension.
-CREATE TABLE IF NOT EXISTS df._worker_epoch (
+CREATE TABLE df._worker_epoch (
     epoch_id UUID PRIMARY KEY,
     started_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
     last_seen_at TIMESTAMPTZ DEFAULT pg_catalog.now()
@@ -517,37 +545,6 @@ END $$;
 "#,
     name = "validate_database",
     requires = [df]
-);
-
-// ============================================================================
-// Duroxide Schema
-// ============================================================================
-
-extension_sql!(
-    r#"
--- The duroxide provider schema is created here so the extension owns it.
--- No IF NOT EXISTS: fails loudly if a _duroxide schema already exists,
--- preventing adoption of a potentially attacker-crafted schema.
--- The background worker populates this schema at startup via ApplyAll.
---
--- Fresh installs use the '_duroxide' schema. Installs that originated on
--- pg_durable <= 0.2.2 keep the legacy 'duroxide' schema; the upgrade script
--- pg_durable--0.2.2--0.2.3.sql defines df.duroxide_schema() to return
--- 'duroxide' for those installs. Both backend sessions and the background
--- worker call df.duroxide_schema() to discover which schema to use, falling
--- back to 'duroxide' when the helper is absent (installs predating it).
-CREATE SCHEMA _duroxide;
-
--- Returns the name of the duroxide provider schema selected for this install.
--- Fresh installs return '_duroxide'. The body is version-specific: the upgrade
--- script for pre-existing installs replaces it to return 'duroxide'.
-CREATE FUNCTION df.duroxide_schema() RETURNS text
-    LANGUAGE sql IMMUTABLE PARALLEL SAFE
-    SET search_path = pg_catalog, pg_temp
-    AS $$ SELECT '_duroxide'::text $$;
-"#,
-    name = "create_duroxide_schema",
-    requires = ["validate_database"]
 );
 
 // ============================================================================
