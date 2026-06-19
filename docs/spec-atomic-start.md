@@ -1,6 +1,6 @@
 # Spec: Atomic `df.start()` — Eliminating `df.*` ↔ `_duroxide` Divergence
 
-**Status:** Proposal
+**Status:** Proposal — Option 3 prototyped & validated (POC)
 **Author:** pg_durable team
 **Date:** June 2026
 
@@ -355,6 +355,59 @@ transaction, so the "not yet visible / rolled back" branch cannot occur. The
 retry loop can be simplified to a single read (optionally retain a short grace
 for replication scenarios). This also removes the worker-saturation failure mode.
 
+## Proof of concept (validated)
+
+Option 3 was prototyped end-to-end and validated on PostgreSQL 17 (branch
+`tjgreen42/atomic-start`, ~80 lines across 3 files).
+
+**What was built:**
+
+- `df._enqueue_orchestrator_start(text, text)` — a `SECURITY DEFINER` wrapper
+  (`SET search_path = pg_catalog`) that performs the privileged
+  `_duroxide.enqueue_orchestrator_work(instance, work_item, now())` INSERT.
+  EXECUTE is revoked from PUBLIC and granted through `df.grant_usage()`.
+- `df.start()` builds the real `duroxide::providers::WorkItem::StartOrchestration`
+  (guaranteeing wire compatibility), gates on `is_worker_ready()`, and enqueues
+  via SPI through the wrapper — raising (aborting the transaction) on failure.
+- The out-of-band `start_durable_function` client path is removed from start
+  (the duroxide client pool is still used by `df.signal` / `df.cancel`).
+
+**Confirmed findings:**
+
+- **The privilege model is the only real wrinkle.** `_duroxide.orchestrator_queue`
+  grants INSERT to its owner only and the enqueue function is `SECURITY INVOKER`,
+  so a plain caller gets *permission denied*. The `SECURITY DEFINER` wrapper
+  resolves this while still committing in the caller's transaction. A
+  non-superuser role (`df_e2e_user`) granted via `df.grant_usage()` starts
+  instances successfully and cannot INSERT into the queue directly.
+- **`visible_at = now()`** (SQL transaction time) is sufficient for immediate
+  starts; no reliance on the Rust-side `now_ms`.
+- **Reusing the `duroxide` `WorkItem` type** makes the enqueued row
+  byte-identical to the client path, so the worker behaves identically.
+
+**Validated behavior:**
+
+| Check | Result |
+|-------|:------:|
+| Committed `df.start()` runs to completion | pass |
+| Rolled-back `df.start()` leaves no `df.*` **and** no `_duroxide` orphan (queue + instances) | pass |
+| E2E subset: core, conditionals, loops, variables, signals, join, race, cancel | 8/8 |
+| JOIN determinism under the new (faster) timing | 5/5 |
+| Non-superuser (`df_e2e_user`) start path | pass |
+| `cargo fmt --check`; no new clippy warnings | pass |
+
+**POC scope / deferred to productionization:** fresh install only (no upgrade
+script); the `_duroxide` schema name is hard-coded (resolved dynamically in the
+real change — see Upgrade & Migration); wrapper hardening (move to duroxide-pg
+and/or validate the work item).
+
+> **Local-dev note:** `DROP EXTENSION pg_durable CASCADE` can leave the
+> BGW-owned `_duroxide` schema half-broken (migrations row present, functions
+> dropped), which surfaces as *spurious* JOIN nondeterminism and a missing
+> `_worker_ready`. Recover with `DROP SCHEMA _duroxide CASCADE` + restart so the
+> BGW re-applies its migrations. (This cost real debugging time during the POC;
+> the failures were environmental, not a regression.)
+
 ## Transaction-semantics decision (must be made explicit)
 
 This change makes `df.start()` **atomic with the caller's transaction**:
@@ -454,9 +507,11 @@ E2E (tests/e2e/sql/) and unit coverage:
 
 ## Phasing
 
-1. **Phase 1 (this spec):** atomic `df.start()` via the `SECURITY DEFINER`
-   enqueue entrypoint; readiness gate + legacy fallback; simplify the
-   `load-function-graph` retry; docs + tests.
+1. **Phase 1 (this spec) — prototyped & validated:** atomic `df.start()` via the
+   `SECURITY DEFINER` enqueue entrypoint; readiness gate + legacy fallback;
+   simplify the `load-function-graph` retry; docs + tests. (POC complete; see
+   Proof of concept. Remaining for production: upgrade script, dynamic
+   `_duroxide` schema resolution, entrypoint hardening.)
 2. **Phase 2:** apply the same in-transaction enqueue to `df.signal()` /
    `df.cancel()`.
 3. **Phase 3:** ship the reconciler backstop (Option 4).
@@ -470,9 +525,9 @@ E2E (tests/e2e/sql/) and unit coverage:
 - **Contract stability:** pg_durable now depends on the enqueue entrypoint
   signature and the `WorkItem` JSON. Mitigated by reusing the `duroxide`
   `WorkItem` type and the version-locked duroxide/duroxide-pg pair.
-- **`visible_at` clock:** use `now()` (server time) for immediate starts to match
-  the duroxide-pg provider's behavior; confirm no reliance on the Rust-side
-  `now_ms` for ordering at start.
+- **`visible_at` clock:** the POC uses `now()` (server transaction time) for
+  immediate starts and it works; no reliance on the Rust-side `now_ms` for
+  ordering at start.
 - **Idempotency:** `enqueue_orchestrator_work` is a bare INSERT (no dedup); the
   `df.instances`/`df.nodes` PKs already prevent duplicate instance ids within the
   transaction, so no additional dedup is required.
