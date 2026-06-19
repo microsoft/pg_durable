@@ -65,7 +65,6 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 | `df.join(a, b)` / `df.join3(a, b, c)` | Durofut args | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.race(a, b)` | Two Durofut args | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.explain(fut_or_id)` | Durofut JSON or instance ID | PostgreSQL role | SELECT df.nodes (for existing instances) | JSON parse | Low |
-| `df.debug_connection()` | None | PostgreSQL role | None | None | **Medium** — exposes connection info |
 | `df.version()` | None | PostgreSQL role | None | None | Low |
 | `df.target_database()` | None | PostgreSQL role | None | None | Low |
 

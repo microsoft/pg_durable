@@ -44,8 +44,20 @@ pub fn version() -> String {
     )
 }
 
-/// Debug function to see what duroxide connection is being used
-#[pg_extern(schema = "df")]
+/// Binary backward-compatibility shim for issue #110.
+///
+/// `df.debug_connection()` was removed from the SQL surface in v0.2.4: it is no
+/// longer emitted on fresh installs (`sql = false`) and is dropped by the
+/// `0.2.3 -> 0.2.4` upgrade script. Pre-0.2.4 schemas, however, still define the
+/// function with `AS 'MODULE_PATHNAME','debug_connection_wrapper'`, and
+/// PostgreSQL validates that C symbol at `CREATE FUNCTION` time. We therefore
+/// keep the wrapper symbol compiled into the binary so the new `.so` can still
+/// load every previously shipped schema (upgrade-test Scenario B1). The body
+/// intentionally mirrors the old, non-secret output so a binary-only swap
+/// (without `ALTER EXTENSION UPDATE`) keeps working until the customer upgrades.
+///
+/// Remove once `PROVIDER_COMPAT_START_VERSION` advances past 0.2.3.
+#[pg_extern(sql = false)]
 pub fn debug_connection() -> String {
     use crate::types::{backend_duroxide_schema, postgres_connection_string};
     format!(

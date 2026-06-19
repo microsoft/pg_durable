@@ -968,11 +968,42 @@ test_b2_new_data_after_upgrade() {
     assert_sql_equals "SELECT msg FROM test_upgrade_b2_log WHERE kind = 'post' ORDER BY id DESC LIMIT 1;" "new_value"
 }
 
+test_b2_grant_usage_after_upgrade() {
+    # Regression guard for #110: after ALTER EXTENSION UPDATE, df.debug_connection()
+    # must be gone from the catalog. Scenario A only compares function name/args/
+    # result (not bodies), and the other B2 tests never exercise df.grant_usage(),
+    # so this test independently confirms (a) the upgrade dropped the function and
+    # (b) the simplified df.grant_usage() (the per-function allowlist was removed in
+    # #242) still runs cleanly against the upgraded schema and actually grants a
+    # privilege.
+    local probe_role="durable_b2_grant_probe"
+    local out
+
+    # Idempotent pre-clean (DROP OWNED errors harmlessly if the role is absent).
+    run_sql_capture "DROP OWNED BY ${probe_role};" >/dev/null 2>&1 || true
+    run_sql_capture "DROP ROLE IF EXISTS ${probe_role};" >/dev/null 2>&1 || true
+    out=$(run_sql_capture "CREATE ROLE ${probe_role} LOGIN;") || { echo "$out"; return 1; }
+
+    # The dropped function is absent from the catalog after upgrade.
+    assert_sql_equals "SELECT to_regprocedure('df.debug_connection()') IS NULL;" "t" || return 1
+
+    # The rewritten grant_usage() runs against the upgraded schema and grants
+    # schema USAGE (plus the table privileges) without error.
+    out=$(run_sql_capture "SELECT df.grant_usage('${probe_role}');") || { echo "$out"; return 1; }
+
+    # ... and a representative privilege was actually granted.
+    assert_sql_equals "SELECT has_function_privilege('${probe_role}', 'df.start(text, text, text)', 'EXECUTE');" "t" || return 1
+
+    # Clean up the probe role.
+    run_sql_capture "DROP OWNED BY ${probe_role}; DROP ROLE IF EXISTS ${probe_role};" >/dev/null 2>&1 || true
+}
+
 if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
     run_test "B2: In-flight work completes after upgrade" test_b2_inflight_work_after_upgrade
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
+    run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
 fi
 
 # ============================================================================

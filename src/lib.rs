@@ -1355,10 +1355,14 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_debug_connection_returns_info() {
-        let conn_info = crate::dsl::debug_connection();
-        assert!(!conn_info.is_empty());
-        assert!(conn_info.contains("duroxide")); // Should contain schema name
+    fn test_connection_info_builders() {
+        use crate::types::{backend_duroxide_schema, postgres_connection_string};
+        let conn = postgres_connection_string();
+        assert!(!conn.is_empty());
+        assert!(conn.contains("postgres://"));
+        // Fresh installs use the "_duroxide" provider schema; upgraded installs
+        // use the legacy "duroxide". Both contain "duroxide" as a substring.
+        assert!(backend_duroxide_schema().contains("duroxide"));
     }
 
     // ========================================================================
