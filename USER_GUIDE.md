@@ -251,7 +251,7 @@ Access specific columns by name instead of just the first column:
 ```sql
 SELECT df.start(
     $$SELECT 42 AS id, 'Alice' AS name$$ |=> 'user'
-    ~> $$SELECT $user.id, $user.name$$          -- access specific columns
+    ~> $$SELECT $user.id AS id, $user.name AS name$$  -- access specific columns
 );
 ```
 
@@ -557,11 +557,11 @@ Use `df.if_rows()` to branch based on whether a named result has rows — withou
 
 ```sql
 SELECT df.start(
-    $$SELECT id FROM orders WHERE status = 'pending'$$ |=> 'pending'
+    $$SELECT id FROM playground.orders WHERE status = 'pending'$$ |=> 'pending'
     ~> df.if_rows(
         'pending',                                               -- result name
-        $$UPDATE orders SET status = 'processing' WHERE id = $pending.id$$,  -- then
-        $$INSERT INTO logs (msg) VALUES ('No pending orders')$$               -- else
+        $$UPDATE playground.orders SET status = 'processing' WHERE id = $pending.id$$,  -- then
+        $$INSERT INTO playground.logs (msg) VALUES ('No pending orders')$$               -- else
     ),
     'check-pending'
 );
@@ -877,7 +877,7 @@ SELECT df.setvar('batch_size', '100');
 -- Start the pipeline
 SELECT df.start(
     'SELECT * FROM {source_table} LIMIT {batch_size}::int' |=> 'batch'
-    ~> 'INSERT INTO {target_table} SELECT * FROM ($batch) AS source',
+    ~> 'INSERT INTO {target_table} SELECT * FROM $batch.*',
     'etl-pipeline'
 );
 ```
@@ -1136,13 +1136,13 @@ If the signal times out:
 
 ```sql
 SELECT df.start(
-    'SELECT order_id, total FROM orders WHERE id = 1' |=> 'order'
+    'SELECT id, total FROM orders WHERE id = 1' |=> 'order'
     ~> df.wait_for_signal('approval', 86400) |=> 'sig'  -- 24h timeout
     ~> df.if(
         'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean 
             AND ($sig::jsonb->''data''->>''approved'')::boolean',
-        'UPDATE orders SET status = ''approved'' WHERE id = $order_id',
-        'UPDATE orders SET status = ''rejected'' WHERE id = $order_id'
+        'UPDATE orders SET status = ''approved'' WHERE id = $order.id',
+        'UPDATE orders SET status = ''rejected'' WHERE id = $order.id'
     ),
     'order-approval'
 );
@@ -1157,13 +1157,13 @@ Wait for multiple approvals using `df.join3()`:
 
 ```sql
 SELECT df.start(
-    'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
+    'SELECT id FROM documents WHERE id = 1' |=> 'doc'
     ~> df.join3(
         df.wait_for_signal('legal_approval'),
         df.wait_for_signal('tech_approval'),
         df.wait_for_signal('mgmt_approval')
     ) |=> 'approvals'
-    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc_id',
+    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc.id',
     'multi-approval'
 );
 

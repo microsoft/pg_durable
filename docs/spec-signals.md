@@ -68,9 +68,9 @@ The `df.wait_for_signal()` function returns a JSON object:
 
 ```sql
 SELECT df.start(
-    'SELECT order_id FROM orders WHERE id = 1' |=> 'order'
+    'SELECT id FROM orders WHERE id = 1' |=> 'order'
     ~> df.wait_for_signal('approval') |=> 'sig'
-    ~> 'INSERT INTO audit_log VALUES ($order_id, $sig::jsonb->''data''->>''approver'')',
+    ~> 'INSERT INTO audit_log VALUES ($order.id, $sig::jsonb->''data''->>''approver'')',
     'order-approval'
 );
 
@@ -82,18 +82,18 @@ SELECT df.signal('a1b2c3d4', 'approval', '{"approved": true, "approver": "jane"}
 
 ```sql
 SELECT df.start(
-    'SELECT order_id FROM orders WHERE id = 1' |=> 'order'
+    'SELECT id FROM orders WHERE id = 1' |=> 'order'
     ~> df.wait_for_signal('approval', 86400) |=> 'sig'  -- 24 hour timeout
     ~> df.if(
         'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean',
         -- Signal received
         df.if(
             'SELECT ($sig::jsonb->''data''->>''approved'')::boolean',
-            'UPDATE orders SET status = ''approved'' WHERE id = $order_id',
-            'UPDATE orders SET status = ''rejected'' WHERE id = $order_id'
+            'UPDATE orders SET status = ''approved'' WHERE id = $order.id',
+            'UPDATE orders SET status = ''rejected'' WHERE id = $order.id'
         ),
         -- Timed out
-        'UPDATE orders SET status = ''expired'' WHERE id = $order_id'
+        'UPDATE orders SET status = ''expired'' WHERE id = $order.id'
     ),
     'order-with-timeout'
 );
@@ -103,13 +103,13 @@ SELECT df.start(
 
 ```sql
 SELECT df.start(
-    'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
+    'SELECT id FROM documents WHERE id = 1' |=> 'doc'
     ~> df.join3(
         df.wait_for_signal('legal_approval'),
         df.wait_for_signal('tech_approval'),
         df.wait_for_signal('mgmt_approval')
     ) |=> 'approvals'
-    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc_id',
+    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc.id',
     'multi-approval'
 );
 
@@ -635,13 +635,13 @@ SELECT df.signal('instance_id', 'signal_name', '{"data": "value"}');
 
 ```sql
 SELECT df.start(
-    'SELECT order_id, total FROM orders WHERE id = 1' |=> 'order'
+    'SELECT id, total FROM orders WHERE id = 1' |=> 'order'
     ~> df.wait_for_signal('approval', 86400) |=> 'sig'
     ~> df.if(
         'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean 
             AND ($sig::jsonb->''data''->>''approved'')::boolean',
-        'UPDATE orders SET status = ''approved'' WHERE id = $order_id',
-        'UPDATE orders SET status = ''rejected'' WHERE id = $order_id'
+        'UPDATE orders SET status = ''approved'' WHERE id = $order.id',
+        'UPDATE orders SET status = ''rejected'' WHERE id = $order.id'
     ),
     'order-approval'
 );
@@ -675,4 +675,3 @@ SELECT df.signal('a1b2c3d4', 'approval', '{"approved": true}');
 - [x] Add to Quick Reference Card
 
 **Implementation completed: December 2024**
-

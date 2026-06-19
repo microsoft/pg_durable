@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the PostgreSQL License.
 
-# Offline syntax validation for all scripts and SQL in this example.
+# Offline validation for shell syntax and required service files in this example.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
