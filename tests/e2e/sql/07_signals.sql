@@ -64,7 +64,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_basic;
     RAISE NOTICE 'Testing basic signal: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: basic signal status = %', status;
@@ -110,7 +110,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_timeout;
     RAISE NOTICE 'Testing signal timeout: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: signal timeout status = %', status;
@@ -158,7 +158,7 @@ BEGIN
     PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
     RAISE NOTICE 'Testing signal with data: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: signal data status = %', status;
@@ -207,7 +207,7 @@ BEGIN
     PERFORM df.signal(inst_id, 'plain_text', 'approve');
     RAISE NOTICE 'Testing signal with plain text data: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: signal plain text status = %', status;
@@ -259,7 +259,7 @@ DECLARE
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_then_named;
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: composite THEN capture status = %', status;

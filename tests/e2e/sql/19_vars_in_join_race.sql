@@ -31,7 +31,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_join_vars;
     RAISE NOTICE 'Testing vars in JOIN branches: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [vars-in-join]: status = %', status;
@@ -79,7 +79,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_join_label;
     RAISE NOTICE 'Testing sys_label in JOIN branches: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [label-in-join]: status = %', status;
@@ -127,7 +127,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_race_vars;
     RAISE NOTICE 'Testing vars in RACE branches: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [vars-in-race]: status = %', status;

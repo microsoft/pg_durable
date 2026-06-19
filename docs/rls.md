@@ -59,7 +59,7 @@ These `df.*` functions access `df.instances` or `df.nodes` via SPI (which runs a
 | `df.result()` | `df.instances` (SELECT), `df.nodes` (SELECT) | Read | User sees only own |
 | `df.cancel()` | `df.instances` (SELECT for ownership check) | Read | User can only cancel own instances |
 | `df.signal()` | _(no direct table access — goes through duroxide client)_ | — | No RLS impact |
-| `df.wait_for_completion()` | `df.instances` (SELECT, polling) | Read | User sees only own |
+| `df.await_instance()` | `df.instances` (SELECT, polling) | Read | User sees only own |
 | `df.explain()` | `df.nodes` (SELECT, for existing instances) | Read | User sees only own |
 | `df.list_instances()` | `df.instances` (SELECT for labels) | Read | User sees only own labels |
 | `df.instance_info()` | `df.instances` (SELECT for label) | Read | User sees only own |

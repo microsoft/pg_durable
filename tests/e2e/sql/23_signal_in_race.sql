@@ -45,7 +45,7 @@ DECLARE
     v_status TEXT;
 BEGIN
     SELECT instance_id INTO v_instance_id FROM _test_signal_race_state;
-    SELECT df.wait_for_completion(v_instance_id, 25) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 25) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [signal-in-race]: expected completed, got %', v_status;

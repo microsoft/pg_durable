@@ -24,7 +24,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected completed, got %', status;
@@ -87,7 +87,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_1;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 1 - alice own table): expected completed, got %', final_status;
@@ -117,7 +117,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_2;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 2 - alice access bob table): expected failed, got %', final_status;
@@ -143,7 +143,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_3;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 3 - bob own table): expected completed, got %', final_status;
@@ -173,7 +173,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_4;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 4 - bob access alice table): expected failed, got %', final_status;
@@ -237,7 +237,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_5b;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 5b - SET ROLE with LOGIN): expected completed, got %', final_status;
@@ -289,7 +289,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_6a;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 6a - SECURITY DEFINER access alice table): expected completed, got %', final_status;
@@ -320,7 +320,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_6b;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
 
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (Test 6b - SECURITY DEFINER access superuser table): expected completed (runs as definer), got %', final_status;

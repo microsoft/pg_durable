@@ -135,5 +135,48 @@ BEGIN
     RAISE NOTICE 'TEST PASSED: invalid node_type handling';
 END $body$;
 
+-- === Test: await_instance blocked inside workflow ===
+-- df.await_instance blocks the calling backend on a polling loop.
+-- Inside a workflow that backend is a BGW thread, so calling it would
+-- pin a worker slot for up to `timeout_seconds` and (if waiting on the
+-- current instance) deadlock the workflow on itself. The function must
+-- refuse to run when df.in_workflow='true'.
+
+CREATE TEMP TABLE _test_wait_blocked (instance_id TEXT);
+
+INSERT INTO _test_wait_blocked SELECT df.start(
+    'SELECT df.await_instance(''nonexistent-instance'')',
+    'test-wait-blocked'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_error TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_wait_blocked;
+    RAISE NOTICE 'Testing await_instance blocked in workflow: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected workflow to fail but status = %', status;
+    END IF;
+
+    SELECT n.result::text INTO node_error
+    FROM df.nodes n
+    WHERE n.instance_id = inst_id AND n.status = 'failed'
+    LIMIT 1;
+
+    IF node_error NOT LIKE '%cannot be called inside a workflow%' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected "cannot be called inside a workflow" error, got: %', node_error;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: await_instance_blocked_in_workflow';
+END $$;
+
+DROP TABLE _test_wait_blocked;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

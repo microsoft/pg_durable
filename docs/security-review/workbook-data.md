@@ -58,14 +58,13 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 | `df.getvar(name)` | Key text | PostgreSQL role | SELECT df.vars (owner filter) | None | Low |
 | `df.unsetvar(name)` | Key text | PostgreSQL role | DELETE df.vars (owner filter) | None | Low |
 | `df.clearvars()` | None | PostgreSQL role | DELETE df.vars (owner filter) | None | Low |
-| `df.wait_for_completion(id, timeout?)` | Instance ID, timeout | PostgreSQL role | SELECT df.instances | Timeout > 0 | Low |
+| `df.await_instance(id, timeout?)` | Instance ID, timeout | PostgreSQL role | SELECT df.instances | Timeout > 0 | Low |
 | `df.sleep(seconds)` | bigint | None (in-memory) | N/A | seconds >= 0 | Low |
 | `df.if(cond, then, else)` | Three Durofut args | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.loop(body, cond?)` | Durofut, optional condition | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.join(a, b)` / `df.join3(a, b, c)` | Durofut args | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.race(a, b)` | Two Durofut args | None (in-memory) | N/A | Validates Durofut JSON | Low |
 | `df.explain(fut_or_id)` | Durofut JSON or instance ID | PostgreSQL role | SELECT df.nodes (for existing instances) | JSON parse | Low |
-| `df.debug_connection()` | None | PostgreSQL role | None | None | **Medium** — exposes connection info |
 | `df.version()` | None | PostgreSQL role | None | None | Low |
 | `df.target_database()` | None | PostgreSQL role | None | None | Low |
 

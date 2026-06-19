@@ -75,7 +75,7 @@ cat regression.diffs
 **What it tests:**
 - Core DSL operators: `~>`, `|=>`, `&`, `?>`, `!>`
 - DSL functions: `df.sql()`, `df.seq()`, `df.as()`, `df.join()`, `df.if()`
-- Helper functions: `df.wait_for_completion()`
+- Helper functions: `df.await_instance()`
 
 **Key features:**
 - Deterministic output (no UUIDs, timestamps, or variable timing)

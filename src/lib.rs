@@ -341,37 +341,23 @@ CREATE POLICY vars_user_isolation ON df.vars
     USING (owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole)
     WITH CHECK (owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole);
 
--- No automatic PUBLIC grants. Admins must explicitly grant privileges
--- to application roles after CREATE EXTENSION.
--- Use df.grant_usage('role_name') (recommended) or see USER_GUIDE.md
--- "Privilege Grants" for the equivalent manual GRANT statements.
+-- No automatic PUBLIC grants — admins call df.grant_usage('role') after
+-- CREATE EXTENSION (or see USER_GUIDE.md "Privilege Grants" for manual GRANTs).
 
--- Helper: grant all required df privileges to a role in one call.
--- Authorization model: This function is SECURITY INVOKER and EXECUTE is
--- revoked from PUBLIC, so only roles explicitly granted EXECUTE (via
--- with_grant => true or a direct superuser GRANT) can call it. The inner
--- GRANT statements run as the caller, so the caller must also hold the
--- underlying privileges WITH GRANT OPTION (automatically true for
--- superusers; for delegated admins, df.grant_usage(..., with_grant => true)
--- grants all privileges WITH GRANT OPTION).
+-- Helper: grant all required df privileges to a role in one call. Additive
+-- only (never REVOKEs); call df.revoke_usage() first to downgrade. SECURITY
+-- INVOKER with EXECUTE revoked from PUBLIC, so the caller must hold the
+-- underlying privileges WITH GRANT OPTION (superusers and with_grant => true
+-- admins do). See USER_GUIDE.md "Privilege Grants" for full details.
 --
--- This function is purely additive — it never issues REVOKE.  To downgrade
--- a role's privileges, call df.revoke_usage() first, then df.grant_usage()
--- with the desired options.
---
--- include_http controls whether the role is granted EXECUTE on df.http().
--- Default is false: HTTP access is opt-in because df.http() makes outbound
--- network requests and requires explicit administrator approval.
---
--- with_grant controls whether the target role receives privileges WITH GRANT
--- OPTION and can itself call df.grant_usage() / df.revoke_usage() to manage
--- other roles' access.  Authorization is enforced by PostgreSQL's native
--- WITH GRANT OPTION mechanism: the caller must hold each underlying
--- privilege WITH GRANT OPTION, which is automatically true for superusers
--- and for delegated admins granted via with_grant => true.
---
--- MAINTENANCE: when adding a new df.* function, add it to the func_sigs
--- array below.  Functions NOT in this list are deny-by-default.
+-- Access gate: schema USAGE makes the ordinary df.* functions callable (they
+-- keep PostgreSQL's default PUBLIC EXECUTE). Sensitive functions (df.http,
+-- df.grant_usage, df.revoke_usage) have PUBLIC EXECUTE revoked at install time
+-- and are granted explicitly below — keep a new private function private the
+-- same way (REVOKE ... FROM PUBLIC in rls_and_grants, then grant it here).
+--   include_http => true  also grants EXECUTE on df.http() (opt-in: network).
+--   with_grant   => true  grants everything WITH GRANT OPTION and lets the role
+--                         call df.grant_usage()/df.revoke_usage() for others.
 CREATE OR REPLACE FUNCTION df.grant_usage(
     p_role TEXT,
     include_http boolean DEFAULT false,
@@ -379,162 +365,110 @@ CREATE OR REPLACE FUNCTION df.grant_usage(
 )
 RETURNS VOID
 LANGUAGE plpgsql
-SET search_path = pg_catalog, df, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
     grant_opt TEXT := '';
-    func_sig TEXT;
-    -- Explicit list of df.* functions to grant.  Sensitive functions
-    -- (df.http, df.grant_usage, df.revoke_usage) are excluded from this
-    -- list and granted conditionally below.
-    func_sigs TEXT[] := ARRAY[
-        -- DSL functions
-        'df.sql(text)',
-        'df.seq(text, text)',
-        'df.as(text, text)',
-        'df.sleep(bigint)',
-        'df.wait_for_schedule(text)',
-        'df.loop(text, text)',
-        'df.break(text)',
-        'df.if(text, text, text)',
-        'df.if_rows(text, text, text)',
-        'df.join(text, text)',
-        'df.join3(text, text, text)',
-        'df.race(text, text)',
-        'df.wait_for_signal(text, integer)',
-        'df.signal(text, text, text)',
-        'df.start(text, text, text)',
-        'df.setvar(text, text)',
-        'df.getvar(text)',
-        'df.unsetvar(text)',
-        'df.clearvars()',
-        -- Monitoring functions
-        'df.status(text)',
-        'df.result(text)',
-        'df.cancel(text, text)',
-        'df.wait_for_completion(text, integer)',
-        'df.run(text)',
-        'df.list_instances(text, integer)',
-        'df.instance_info(text)',
-        'df.instance_nodes(text, integer)',
-        'df.instance_executions(text, integer)',
-        'df.metrics()',
-        -- Internal helpers (operators, version, etc.)
-        'df.as_op(text, text)',
-        'df.if_then_op(text, text)',
-        'df.if_else_op(text, text)',
-        'df.ensure_durofut(text)',
-        'df.loop_prefix_op(text)',
-        'df.version()',
-        'df.debug_connection()',
-        'df.explain(text)',
-        'df.target_database()',
-        -- Atomic-start enqueue wrapper (called by df.start() via SPI)
-        'df._enqueue_orchestrator_start(text, text, text)',
-        'df._enqueue_orchestrator_cancel(text, text)',
-        'df._enqueue_orchestrator_signal(text, text, text)'
-    ];
 BEGIN
-    -- Validate the role exists
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
-        RAISE EXCEPTION 'role "%" does not exist', p_role;
-    END IF;
-
     IF with_grant THEN
         grant_opt := ' WITH GRANT OPTION';
     END IF;
 
-    -- Schema access
-    EXECUTE format('GRANT USAGE ON SCHEMA df TO %I', p_role) || grant_opt;
-
-    -- Grant EXECUTE on each standard function explicitly.
-    FOREACH func_sig IN ARRAY func_sigs LOOP
-        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', func_sig, p_role) || grant_opt;
-    END LOOP;
+    -- Schema access — the access gate for ordinary df.* functions (see header).
+    EXECUTE pg_catalog.format('GRANT USAGE ON SCHEMA df TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
 
     -- df.http() — opt-in because it makes outbound network requests.
     IF include_http THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) || grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- Admin helpers — only for delegated administrators.
     IF with_grant THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) || grant_opt;
-        EXECUTE format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) || grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
+    -- In-transaction enqueue wrappers — SECURITY DEFINER, revoked from PUBLIC at
+    -- install. Granted unconditionally to every df user because df.start() /
+    -- df.cancel() / df.signal() call them via SPI as the calling role; their own
+    -- internal authorization checks gate access to other users' instances.
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+
     -- Table privileges
-    EXECUTE format('GRANT SELECT ON df.instances TO %I', p_role) || grant_opt;
-    EXECUTE format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) || grant_opt;
-    EXECUTE format('GRANT SELECT ON df.nodes TO %I', p_role) || grant_opt;
-    EXECUTE format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) || grant_opt;
-    EXECUTE format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) || grant_opt;
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role) || grant_opt;
+    EXECUTE pg_catalog.format('GRANT SELECT ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT SELECT ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
 
     RAISE NOTICE 'pg_durable: granted df usage privileges to "%"', p_role;
 END;
 $fn$;
 
--- Revoke all df privileges previously granted by df.grant_usage().
--- Authorization: same model as df.grant_usage() — EXECUTE is revoked from
--- PUBLIC, caller must hold the underlying privileges to revoke them.
--- Safety: format(%I) quotes identifiers to prevent SQL injection. Additionally,
--- this is SECURITY INVOKER so it cannot escalate beyond the caller's privileges.
+-- Revoke everything df.grant_usage() grants (same authorization model).
+-- format(%I) quotes identifiers; SECURITY INVOKER caps it at the caller's
+-- own privileges.
 CREATE OR REPLACE FUNCTION df.revoke_usage(p_role TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
-SET search_path = pg_catalog, df, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
-DECLARE
-    func_oid oid;
 BEGIN
-    -- Validate the role exists
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
-        RAISE EXCEPTION 'role "%" does not exist', p_role;
-    END IF;
+    -- Mirror of df.grant_usage(): undo exactly what it grants. Revoking schema
+    -- USAGE is the access gate that locks the role out of ordinary df.*
+    -- functions; the sensitive functions and table privileges are undone below.
+    -- CASCADE also removes any sub-grants the role made via WITH GRANT OPTION.
 
-    -- Prevent accidentally revoking your own access.  pg_has_role checks
-    -- both direct identity (current_user = p_role) and inherited membership
-    -- (current_user is a member of p_role), so revoking a parent role that
-    -- the caller depends on is also caught.
-    -- Superusers are exempt: pg_has_role returns true for all roles when the
-    -- caller is a superuser, and superusers can always re-grant themselves.
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_roles
-        WHERE rolname = current_user
-          AND rolsuper
-    )
-       AND pg_has_role(current_user, p_role, 'MEMBER') THEN
-        RAISE EXCEPTION 'cannot revoke df privileges from "%" because the current role ("%") is a member of it — use a different administrator', p_role, current_user;
-    END IF;
+    -- Sensitive functions (granted explicitly by grant_usage()).  A delegated
+    -- admin may lack privilege on some of these (e.g. df.http); skip those.
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
 
-    -- CASCADE: if the target role granted sub-grants (via WITH GRANT OPTION),
-    -- CASCADE ensures those dependent privileges are also revoked.
+    -- In-transaction enqueue wrappers (granted unconditionally by grant_usage()).
+    -- A delegated admin may not be the grantor of these; skip if so.
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+
+    -- Table privileges.
     -- Column-level revokes must match the column-level grants from grant_usage().
-    EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I CASCADE', p_role);
-    EXECUTE format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
-    EXECUTE format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
-    EXECUTE format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
-    EXECUTE format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
-    EXECUTE format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
 
-    -- Revoke EXECUTE per-function rather than using the blanket
-    -- REVOKE ON ALL FUNCTIONS.  A delegated admin may lack privilege on
-    -- some functions (e.g. df.http); per-function revokes let us skip those.
-    FOR func_oid IN
-        SELECT p.oid FROM pg_proc p
-        JOIN pg_namespace n ON p.pronamespace = n.oid
-        WHERE n.nspname = 'df'
-    LOOP
-        BEGIN
-            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I CASCADE', func_oid::regprocedure, p_role);
-        EXCEPTION WHEN insufficient_privilege THEN
-            NULL;
-        END;
-    END LOOP;
-
-    EXECUTE format('REVOKE USAGE ON SCHEMA df FROM %I CASCADE', p_role);
+    -- Schema access — the access gate for all ordinary df.* functions.
+    EXECUTE pg_catalog.format('REVOKE USAGE ON SCHEMA df FROM %I CASCADE', p_role);
 
     RAISE NOTICE 'pg_durable: revoked df usage privileges granted by "%" from "%"', current_user, p_role;
 END;
@@ -562,17 +496,10 @@ BEGIN
     END IF;
 END $$;
 
--- df.http() carries network-access implications and must be opt-in.
--- PostgreSQL grants EXECUTE to PUBLIC by default when functions are created;
--- revoke that so only roles explicitly granted access (via
--- df.grant_usage(role, include_http => true) or a direct GRANT) can make
--- HTTP requests.
+-- df.http(), df.grant_usage() and df.revoke_usage() are sensitive (network
+-- access / privilege management), so revoke PostgreSQL's default PUBLIC
+-- EXECUTE. df.grant_usage() re-grants them explicitly to authorized roles.
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
-
--- df.grant_usage() and df.revoke_usage() are admin-only helpers.
--- Revoke PUBLIC's default EXECUTE privilege so that only roles explicitly
--- granted access (via with_grant => true or a direct superuser GRANT) can
--- manage other roles' df privileges.
 REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
@@ -1169,7 +1096,7 @@ mod tests {
     }
 
     /// Wait for a durable function to complete, polling Duroxide status
-    fn wait_for_completion(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
+    fn poll_until_terminal(instance_id: &str, timeout_secs: u64) -> Result<String, String> {
         use crate::types::{
             backend_duroxide_schema, new_backend_provider, postgres_connection_string,
         };
@@ -1767,10 +1694,14 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_debug_connection_returns_info() {
-        let conn_info = crate::dsl::debug_connection();
-        assert!(!conn_info.is_empty());
-        assert!(conn_info.contains("duroxide")); // Should contain schema name
+    fn test_connection_info_builders() {
+        use crate::types::{backend_duroxide_schema, postgres_connection_string};
+        let conn = postgres_connection_string();
+        assert!(!conn.is_empty());
+        assert!(conn.contains("postgres://"));
+        // Fresh installs use the "_duroxide" provider schema; upgraded installs
+        // use the legacy "duroxide". Both contain "duroxide" as a substring.
+        assert!(backend_duroxide_schema().contains("duroxide"));
     }
 
     // ========================================================================
@@ -1933,9 +1864,52 @@ mod tests {
         );
     }
 
-    // Note: Testing that setvar fails in workflow context requires E2E test
-    // because it depends on the background worker setting df.in_workflow='true'
-    // on its connections. See tests/e2e/sql/20_vars.sql for E2E coverage.
+    #[pg_test]
+    fn test_wait_for_completion_cannot_be_used_in_seq_composition() {
+        // df.await_instance polls df.instances and would block on a
+        // missing instance, so we can't actually call it in a unit test
+        // (the background worker isn't running under pg_test). Instead we
+        // exercise the same machinery directly: write the marker GUC that
+        // await_instance would have written, then thread its plain-text
+        // return value ("completed") into df.seq. Durofut::ensure should
+        // detect the marker and reject the composition by name.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            "SELECT pg_temp.capture_error($body$
+                 WITH _mark AS (
+                     SELECT pg_catalog.set_config(
+                         'df.non_future_helper',
+                         'df.await_instance' || E'\\n' || pg_catalog.statement_timestamp()::text,
+                         true
+                     )
+                 )
+                 SELECT df.seq('completed', df.sql('SELECT 1')) FROM _mark
+             $body$)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("df.await_instance cannot be used as a workflow step"),
+            "Unexpected error: {msg}"
+        );
+    }
+
+    // Note: Testing that setvar / await_instance fail in workflow context
+    // requires E2E tests because it depends on the background worker setting
+    // df.in_workflow='true' on its connections. See
+    // tests/e2e/sql/04_variables_and_results.sql (setvar) and
+    // tests/e2e/sql/09_graph_and_validation.sql (await_instance).
 
     // ========================================================================
     // Unit Tests - Explain Functionality
@@ -2194,7 +2168,7 @@ mod tests {
         let instance_id = crate::dsl::start(&sql, Some("test-e2e-simple"), None);
 
         // Wait for completion
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify result contains the inserted row
@@ -2229,7 +2203,7 @@ mod tests {
         let instance_id = crate::dsl::start(&seq, Some("test-e2e-seq"), None);
 
         // Wait for completion
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify both rows exist in order
@@ -2269,7 +2243,7 @@ mod tests {
         let instance_id = crate::dsl::start(&seq, Some("test-e2e-vars"), None);
 
         // Wait for completion
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify the value was copied
@@ -2296,7 +2270,7 @@ mod tests {
         let instance_id = crate::dsl::start(&seq, Some("test-e2e-sleep"), None);
 
         // Wait for completion (with extra time for sleep)
-        let result = wait_for_completion(&instance_id, 15);
+        let result = poll_until_terminal(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let elapsed = start_time.elapsed();
@@ -2317,7 +2291,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-true"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
@@ -2334,7 +2308,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-false"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
@@ -2352,7 +2326,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&if_node, Some("test-e2e-if-zero"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         let output = result.unwrap();
@@ -2379,7 +2353,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join"), None);
 
-        let result = wait_for_completion(&instance_id, 15);
+        let result = poll_until_terminal(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Verify both branches executed
@@ -2409,7 +2383,7 @@ mod tests {
 
         let instance_id = crate::dsl::start(&join_node, Some("test-e2e-join3"), None);
 
-        let result = wait_for_completion(&instance_id, 15);
+        let result = poll_until_terminal(&instance_id, 15);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Result should be an array of 3 results
@@ -2463,8 +2437,8 @@ mod tests {
         let id2 = crate::dsl::start(&sql2, Some("test-list-2"), None);
 
         // Wait for both to complete
-        let _ = wait_for_completion(&id1, 10);
-        let _ = wait_for_completion(&id2, 10);
+        let _ = poll_until_terminal(&id1, 10);
+        let _ = poll_until_terminal(&id2, 10);
 
         // Query list_instances
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM df.list_instances()")
@@ -2487,7 +2461,7 @@ mod tests {
         let sql = crate::dsl::sql("SELECT 'info-test'");
         let instance_id = crate::dsl::start(&sql, Some("test-info-label"), None);
 
-        let _ = wait_for_completion(&instance_id, 10);
+        let _ = poll_until_terminal(&instance_id, 10);
 
         // Query instance_info
         let orch_name = Spi::get_one::<String>(&format!(
@@ -2509,7 +2483,7 @@ mod tests {
         let seq = crate::dsl::then_fn(&a, &b);
         let instance_id = crate::dsl::start(&seq, None, None);
 
-        let _ = wait_for_completion(&instance_id, 10);
+        let _ = poll_until_terminal(&instance_id, 10);
 
         // Query instance_nodes - should have 3 nodes (2 SQL + 1 THEN)
         let node_count = Spi::get_one::<i64>(&format!(
@@ -2531,7 +2505,7 @@ mod tests {
         let sql = crate::dsl::sql("SELECT * FROM nonexistent_table_xyz_12345");
         let instance_id = crate::dsl::start(&sql, Some("test-sql-error"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
 
         // Should fail
         assert!(result.is_err(), "Expected function to fail");
@@ -2548,7 +2522,7 @@ mod tests {
         let sql = crate::dsl::sql("SELECT 'sync-test'");
         let instance_id = crate::dsl::start(&sql, Some("test-status-sync"), None);
 
-        let result = wait_for_completion(&instance_id, 10);
+        let result = poll_until_terminal(&instance_id, 10);
         assert!(result.is_ok(), "Function failed: {result:?}");
 
         // Check PostgreSQL table status
@@ -3056,6 +3030,159 @@ mod tests {
         assert!(
             result.is_err(),
             "try_from_json should return Err on structurally invalid Durofut"
+        );
+    }
+
+    // --- C5: Client connection error detection ---
+
+    #[pg_test]
+    fn test_is_connection_error_detects_failures() {
+        // Validates the heuristic used to reset the client on connection-level errors.
+        assert!(crate::client::is_connection_error_for_test(
+            "connection refused"
+        ));
+        assert!(crate::client::is_connection_error_for_test("broken pipe"));
+        assert!(crate::client::is_connection_error_for_test(
+            "pool timed out"
+        ));
+        assert!(crate::client::is_connection_error_for_test("reset by peer"));
+        assert!(crate::client::is_connection_error_for_test(
+            "connection closed"
+        ));
+        // Non-connection errors should NOT trigger a reset
+        assert!(!crate::client::is_connection_error_for_test(
+            "permission denied"
+        ));
+        assert!(!crate::client::is_connection_error_for_test(
+            "Instance not found"
+        ));
+    }
+
+    // --- H6: CGNAT SSRF blocklist ---
+
+    #[pg_test]
+    fn test_ssrf_blocks_cgnat_range() {
+        use std::net::{IpAddr, Ipv4Addr};
+        // 100.64.0.0/10 must be blocked
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))).is_some(),
+            "100.64.0.1 (CGNAT) should be blocked"
+        );
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 254))).is_some(),
+            "100.127.255.254 (CGNAT) should be blocked"
+        );
+        // Outside CGNAT range should be allowed
+        assert!(
+            crate::ssrf::check_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))).is_none(),
+            "100.128.0.1 (NOT CGNAT) should be allowed"
+        );
+    }
+
+    // --- M1: Row-set expansion limit ---
+
+    #[pg_test]
+    fn test_row_set_expansion_limit_via_dsl() {
+        // The row-set expansion limit (10,000 rows) is enforced inside
+        // expand_row_set(). This is tested thoroughly in the unit test
+        // types::tests::test_row_set_expansion_rejects_oversized_result.
+        // Here we just verify the types module is accessible and the limit works
+        // at the substitution layer by checking a small expansion works.
+        use crate::types::substitute_all;
+        use std::collections::HashMap;
+
+        let mut results = HashMap::new();
+        let json = r#"{"rows":[{"id":1},{"id":2}],"row_count":2}"#;
+        results.insert("batch".to_string(), json.to_string());
+
+        let sys = crate::types::SystemVars {
+            instance_id: "test1234".to_string(),
+            label: None,
+        };
+        let vars = HashMap::new();
+        let result = substitute_all("SELECT * FROM $batch.*", &results, &vars, &sys);
+        assert!(result.is_ok(), "Small row-set should expand successfully");
+        assert!(
+            result.unwrap().contains("VALUES"),
+            "Should produce a VALUES clause"
+        );
+    }
+
+    // --- M7: Loop iteration counter persisted across continue_as_new ---
+
+    #[pg_test]
+    fn test_function_input_loop_iteration_serialization() {
+        use crate::types::FunctionInput;
+
+        // Verify loop_iteration is preserved through serialization
+        let input = FunctionInput {
+            instance_id: "test123".to_string(),
+            label: Some("test".to_string()),
+            vars: std::collections::HashMap::new(),
+            loop_iteration: 42,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let deserialized: FunctionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.loop_iteration, 42,
+            "loop_iteration must survive serialization round-trip"
+        );
+    }
+
+    #[pg_test]
+    fn test_function_input_loop_iteration_defaults_to_zero() {
+        use crate::types::FunctionInput;
+
+        // Verify backward compat: old FunctionInput JSON without loop_iteration
+        // deserializes with loop_iteration = 0
+        let json = r#"{"instance_id":"abc12345","label":"test","vars":{}}"#;
+        let input: FunctionInput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            input.loop_iteration, 0,
+            "Missing loop_iteration should default to 0 for backward compatibility"
+        );
+    }
+
+    // --- M8: Malformed loop condition config detection ---
+
+    #[pg_test]
+    fn test_malformed_loop_condition_detected_at_validate() {
+        // A LOOP node whose condition_node is a plain string (not a Durofut object)
+        // should be rejected by validate_recursive because for_each_config_child
+        // requires condition_node to deserialize as a valid Durofut.
+        let node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            // Malformed config: valid JSON but condition_node is a string, not a Durofut object.
+            query: Some(r#"{"condition_node": "nonexist"}"#.to_string()),
+            ..Default::default()
+        };
+        // Validate should fail because condition_node is not a valid Durofut object
+        let err = node.validate_recursive().unwrap_err();
+        assert!(
+            err.contains("condition_node"),
+            "Error should mention condition_node, got: {err}"
+        );
+
+        // But if the config is totally not JSON, for_each_config_child skips it
+        // (it's treated as a plain query string, not a config object).
+        let non_json_node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(Box::new(Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT 1".to_string()),
+                ..Default::default()
+            })),
+            query: Some("this is not json at all!!!".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            non_json_node.validate_recursive().is_ok(),
+            "LOOP with non-JSON config passes DSL validation (caught at execution time)"
         );
     }
 }

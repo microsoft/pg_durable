@@ -56,7 +56,7 @@ DECLARE
     node_role TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_quoted_1;
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (labUser): expected completed, got %', final_status;
     END IF;
@@ -77,7 +77,7 @@ DECLARE
     node_role TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_quoted_2;
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (role with space): expected completed, got %', final_status;
     END IF;
@@ -98,7 +98,7 @@ DECLARE
     node_role TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state_quoted_3;
-    SELECT df.wait_for_completion(inst_id, 30) INTO final_status;
+    SELECT df.await_instance(inst_id, 30) INTO final_status;
     IF final_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED (role"with"quote): expected completed, got %', final_status;
     END IF;

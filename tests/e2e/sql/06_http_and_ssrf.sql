@@ -26,7 +26,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_get;
     RAISE NOTICE 'Testing HTTP GET: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP GET status = %', status;
@@ -60,7 +60,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_post;
     RAISE NOTICE 'Testing HTTP POST: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP POST status = %', status;
@@ -93,7 +93,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_headers;
     RAISE NOTICE 'Testing HTTP with headers: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP headers status = %', status;
@@ -128,7 +128,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_sequence;
     RAISE NOTICE 'Testing HTTP sequence: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP sequence status = %', status;
@@ -159,7 +159,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_parallel;
     RAISE NOTICE 'Testing HTTP parallel: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP parallel status = %', status;
@@ -191,7 +191,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_404;
     RAISE NOTICE 'Testing HTTP 404 handling: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP 404 should complete (user handles), got status = %', status;
@@ -219,7 +219,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_delay;
     RAISE NOTICE 'Testing HTTP delay: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP delay status = %', status;
@@ -251,7 +251,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_vars;
     RAISE NOTICE 'Testing HTTP with vars: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: HTTP vars status = %', status;
@@ -363,7 +363,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf1;
     RAISE NOTICE 'Testing SSRF block (metadata endpoint): %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: SSRF metadata request should have failed, got status = %', status;
@@ -399,7 +399,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf2;
     RAISE NOTICE 'Testing SSRF block (localhost): %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: SSRF localhost request should have failed, got status = %', status;
@@ -457,7 +457,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf4;
     RAISE NOTICE 'Testing non-Azure domain blocked: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: non-Azure domain should be blocked, got status = %', status;
@@ -492,7 +492,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf5;
     RAISE NOTICE 'Testing Azure Blob domain passes allow-list: %', inst_id;
 
-    PERFORM df.wait_for_completion(inst_id);
+    PERFORM df.await_instance(inst_id);
 
     SELECT result::text INTO node_result
     FROM df.nodes
@@ -524,7 +524,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf6;
     RAISE NOTICE 'Testing bare public IP blocked: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: bare IP should be blocked, got status = %', status;
@@ -560,7 +560,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf7;
     RAISE NOTICE 'Testing management.azure.com blocked: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: management.azure.com should be blocked, got status = %', status;
@@ -598,7 +598,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf8;
     RAISE NOTICE 'Testing redirect not followed: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 60) INTO status;
+    SELECT df.await_instance(inst_id, 60) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: redirect request should complete (return 3xx), got status = %', status;
@@ -658,7 +658,7 @@ DECLARE
     node_result TEXT;
 BEGIN
     FOR rec IN SELECT instance_id, suffix FROM _test_ssrf9 LOOP
-        PERFORM df.wait_for_completion(rec.instance_id, 60);
+        PERFORM df.await_instance(rec.instance_id, 60);
 
         SELECT result::text INTO node_result
         FROM df.nodes
@@ -690,7 +690,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf10;
     RAISE NOTICE 'Testing allowed test domain (httpbingo.org): %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: httpbingo.org should be allowed (test domains feature), got status = %', status;
@@ -719,7 +719,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_ssrf11;
     RAISE NOTICE 'Testing scheme-bypass block (file:// via raw JSON): %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected status = failed, got %', status;
@@ -791,7 +791,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_priv1;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     -- The request may succeed or fail due to network/rate-limiting, but it
     -- must NOT fail with a privilege error.
@@ -836,7 +836,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_priv2;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected status = failed after privilege revocation, got %', status;
@@ -877,7 +877,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_priv3;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF lower(status) NOT IN ('completed', 'failed') THEN
         RAISE EXCEPTION 'TEST FAILED: unexpected status = %', status;
@@ -916,7 +916,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_priv4;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF status != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected status = failed for role without HTTP grant, got %', status;
@@ -978,7 +978,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_http_priv6;
 
-    SELECT df.wait_for_completion(inst_id, 30) INTO status;
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     IF lower(status) NOT IN ('completed', 'failed') THEN
         RAISE EXCEPTION 'TEST FAILED: unexpected status for superuser HTTP node = %', status;

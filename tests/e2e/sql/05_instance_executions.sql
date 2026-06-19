@@ -31,7 +31,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing instance: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
     IF lower(status) != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: expected completed, got %', status;
     END IF;
@@ -44,7 +44,7 @@ BEGIN
 
     -- The returned execution should have a valid id and a non-empty status.
     -- We deliberately do NOT assert status = 'completed': df.status() /
-    -- wait_for_completion track the pg_durable df.instances table, while
+    -- await_instance track the pg_durable df.instances table, while
     -- instance_executions reports duroxide's per-execution status. The two are
     -- updated independently and can briefly diverge under concurrent
     -- background-worker load. Issue #168 is about empty rows, not the exact

@@ -6,6 +6,14 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.4] - Unreleased
 
+### Changed
+
+- **`df.grant_usage()` / `df.revoke_usage()`:** dropped the explicit per-function `EXECUTE` allowlist. Schema `USAGE` on `df` is the real access gate for ordinary `df.*` functions, so the helpers now grant/revoke schema `USAGE`, the table privileges, and `EXECUTE` only on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`). Function signatures are unchanged and existing privileges are unaffected (#242).
+
+### Removed
+
+- **`df.debug_connection()`:** removed from the SQL surface as non-security, surface-reduction cleanup (#110). The function returned the worker connection string (`postgres://role@host:port/db`) with no password or credential, and the worker role is already visible through native PostgreSQL channels (the world-readable `pg_durable.worker_role` GUC and `pg_stat_activity.usename`) — so issue #110 is reclassified from a security finding to cleanup. Fresh installs no longer create the function and the `0.2.3 → 0.2.4` upgrade drops it; a binary-compatibility shim retains the underlying C symbol so pre-0.2.4 schemas keep resolving the function until `ALTER EXTENSION pg_durable UPDATE` runs.
+
 ## [0.2.3] - 2026-06-17
 
 Provider-line note: v0.2.3 stays in the `duroxide-pg` provider compatibility line started in v0.2.2, so the upgrade source is v0.2.2 (`sql/pg_durable--0.2.2--0.2.3.sql`).

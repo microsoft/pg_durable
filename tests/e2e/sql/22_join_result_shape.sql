@@ -22,7 +22,7 @@ DECLARE
     elem1    JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t_join2;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [join2-shape]: status = %', status;
@@ -91,7 +91,7 @@ DECLARE
     elem2    JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t_join3;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [join3-shape]: status = %', status;
@@ -158,7 +158,7 @@ DECLARE
     outer_c  JSONB;
 BEGIN
     SELECT instance_id INTO inst_id FROM _t_nested;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [join-nested-shape]: status = %', status;

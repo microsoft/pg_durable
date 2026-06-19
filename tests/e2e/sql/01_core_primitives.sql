@@ -27,7 +27,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: expected completed, got %', rec.variant, status;
@@ -82,7 +82,7 @@ BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
         RAISE NOTICE 'Testing % variant: %', rec.variant, rec.instance_id;
 
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -139,7 +139,7 @@ DECLARE
     cnt INT;
 BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;
@@ -181,7 +181,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing instance: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 50) INTO status;
+    SELECT df.await_instance(inst_id, 50) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: status = %', status;
@@ -228,7 +228,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing join3: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO inst_status;
+    SELECT df.await_instance(inst_id) INTO inst_status;
 
     IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: join3 status = %', inst_status;
@@ -275,7 +275,7 @@ DECLARE
     cnt INT;
 BEGIN
     FOR rec IN SELECT instance_id, variant FROM _test_state LOOP
-        SELECT df.wait_for_completion(rec.instance_id) INTO status;
+        SELECT df.await_instance(rec.instance_id) INTO status;
 
         IF status != 'completed' THEN
             RAISE EXCEPTION 'TEST FAILED [%]: status = %', rec.variant, status;

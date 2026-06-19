@@ -458,6 +458,6 @@ SELECT df.start('SELECT 1', database => 'other_db');
 7. **Expecting `df.start()` to block until completion:**
    ```sql
    -- df.start() returns IMMEDIATELY with an instance ID
-   -- Use df.status() or df.wait_for_completion() to check progress
+   -- Use df.status() or df.await_instance() to check progress
    SELECT df.start('long running query');  -- Returns instantly
    ```

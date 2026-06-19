@@ -76,7 +76,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_signal;
 
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: cross-connection signal status = %', status;
@@ -158,7 +158,7 @@ DECLARE
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_cancel;
 
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF lower(status) != 'cancelled' THEN
         RAISE EXCEPTION 'TEST FAILED: cross-connection cancel status = % (expected cancelled)', status;
@@ -209,7 +209,7 @@ DECLARE
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_monitor;
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
 END $$;
 
 DROP TABLE _test_cross_monitor;
@@ -256,7 +256,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM txn_test_log WHERE msg = 'test1_instance_id';
     RAISE NOTICE 'Test 1: Waiting for DF: %', inst_id;
     
-    SELECT df.wait_for_completion(inst_id, 10) INTO status;
+    SELECT df.await_instance(inst_id, 10) INTO status;
     
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: same-txn DF status = % (retry logic should have waited for commit)', status;

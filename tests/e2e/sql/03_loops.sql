@@ -108,7 +108,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test1_state;
     RAISE NOTICE 'Test 1 - df.break(): instance %', v_instance_id;
     
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
     
     SELECT COUNT(*) INTO v_cnt FROM test_break_log WHERE test_name = 'break_test';
     
@@ -145,7 +145,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test2_state;
     RAISE NOTICE 'Test 2 - while loop: instance %', v_instance_id;
     
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
     
     SELECT COUNT(*) INTO v_cnt FROM test_break_log WHERE test_name = 'while_test';
     
@@ -185,7 +185,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test3_state;
     RAISE NOTICE 'Test 3 - df.break(value): instance %', v_instance_id;
     
-    SELECT df.wait_for_completion(v_instance_id, 50) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 50) INTO v_status;
     
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [break-value]: expected Completed, got %', v_status;
@@ -224,7 +224,7 @@ BEGIN
     SELECT instance_id INTO v_instance_id FROM _test4_state;
     RAISE NOTICE 'Test 4 - named loop result: instance %', v_instance_id;
 
-    SELECT df.wait_for_completion(v_instance_id, 20) INTO v_status;
+    SELECT df.await_instance(v_instance_id, 20) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [loop-named]: expected Completed, got %', v_status;

@@ -36,7 +36,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing ETL pipeline: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: ETL status = %', status;
@@ -83,7 +83,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing parallel counts: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO inst_status;
+    SELECT df.await_instance(inst_id) INTO inst_status;
 
     IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: parallel counts status = %', inst_status;
@@ -133,7 +133,7 @@ BEGIN
     FROM playground.task_queue tq WHERE tq.status = 'pending';
     RAISE NOTICE 'Pending tasks: %', pending_count;
 
-    SELECT df.wait_for_completion(inst_id) INTO inst_status;
+    SELECT df.await_instance(inst_id) INTO inst_status;
 
     IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: conditional status = %', inst_status;
@@ -187,7 +187,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing order processing: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id, 50) INTO inst_status;
+    SELECT df.await_instance(inst_id, 50) INTO inst_status;
 
     IF inst_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: order processing status = %', inst_status;
@@ -228,7 +228,7 @@ BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
     RAISE NOTICE 'Testing three-step workflow: %', inst_id;
 
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: three-step status = %', status;

@@ -43,7 +43,7 @@ DECLARE
     resp_status INT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cosmos;
-    SELECT df.wait_for_completion(inst_id) INTO status;
+    SELECT df.await_instance(inst_id) INTO status;
 
     IF status = 'completed' THEN
         -- Check if we got a successful response

@@ -618,6 +618,10 @@ fn extract_column_value(
 
 /// Expand `$name.*` into an inline `VALUES` subquery (SQL) or JSON array (raw).
 fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, String> {
+    /// Maximum number of rows allowed in `$name.*` expansion to prevent
+    /// unbounded SQL string allocation from large result sets.
+    const MAX_ROWSET_EXPANSION: usize = 10_000;
+
     let json: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| format!("${name}.* — invalid result JSON: {e}"))?;
 
@@ -625,6 +629,15 @@ fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, S
         .get("rows")
         .and_then(|r| r.as_array())
         .ok_or_else(|| format!("${name}.* — invalid result format"))?;
+
+    if rows.len() > MAX_ROWSET_EXPANSION {
+        return Err(format!(
+            "${name}.* — result has {} rows, exceeding the maximum of {} for row-set expansion. \
+             Use pagination or intermediate tables for large result sets.",
+            rows.len(),
+            MAX_ROWSET_EXPANSION
+        ));
+    }
 
     if !for_sql {
         return Ok(serde_json::to_string(rows).unwrap());
@@ -886,6 +899,10 @@ pub struct FunctionInput {
     pub label: Option<String>,
     #[serde(default)]
     pub vars: std::collections::HashMap<String, String>,
+    /// Loop iteration counter, incremented on each `continue_as_new`.
+    /// Used to enforce a maximum iteration safeguard.
+    #[serde(default)]
+    pub loop_iteration: u64,
 }
 
 /// Configuration for HTTP requests
@@ -955,7 +972,16 @@ pub struct Durofut {
 
 impl Durofut {
     fn same_statement_non_future_helper_name(s: &str) -> Option<String> {
-        if s != "OK" {
+        // Fast path: legitimate Durofut envelopes are JSON objects starting
+        // with '{'. Anything else (plain text such as "OK", "completed",
+        // "failed", "cancelled", error messages, etc.) might be the return
+        // value of a non-future helper, so we look up the marker GUC to
+        // attribute it by name. Restricting the SPI lookup to non-JSON inputs
+        // keeps the common case (JSON envelopes flowing through composers)
+        // free of an extra catalog query, while letting *any* helper that
+        // calls mark_non_future_helper_call surface a precise error -- not
+        // just the ones that happen to return "OK".
+        if s.trim_start().starts_with('{') {
             return None;
         }
 
@@ -1673,5 +1699,51 @@ mod tests {
             result.is_ok(),
             "should accept graph within node count limit"
         );
+    }
+
+    #[test]
+    fn test_row_set_expansion_rejects_oversized_result() {
+        // Build a JSON result with more than 10,000 rows
+        let mut rows = Vec::new();
+        for i in 0..10_001 {
+            rows.push(serde_json::json!({"id": i}));
+        }
+        let json_str = serde_json::json!({"rows": rows, "row_count": 10_001}).to_string();
+        let results = make_results(&[("big", &json_str)]);
+
+        let result = substitute_all("SELECT * FROM $big.*", &results, &empty_vars(), &sys_vars());
+        assert!(
+            result.is_err(),
+            "Should reject row-set expansion > 10,000 rows"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("exceeding the maximum"),
+            "Error should mention the limit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_row_set_expansion_accepts_within_limit() {
+        // Build a JSON result with exactly 100 rows (well within limit)
+        let mut rows = Vec::new();
+        for i in 0..100 {
+            rows.push(serde_json::json!({"id": i, "name": format!("item_{i}")}));
+        }
+        let json_str = serde_json::json!({"rows": rows, "row_count": 100}).to_string();
+        let results = make_results(&[("batch", &json_str)]);
+
+        let result = substitute_all(
+            "SELECT * FROM $batch.*",
+            &results,
+            &empty_vars(),
+            &sys_vars(),
+        );
+        assert!(
+            result.is_ok(),
+            "Should accept row-set expansion within limit"
+        );
+        let sql = result.unwrap();
+        assert!(sql.contains("VALUES"), "Should produce VALUES clause");
     }
 }
