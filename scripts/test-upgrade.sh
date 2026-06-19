@@ -914,6 +914,7 @@ echo ""
 B2_PRE_INSTANCE_ID=""
 B2_INFLIGHT_INSTANCE_ID=""
 B2_POST_INSTANCE_ID=""
+B2_PRE_GRANTED_ROLE="durable_b2_pre_grant"
 
 test_b2_data_survives_upgrade() {
     # Step 1: Install previous version and create test data
@@ -923,6 +924,14 @@ test_b2_data_survives_upgrade() {
 
     assert_sql_equals "SELECT df.clearvars();" "OK" || return 1
     assert_sql_equals "SELECT df.setvar('b2_key', 'b2_value');" "OK" || return 1
+
+    # Role granted under the previous schema. The upgrade must backfill EXECUTE
+    # on new private wrappers so this existing df user can keep calling
+    # df.start()/df.cancel()/df.signal() without re-running df.grant_usage().
+    run_sql_capture "DROP OWNED BY ${B2_PRE_GRANTED_ROLE};" >/dev/null 2>&1 || true
+    run_sql_capture "DROP ROLE IF EXISTS ${B2_PRE_GRANTED_ROLE};" >/dev/null 2>&1 || true
+    run_sql_capture "CREATE ROLE ${B2_PRE_GRANTED_ROLE} LOGIN;" >/dev/null || return 1
+    run_sql_capture "SELECT df.grant_usage('${B2_PRE_GRANTED_ROLE}');" >/dev/null || return 1
 
     B2_PRE_INSTANCE_ID=$(run_sql_capture "SELECT df.start('INSERT INTO test_upgrade_b2_log (kind, msg) VALUES (''pre'', ''{b2_key}'') RETURNING msg', 'b2-pre-upgrade');") || return 1
     B2_INFLIGHT_INSTANCE_ID=$(run_sql_capture "SELECT df.start(df.sleep(2) ~> 'SELECT ''b2-running'' AS value', 'b2-inflight');") || return 1
@@ -968,6 +977,12 @@ test_b2_new_data_after_upgrade() {
     assert_sql_equals "SELECT msg FROM test_upgrade_b2_log WHERE kind = 'post' ORDER BY id DESC LIMIT 1;" "new_value"
 }
 
+test_b2_existing_grants_after_upgrade() {
+    assert_sql_equals "SELECT has_function_privilege('${B2_PRE_GRANTED_ROLE}', 'df._enqueue_orchestrator_start(text, text, text)', 'EXECUTE');" "t" &&
+    assert_sql_equals "SELECT has_function_privilege('${B2_PRE_GRANTED_ROLE}', 'df._enqueue_orchestrator_cancel(text, text)', 'EXECUTE');" "t" &&
+    assert_sql_equals "SELECT has_function_privilege('${B2_PRE_GRANTED_ROLE}', 'df._enqueue_orchestrator_signal(text, text, text)', 'EXECUTE');" "t"
+}
+
 test_b2_grant_usage_after_upgrade() {
     # Regression guard for #110: after ALTER EXTENSION UPDATE, df.debug_connection()
     # must be gone from the catalog. Scenario A only compares function name/args/
@@ -996,6 +1011,7 @@ test_b2_grant_usage_after_upgrade() {
 
     # Clean up the probe role.
     run_sql_capture "DROP OWNED BY ${probe_role}; DROP ROLE IF EXISTS ${probe_role};" >/dev/null 2>&1 || true
+    run_sql_capture "DROP OWNED BY ${B2_PRE_GRANTED_ROLE}; DROP ROLE IF EXISTS ${B2_PRE_GRANTED_ROLE};" >/dev/null 2>&1 || true
 }
 
 if [ "$HAS_COMPAT_PREV" = true ]; then
@@ -1003,6 +1019,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
     run_test "B2: In-flight work completes after upgrade" test_b2_inflight_work_after_upgrade
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
+    run_test "B2: Existing df users retain wrapper privileges after upgrade" test_b2_existing_grants_after_upgrade
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
 fi
 

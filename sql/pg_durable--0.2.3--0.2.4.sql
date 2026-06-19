@@ -372,6 +372,33 @@ $fn$;
 
 REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) FROM PUBLIC;
 
+-- Backfill wrapper EXECUTE to roles that already had df usage before ALTER
+-- EXTENSION UPDATE. New calls to df.grant_usage() grant these wrappers via the
+-- function body above, but existing users would otherwise lose df.start() /
+-- df.cancel() / df.signal() when the new .so chooses the atomic path.
+DO $$
+DECLARE
+    r RECORD;
+    grant_opt TEXT;
+BEGIN
+    FOR r IN
+        SELECT
+            pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) AS grantee,
+            pg_catalog.bool_or(a.is_grantable) AS with_grant_option
+        FROM pg_catalog.pg_namespace n
+        CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) AS a
+        WHERE n.nspname OPERATOR(pg_catalog.=) 'df'
+          AND a.privilege_type OPERATOR(pg_catalog.=) 'USAGE'
+          AND a.grantee OPERATOR(pg_catalog.<>) 0  -- skip PUBLIC
+        GROUP BY a.grantee
+    LOOP
+        grant_opt := CASE WHEN r.with_grant_option THEN ' WITH GRANT OPTION' ELSE '' END;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) TO %s', r.grantee) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) TO %s', r.grantee) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) TO %s', r.grantee) OPERATOR(pg_catalog.||) grant_opt;
+    END LOOP;
+END $$;
+
 CREATE FUNCTION df.reconcile(p_grace_seconds integer DEFAULT 60)
 RETURNS TABLE(duroxide_orphans_deleted bigint, stuck_instances_failed bigint)
 LANGUAGE plpgsql

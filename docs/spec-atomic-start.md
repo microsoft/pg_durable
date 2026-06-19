@@ -322,10 +322,10 @@ but it *is* a change from "fires the moment the statement runs." `df.cancel()` a
   time that the loop replayed every generation. Fixed so the wait node recomputes the
   delay each generation from the orchestration's recorded clock (deterministic on
   replay). **Upgrade caveat:** this changes the recorded replay event sequence
-  (`utc_now` is recorded before the timer). A `df.loop(df.wait_for_schedule(...))`
-  instance that is already waiting when the binary changes may replay expecting the
-  old sequence and fail as nondeterministic; drain or restart those scheduled
-  instances during upgrade.
+  (`utc_now` is recorded before the timer). Any instance already waiting in a
+  `WAIT_SCHEDULE` node when the binary changes may replay expecting the old sequence
+  and fail as nondeterministic; drain or restart those scheduled instances during
+  upgrade.
 - **Self-healing (medium).** The reconciler is re-checked from the steady-state poll
   loop, not only once per worker epoch, so a cancelled one comes back within the poll
   interval.
@@ -356,11 +356,11 @@ the upgrade rolls out.
 **Data migration.** None. No table shapes change, and already-enqueued work items
 are left in place.
 
-**In-flight scheduled loops.** `df.wait_for_schedule` now records an `utc_now` event
-before the timer so a loop computes the next cron tick each generation. That changes
-the recorded replay event sequence for existing wait-in-loop instances. Drain or
-restart any in-flight `df.loop(df.wait_for_schedule(...))` instances during upgrade;
-otherwise they may fail on replay as nondeterministic.
+**In-flight scheduled waits.** `df.wait_for_schedule` now records an `utc_now` event
+before the timer. That changes the recorded replay event sequence for existing
+instances already waiting in any `WAIT_SCHEDULE` node. Drain or restart those
+in-flight scheduled waits during upgrade; otherwise they may fail on replay as
+nondeterministic.
 
 **Rollback.** Reverting the binary restores the out-of-band enqueue; the wrappers, if
 left in place, are simply unused.
