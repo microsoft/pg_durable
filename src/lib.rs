@@ -430,7 +430,9 @@ DECLARE
         'df.explain(text)',
         'df.target_database()',
         -- Atomic-start enqueue wrapper (called by df.start() via SPI)
-        'df._enqueue_orchestrator_start(text, text, text)'
+        'df._enqueue_orchestrator_start(text, text, text)',
+        'df._enqueue_orchestrator_cancel(text, text)',
+        'df._enqueue_orchestrator_signal(text, text, text)'
     ];
 BEGIN
     -- Validate the role exists
@@ -672,13 +674,108 @@ REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) FROM
 );
 
 // ============================================================================
+// In-transaction signal / cancel enqueue (Part 1, extended) — SECURITY DEFINER
+// ============================================================================
+//
+// df.signal()/df.cancel() enqueue their work items (ExternalRaised /
+// CancelInstance) via SPI through these wrappers, inside the caller's
+// transaction, instead of out-of-band on the duroxide client pool. Both target
+// an already-committed instance, so the start wrapper's "brand-new instance"
+// guard does not apply; instead they authorize on ownership.
+//
+// AUTHORIZATION: these are SECURITY DEFINER (the orchestrator queue is
+// owner-only) and granted to every df user via df.grant_usage(), so they must
+// not let a caller signal/cancel a foreign instance. current_user is the definer
+// here, so ownership is checked against session_user (the unforgeable
+// authenticated role) plus membership in the instance's submitted_by — i.e. the
+// caller's session must be able to act as the instance owner. The work items are
+// built server-side from the arguments (no opaque caller-supplied work item).
+extension_sql!(
+    r#"
+CREATE FUNCTION df._enqueue_orchestrator_cancel(p_instance_id text, p_reason text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $fn$
+DECLARE
+    sch       text := df.duroxide_schema();
+    owner_oid oid;
+BEGIN
+    SELECT i.submitted_by::oid INTO owner_oid FROM df.instances i WHERE i.id = p_instance_id;
+    IF owner_oid IS NULL OR NOT pg_catalog.pg_has_role(session_user, owner_oid, 'MEMBER') THEN
+        RAISE EXCEPTION 'pg_durable: not authorized to cancel instance %', p_instance_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    EXECUTE pg_catalog.format('SELECT %I.enqueue_orchestrator_work($1, $2, $3)', sch)
+        USING p_instance_id,
+              pg_catalog.json_build_object('CancelInstance',
+                  pg_catalog.json_build_object('instance', p_instance_id, 'reason', p_reason))::text,
+              pg_catalog.now();
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) FROM PUBLIC;
+
+CREATE FUNCTION df._enqueue_orchestrator_signal(p_instance_id text, p_name text, p_data text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $fn$
+DECLARE
+    sch       text := df.duroxide_schema();
+    owner_oid oid;
+BEGIN
+    SELECT i.submitted_by::oid INTO owner_oid FROM df.instances i WHERE i.id = p_instance_id;
+    IF owner_oid IS NULL OR NOT pg_catalog.pg_has_role(session_user, owner_oid, 'MEMBER') THEN
+        RAISE EXCEPTION 'pg_durable: not authorized to signal instance %', p_instance_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Raise the event for the target instance and every RUNNING descendant
+    -- (a sub-orchestration — JOIN/RACE branch or loop generation — may be the one
+    -- waiting on the signal), mirroring the out-of-band fan-out. %1$I = schema.
+    EXECUTE pg_catalog.format(
+        'INSERT INTO %1$I.orchestrator_queue (instance_id, work_item, visible_at, created_at) '
+        'SELECT t.instance_id, '
+        '       pg_catalog.json_build_object(''ExternalRaised'', '
+        '           pg_catalog.json_build_object(''instance'', t.instance_id, ''name'', $2, ''data'', $3))::text, '
+        '       pg_catalog.now(), pg_catalog.now() '
+        'FROM ( '
+        '    WITH RECURSIVE tree AS ( '
+        '        SELECT i.instance_id, i.current_execution_id, true AS is_root '
+        '        FROM %1$I.instances i WHERE i.instance_id = $1 '
+        '        UNION '
+        '        SELECT c.instance_id, c.current_execution_id, false '
+        '        FROM %1$I.instances c JOIN tree p ON c.parent_instance_id = p.instance_id '
+        '    ) '
+        '    SELECT tr.instance_id '
+        '    FROM tree tr '
+        '    LEFT JOIN %1$I.executions e '
+        '      ON e.instance_id = tr.instance_id AND e.execution_id = tr.current_execution_id '
+        '    WHERE tr.is_root OR pg_catalog.lower(COALESCE(e.status, '''')) = ''running'' '
+        ') t',
+        sch)
+    USING p_instance_id, p_name, p_data;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) FROM PUBLIC;
+"#,
+    name = "atomic_signal_cancel_enqueue",
+    requires = ["create_tables"]
+);
+
+// ============================================================================
 // Reconciler (Option 4) — repair residual df.* / duroxide divergence
 // ============================================================================
 //
-// Atomic df.start() prevents the rolled-back-start orphan leak at the source,
-// but some divergence can still arise: legacy orphans, the non-atomic fallback
-// path, df.signal()/df.cancel() (not yet migrated), and crashes mid-execution.
-// df.reconcile() is a best-effort garbage collector for that residue. It is
+// Atomic df.start()/df.signal()/df.cancel() commit their duroxide enqueue with
+// the caller's transaction, but some divergence can still arise: legacy orphans,
+// the non-atomic fallback path, and crashes mid-execution. df.reconcile() is a
+// best-effort garbage collector for that residue. It is
 // admin-only (EXECUTE revoked from PUBLIC) and SECURITY DEFINER so it can touch
 // the duroxide-owned tables and all users' df.instances.
 //

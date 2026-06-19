@@ -612,9 +612,32 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
         pgrx::error!("Instance not found or access denied: {}", instance_id);
     }
 
-    match raise_external_event(instance_id, signal_name, &signal_data) {
-        Ok(_) => "OK".to_string(),
-        Err(e) => pgrx::error!("Failed to send signal: {}", e),
+    // Enqueue the ExternalRaised work item. Prefer the in-transaction SPI path
+    // (atomic with the caller's transaction; fans out to running descendants in
+    // the wrapper) when the duroxide-pg SQL surface is present; otherwise fall
+    // back to the out-of-band client path.
+    let schema = crate::types::backend_duroxide_schema();
+    if in_tx_enqueue_supported(schema) {
+        if let Err(e) = Spi::run_with_args(
+            "SELECT df._enqueue_orchestrator_signal($1, $2, $3)",
+            &[
+                instance_id.into(),
+                signal_name.into(),
+                signal_data.as_str().into(),
+            ],
+        ) {
+            pgrx::error!("Failed to send signal: {:?}", e);
+        }
+        "OK".to_string()
+    } else {
+        pgrx::warning!(
+            "pg_durable: df.signal() is using the non-atomic fallback enqueue \
+             (duroxide-pg SQL surface not detected)"
+        );
+        match raise_external_event(instance_id, signal_name, &signal_data) {
+            Ok(_) => "OK".to_string(),
+            Err(e) => pgrx::error!("Failed to send signal: {}", e),
+        }
     }
 }
 
@@ -1015,8 +1038,26 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
         pgrx::error!("Instance not found or access denied: {}", instance_id);
     }
 
-    if let Err(e) = cancel_durable_function(instance_id, reason) {
-        return format!("Failed to cancel: {e}");
+    // Enqueue the CancelInstance work item and flip the status mirror together.
+    // On the in-transaction path the enqueue and the status UPDATE commit
+    // atomically (no df.* / duroxide divergence on cancel); otherwise fall back
+    // to the out-of-band client path.
+    let schema = crate::types::backend_duroxide_schema();
+    if in_tx_enqueue_supported(schema) {
+        if let Err(e) = Spi::run_with_args(
+            "SELECT df._enqueue_orchestrator_cancel($1, $2)",
+            &[instance_id.into(), reason.into()],
+        ) {
+            pgrx::error!("Failed to cancel: {:?}", e);
+        }
+    } else {
+        pgrx::warning!(
+            "pg_durable: df.cancel() is using the non-atomic fallback enqueue \
+             (duroxide-pg SQL surface not detected)"
+        );
+        if let Err(e) = cancel_durable_function(instance_id, reason) {
+            return format!("Failed to cancel: {e}");
+        }
     }
 
     // Update the instance status to 'cancelled' via SPI only when the instance is not

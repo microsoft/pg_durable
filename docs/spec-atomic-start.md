@@ -1,6 +1,6 @@
 # Spec: Atomic `df.start()` — Eliminating `df.*` ↔ `_duroxide` Divergence
 
-**Status:** Proposal — Option 3 prototyped & validated (POC)
+**Status:** Implemented & validated — Option 3 (atomic `df.start`/`df.cancel`/`df.signal`) + Option 4 (reconciler)
 **Author:** pg_durable team
 **Date:** June 2026
 
@@ -104,12 +104,12 @@ backstop alongside Option 3.
 ### Decision
 
 Implement **Option 3 + Option 4**. Option 3 removes the dual-write at the source
-for backend-initiated starts (and, in a later phase, `df.cancel`); Option 4 is a
-lightweight safety net for the residual divergence that no start-time atomicity
-can prevent (crashes mid-execution, the best-effort `df.*` mirror, and
-not-yet-migrated signal/cancel). Options 1 and 2 are rejected — Option 1 is
-disproportionate to the problem, and Option 2 is a strictly weaker variant of
-Option 3.
+for every backend-initiated cross-store write — `df.start()`, `df.cancel()`, and
+`df.signal()` all enqueue on the caller's transaction; Option 4 is a lightweight
+safety net for the residual divergence that no in-transaction enqueue can prevent
+(crashes mid-execution and the best-effort `df.*` mirror). Options 1 and 2 are
+rejected — Option 1 is disproportionate to the problem, and Option 2 is a strictly
+weaker variant of Option 3.
 
 ## Background: how a start is written today
 
@@ -164,25 +164,27 @@ seams are bounded and fall into two distinct classes.
 **Backend (session) side — `df.*` on the caller's transaction + an out-of-band
 duroxide-client enqueue.** This is the class Option 3 fixes.
 
-| Site | `df.*` write (user tx, SPI) | `_duroxide` write (out-of-band pool) | Dual-write? |
+| Site | `df.*` write (user tx, SPI) | `_duroxide` write | Now in caller tx? |
 |------|------|------|------|
-| `df.start()` | INSERT `df.nodes` + `df.instances` (src/dsl.rs:842,888) | enqueue `StartOrchestration` (src/dsl.rs:923) | **Yes** — Phase 1 |
-| `df.cancel()` | UPDATE `df.instances.status='cancelled'` (src/dsl.rs:966) | `cancel_instance` enqueue (src/dsl.rs:955) | **Yes** — Phase 2 |
-| `df.signal()` | **none** (only an RLS read of `df.instances`) | `raise_event` + descendant fan-out (src/dsl.rs:616) | **No** — single store |
+| `df.start()` | INSERT `df.nodes` + `df.instances` (src/dsl.rs:842,888) | enqueue `StartOrchestration` (src/dsl.rs:923) | **Yes** |
+| `df.cancel()` | UPDATE `df.instances.status='cancelled'` (src/dsl.rs:966) | `CancelInstance` enqueue | **Yes** |
+| `df.signal()` | **none** (only an RLS read of `df.instances`) | `ExternalRaised` + descendant fan-out (src/dsl.rs:616) | **Yes** |
 
 Notes:
 
 - **`df.cancel()` is a genuine dual-write** with two twists vs `df.start()`: it
-  enqueues to duroxide **first** and then does the `df.*` UPDATE (opposite
-  order), and the UPDATE is only an *optimistic* mirror — the authoritative
-  `cancelled` status is re-applied when the worker processes the cancel via
+  enqueued to duroxide **first** and then did the `df.*` UPDATE (opposite order),
+  and the UPDATE is only an *optimistic* mirror — the authoritative `cancelled`
+  status is re-applied when the worker processes the cancel via
   `update-instance-status`, so divergence here is usually transient and
-  self-healing. It still belongs in the same in-transaction treatment for strict
-  atomicity.
+  self-healing. It now uses the same in-transaction enqueue as `df.start()`, so
+  the optimistic UPDATE and the `CancelInstance` enqueue commit or roll back
+  together.
 - **`df.signal()` is not a dual-write**: it writes only `_duroxide`. There is no
-  cross-store inconsistency to create; moving it in-transaction only changes
-  "don't deliver the signal if my surrounding tx rolls back" semantics — a
-  nice-to-have, not a consistency fix.
+  cross-store inconsistency to create; moving it in-transaction changes
+  "don't deliver the signal if my surrounding tx rolls back" semantics, which is
+  the least-surprising contract and is applied here for consistency with the
+  other paths.
 - Not seams: `df.run()` is a no-op stub; `df.result/status/explain/monitoring`
   are reads; `df.vars` and `df._worker_epoch` touch only `df.*`.
 
@@ -204,6 +206,9 @@ This is the "best-effort mirror"; any persistent drift is the reconciler's job
 - `df.start()` is **atomic with the caller's transaction**: on rollback, no
   `df.*` rows *and* no `_duroxide` start item remain; on commit, both are present
   and the worker picks the instance up only after the `df.*` rows are visible.
+- `df.cancel()` and `df.signal()` enqueue on the **caller's transaction** too: a
+  rolled-back cancel/signal leaves nothing in `_duroxide`, and a committed one is
+  durable with the caller's other work.
 - Eliminate the rolled-back-start orphan leak at the source.
 - Eliminate the `load-function-graph` "wait up to 5 s for the row to appear"
   race on the atomic path (the retry is retained for the non-atomic fallback).
@@ -218,8 +223,6 @@ This is the "best-effort mirror"; any persistent drift is the reconciler's job
   consistent by design).
 - Changing short-id generation / the id space. (Independent; can be addressed
   separately. This spec makes a collision a clean, fully-atomic abort.)
-- Migrating `df.signal()` / `df.cancel()` to the in-transaction path — same
-  mechanism, scoped as a follow-up (see Phasing).
 
 ## Design
 
@@ -344,6 +347,34 @@ item carries only the orchestration name/input. The worker continues to
 authenticate using `df.instances.submitted_by` and re-check the superuser policy
 (unchanged). No new forgery surface is introduced.
 
+### Cancel and signal wrappers
+
+`df.cancel()` and `df.signal()` enqueue on the caller's transaction through their
+own `SECURITY DEFINER` wrappers (`df._enqueue_orchestrator_cancel`,
+`df._enqueue_orchestrator_signal`). Both build the work item server-side
+(`CancelInstance` / `ExternalRaised`) via `json_build_object`, so a caller cannot
+choose the variant or smuggle a foreign target.
+
+The start wrapper can authorize structurally (a brand-new `pending` instance is
+only reachable for the row the caller just inserted). Cancel and signal target an
+**already-committed** instance, so they authorize explicitly: the wrapper checks
+`pg_has_role(session_user, df.instances.submitted_by::oid, 'MEMBER')`
+(`submitted_by` is a `regrole`, so `::oid` yields the owning role's OID).
+`session_user` is unforgeable inside `SECURITY DEFINER` (unlike `current_user`,
+which is the definer), and membership — rather than an exact-name match — lets a
+role that owns the instance via `SET ROLE` still cancel/signal it. A caller that
+is not a member of the owning role is rejected before any enqueue, mirroring the
+RLS gate `df.cancel`/`df.signal` already enforce. The wrappers run no
+caller-supplied SQL.
+
+**Signal fan-out.** A signal must reach the root instance **and** every running
+sub-orchestration (a descendant may be the one blocked on
+`wait_for_signal`). The wrapper recurses `_duroxide.instances.parent_instance_id`
+from the root, joins each instance to its current execution, keeps only
+executions whose `status` is `Running` (lower-cased), and enqueues one
+`ExternalRaised` per surviving instance — all in the caller's transaction, so the
+whole fan-out commits or rolls back atomically.
+
 ### Worker readiness and ordering
 
 - Keep the existing worker-readiness gate: if `_worker_ready` is absent/stale,
@@ -439,6 +470,10 @@ The probe + fallback make this non-breaking for any other provider.
 | E2E subset: core, conditionals, loops, variables, signals, join, race, cancel | 8/8 |
 | JOIN determinism under the new (faster) timing | 5/5 |
 | Non-superuser (`df_e2e_user`) start path | pass |
+| Committed `df.cancel()` cancels; rolled-back `df.cancel()` leaves the instance running and rolls back the queue enqueue | pass |
+| Committed `df.signal()` delivers (incl. fan-out to a sub-orchestration in a race); rolled-back `df.signal()` rolls back the enqueue | pass |
+| Cancel/signal authz: a non-member caller is denied on the wrapper and via the RLS gate; the owning role (incl. via `SET ROLE`) succeeds | pass |
+| E2E: `07_signals`, `23_signal_in_race` (fan-out), `22_cancel_status_consistency` | 3/3 |
 | `df.reconcile()` deletes a planted root orphan; leaves sub-orchestrations + live instances untouched | pass |
 | `df.reconcile()` fails a stuck (lost-enqueue) `df.instances` | pass |
 | Built-in reconciler auto-starts as non-superuser `df_reconciler`, idempotent (exactly one) | pass |
@@ -513,30 +548,26 @@ transaction that later rolls back will **not** run — which is the desired fix,
 but a behavior change from "fire-and-forget at statement time." This must be
 called out in `USER_GUIDE.md`.
 
-## Signals & cancellation (follow-up)
+## Signals & cancellation (migrated)
 
-See the Dual-write inventory above for the precise classification. In short:
+`df.cancel()` and `df.signal()` use the same in-transaction enqueue as
+`df.start()` (see Cancel and signal wrappers above). In short:
 
-- **`df.cancel()` is a genuine dual-write** (`df.instances.status` + a
-  `CancelInstance` enqueue) and should get the same in-transaction treatment as
-  `df.start()`. It is scoped as **Phase 2** rather than Phase 1 only because it
-  targets an already-committed instance (so the rolled-back-*start* leak does not
-  apply) and because the worker's `update-instance-status` activity already
-  re-applies the authoritative `cancelled` status, making its divergence
-  transient. The `SECURITY DEFINER` enqueue entrypoint should be generalized to
-  carry an arbitrary work item (e.g. `client_enqueue(instance, work_item,
-  visible_at)`) so it serves cancel directly.
-- **`df.signal()` is not a dual-write** (it writes only `_duroxide`), so it
-  creates no cross-store inconsistency. It can ride on the same entrypoint for
-  "don't deliver if my tx rolls back" semantics, but that is a nice-to-have, not
-  a consistency fix — lowest priority.
+- **`df.cancel()`** — the optimistic `df.instances.status='cancelled'` UPDATE and
+  the `CancelInstance` enqueue now commit or roll back together on the caller's
+  transaction. The worker's `update-instance-status` activity still re-applies the
+  authoritative status, so a worker-side crash remains transient/self-healing.
+- **`df.signal()`** — the `ExternalRaised` fan-out (root + running
+  sub-orchestrations) is enqueued on the caller's transaction, giving "don't
+  deliver if my tx rolls back" semantics. It writes only `_duroxide`, so this is a
+  consistency-of-contract change rather than a cross-store fix.
 
 ## Complementary backstop — Option 4 (implemented)
 
 As part of the chosen approach, a lightweight **reconciler** sweeps for residual
-divergence that an atomic start cannot prevent (crashes mid-execution,
-not-yet-migrated signal/cancel paths, `status` mirror drift, and legacy/fallback
-orphans). It ships as **`df.reconcile(grace_seconds int default 60)`**
+divergence that an in-transaction enqueue cannot prevent (crashes mid-execution,
+the best-effort `df.*` `status` mirror, and legacy/fallback orphans). It ships as
+**`df.reconcile(grace_seconds int default 60)`**
 (`SECURITY DEFINER`, admin-only): it deletes orphaned **root** duroxide instances
 (`parent_instance_id IS NULL`, no `df.instances` row, older than the grace
 window) via `delete_instances_atomic`, and marks `df.instances` rows stuck
@@ -613,13 +644,15 @@ E2E (tests/e2e/sql/) and unit coverage:
 
 ## Phasing
 
-1. **Phase 1 (this spec) — prototyped & validated:** atomic `df.start()` via the
+1. **Phase 1 — implemented & validated:** atomic `df.start()` via the
    `SECURITY DEFINER` enqueue entrypoint; readiness gate + legacy fallback;
-   simplify the `load-function-graph` retry; docs + tests. (POC complete; see
-   Proof of concept. Remaining for production: upgrade script, dynamic
-   `_duroxide` schema resolution, entrypoint hardening.)
-2. **Phase 2:** apply the same in-transaction enqueue to `df.signal()` /
-   `df.cancel()`.
+   simplify the `load-function-graph` retry; docs + tests. Remaining for
+   production: upgrade script and entrypoint hardening.
+2. **Phase 2 — implemented & validated:** the same in-transaction enqueue for
+   `df.signal()` (root + running-descendant `ExternalRaised` fan-out) and
+   `df.cancel()` (`CancelInstance`), each via a `SECURITY DEFINER` wrapper that
+   builds the work item server-side and authorizes the caller via
+   `pg_has_role(session_user, ...)`.
 3. **Phase 3 — reconciler implemented:** `df.reconcile()` plus a built-in durable
    cron loop (worker-managed `df_reconciler` instance on
    `pg_durable.reconciler_cron`) are validated (auto-start, idempotency,
