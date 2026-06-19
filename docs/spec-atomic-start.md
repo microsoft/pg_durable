@@ -321,8 +321,11 @@ but it *is* a change from "fires the moment the statement runs." `df.cancel()` a
 - **Cron busy-loop (medium).** `df.wait_for_schedule` baked a fixed delay at build
   time that the loop replayed every generation. Fixed so the wait node recomputes the
   delay each generation from the orchestration's recorded clock (deterministic on
-  replay). Note: this changes the recorded history shape, so a wait-in-loop instance
-  in flight across the upgrade may need a restart.
+  replay). **Upgrade caveat:** this changes the recorded replay event sequence
+  (`utc_now` is recorded before the timer). A `df.loop(df.wait_for_schedule(...))`
+  instance that is already waiting when the binary changes may replay expecting the
+  old sequence and fail as nondeterministic; drain or restart those scheduled
+  instances during upgrade.
 - **Self-healing (medium).** The reconciler is re-checked from the steady-state poll
   loop, not only once per worker epoch, so a cancelled one comes back within the poll
   interval.
@@ -351,9 +354,13 @@ out-of-band path. This keeps the binary compatible with every prior schema while
 the upgrade rolls out.
 
 **Data migration.** None. No table shapes change, and already-enqueued work items
-are left in place. One caveat: the `df.wait_for_schedule` fix changes the recorded
-history shape for a wait-in-loop orchestration, so such in-flight instances may need
-to be restarted after upgrade if they replay across the change.
+are left in place.
+
+**In-flight scheduled loops.** `df.wait_for_schedule` now records an `utc_now` event
+before the timer so a loop computes the next cron tick each generation. That changes
+the recorded replay event sequence for existing wait-in-loop instances. Drain or
+restart any in-flight `df.loop(df.wait_for_schedule(...))` instances during upgrade;
+otherwise they may fail on replay as nondeterministic.
 
 **Rollback.** Reverting the binary restores the out-of-band enqueue; the wrappers, if
 left in place, are simply unused.
