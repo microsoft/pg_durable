@@ -379,7 +379,18 @@ Option 3 was prototyped end-to-end and validated on PostgreSQL 17 (branch
   admin-only (revoked from PUBLIC) reconciler that deletes orphaned **root**
   duroxide instances (`parent_instance_id IS NULL`, no `df.instances` row) via
   `delete_instances_atomic`, and fails `df.instances` stuck non-terminal with no
-  live duroxide instance and no queued start. Schedulable as a durable cron loop.
+  live duroxide instance and no queued start.
+- **Built-in durable cron loop** — the background worker
+  (`worker::ensure_reconciler`) keeps exactly one reconciler instance running per
+  cluster, dogfooding pg_durable:
+  `df.start(df.loop(df.seq('SELECT * FROM df.reconcile()', df.wait_for_schedule(<cron>))), 'df_reconciler')`.
+  It is idempotent (skips if one is pending/running; self-heals if it died),
+  driven by the `pg_durable.reconciler_cron` GUC (default `*/5 * * * *`; empty
+  disables), and submitted by a dedicated **non-superuser** role `df_reconciler`
+  (created by the worker, granted only `df.grant_usage()` + EXECUTE on
+  `df.reconcile()`). A non-superuser identity sidesteps the
+  `enable_superuser_instances` guard and bounds the blast radius to "trigger GC"
+  even if the instance were forged.
 
 **Provider requirement:** the atomic path only works with the **duroxide-pg
 (SQL-backed) provider**, because it calls the provider's SQL function directly.
@@ -401,6 +412,11 @@ The probe + fallback make this non-breaking for any other provider.
 - **The reconciler must exclude sub-orchestrations.** JOIN/RACE branches and loop
   generations are legitimate duroxide instances with no `df.instances` row;
   filtering on `parent_instance_id IS NULL` (root only) prevents collecting them.
+- **Two gotchas in the cron loop:** the reconciler role cannot be named with a
+  `pg_` prefix (PostgreSQL reserves it) — hence `df_reconciler`; and the loop
+  node must call the set-returning reconciler as `SELECT * FROM df.reconcile()`
+  (a bare `SELECT df.reconcile()` yields an unsupported `RECORD` column in
+  `execute-sql`).
 
 **Validated behavior:**
 
@@ -414,13 +430,16 @@ The probe + fallback make this non-breaking for any other provider.
 | Non-superuser (`df_e2e_user`) start path | pass |
 | `df.reconcile()` deletes a planted root orphan; leaves sub-orchestrations + live instances untouched | pass |
 | `df.reconcile()` fails a stuck (lost-enqueue) `df.instances` | pass |
+| Built-in reconciler auto-starts as non-superuser `df_reconciler`, idempotent (exactly one) | pass |
+| Scheduled loop GCs a planted orphan on its next tick, without self-GC'ing | pass |
+| E2E subset unaffected with the reconciler running (incl. heartbeat + join) | 6/6 |
 | `cargo fmt --check`; no new clippy warnings | pass |
 
 **POC scope / deferred to productionization:** fresh install only (no upgrade
 script); the atomic-start wrapper hardening (move the entrypoint into duroxide-pg
-owned by the schema owner, and/or validate the work item); the reconciler is a
-plain SQL function (Phase 3 wires it into a built-in durable cron loop and tunes
-grace/policy).
+owned by the schema owner, and/or validate the work item); the reconciler's
+grace/cadence policy still needs tuning, and the `df_reconciler` role is created
+by the worker rather than via managed provisioning.
 
 > **Local-dev note:** `DROP EXTENSION pg_durable CASCADE` can leave the
 > BGW-owned `_duroxide` schema half-broken (migrations row present, functions
@@ -464,27 +483,33 @@ See the Dual-write inventory above for the precise classification. In short:
   "don't deliver if my tx rolls back" semantics, but that is a nice-to-have, not
   a consistency fix — lowest priority.
 
-## Complementary backstop — Option 4 (prototyped, Phase 3)
+## Complementary backstop — Option 4 (implemented)
 
 As part of the chosen approach, a lightweight **reconciler** sweeps for residual
 divergence that an atomic start cannot prevent (crashes mid-execution,
 not-yet-migrated signal/cancel paths, `status` mirror drift, and legacy/fallback
-orphans). The POC ships it as **`df.reconcile(grace_seconds int default 60)`**
+orphans). It ships as **`df.reconcile(grace_seconds int default 60)`**
 (`SECURITY DEFINER`, admin-only): it deletes orphaned **root** duroxide instances
 (`parent_instance_id IS NULL`, no `df.instances` row, older than the grace
 window) via `delete_instances_atomic`, and marks `df.instances` rows stuck
 non-terminal with no live duroxide instance and no queued start as `failed`.
 Sub-orchestrations (JOIN/RACE branches, loop generations) are excluded by the
-root filter so they are never collected. Phase 3 wires this into a built-in
-durable cron loop (dogfooding pg_durable):
+root filter so they are never collected.
+
+The background worker runs it as a **built-in durable cron loop** (dogfooding
+pg_durable), ensuring exactly one instance per cluster:
 
 ```sql
-SELECT df.start(
-  @> ( 'SELECT df.reconcile()' ~> df.wait_for_schedule('*/5 * * * *') ),
-  'reconciler');
+df.start(
+  df.loop(df.seq('SELECT * FROM df.reconcile()',
+                 df.wait_for_schedule(current_setting('pg_durable.reconciler_cron')))),
+  'df_reconciler');
 ```
 
-It complements Option 3 rather than replacing it.
+started by `worker::ensure_reconciler` each epoch (idempotent; self-heals if it
+died), submitted by the dedicated non-superuser `df_reconciler` role, and driven
+by `pg_durable.reconciler_cron` (default `*/5 * * * *`; empty disables). It
+complements Option 3 rather than replacing it.
 
 ## Upgrade & Migration
 
@@ -547,9 +572,11 @@ E2E (tests/e2e/sql/) and unit coverage:
    `_duroxide` schema resolution, entrypoint hardening.)
 2. **Phase 2:** apply the same in-transaction enqueue to `df.signal()` /
    `df.cancel()`.
-3. **Phase 3 — reconciler prototyped:** `df.reconcile()` exists and is validated
-   (orphan GC + stuck-instance failover); remaining work is wiring it into a
-   built-in durable cron loop and tuning the grace/policy.
+3. **Phase 3 — reconciler implemented:** `df.reconcile()` plus a built-in durable
+   cron loop (worker-managed `df_reconciler` instance on
+   `pg_durable.reconciler_cron`) are validated (auto-start, idempotency,
+   scheduled orphan GC, no self-GC). Remaining: tune the grace/cadence policy and
+   role provisioning.
 
 ## Open questions / risks
 

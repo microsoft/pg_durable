@@ -29,6 +29,12 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Cron schedule for the built-in durable reconciler (Option 4 / df.reconcile()).
+/// The background worker ensures one reconciler instance per cluster, running on
+/// this schedule. Set to an empty string to disable the built-in reconciler.
+pub static RECONCILER_CRON: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"*/5 * * * *"));
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -133,6 +139,15 @@ pub extern "C-unwind" fn _PG_init() {
         &ENABLE_SUPERUSER_INSTANCES,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_durable.reconciler_cron",
+        c"Cron schedule for the built-in durable reconciler (df.reconcile()); empty disables it",
+        c"The background worker keeps one reconciler instance running on this schedule to repair residual df.* / duroxide divergence. Empty string disables the built-in reconciler. Requires server restart to change.",
+        &RECONCILER_CRON,
+        GucContext::Postmaster,
+        GucFlags::default(),
     );
 
     worker::register_background_worker();
@@ -621,10 +636,13 @@ REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text) FROM PUBLI
 // admin-only (EXECUTE revoked from PUBLIC) and SECURITY DEFINER so it can touch
 // the duroxide-owned tables and all users' df.instances.
 //
-// Schedule it durably (dogfooding pg_durable), e.g. every 5 minutes:
-//   SELECT df.start(
-//     @> ( 'SELECT df.reconcile()' ~> df.wait_for_schedule('*/5 * * * *') ),
-//     'reconciler');
+// The background worker keeps one reconciler instance running automatically
+// (worker::ensure_reconciler), dogfooding pg_durable as a durable cron loop:
+//   df.start(df.loop(df.seq('SELECT * FROM df.reconcile()',
+//                           df.wait_for_schedule(<pg_durable.reconciler_cron>))),
+//            'df_reconciler')
+// submitted by the dedicated non-superuser role df_reconciler. Set
+// pg_durable.reconciler_cron = '' to disable it.
 //
 // Only ROOT duroxide instances (parent_instance_id IS NULL) are considered —
 // sub-orchestrations (JOIN/RACE branches, loop generations) intentionally have

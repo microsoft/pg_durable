@@ -202,6 +202,10 @@ async fn run_duroxide_runtime() {
             }
         };
 
+        // Ensure the built-in durable reconciler is running for this epoch
+        // (Option 4). Idempotent: starts one only if none is pending/running.
+        ensure_reconciler(&mgmt_pool).await;
+
         run_until_extension_dropped_or_shutdown(
             &mgmt_pool,
             duroxide_runtime,
@@ -213,6 +217,109 @@ async fn run_duroxide_runtime() {
     }
 
     mgmt_pool.close().await;
+}
+
+/// Built-in durable reconciler (Option 4). Ensures exactly one reconciler
+/// instance is running per cluster: an infinite durable loop that calls
+/// `df.reconcile()` on the `pg_durable.reconciler_cron` schedule.
+///
+/// Idempotent — does nothing if a reconciler is already pending/running, and
+/// (re)starts one if it has died. The instance is submitted by a dedicated
+/// **non-superuser** role (`pg_durable_reconciler`) granted only df usage plus
+/// EXECUTE on the SECURITY DEFINER `df.reconcile()`. Using a non-superuser
+/// identity avoids the enable_superuser_instances guard, and bounds the blast
+/// radius to "trigger GC" even if the instance were forged.
+async fn ensure_reconciler(pool: &sqlx::PgPool) {
+    const ROLE: &str = "df_reconciler";
+    const LABEL: &str = "df_reconciler";
+
+    let cron = crate::RECONCILER_CRON
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cron = cron.trim().to_string();
+    if cron.is_empty() {
+        return; // built-in reconciler disabled
+    }
+
+    // Skip if a reconciler is already pending/running (idempotent across epochs;
+    // self-heals if a previous one failed/was cancelled). Runs as the worker
+    // role, which bypasses RLS, so it sees the instance regardless of owner.
+    let already_running: i64 = match sqlx::query_scalar(
+        "SELECT count(*) FROM df.instances \
+         WHERE label = $1 AND status IN ('pending', 'running')",
+    )
+    .bind(LABEL)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            log!("pg_durable: reconciler liveness check failed: {}", e);
+            return;
+        }
+    };
+    if already_running > 0 {
+        return;
+    }
+
+    // Ensure the dedicated role exists with the minimal grants.
+    if let Err(e) = ensure_reconciler_role(pool, ROLE).await {
+        log!("pg_durable: failed to provision reconciler role: {}", e);
+        return;
+    }
+
+    // Start the durable loop as the dedicated role on a single connection so the
+    // SET ROLE applies to df.start() (which captures submitted_by = current_user).
+    let started = async {
+        let mut conn = pool.acquire().await?;
+        sqlx::query(&format!("SET ROLE {ROLE}"))
+            .execute(&mut *conn)
+            .await?;
+        let res = sqlx::query(
+            "SELECT df.start(\
+               df.loop(df.seq('SELECT * FROM df.reconcile()', df.wait_for_schedule($1))), \
+               $2)",
+        )
+        .bind(&cron)
+        .bind(LABEL)
+        .execute(&mut *conn)
+        .await;
+        // Always reset the role before the connection returns to the pool.
+        let _ = sqlx::query("RESET ROLE").execute(&mut *conn).await;
+        res.map(|_| ())
+    }
+    .await;
+
+    match started {
+        Ok(()) => log!("pg_durable: started built-in reconciler (cron='{}')", cron),
+        Err(e) => log!("pg_durable: failed to start built-in reconciler: {}", e),
+    }
+}
+
+/// Create the dedicated non-superuser reconciler role (if absent) and grant it
+/// df usage plus EXECUTE on df.reconcile(). Idempotent.
+async fn ensure_reconciler_role(pool: &sqlx::PgPool, role: &str) -> Result<(), sqlx::Error> {
+    // role is a fixed compile-time constant, so the format! is injection-safe.
+    sqlx::query(&format!(
+        "DO $$ BEGIN \
+           IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{role}') THEN \
+             CREATE ROLE {role} LOGIN; \
+           END IF; \
+         END $$;"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query("SELECT df.grant_usage($1)")
+        .bind(role)
+        .execute(pool)
+        .await?;
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION df.reconcile(integer) TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
