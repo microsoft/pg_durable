@@ -1,676 +1,368 @@
-# Spec: Atomic `df.start()` — Eliminating `df.*` ↔ `_duroxide` Divergence
+# Keeping the control plane and the runtime consistent
 
-**Status:** Implemented & validated — Option 3 (atomic `df.start`/`df.cancel`/`df.signal`) + Option 4 (reconciler)
+**Status:** Implemented and validated. Atomic `df.start`/`df.cancel`/`df.signal`,
+plus a reconciler that repairs leftover drift.
 **Author:** pg_durable team
 **Date:** June 2026
 
-## Overview
+## The problem
 
-`df.start()` writes to two independent stores that are **not** committed together:
+A durable function lives in two stores that are written separately:
 
-- the **pg_durable control plane** (`df.nodes`, `df.instances`) — written on the
-  caller's backend transaction via SPI; and
-- the **duroxide runtime** (`_duroxide.orchestrator_queue`) — enqueued
-  out-of-band on a *separate* sqlx connection pool, committed independently.
+- the **pg_durable control plane** — `df.nodes` and `df.instances`, written on the
+  caller's transaction; and
+- the **duroxide runtime** — `_duroxide.orchestrator_queue`, where the orchestration
+  is enqueued.
 
-Because the two halves are not atomic, the stores can diverge. The most common
-failure is the "rolled-back start" leak: a `df.start()` whose surrounding
-transaction is rolled back (or whose batch subtransaction aborts on a PK
-collision) leaves an **orphaned orchestration** in `_duroxide` with no
-corresponding `df.*` rows. The background worker then repeatedly tries to load a
-graph that does not exist, fails after a 5 s timeout, and the orphan persists in
-`_duroxide.instances`.
+Originally `df.start()` wrote the first on the caller's transaction but enqueued the
+second out-of-band, on a separate connection pool that committed on its own. The two
+were never atomic, so they could disagree.
 
-Four designs were explored to keep the two stores consistent (see **Design
-options considered** below). This spec **implements Option 3 (primary) plus
-Option 4 (complementary backstop)**: make the duroxide start-enqueue part of the
-caller's backend transaction so `df.start()` is atomic — either everything
-commits or nothing does — and add an asynchronous reconciler to repair any
-residual drift that start-time atomicity cannot prevent.
+The common failure was an **orphaned orchestration**: a `df.start()` whose
+surrounding transaction rolled back (or whose batch aborted on a primary-key
+collision) left a row in `_duroxide` with no matching `df.*` rows. The background
+worker then kept trying to load a graph that did not exist, failed after a 5-second
+timeout, and the orphan stayed behind. Under load these orphans accumulated and
+saturated the worker's two threads.
 
-### Evidence (observed during investigation)
+We observed this directly: a `df.start()` inside a rolled-back transaction left
+`_duroxide.instances` row `48819f12` with zero rows in `df.instances`, surviving the
+rollback.
 
-- A `df.start()` executed inside a transaction that was then `ROLLBACK`-ed left a
-  row in `_duroxide.instances` (e.g. `48819f12`) with **zero** rows in
-  `df.instances`. The orphan survived the rollback.
-- Under load, orphaned start items self-sustain via retry and saturate the
-  2-thread worker with 5 s "Instance not found … transaction may have been
-  rolled back" failures.
-- The short-id PK-collision path (8 hex chars ≈ 2³²) reliably aborts `df.start()`
-  well under 1M instances (observed first-collision draws: 9248, 34845, 40445,
-  60776). That abort is *safe* today (it happens before the duroxide enqueue),
-  but it exercises the same dual-write seam.
+## What we did
 
-## Design options considered
+Two complementary changes:
 
-Four approaches were explored for keeping the `df.*` control plane and the
-`_duroxide` runtime consistent. The mechanics of the chosen approach are detailed
-in **Design** below; this section records all four and the decision.
+1. **Prevent** the drift at the source. `df.start()`, `df.cancel()`, and
+   `df.signal()` now enqueue their runtime work on the **caller's transaction**, so
+   the control-plane writes and the runtime enqueue commit or roll back together.
+2. **Repair** what prevention cannot cover. A reconciler periodically deletes
+   leftover orphans and marks stuck instances failed — catching drift from crashes
+   mid-execution and from the legacy fallback path.
 
-**Option 1 — Single source of truth in `_duroxide`.** Drop the `df.instances` /
-`df.nodes` control tables entirely, keep all instance state in `_duroxide`,
-serialize the graph into the orchestration input, and have duroxide expose
-whatever state pg_durable needs (via views / read APIs).
-*Guarantee:* total — there is only one store, so nothing can diverge.
-*Cost:* large — moves the `submitted_by` security boundary, requires rebuilding
-per-user RLS over duroxide-owned tables, re-exposing every `df.*` read surface,
-and a destructive migration with B1 backward-compat implications. A possible
-long-term direction, not this change.
+Both are pg_durable-only. No `duroxide` / `duroxide-pg` or `Cargo.*` changes.
 
-**Option 2 — Hand duroxide-pg our SQL to run inside *its* transaction.** Keep
-both schemas; extend duroxide-pg so the start-enqueue also executes the
-pg_durable `df.*` writes in the same (sqlx, worker-pool) transaction.
-*Guarantee:* `df.*` ↔ `_duroxide` atomic — but on the worker-pool connection, so
-`df.start()` stops participating in the *caller's* transaction and the `df.*`
-writes run as the pool role, breaking `current_user` / `submitted_by` capture and
-RLS. Strictly weaker than Option 3.
+## Designs we considered
 
-**Option 3 — Hand duroxide-pg *our* (the caller's) transaction.** Keep both
-schemas; run duroxide's start-enqueue inside the caller's backend transaction via
-SPI, alongside the `df.*` writes.
-*Guarantee:* strongest — `df.nodes` + `df.instances` + the queue row + the
-caller's surrounding statements all commit or roll back together; identity
-capture and the `df.*` read surface are untouched; the 5 s load race disappears
-on the atomic path.
-*Cost:* small — the start is a single SQL-function call — with one wrinkle: a
-`SECURITY DEFINER` enqueue entrypoint is needed because the queue INSERT is
-owner-only. **Chosen as the primary fix.**
+Four approaches were weighed for keeping the two stores in agreement.
 
-**Option 4 — Tolerate divergence; repair asynchronously.** Accept a transient
-window and add a reconciler — ideally a built-in durable function — that detects
-and repairs mismatches (orphaned `_duroxide` instances, stuck `df.instances`
-rows, `status`-mirror drift).
-*Guarantee:* none added; eventual consistency with bounded repair latency.
-*Value:* the only option that also catches divergence from crashes
-*mid-execution* and from paths Option 3 does not cover (the worker-side mirror
-activities, and signal/cancel until they are migrated). **Chosen as a
-complementary backstop.**
+**Option 1 — One store.** Drop `df.nodes` / `df.instances` entirely and keep all
+state in `_duroxide`, exposing what pg_durable needs through views.
+*Strongest guarantee* (only one store can't diverge) but the most disruptive: it
+moves the `submitted_by` security boundary, rebuilds per-user row security over
+runtime-owned tables, re-exposes every read path, and needs a destructive migration.
+A possible long-term direction, not this change.
 
-### Comparison
+**Option 2 — Run our writes inside duroxide's transaction.** Extend duroxide-pg so
+the enqueue also performs the `df.*` writes, on duroxide's worker-pool connection.
+This makes the two stores atomic — but on the *worker's* connection, so `df.start()`
+no longer joins the *caller's* transaction and the `df.*` writes run as the pool
+role, breaking identity capture and row security. Strictly worse than Option 3.
 
-| Option | Atomic with `df.*` | Atomic with caller tx | Kills 5 s load race | Fixes crash-time drift | Effort |
+**Option 3 — Run duroxide's enqueue inside the caller's transaction.** Keep both
+stores; call the runtime's enqueue over SPI on the caller's transaction, next to the
+`df.*` writes. Everything commits or rolls back together, identity capture and the
+read paths are untouched, and the 5-second load race disappears. The only cost is a
+`SECURITY DEFINER` wrapper, because the runtime queue is writable by its owner only.
+**Chosen as the primary fix.**
+
+**Option 4 — Tolerate drift, repair it later.** Accept a brief inconsistency window
+and add a reconciler that finds and fixes mismatches. Adds no guarantee on its own,
+but it is the only option that also catches drift from crashes *mid-execution* —
+something no start-time atomicity can prevent. **Chosen as a backstop.**
+
+| Option | Atomic with `df.*` | Atomic with caller's tx | Removes 5 s race | Fixes crash-time drift | Effort |
 |--------|:--:|:--:|:--:|:--:|:--:|
-| 1 — single source of truth in `_duroxide` | n/a (one store) | no¹ | yes | yes | Large |
-| 2 — our SQL in duroxide's tx | yes | **no** | yes | no | Medium |
-| 3 — enqueue in caller's tx (SPI) | yes | **yes** | **yes** | no | Small–Med |
-| 4 — async GC / reconciler | repairs | — | no | **yes** | Small–Med |
+| 1 — one store | n/a | no | yes | yes | Large |
+| 2 — our writes in duroxide's tx | yes | **no** | yes | no | Medium |
+| 3 — enqueue in caller's tx | yes | **yes** | **yes** | no | Small |
+| 4 — async reconciler | repairs | — | no | **yes** | Small |
 
-¹ Option 1 also decouples from the caller's transaction unless the enqueue is
-itself done via SPI — at which point its start path converges with Option 3.
-"Fixes crash-time drift" = repairs divergence from a crash *mid-execution* (not
-just at start); only Options 1 and 4 do this, which is why Option 4 is kept as a
-backstop alongside Option 3.
+We implemented **Option 3 (prevent) plus Option 4 (repair)**. Options 1 and 2 were
+rejected: Option 1 is out of proportion to the problem, and Option 2 is a weaker
+version of Option 3.
 
-### Decision
+## How a start is written
 
-Implement **Option 3 + Option 4**. Option 3 removes the dual-write at the source
-for every backend-initiated cross-store write — `df.start()`, `df.cancel()`, and
-`df.signal()` all enqueue on the caller's transaction; Option 4 is a lightweight
-safety net for the residual divergence that no in-transaction enqueue can prevent
-(crashes mid-execution and the best-effort `df.*` mirror). Options 1 and 2 are
-rejected — Option 1 is disproportionate to the problem, and Option 2 is a strictly
-weaker variant of Option 3.
+`df.start()` (`src/dsl.rs`) runs these steps on the caller's transaction:
 
-## Background: how a start is written today
+1. Pick an instance id (`short_id()` — eight hex characters).
+2. Validate (database exists, caller can log in, superuser policy).
+3. Insert the graph rows into `df.nodes`.
+4. Insert the instance row into `df.instances`.
+5. Snapshot the caller's `df.vars`.
+6. Enqueue the orchestration.
 
-`crate::dsl::start()` (src/dsl.rs) executes, in order, on the **caller's**
-transaction unless noted:
+The fix is small because the start is **a single enqueue**: one
+`StartOrchestration` row in `_duroxide.orchestrator_queue`. The worker builds the
+`_duroxide.instances` and history rows later. And because duroxide-pg exposes every
+operation as a SQL function in the `_duroxide` schema, that enqueue can run over SPI
+on the caller's transaction — no separate pool needed.
 
-1. `instance_id = short_id()` (src/dsl.rs:645).
-2. Read-only validation (database exists, caller has `LOGIN`, superuser policy).
-3. `insert_nodes()` → INSERT rows into `df.nodes` (src/dsl.rs:842).
-4. INSERT row into `df.instances` (src/dsl.rs:888).
-5. Capture `df.vars` snapshot.
-6. `start_durable_function()` → `Client::start_orchestration()` →
-   `store.enqueue_for_orchestrator(StartOrchestration)` (src/dsl.rs:923) — runs on
-   the cached `DUROXIDE_CLIENT` sqlx pool (src/client.rs), **separate
-   connection, independently committed.** Failures here are logged, not raised
-   (src/dsl.rs:928).
+### What each store owns
 
-Key facts that make the fix small:
-
-- **The start is a single enqueue.** `Client::start_orchestration` builds one
-  `WorkItem::StartOrchestration` and calls `enqueue_for_orchestrator`
-  (duroxide `client/mod.rs`). The duroxide-pg provider implements that as one
-  call to the SQL function `_duroxide.enqueue_orchestrator_work(...)`, whose body
-  is a single `INSERT INTO _duroxide.orchestrator_queue`. The
-  `_duroxide.instances`/`history` rows are materialized **later** by the worker.
-- **The atomic unit is therefore just** `{df.nodes INSERTs, df.instances INSERT,
-  one orchestrator_queue INSERT}`.
-- **duroxide-pg is SQL-function based.** Every provider operation is a function
-  in the `_duroxide` schema, so the enqueue can be invoked directly via SPI on
-  the caller's transaction — no async pool required for the start path.
-
-### What each store owns (so we know what must *not* change)
+The fix must not move any of these boundaries.
 
 | Data | Source of truth | Notes |
 |------|-----------------|-------|
-| Graph (`df.nodes`) | `df.*` | duroxide does not store it; the worker loads it via the `load-function-graph` activity. |
-| Execution history | `_duroxide.history` | duroxide-internal; transactional per turn via `ack_orchestration_item`. |
-| Control plane (`root_node`, `submitted_by`, `database`, `label`) | `df.instances` | needed by the worker to load + authenticate. |
-| `df.instances.status` | best-effort mirror | written by the `update-instance-status` activity; not atomic with duroxide, self-heals. |
-| `df.nodes.status/result/error` | best-effort mirror | written by the `update-node-status` activity; same properties as above. |
+| Graph (`df.nodes`) | `df.*` | The worker loads it; duroxide does not store it. |
+| Execution history | `_duroxide.history` | Runtime-internal; transactional per turn. |
+| Control plane (`root_node`, `submitted_by`, `database`, `label`) | `df.instances` | The worker needs it to load and authenticate. |
+| `df.instances.status` | best-effort mirror | Written by the worker; self-heals, not atomic with the runtime. |
+| `df.nodes.status/result/error` | best-effort mirror | Same as above. |
 
-`submitted_by` is a **security boundary**: it is captured as `current_user` at
-`df.start()` time and pinned by a composite FK; the worker re-checks the
-superuser policy (src/activities/load_function_graph.rs). Any change must keep it
-unforgeable.
+`submitted_by` is a **security boundary**: it is captured as the calling role at
+start time and must stay unforgeable. The worker re-checks the superuser policy when
+it loads the graph.
 
-### Dual-write inventory
+### Where the two stores were written together
 
-Auditing every `df.*` writer against every duroxide-client call, the cross-store
-seams are bounded and fall into two distinct classes.
+Auditing every writer, the cross-store paths are bounded. All three now enqueue on
+the caller's transaction:
 
-**Backend (session) side — `df.*` on the caller's transaction + an out-of-band
-duroxide-client enqueue.** This is the class Option 3 fixes.
+| Caller | `df.*` write | `_duroxide` write | On caller's tx now? |
+|--------|------|------|:--:|
+| `df.start()` | insert `df.nodes` + `df.instances` | enqueue `StartOrchestration` | yes |
+| `df.cancel()` | update `df.instances.status` | enqueue `CancelInstance` | yes |
+| `df.signal()` | none (only a row-security read) | enqueue `ExternalRaised` (+ fan-out) | yes |
 
-| Site | `df.*` write (user tx, SPI) | `_duroxide` write | Now in caller tx? |
-|------|------|------|------|
-| `df.start()` | INSERT `df.nodes` + `df.instances` (src/dsl.rs:842,888) | enqueue `StartOrchestration` (src/dsl.rs:923) | **Yes** |
-| `df.cancel()` | UPDATE `df.instances.status='cancelled'` (src/dsl.rs:966) | `CancelInstance` enqueue | **Yes** |
-| `df.signal()` | **none** (only an RLS read of `df.instances`) | `ExternalRaised` + descendant fan-out (src/dsl.rs:616) | **Yes** |
+- **`df.cancel()`** was a genuine dual-write: it enqueued the cancel, then updated
+  the status mirror. The status update is only an optimistic hint — the worker
+  re-applies the authoritative `cancelled` status when it processes the cancel — so
+  any disagreement was already transient. Both now commit together.
+- **`df.signal()`** writes only `_duroxide`, so it never created cross-store drift.
+  Moving it onto the caller's transaction simply gives it the same rule as the
+  others: *if my transaction rolls back, the signal is not delivered.*
 
-Notes:
+The worker also keeps the `df.*` status columns in sync as activities run. Those
+writes are eventually consistent and self-healing by design; the reconciler cleans
+up any lasting drift.
 
-- **`df.cancel()` is a genuine dual-write** with two twists vs `df.start()`: it
-  enqueued to duroxide **first** and then did the `df.*` UPDATE (opposite order),
-  and the UPDATE is only an *optimistic* mirror — the authoritative `cancelled`
-  status is re-applied when the worker processes the cancel via
-  `update-instance-status`, so divergence here is usually transient and
-  self-healing. It now uses the same in-transaction enqueue as `df.start()`, so
-  the optimistic UPDATE and the `CancelInstance` enqueue commit or roll back
-  together.
-- **`df.signal()` is not a dual-write**: it writes only `_duroxide`. There is no
-  cross-store inconsistency to create; moving it in-transaction changes
-  "don't deliver the signal if my surrounding tx rolls back" semantics, which is
-  the least-surprising contract and is applied here for consistency with the
-  other paths.
-- Not seams: `df.run()` is a no-op stub; `df.result/status/explain/monitoring`
-  are reads; `df.vars` and `df._worker_epoch` touch only `df.*`.
+## The mechanism
 
-**Worker side — `df.*` mirror maintained by activities, on a connection separate
-from duroxide's history ack.** Option 3 does **not** address this class.
-
-| Activity | `df.*` write | Property |
-|----------|--------------|----------|
-| `update-instance-status` | UPDATE `df.instances.status` | eventually consistent, self-healing |
-| `update-node-status` | UPDATE `df.nodes.status/result/error` | eventually consistent, self-healing |
-
-These are at-least-once activities re-applied on replay, so a crash between the
-duroxide ack and the mirror update is transient lag, not permanent divergence.
-This is the "best-effort mirror"; any persistent drift is the reconciler's job
-(see Complementary backstop), not Option 3's.
-
-## Goals
-
-- `df.start()` is **atomic with the caller's transaction**: on rollback, no
-  `df.*` rows *and* no `_duroxide` start item remain; on commit, both are present
-  and the worker picks the instance up only after the `df.*` rows are visible.
-- `df.cancel()` and `df.signal()` enqueue on the **caller's transaction** too: a
-  rolled-back cancel/signal leaves nothing in `_duroxide`, and a committed one is
-  durable with the caller's other work.
-- Eliminate the rolled-back-start orphan leak at the source.
-- Eliminate the `load-function-graph` "wait up to 5 s for the row to appear"
-  race on the atomic path (the retry is retained for the non-atomic fallback).
-- No change to the `df.*` schema's read surface (status/result/monitoring/explain
-  keep working unchanged).
-
-## Non-goals
-
-- Collapsing `df.*` into `_duroxide` (Option 1) — out of scope; tracked
-  separately as a possible long-term direction.
-- Fixing the best-effort `df.instances.status` mirror (it is eventually
-  consistent by design).
-- Changing short-id generation / the id space. (Independent; can be addressed
-  separately. This spec makes a collision a clean, fully-atomic abort.)
-
-## Design
-
-### Mechanism
-
-In `crate::dsl::start()`, replace step 6 (the out-of-band
-`start_durable_function` pool call) with an **SPI call** that enqueues the start
-work item on the caller's transaction, immediately after the `df.instances`
-INSERT:
+Step 6 of `df.start()` is now an SPI call on the caller's transaction, right after
+the `df.instances` insert:
 
 ```text
--- still on the caller's transaction (SPI):
-INSERT INTO df.nodes ...                          -- step 3 (unchanged)
-INSERT INTO df.instances ...                      -- step 4 (unchanged)
-SELECT df.__enqueue_start($instance_id, $work_item_json, $visible_at);  -- step 6 (new)
+INSERT INTO df.nodes ...                              -- step 3
+INSERT INTO df.instances ...                          -- step 4
+SELECT df._enqueue_orchestrator_start($id, $name, $input);  -- step 6 (SPI)
 ```
 
-Because the enqueue is now an SPI statement, it shares the caller's transaction:
-rollback removes the queue row along with the `df.*` rows; commit makes them
-visible together.
+Because the enqueue is an ordinary SPI statement, it shares the caller's
+transaction: a rollback drops the queue row along with the `df.*` rows, and a commit
+makes them visible together. `df.cancel()` and `df.signal()` work the same way
+through their own wrappers.
 
-### The work item
+### Why a privileged wrapper is needed
 
-pg_durable already depends on the `duroxide` crate, so it should **construct and
-serialize the real `WorkItem` type** rather than hand-rolling JSON, guaranteeing
-wire compatibility:
+`_duroxide.orchestrator_queue` is writable by its owner only (the worker role), so a
+normal caller cannot insert into it. The enqueue therefore runs through a
+`SECURITY DEFINER` wrapper in the `df` schema, owned by the extension owner. Each
+wrapper pins `search_path` and schema-qualifies every reference (per CVE-2018-1058,
+enforced by `scripts/pgspot-gate.sh`).
 
-```rust
-let item = duroxide::providers::WorkItem::StartOrchestration {
-    instance: instance_id.clone(),
-    orchestration: orchestrations::execute_function_graph::NAME.into(),
-    input: input_json,                       // existing FunctionInput JSON
-    version: None,                           // runtime resolves from registry
-    parent_instance: None,
-    parent_id: None,
-    execution_id: duroxide::INITIAL_EXECUTION_ID,   // = 1
-};
-let work_item_json = serde_json::to_string(&item)?;
-```
+The wrappers resolve the runtime schema at call time via `df.duroxide_schema()`
+(`_duroxide` on current installs, legacy `duroxide` on older ones) and quote it
+with `%I`. They are revoked from `PUBLIC` and granted through `df.grant_usage()`.
 
-`WorkItem` is externally tagged (default serde), i.e.
-`{"StartOrchestration":{...}}`. These are exactly the values the current
-`Client::start_orchestration` path uses, so worker behavior is unchanged.
+Because a `SECURITY DEFINER` function runs as its owner, the wrappers cannot trust
+the caller. Two safeguards make them safe to grant to every user:
 
-The enqueue target is the existing function (body is a single INSERT; the
-`p_orchestration_name/version/execution_id` params are accepted but unused — the
-work item is self-contained):
+- **The work item is built inside the wrapper**, from the caller's arguments — never
+  passed in. A caller cannot choose the work-item type or smuggle in a foreign
+  target. (`df.start` builds `StartOrchestration`, `df.cancel` builds
+  `CancelInstance`, `df.signal` builds `ExternalRaised`, each with
+  `json_build_object`, matching duroxide's wire format.)
+- **The caller is authorized before any enqueue**, by two different rules:
+  - *Start* targets a brand-new instance, so it authorizes by *state*: it permits
+    the enqueue only for a `pending` `df.instances` row that has no queue entry and
+    no runtime instance yet. Under the atomic path a committed instance always has
+    its queue row in the same transaction, so this state is reachable only for the
+    row the caller just inserted — never someone else's instance.
+  - *Cancel* and *signal* target an already-committed instance, so they authorize by
+    *ownership*: `pg_has_role(session_user, <instance owner>, 'MEMBER')`.
+    `session_user` is the real authenticated role (it cannot be spoofed inside a
+    `SECURITY DEFINER` function), and checking membership rather than an exact name
+    means a role that owns the instance through `SET ROLE` still qualifies. A
+    non-member is rejected before anything is enqueued — the same gate `df.cancel` /
+    `df.signal` already enforce through row security.
 
-```sql
-_duroxide.enqueue_orchestrator_work(
-    p_instance_id   text,
-    p_work_item     text,                 -- work_item_json
-    p_visible_at    timestamptz,          -- now() for immediate start
-    p_orchestration_name text DEFAULT NULL,
-    p_orchestration_version text DEFAULT NULL,
-    p_execution_id  bigint DEFAULT NULL)
-```
+### Signal fan-out
 
-### Privilege model (the one real wrinkle)
-
-`_duroxide.orchestrator_queue` grants INSERT to its **owner only** (the
-`pg_durable.worker_role`; `relacl` is empty → no PUBLIC), and
-`_duroxide.enqueue_orchestrator_work` is `SECURITY INVOKER`. `df.start()` is also
-`SECURITY INVOKER` and runs SPI as the calling user. Therefore a normal caller
-cannot insert into the queue directly — confirmed: for a fresh `LOGIN` role,
-`has_table_privilege(... 'INSERT') = false`.
-
-The enqueue must run through a **`SECURITY DEFINER`** entrypoint owned by a role
-that owns the `_duroxide` queue tables. Two placements:
-
-- **Recommended — provide it in duroxide-pg** (proper layering; pg_durable never
-  touches `_duroxide` internals). Add a stable, documented `SECURITY DEFINER`
-  client-enqueue function in the `_duroxide` schema, owned by the schema owner
-  (`worker_role`), e.g. `_duroxide.client_enqueue_start(p_instance_id text,
-  p_work_item text, p_visible_at timestamptz)`. It performs the single queue
-  INSERT and is `GRANT EXECUTE`-ed to the roles allowed to start instances.
-  Applied by the BGW migration runner (`ApplyAll`); no pg_durable extension
-  upgrade script needed (consistent with docs/bgw-applies-migrations.md).
-- **Fallback — a `df` wrapper in pg_durable.** A `df.__enqueue_start(...)`
-  `SECURITY DEFINER` function owned by the extension owner that calls
-  `_duroxide.enqueue_orchestrator_work(...)`. Works in the common configuration
-  where the extension owner is a superuser (or otherwise owns/【has INSERT on】the
-  queue). In hardened multi-role deployments where `_duroxide` is owned by a
-  non-superuser `worker_role` distinct from the extension owner, this requires
-  the `worker_role` to `GRANT INSERT` on the queue tables (and `EXECUTE` on the
-  enqueue fn) to the wrapper's owner. The duroxide-pg placement avoids this
-  coordination.
-
-Either wrapper **must** pin `search_path` and schema-qualify every reference
-(CVE-2018-1058; enforced by the pgspot gate, scripts/pgspot-gate.sh):
-
-```sql
-CREATE FUNCTION _duroxide.client_enqueue_start(...)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog
-AS $$ BEGIN
-  INSERT INTO _duroxide.orchestrator_queue (instance_id, work_item, visible_at, created_at)
-  VALUES (p_instance_id, p_work_item, p_visible_at, pg_catalog.now());
-END $$;
-```
-
-The wrapper takes the caller's `instance_id`, orchestration name, and input
-string; it **constructs the `StartOrchestration` work item server-side** (so the
-caller cannot choose the work-item variant or target a foreign instance) and
-**authorizes** the enqueue only for a brand-new, not-yet-started instance
-(`pending` `df.instances` row, no orchestrator-queue entry, no duroxide
-instance — under atomic-start semantics reachable only for the row `df.start`
-just inserted in the current transaction). It executes no caller-supplied SQL.
-This is what prevents the wrapper from being a generic, cross-tenant
-arbitrary-work-item enqueue primitive (which would otherwise let any df user
-forge `CancelInstance`/`ExternalRaised`/`ActivityCompleted` against another
-user's instance, bypassing the RLS gate `df.signal`/`df.cancel` enforce).
-
-### Identity / security
-
-`submitted_by` capture is unchanged: it is still read as `current_user` inside
-`df.start()` (`SECURITY INVOKER`) **before** the enqueue and stored in
-`df.instances`. The `SECURITY DEFINER` wrapper does not touch identity; the work
-item carries only the orchestration name/input. The worker continues to
-authenticate using `df.instances.submitted_by` and re-check the superuser policy
-(unchanged). No new forgery surface is introduced.
-
-### Cancel and signal wrappers
-
-`df.cancel()` and `df.signal()` enqueue on the caller's transaction through their
-own `SECURITY DEFINER` wrappers (`df._enqueue_orchestrator_cancel`,
-`df._enqueue_orchestrator_signal`). Both build the work item server-side
-(`CancelInstance` / `ExternalRaised`) via `json_build_object`, so a caller cannot
-choose the variant or smuggle a foreign target.
-
-The start wrapper can authorize structurally (a brand-new `pending` instance is
-only reachable for the row the caller just inserted). Cancel and signal target an
-**already-committed** instance, so they authorize explicitly: the wrapper checks
-`pg_has_role(session_user, df.instances.submitted_by::oid, 'MEMBER')`
-(`submitted_by` is a `regrole`, so `::oid` yields the owning role's OID).
-`session_user` is unforgeable inside `SECURITY DEFINER` (unlike `current_user`,
-which is the definer), and membership — rather than an exact-name match — lets a
-role that owns the instance via `SET ROLE` still cancel/signal it. A caller that
-is not a member of the owning role is rejected before any enqueue, mirroring the
-RLS gate `df.cancel`/`df.signal` already enforce. The wrappers run no
-caller-supplied SQL.
-
-**Signal fan-out.** A signal must reach the root instance **and** every running
-sub-orchestration (a descendant may be the one blocked on
-`wait_for_signal`). The wrapper recurses `_duroxide.instances.parent_instance_id`
-from the root, joins each instance to its current execution, keeps only
-executions whose `status` is `Running` (lower-cased), and enqueues one
-`ExternalRaised` per surviving instance — all in the caller's transaction, so the
-whole fan-out commits or rolls back atomically.
+A signal must reach the root instance **and** every running sub-orchestration,
+because a child (a `JOIN`/`RACE` branch or a loop generation) may be the one waiting
+on it. The `df.signal` wrapper walks the instance tree from the root
+(`_duroxide.instances.parent_instance_id`), keeps the instances whose current
+execution is still running, and enqueues one `ExternalRaised` per surviving
+instance — all on the caller's transaction, so the whole fan-out is atomic.
 
 ### Worker readiness and ordering
 
-- Keep the existing worker-readiness gate: if `_worker_ready` is absent/stale,
-  `df.start()` errors as it does today (the `_duroxide` schema may not yet
-  exist). This check moves from "before acquiring the client" to "before the SPI
-  enqueue."
-- The enqueue is the **last** write in `df.start()`; a PK collision on
-  `df.nodes`/`df.instances` still aborts before it (no behavior change for the
-  collision case, now fully inside one transaction).
+- The existing readiness gate still applies: if the worker has not initialized the
+  runtime schema yet, `df.start()` fails clearly (and atomically — the `df.*`
+  inserts roll back).
+- The enqueue is the last write in `df.start()`. A primary-key collision on
+  `df.nodes` / `df.instances` still aborts before it, now cleanly inside one
+  transaction.
 
-### Consequence: the 5 s load race disappears (on the atomic path)
+### The 5-second load race is gone (on the atomic path)
 
-`load-function-graph` polls for up to `MAX_WAIT_SECS = 5` because the worker
-could dequeue a start item before the caller's `df.*` rows committed
-(src/activities/load_function_graph.rs:21,60). On the **atomic path** a queue row
-becomes visible to the worker **only** after the `df.*` rows commit in the same
-transaction, so the "not yet visible / rolled back" branch cannot occur. The
-retry is **retained** rather than removed, because the non-atomic **fallback**
-path can still enqueue before the `df.*` rows commit; it is a no-op on the atomic
-path. So this removes the worker-saturation failure mode for atomic starts while
-staying correct for the fallback.
+The worker's `load-function-graph` activity used to wait up to five seconds for the
+`df.*` rows to appear, because it could dequeue a start before they committed. On
+the atomic path the queue row becomes visible only *after* those rows commit in the
+same transaction, so that wait can't trigger. The retry is kept for the
+non-atomic fallback path, where it remains a no-op on the atomic path.
 
-## Proof of concept (validated)
+## The reconciler
 
-Option 3 was prototyped end-to-end and validated on PostgreSQL 17 (branch
-`tjgreen42/atomic-start`, ~80 lines across 3 files).
+`df.reconcile(p_grace_seconds integer DEFAULT 60)` is a `SECURITY DEFINER`,
+admin-only function that repairs leftover drift:
 
-**What was built:**
+- It deletes orphaned **root** runtime instances — those with no parent, no matching
+  `df.instances` row, and older than the grace window — gathering each orphan's full
+  subtree so the delete is accepted. Sub-orchestrations (branches and loop
+  generations) have no `df.instances` row of their own and are excluded by the root
+  filter, so they are never collected on their own.
+- It marks `df.instances` rows that are stuck non-terminal — no live runtime
+  instance and no queued start — as `failed`.
 
-- `df._enqueue_orchestrator_start(text, text)` — a `SECURITY DEFINER` wrapper
-  (`SET search_path = pg_catalog`) that performs the privileged
-  `<schema>.enqueue_orchestrator_work(instance, work_item, now())` INSERT. The
-  duroxide schema is **resolved dynamically** via `df.duroxide_schema()`
-  (`_duroxide` fresh / legacy `duroxide`) and quoted with `%I`. EXECUTE is
-  revoked from PUBLIC and granted through `df.grant_usage()`.
-- `df.start()` **probes** for the duroxide-pg SQL surface
-  (`enqueue_orchestrator_work` in the resolved schema). When present it builds
-  the real `duroxide::providers::WorkItem::StartOrchestration` (guaranteeing wire
-  compatibility), gates on `is_worker_ready()`, and enqueues via SPI through the
-  wrapper — raising (aborting the transaction) on failure. When **absent** (a
-  non-pg provider, or a schema predating the wrapper) it **falls back** to the
-  out-of-band `start_durable_function` client path (legacy, non-atomic).
-- `df.reconcile(grace_seconds int default 60)` (Option 4) — a `SECURITY DEFINER`,
-  admin-only (revoked from PUBLIC) reconciler that deletes orphaned **root**
-  duroxide instances (`parent_instance_id IS NULL`, no `df.instances` row) via
-  `delete_instances_atomic`, and fails `df.instances` stuck non-terminal with no
-  live duroxide instance and no queued start.
-- **Built-in durable cron loop** — the background worker
-  (`worker::ensure_reconciler`) keeps exactly one reconciler instance running per
-  cluster, dogfooding pg_durable:
-  `df.start(df.loop(df.seq('SELECT * FROM df.reconcile()', df.wait_for_schedule(<cron>))), 'df_reconciler')`.
-  It is idempotent (skips if one is pending/running; self-heals if it died),
-  driven by the `pg_durable.reconciler_cron` GUC (default `*/5 * * * *`; empty
-  disables), and submitted by a dedicated **non-superuser** role `df_reconciler`
-  (created by the worker, granted only `df.grant_usage()` + EXECUTE on
-  `df.reconcile()`). A non-superuser identity sidesteps the
-  `enable_superuser_instances` guard and bounds the blast radius to "trigger GC"
-  even if the instance were forged.
+Each pass is wrapped so a single failure never aborts the reconcile or stops the
+loop.
 
-**Provider requirement:** the atomic path only works with the **duroxide-pg
-(SQL-backed) provider**, because it calls the provider's SQL function directly.
-The probe + fallback make this non-breaking for any other provider.
+The background worker runs the reconciler as a **built-in durable cron loop**,
+keeping exactly one instance per cluster. It reads the schedule, connects as the
+`df_reconciler` role (`SET ROLE`), and starts:
 
-**Confirmed findings:**
+```sql
+-- $1 = the pg_durable.reconciler_cron value, $2 = 'df_reconciler'
+SELECT df.start(
+  df.loop(df.seq('SELECT * FROM df.reconcile()', df.wait_for_schedule($1))),
+  $2);
+```
 
-- **The privilege model is the only real wrinkle.** The duroxide orchestrator
-  queue grants INSERT to its owner only and the enqueue function is
-  `SECURITY INVOKER`, so a plain caller gets *permission denied*. The
-  `SECURITY DEFINER` wrapper resolves this while still committing in the caller's
-  transaction. A non-superuser role (`df_e2e_user`) granted via
-  `df.grant_usage()` starts instances successfully and cannot INSERT into the
-  queue directly.
-- **`visible_at = now()`** (SQL transaction time) is sufficient for immediate
-  starts; no reliance on the Rust-side `now_ms`.
-- **Reusing the `duroxide` `WorkItem` type** makes the enqueued row
-  byte-identical to the client path, so the worker behaves identically.
-- **The reconciler must exclude sub-orchestrations.** JOIN/RACE branches and loop
-  generations are legitimate duroxide instances with no `df.instances` row;
-  filtering on `parent_instance_id IS NULL` (root only) prevents collecting them.
-- **Two gotchas in the cron loop:** the reconciler role cannot be named with a
-  `pg_` prefix (PostgreSQL reserves it) — hence `df_reconciler`; and the loop
-  node must call the set-returning reconciler as `SELECT * FROM df.reconcile()`
-  (a bare `SELECT df.reconcile()` yields an unsupported `RECORD` column in
-  `execute-sql`).
+`worker::ensure_reconciler` starts it, skips if one is already pending or running,
+and restarts it if it died. It is driven by the `pg_durable.reconciler_cron` setting
+(default `*/5 * * * *`; empty disables it) and submitted by a dedicated
+**non-superuser** role, `df_reconciler` (so `submitted_by` is `df_reconciler`). A
+non-superuser identity keeps it clear of the superuser-instance guard and limits what
+the instance can do to "run the reconciler" even if it were somehow forged.
 
-**Validated behavior:**
+## Behavior change for users
 
-| Check | Result |
-|-------|:------:|
-| Committed `df.start()` runs to completion | pass |
-| Rolled-back `df.start()` leaves no `df.*` **and** no `_duroxide` orphan (queue + instances) | pass |
-| Dynamic schema resolution drives the SPI path (atomicity holds) | pass |
-| E2E subset: core, conditionals, loops, variables, signals, join, race, cancel | 8/8 |
-| JOIN determinism under the new (faster) timing | 5/5 |
-| Non-superuser (`df_e2e_user`) start path | pass |
-| Committed `df.cancel()` cancels; rolled-back `df.cancel()` leaves the instance running and rolls back the queue enqueue | pass |
-| Committed `df.signal()` delivers (incl. fan-out to a sub-orchestration in a race); rolled-back `df.signal()` rolls back the enqueue | pass |
-| Cancel/signal authz: a non-member caller is denied on the wrapper and via the RLS gate; the owning role (incl. via `SET ROLE`) succeeds | pass |
-| E2E: `07_signals`, `23_signal_in_race` (fan-out), `22_cancel_status_consistency` | 3/3 |
-| `df.reconcile()` deletes a planted root orphan; leaves sub-orchestrations + live instances untouched | pass |
-| `df.reconcile()` fails a stuck (lost-enqueue) `df.instances` | pass |
-| Built-in reconciler auto-starts as non-superuser `df_reconciler`, idempotent (exactly one) | pass |
-| Scheduled loop GCs a planted orphan on its next tick, without self-GC'ing | pass |
-| E2E subset unaffected with the reconciler running (incl. heartbeat + join) | 6/6 |
-| `cargo fmt --check`; no new clippy warnings | pass |
-
-### Review hardening (applied)
-
-A source-of-truth code review surfaced and fixed several issues:
-
-- **Cross-tenant enqueue bypass (HIGH).** The wrapper originally accepted an
-  opaque `work_item` and was granted to every df user, letting a caller forge
-  `CancelInstance`/`ExternalRaised`/`ActivityCompleted` against another user's
-  instance. Fixed: the wrapper now **builds the `StartOrchestration` server-side**
-  and **authorizes** only a brand-new, not-yet-started instance — verified that a
-  non-superuser can no longer forge an enqueue for a foreign or arbitrary id.
-- **Reconciler self-destruct on parallel-workflow orphans (HIGH).**
-  `delete_instances_atomic` refuses to delete a parent without its children (even
-  with `force`), so deleting only orphan **roots** raised on any JOIN/RACE/loop
-  orphan and aborted GC. Fixed: gather the **full subtree** (recursive on
-  `parent_instance_id`) and wrap each pass in an exception block so one failure
-  never aborts reconcile or kills the loop — verified root+child GC with no error.
-- **GC-suppression via user label (HIGH).** The singleton key was the
-  user-writable `label`; any user could park a `df_reconciler`-labelled instance
-  to stop the GC from starting. Fixed: key liveness on the unforgeable
-  `submitted_by = df_reconciler` role.
-- **Cron busy-loop (MED/HIGH).** `df.wait_for_schedule` baked a fixed offset at
-  build time that a `df.loop` replayed every generation (worst case ~1 s spin).
-  Fixed: the WAIT_SCHEDULE node now recomputes the delay from the orchestration's
-  deterministic clock (`ctx.utc_now()`) each generation — verified the reconciler
-  fires on the cron tick and does not spin. (Note: adding the clock read changes
-  the orchestration history shape, so a wait-in-loop instance in flight across the
-  upgrade may need to restart.)
-- **No in-epoch self-healing (MED).** The reconciler was (re)started only per
-  epoch. Fixed: `ensure_reconciler` is also re-asserted from the steady-state poll
-  loop — verified a cancelled reconciler restarts within the poll interval.
-- **Silent non-atomic fallback (MED).** `df.start()` now emits a `WARNING` when it
-  takes the non-atomic fallback path.
-- **Debated/rejected:** the `df_reconciler` role keeps `LOGIN` — the worker
-  executes the reconcile node by connecting *as* the role via `connect_as_user`,
-  exactly like every other durable-function role; the proposed `NOLOGIN` would
-  break node execution.
-
-**POC scope / deferred to productionization:** fresh install only (no upgrade
-script); the atomic-start wrapper hardening (move the entrypoint into duroxide-pg
-owned by the schema owner, and/or validate the work item); the reconciler's
-grace/cadence policy still needs tuning, and the `df_reconciler` role is created
-by the worker rather than via managed provisioning.
-
-> **Local-dev note:** `DROP EXTENSION pg_durable CASCADE` can leave the
-> BGW-owned `_duroxide` schema half-broken (migrations row present, functions
-> dropped), which surfaces as *spurious* JOIN nondeterminism and a missing
-> `_worker_ready`. Recover with `DROP SCHEMA _duroxide CASCADE` + restart so the
-> BGW re-applies its migrations. (This cost real debugging time during the POC;
-> the failures were environmental, not a regression.)
-
-## Transaction-semantics decision (must be made explicit)
-
-This change makes `df.start()` **atomic with the caller's transaction**:
+`df.start()` now takes part in the caller's transaction:
 
 ```sql
 BEGIN;
 SELECT df.start('SELECT 1');   -- enqueued on THIS transaction
-ROLLBACK;                      -- start is fully undone; nothing runs
+ROLLBACK;                      -- fully undone; nothing runs
 ```
 
-Today the behavior is inconsistent (the `df.*` rows roll back but the duroxide
-enqueue does not). The new behavior is the least-surprising contract and is the
-explicit, documented decision of this spec. Note for users: a `df.start()` in a
-transaction that later rolls back will **not** run — which is the desired fix,
-but a behavior change from "fire-and-forget at statement time." This must be
-called out in `USER_GUIDE.md`.
+Previously the `df.*` rows rolled back but the orchestration still ran. The new
+behavior is the least surprising one and is the deliberate decision of this spec,
+but it *is* a change from "fires the moment the statement runs." `df.cancel()` and
+`df.signal()` gain the same property. This should be called out in `USER_GUIDE.md`.
 
-## Signals & cancellation (migrated)
+## Implementation notes
 
-`df.cancel()` and `df.signal()` use the same in-transaction enqueue as
-`df.start()` (see Cancel and signal wrappers above). In short:
+- The atomic path only works with the **duroxide-pg (SQL-backed) provider**, because
+  it calls the provider's SQL functions directly. `df.start` / `df.cancel` /
+  `df.signal` each probe for that surface (`enqueue_orchestrator_work` in the
+  resolved schema); when it is absent — a different provider, or a schema predating
+  the wrappers — they fall back to the old out-of-band path and emit a warning, so
+  the change never breaks another provider.
+- `visible_at = now()` (transaction time) is enough for immediate starts.
+- The work items are byte-compatible with duroxide's `WorkItem` JSON, so the worker
+  behaves exactly as before.
 
-- **`df.cancel()`** — the optimistic `df.instances.status='cancelled'` UPDATE and
-  the `CancelInstance` enqueue now commit or roll back together on the caller's
-  transaction. The worker's `update-instance-status` activity still re-applies the
-  authoritative status, so a worker-side crash remains transient/self-healing.
-- **`df.signal()`** — the `ExternalRaised` fan-out (root + running
-  sub-orchestrations) is enqueued on the caller's transaction, giving "don't
-  deliver if my tx rolls back" semantics. It writes only `_duroxide`, so this is a
-  consistency-of-contract change rather than a cross-store fix.
+### Hardening applied during review
 
-## Complementary backstop — Option 4 (implemented)
+- **Cross-tenant enqueue (high).** The start wrapper first accepted an opaque work
+  item and was granted to everyone, which would let a caller forge a cancel or
+  signal against another instance. Fixed by building the work item inside the
+  wrapper and authorizing only a brand-new instance.
+- **Reconciler deleting live work (high).** The runtime refuses to delete a parent
+  without its children, so deleting only orphan roots failed on any parallel-workflow
+  orphan. Fixed by gathering the full subtree and isolating each pass so one failure
+  can't stop the loop.
+- **Suppressing the reconciler (high).** Its single-instance check first keyed on the
+  user-writable label, so a user could park a same-labelled instance to block it.
+  Fixed by keying on the unforgeable `df_reconciler` submitter.
+- **Cron busy-loop (medium).** `df.wait_for_schedule` baked a fixed delay at build
+  time that the loop replayed every generation. Fixed so the wait node recomputes the
+  delay each generation from the orchestration's recorded clock (deterministic on
+  replay). Note: this changes the recorded history shape, so a wait-in-loop instance
+  in flight across the upgrade may need a restart.
+- **Self-healing (medium).** The reconciler is re-checked from the steady-state poll
+  loop, not only once per worker epoch, so a cancelled one comes back within the poll
+  interval.
+- **Silent fallback (medium).** `df.start` now warns when it uses the non-atomic
+  fallback.
+- **Kept `LOGIN` on `df_reconciler`** (debated): the worker runs the reconcile node
+  by connecting *as* the role, like every other durable-function role, so `NOLOGIN`
+  would break it.
 
-As part of the chosen approach, a lightweight **reconciler** sweeps for residual
-divergence that an in-transaction enqueue cannot prevent (crashes mid-execution,
-the best-effort `df.*` `status` mirror, and legacy/fallback orphans). It ships as
-**`df.reconcile(grace_seconds int default 60)`**
-(`SECURITY DEFINER`, admin-only): it deletes orphaned **root** duroxide instances
-(`parent_instance_id IS NULL`, no `df.instances` row, older than the grace
-window) via `delete_instances_atomic`, and marks `df.instances` rows stuck
-non-terminal with no live duroxide instance and no queued start as `failed`.
-Sub-orchestrations (JOIN/RACE branches, loop generations) are excluded by the
-root filter so they are never collected.
+> **Local-dev note:** `DROP EXTENSION pg_durable CASCADE` can leave the worker-owned
+> `_duroxide` schema half-dropped (its migration row remains but functions are gone),
+> which shows up as flaky `JOIN` behavior and a missing `_worker_ready`. Recover with
+> `DROP SCHEMA _duroxide CASCADE` and a restart so the worker re-applies its
+> migrations.
 
-The background worker runs it as a **built-in durable cron loop** (dogfooding
-pg_durable), ensuring exactly one instance per cluster:
+## Upgrade and migration
 
-```sql
-df.start(
-  df.loop(df.seq('SELECT * FROM df.reconcile()',
-                 df.wait_for_schedule(current_setting('pg_durable.reconciler_cron')))),
-  'df_reconciler');
-```
+**New binary against an older schema.** The wrappers live in the `df` schema, so
+they ship in the extension's install SQL and an upgrade script
+(`sql/pg_durable--<prev>--<current>.sql`, `CREATE FUNCTION` + `GRANT`), with a
+"Version-Specific Changes" entry in `docs/upgrade-testing.md`. A new binary running
+against an older `df` schema that predates the wrappers must still work: each caller
+probes for the enqueue surface and falls back to the old out-of-band path when it is
+missing. This keeps the binary compatible with every prior schema while the upgrade
+rolls out.
 
-started by `worker::ensure_reconciler` each epoch (idempotent; self-heals if it
-died), submitted by the dedicated non-superuser `df_reconciler` role, and driven
-by `pg_durable.reconciler_cron` (default `*/5 * * * *`; empty disables). It
-complements Option 3 rather than replacing it.
+**Data migration.** None. No table shapes change, and in-flight instances are
+unaffected (their queue items were already enqueued).
 
-## Upgrade & Migration
+**Rollback.** Reverting the binary restores the out-of-band enqueue; the wrappers, if
+left in place, are simply unused.
 
-**B1 — binary backward compatibility (new `.so` vs all prior schemas).** The new
-`.so` calls the enqueue entrypoint via SPI.
-- If the entrypoint is the **duroxide-pg-provided** `SECURITY DEFINER` function,
-  the BGW applies the duroxide migration at startup (`ApplyAll`,
-  src/worker.rs), and the function exists for every running worker. Backends
-  detect readiness via `_worker_ready` (existing gate) before enqueuing.
-  Versioning: bump the pinned `duroxide`/`duroxide-pg` pair together (see
-  docs/upgrade-testing.md "Updating duroxide-pg") and run `cargo update`. **No
-  `pg_durable` extension upgrade script is required** for duroxide-schema changes
-  (docs/bgw-applies-migrations.md).
-- If the entrypoint is the **`df`-schema fallback wrapper**, it is a `df` schema
-  object and **does** require an extension upgrade script
-  `sql/pg_durable--<prev>--<current>.sql` (CREATE FUNCTION + GRANT), plus the
-  fresh-install SQL, and a "Version-Specific Changes" entry in
-  docs/upgrade-testing.md. The new `.so` must still operate against older `df`
-  schemas that predate the wrapper: gate the SPI path on the wrapper's existence
-  (catalog probe) and **fall back to the existing out-of-band client enqueue**
-  when absent. This preserves B1 while the upgrade rolls out.
+**Future direction.** The privileged enqueue could move into duroxide-pg, owned by
+the runtime schema owner — cleaner layering, at the cost of a coordinated
+duroxide-pg release. The `df`-schema wrapper avoids that coordination and is what
+ships today.
 
-**Runtime schema detection.** Reuse the existing `_worker_ready` /
-`backend_duroxide_schema()` resolution. Add a one-time probe (cached per session)
-for the enqueue entrypoint; if missing (old worker), fall back to the legacy
-path. This makes the change safe under mixed binary/worker versions.
+## Validation (PostgreSQL 17)
 
-**Data migration.** None. No `df.*` or `_duroxide` table shapes change. Existing
-in-flight instances are unaffected (their queue items were already enqueued).
+Prevent:
 
-**Rollback.** Reverting the `.so` restores the out-of-band enqueue; the optional
-`df` wrapper, if added, is inert when unused.
+| Check | Result |
+|-------|:--:|
+| Committed `df.start()` runs to completion | pass |
+| Rolled-back `df.start()` leaves no `df.*` and no `_duroxide` orphan | pass |
+| Rolled-back `df.cancel()` leaves the instance running and rolls back the enqueue; committed cancel takes effect | pass |
+| Rolled-back `df.signal()` rolls back the fan-out enqueue; committed signal delivers (incl. fan-out into a sub-orchestration) | pass |
+| A caller cannot enqueue a start, cancel, or signal against a foreign or arbitrary instance; cancel/signal succeed for the owning role (incl. via `SET ROLE`) | pass |
+| Schema resolved dynamically; atomicity holds | pass |
+| E2E `07_signals`, `23_signal_in_race` (fan-out), `22_cancel_status_consistency` | 3/3 |
+| Broader E2E subset (core, conditionals, loops, variables, join, race) | pass |
 
-## Testing
+Repair:
 
-E2E (tests/e2e/sql/) and unit coverage:
+| Check | Result |
+|-------|:--:|
+| `df.reconcile()` deletes an orphan root with children, leaves sub-orchestrations and live instances intact | pass |
+| `df.reconcile()` marks a stuck instance failed | pass |
+| Reconciler auto-starts as non-superuser `df_reconciler`, stays a single instance | pass |
+| Reconciler fires on the cron schedule without spinning, and restarts after being cancelled | pass |
+| E2E subset unaffected with the reconciler running | pass |
+| `cargo fmt --check` clean; no new clippy warnings | pass |
 
-- **Atomic rollback (the leak):** `BEGIN; df.start(...); ROLLBACK;` then assert
-  **both** `df.instances` and `_duroxide.instances`/`orchestrator_queue` have no
-  row for the instance. (Today this fails: `_duroxide` keeps an orphan.)
-- **Atomic commit:** `BEGIN; df.start(...); COMMIT;` runs to completion exactly
-  as before.
-- **Subtransaction abort:** a `df.start()` inside a `BEGIN/EXCEPTION` block that
-  raises leaves no `_duroxide` orphan.
-- **PK collision (existing repro):** the short-id collision aborts cleanly with
-  no `_duroxide` residue (extends the manual `short_id_collision` repro).
-- **Worker-not-ready:** `df.start()` before `_worker_ready` errors as today.
-- **Privilege/hardened config:** a non-superuser caller (and, for the fallback
-  wrapper, a distinct `worker_role`) can start successfully and cannot insert
-  into `_duroxide.orchestrator_queue` directly.
-- **No 5 s waits:** worker logs contain no "transaction may have been rolled
-  back" entries during normal start/rollback flows.
+## Open questions
 
-## Phasing
-
-1. **Phase 1 — implemented & validated:** atomic `df.start()` via the
-   `SECURITY DEFINER` enqueue entrypoint; readiness gate + legacy fallback;
-   simplify the `load-function-graph` retry; docs + tests. Remaining for
-   production: upgrade script and entrypoint hardening.
-2. **Phase 2 — implemented & validated:** the same in-transaction enqueue for
-   `df.signal()` (root + running-descendant `ExternalRaised` fan-out) and
-   `df.cancel()` (`CancelInstance`), each via a `SECURITY DEFINER` wrapper that
-   builds the work item server-side and authorizes the caller via
-   `pg_has_role(session_user, ...)`.
-3. **Phase 3 — reconciler implemented:** `df.reconcile()` plus a built-in durable
-   cron loop (worker-managed `df_reconciler` instance on
-   `pg_durable.reconciler_cron`) are validated (auto-start, idempotency,
-   scheduled orphan GC, no self-GC). Remaining: tune the grace/cadence policy and
-   role provisioning.
-
-## Open questions / risks
-
-- **Entrypoint placement:** duroxide-pg (clean layering, coordinated release) vs
-  a `df` fallback wrapper (no duroxide-pg release, but cross-role grants in
-  hardened setups). Recommendation: duroxide-pg, with the `df` fallback retained
-  for B1 during rollout.
-- **Contract stability:** pg_durable now depends on the enqueue entrypoint
-  signature and the `WorkItem` JSON. Mitigated by reusing the `duroxide`
-  `WorkItem` type and the version-locked duroxide/duroxide-pg pair.
-- **`visible_at` clock:** the POC uses `now()` (server transaction time) for
-  immediate starts and it works; no reliance on the Rust-side `now_ms` for
-  ordering at start.
-- **Idempotency:** `enqueue_orchestrator_work` is a bare INSERT (no dedup); the
-  `df.instances`/`df.nodes` PKs already prevent duplicate instance ids within the
-  transaction, so no additional dedup is required.
+- **Enqueue placement** — keep the `df`-schema wrapper, or move it into duroxide-pg
+  (cleaner layering, but a coordinated release). The wrapper ships today; the move is
+  a future option.
+- **Contract stability** — pg_durable now depends on the enqueue function signature
+  and the `WorkItem` JSON shape. Mitigated by the version-locked
+  duroxide / duroxide-pg pair.
+- **Reconciler policy** — the grace window and cron cadence still want tuning, and
+  `df_reconciler` is created by the worker rather than provisioned externally.
