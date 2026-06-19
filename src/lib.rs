@@ -547,7 +547,7 @@ CREATE FUNCTION df._enqueue_orchestrator_start(
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
     sch       text := df.duroxide_schema();
@@ -637,7 +637,7 @@ CREATE FUNCTION df._enqueue_orchestrator_cancel(p_instance_id text, p_reason tex
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
     sch       text := df.duroxide_schema();
@@ -663,7 +663,7 @@ CREATE FUNCTION df._enqueue_orchestrator_signal(p_instance_id text, p_name text,
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
     sch       text := df.duroxide_schema();
@@ -751,7 +751,7 @@ CREATE FUNCTION df.reconcile(p_grace_seconds integer DEFAULT 60)
 RETURNS TABLE(duroxide_orphans_deleted bigint, stuck_instances_failed bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
     sch        text := df.duroxide_schema();
