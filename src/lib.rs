@@ -570,20 +570,24 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 // df.start() enqueues the StartOrchestration work item by calling this wrapper
 // via SPI, inside the caller's transaction. The duroxide orchestrator queue
 // grants INSERT to its owner only, so the privileged INSERT must run as a
-// definer that owns the _duroxide tables; the call still commits/rolls back as
+// definer that owns the duroxide tables; the call still commits/rolls back as
 // part of the caller's transaction, giving an atomic df.start().
 //
-// The body references _duroxide.enqueue_orchestrator_work, which is created by
-// the background worker's migrations (not this extension). plpgsql resolves it
-// at call time, by which point df.start()'s worker-readiness gate guarantees the
-// _duroxide schema exists.
+// PROVIDER REQUIREMENT: this path only works with the duroxide-pg (SQL-backed)
+// provider, because it calls the provider's `enqueue_orchestrator_work` SQL
+// function directly. df.start() probes for that function and falls back to the
+// provider-agnostic out-of-band client path when it is absent (see dsl::start).
+//
+// The schema is resolved dynamically via df.duroxide_schema() ('_duroxide' on
+// fresh installs, legacy 'duroxide' on upgraded ones); %I quotes the identifier.
+// The function is created by the worker's migrations (not this extension);
+// plpgsql resolves it at call time.
 //
 // SECURITY (POC): this wrapper can enqueue an arbitrary orchestrator work item.
 // EXECUTE is revoked from PUBLIC and granted only via df.grant_usage(). A
 // production version should move this entrypoint into duroxide-pg (owned by the
-// _duroxide schema owner) and/or validate the work item — see
-// docs/spec-atomic-start.md. The _duroxide schema name is also hard-coded here
-// for the POC (it is resolved dynamically elsewhere).
+// duroxide schema owner) and/or validate the work item — see
+// docs/spec-atomic-start.md.
 extension_sql!(
     r#"
 CREATE FUNCTION df._enqueue_orchestrator_start(p_instance_id text, p_work_item text)
@@ -592,14 +596,93 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $fn$
+DECLARE
+    sch text := df.duroxide_schema();
 BEGIN
-    PERFORM _duroxide.enqueue_orchestrator_work(p_instance_id, p_work_item, pg_catalog.now());
+    EXECUTE pg_catalog.format('SELECT %I.enqueue_orchestrator_work($1, $2, $3)', sch)
+        USING p_instance_id, p_work_item, pg_catalog.now();
 END;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text) FROM PUBLIC;
 "#,
     name = "atomic_start_enqueue",
+    requires = ["create_tables"]
+);
+
+// ============================================================================
+// Reconciler (Option 4) — repair residual df.* / duroxide divergence
+// ============================================================================
+//
+// Atomic df.start() prevents the rolled-back-start orphan leak at the source,
+// but some divergence can still arise: legacy orphans, the non-atomic fallback
+// path, df.signal()/df.cancel() (not yet migrated), and crashes mid-execution.
+// df.reconcile() is a best-effort garbage collector for that residue. It is
+// admin-only (EXECUTE revoked from PUBLIC) and SECURITY DEFINER so it can touch
+// the duroxide-owned tables and all users' df.instances.
+//
+// Schedule it durably (dogfooding pg_durable), e.g. every 5 minutes:
+//   SELECT df.start(
+//     @> ( 'SELECT df.reconcile()' ~> df.wait_for_schedule('*/5 * * * *') ),
+//     'reconciler');
+//
+// Only ROOT duroxide instances (parent_instance_id IS NULL) are considered —
+// sub-orchestrations (JOIN/RACE branches, loop generations) intentionally have
+// no df.instances row and must not be collected. A grace window avoids racing
+// legitimately in-flight operations.
+extension_sql!(
+    r#"
+CREATE FUNCTION df.reconcile(p_grace_seconds integer DEFAULT 60)
+RETURNS TABLE(duroxide_orphans_deleted bigint, stuck_instances_failed bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $fn$
+DECLARE
+    sch        text := df.duroxide_schema();
+    orphan_ids text[];
+    stuck      bigint := 0;
+BEGIN
+    -- 1) Root duroxide instances with no df.instances row, older than the grace
+    --    window → orphans (e.g. rolled-back starts on the fallback path). Delete.
+    EXECUTE pg_catalog.format(
+        'SELECT pg_catalog.array_agg(d.instance_id) '
+        'FROM %I.instances d '
+        'LEFT JOIN df.instances i ON i.id = d.instance_id '
+        'WHERE i.id IS NULL '
+        '  AND d.parent_instance_id IS NULL '
+        '  AND d.created_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1)',
+        sch)
+    INTO orphan_ids
+    USING p_grace_seconds;
+
+    IF orphan_ids IS NOT NULL AND pg_catalog.array_length(orphan_ids, 1) > 0 THEN
+        EXECUTE pg_catalog.format('SELECT %I.delete_instances_atomic($1, $2)', sch)
+            USING orphan_ids, true;
+    END IF;
+
+    -- 2) df.instances stuck non-terminal with no live duroxide instance and no
+    --    queued start (lost enqueue) → mark failed.
+    EXECUTE pg_catalog.format(
+        'UPDATE df.instances i '
+        'SET status = ''failed'', updated_at = pg_catalog.now() '
+        'WHERE i.status IN (''pending'', ''running'') '
+        '  AND i.updated_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+        '  AND NOT EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = i.id) '
+        '  AND NOT EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = i.id)',
+        sch, sch)
+    USING p_grace_seconds;
+    GET DIAGNOSTICS stuck = ROW_COUNT;
+
+    duroxide_orphans_deleted := COALESCE(pg_catalog.array_length(orphan_ids, 1), 0);
+    stuck_instances_failed := stuck;
+    RETURN NEXT;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df.reconcile(integer) FROM PUBLIC;
+"#,
+    name = "reconcile",
     requires = ["create_tables"]
 );
 

@@ -622,6 +622,24 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 // Orchestration Control Functions
 // ============================================================================
 
+/// True when the duroxide store exposes the SQL enqueue surface — i.e. the
+/// duroxide-pg (PostgreSQL) provider — in the given schema. Detected by the
+/// presence of `enqueue_orchestrator_work`. When false (a non-pg provider, or a
+/// schema predating the wrapper), df.start() falls back to the out-of-band
+/// client path. The catalog probe never raises, so it is safe in a backend
+/// session even when the schema is absent.
+fn in_tx_enqueue_supported(schema: &str) -> bool {
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = $1 AND p.proname = 'enqueue_orchestrator_work')",
+        &[schema.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
 /// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
 /// Variables from df.vars are captured and passed to the orchestration.
@@ -912,13 +930,6 @@ pub fn start(
     });
 
     // Start the orchestration durably.
-    //
-    // Option 3 (atomic start): the StartOrchestration work item is enqueued via
-    // SPI inside the CALLER'S transaction, so the df.nodes/df.instances INSERTs
-    // above and this orchestrator-queue INSERT commit or roll back together. A
-    // rolled-back df.start() therefore leaves no _duroxide orphan, and the worker
-    // only observes the queue row after the df.* rows are visible (which also
-    // removes the load-function-graph "wait for commit" race).
     let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
@@ -926,33 +937,63 @@ pub fn start(
     };
     let input_json = serde_json::to_string(&input).unwrap_or_else(|_| instance_id.clone());
 
-    // Fail clearly (and atomically — the df.* INSERTs roll back) if the worker
-    // has not yet initialised the duroxide schema.
-    if !crate::client::is_worker_ready() {
-        pgrx::error!("pg_durable background worker not yet initialized — try again in a moment");
-    }
+    // Prefer the atomic in-transaction enqueue (Option 3) when the duroxide-pg
+    // SQL provider is present; otherwise fall back to the provider-agnostic
+    // out-of-band client path (legacy behavior).
+    let schema = crate::types::backend_duroxide_schema();
+    if in_tx_enqueue_supported(schema) {
+        // Option 3 (atomic start): enqueue the StartOrchestration work item via
+        // SPI inside the CALLER'S transaction, so the df.nodes/df.instances
+        // INSERTs above and this orchestrator-queue INSERT commit or roll back
+        // together. A rolled-back df.start() leaves no duroxide orphan, and the
+        // worker only observes the queue row after the df.* rows are visible
+        // (which also removes the load-function-graph "wait for commit" race).
+        //
+        // Fail clearly (and atomically — the df.* INSERTs roll back) if the
+        // worker has not yet initialised the duroxide schema.
+        if !crate::client::is_worker_ready() {
+            pgrx::error!(
+                "pg_durable background worker not yet initialized — try again in a moment"
+            );
+        }
 
-    // Build the exact same work item the duroxide client would enqueue, by
-    // serializing the real duroxide type (guarantees wire compatibility).
-    let work_item = duroxide::providers::WorkItem::StartOrchestration {
-        instance: instance_id.clone(),
-        orchestration: crate::orchestrations::execute_function_graph::NAME.to_string(),
-        input: input_json,
-        version: None,
-        parent_instance: None,
-        parent_id: None,
-        execution_id: duroxide::INITIAL_EXECUTION_ID,
-    };
-    let work_item_json = serde_json::to_string(&work_item)
-        .unwrap_or_else(|e| pgrx::error!("Failed to serialize start work item: {}", e));
+        // Build the exact same work item the duroxide client would enqueue, by
+        // serializing the real duroxide type (guarantees wire compatibility).
+        let work_item = duroxide::providers::WorkItem::StartOrchestration {
+            instance: instance_id.clone(),
+            orchestration: crate::orchestrations::execute_function_graph::NAME.to_string(),
+            input: input_json,
+            version: None,
+            parent_instance: None,
+            parent_id: None,
+            execution_id: duroxide::INITIAL_EXECUTION_ID,
+        };
+        let work_item_json = serde_json::to_string(&work_item)
+            .unwrap_or_else(|e| pgrx::error!("Failed to serialize start work item: {}", e));
 
-    // SECURITY DEFINER wrapper performs the privileged orchestrator-queue INSERT
-    // on the caller's transaction. Raising on failure aborts the whole df.start.
-    if let Err(e) = Spi::run_with_args(
-        "SELECT df._enqueue_orchestrator_start($1, $2)",
-        &[instance_id.as_str().into(), work_item_json.as_str().into()],
-    ) {
-        pgrx::error!("Failed to enqueue durable function start: {:?}", e);
+        // SECURITY DEFINER wrapper performs the privileged orchestrator-queue
+        // INSERT on the caller's transaction. Raising on failure aborts df.start.
+        if let Err(e) = Spi::run_with_args(
+            "SELECT df._enqueue_orchestrator_start($1, $2)",
+            &[instance_id.as_str().into(), work_item_json.as_str().into()],
+        ) {
+            pgrx::error!("Failed to enqueue durable function start: {:?}", e);
+        }
+    } else {
+        // Fallback: no duroxide-pg SQL enqueue surface detected (a non-pg
+        // provider, or a schema predating the wrapper). Enqueue out-of-band via
+        // the duroxide client. NOTE: this is the legacy path and is NOT atomic
+        // with the caller's transaction.
+        if let Err(e) = crate::client::start_durable_function(
+            crate::orchestrations::execute_function_graph::NAME,
+            &instance_id,
+            &input_json,
+        ) {
+            pgrx::log!(
+                "pg_durable: Warning - failed to start durable function: {}",
+                e
+            );
+        }
     }
 
     instance_id
