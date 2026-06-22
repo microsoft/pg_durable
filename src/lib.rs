@@ -365,12 +365,15 @@ CREATE POLICY vars_user_isolation ON df.vars
 --
 -- Access gate: schema USAGE makes the ordinary df.* functions callable (they
 -- keep PostgreSQL's default PUBLIC EXECUTE). Sensitive functions (df.http,
--- df.grant_usage, df.revoke_usage) have PUBLIC EXECUTE revoked at install time
--- and are granted explicitly below — keep a new private function private the
--- same way (REVOKE ... FROM PUBLIC in rls_and_grants, then grant it here).
+-- df.metrics, df.grant_usage, df.revoke_usage) have PUBLIC EXECUTE revoked at
+-- install time and are granted explicitly below when appropriate — keep a new
+-- private function private the same way (REVOKE ... FROM PUBLIC in
+-- rls_and_grants, then grant it here).
 --   include_http => true  also grants EXECUTE on df.http() (opt-in: network).
---   with_grant   => true  grants everything WITH GRANT OPTION and lets the role
---                         call df.grant_usage()/df.revoke_usage() for others.
+--   with_grant   => true  marks a pg_durable admin: grants everything WITH GRANT
+--                         OPTION, lets the role call df.grant_usage()/
+--                         df.revoke_usage() for others, and grants df.metrics()
+--                         (system-wide aggregate counts).
 CREATE OR REPLACE FUNCTION df.grant_usage(
     p_role TEXT,
     include_http boolean DEFAULT false,
@@ -395,10 +398,13 @@ BEGIN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
-    -- Admin helpers — only for delegated administrators.
+    -- Admin helpers and system-wide metrics — with_grant => true marks a
+    -- pg_durable admin, so it also grants df.metrics() (cluster-wide aggregate
+    -- counts).
     IF with_grant THEN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.metrics() TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- Table privileges
@@ -431,6 +437,11 @@ BEGIN
     -- admin may lack privilege on some of these (e.g. df.http); skip those.
     BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.metrics() FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -483,15 +494,18 @@ BEGIN
     END IF;
 END $$;
 
--- df.http(), df.grant_usage() and df.revoke_usage() are sensitive (network
--- access / privilege management), so revoke PostgreSQL's default PUBLIC
--- EXECUTE. df.grant_usage() re-grants them explicitly to authorized roles.
+-- df.http(), df.metrics(), df.grant_usage() and df.revoke_usage() are sensitive
+-- (network access / system-wide monitoring / privilege management), so revoke
+-- PostgreSQL's default PUBLIC EXECUTE. df.grant_usage() re-grants the helper
+-- functions explicitly to authorized roles; df.metrics() is granted to
+-- with_grant => true admins or by a direct administrator GRANT.
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.metrics() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
-    requires = ["create_tables", dsl::http]
+    requires = ["create_tables", dsl::http, monitoring::metrics]
 );
 
 // ============================================================================

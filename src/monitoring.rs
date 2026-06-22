@@ -291,6 +291,11 @@ pub fn instance_executions(
 }
 
 /// Get system-wide durable function metrics.
+///
+/// Access is controlled by PostgreSQL function privileges. Roles with ordinary
+/// df usage can call `df.list_instances()` to see counts scoped to their own
+/// workflows; `df.metrics()` should be granted only to roles that may see
+/// system-wide aggregate counts.
 #[pg_extern(schema = "df")]
 pub fn metrics() -> TableIterator<
     'static,

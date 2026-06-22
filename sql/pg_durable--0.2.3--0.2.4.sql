@@ -38,12 +38,18 @@ DROP FUNCTION IF EXISTS df.debug_connection();
 -- access boundary while requiring maintenance on every new function and
 -- masquerading as a security allowlist.
 --
--- The sensitive functions (df.http, df.grant_usage, df.revoke_usage) had their
--- PUBLIC EXECUTE revoked at install time and were never in the list; they are
--- still granted explicitly here, so their protection is unchanged.
+-- The sensitive functions (df.http, df.grant_usage, df.revoke_usage) have
+-- PUBLIC EXECUTE revoked; df.http and the admin helpers are granted explicitly
+-- here when requested. The updated body also grants df.metrics() (system-wide
+-- aggregate counts) to with_grant => true admins.
 --
--- This CREATE OR REPLACE brings pre-existing installs in line with fresh
--- 0.2.4 installs (see src/lib.rs). The new body works against the existing
+-- Unlike a fresh 0.2.4 install, this upgrade does NOT revoke df.metrics()'s
+-- PUBLIC EXECUTE. Making df.metrics() private by default is a posture change for
+-- new installs; existing admins who want it locked down have already revoked the
+-- PUBLIC grant themselves, so we leave this install's grants as they are.
+--
+-- This CREATE OR REPLACE otherwise brings pre-existing installs in line with
+-- fresh 0.2.4 installs (see src/lib.rs). The new body works against the existing
 -- schema and changes no privileges already granted.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION df.grant_usage(
@@ -70,10 +76,13 @@ BEGIN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
-    -- Admin helpers — only for delegated administrators.
+    -- Admin helpers and system-wide metrics — with_grant => true marks a
+    -- pg_durable admin, so it also grants df.metrics() (cluster-wide aggregate
+    -- counts).
     IF with_grant THEN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.metrics() TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- Table privileges
@@ -100,10 +109,11 @@ $fn$;
 -- the role out of every ordinary df.* function.
 --
 -- The new body undoes exactly what grant_usage() grants: schema USAGE, EXECUTE
--- on the sensitive functions, and the table privileges. Note: a role granted
--- under the OLD grant_usage() (explicit per-function EXECUTE) may retain inert
--- EXECUTE entries on ordinary functions after this revoke; they are harmless
--- because schema USAGE is gone, and clear on the next drop/regrant cycle.
+-- on the sensitive functions (including df.metrics(), which grant_usage() grants
+-- to with_grant admins), and the table privileges. Note: a role granted under
+-- the OLD grant_usage() (explicit per-function EXECUTE) may retain inert EXECUTE
+-- entries on ordinary functions after this revoke; they are harmless because
+-- schema USAGE is gone.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION df.revoke_usage(p_role TEXT)
 RETURNS VOID
@@ -120,6 +130,11 @@ BEGIN
     -- admin may lack privilege on some of these (e.g. df.http); skip those.
     BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.metrics() FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;

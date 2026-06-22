@@ -1471,13 +1471,16 @@ SELECT * FROM df.instance_nodes('a1b2c3d4', 10);
 
 **Columns:** `execution_id`, `node_id`, `node_type`, `query`, `result_name`, `left_node`, `right_node`, `status`, `result`
 
-### System Metrics
+### System Metrics (Explicit Grant Required)
 
 ```sql
+-- Requires a direct admin grant; df.grant_usage() does not include it.
 SELECT * FROM df.metrics();
 ```
 
 **Columns:** `total_instances`, `running_instances`, `completed_instances`, `failed_instances`, `total_executions`, `total_events`
+
+> **Note:** `df.metrics()` returns system-wide aggregate counts across all users and is omitted from an ordinary `df.grant_usage('role')`. It is granted automatically to pg_durable admins via `df.grant_usage('role', with_grant => true)`, or you can grant EXECUTE on `df.metrics()` directly to any role that may view cluster-wide pg_durable activity. Other users can call `df.list_instances()` to view a summary of their own workflows.
 
 ### Quick Status Check
 
@@ -1667,18 +1670,22 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 |-----------|---------|-------------|
 | `p_role` | *(required)* | Target role name |
 | `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
-| `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
+| `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. Also grants EXECUTE on `df.metrics()` (system-wide aggregate counts), since `with_grant => true` designates a pg_durable admin. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
 
-The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep PostgreSQL's default `PUBLIC EXECUTE`, so granting `USAGE ON SCHEMA df` is the single access gate that makes them callable — no per-function `GRANT EXECUTE` is required. Only the **sensitive** functions (`df.http`, `df.grant_usage`, `df.revoke_usage`) have `PUBLIC EXECUTE` revoked at install time and must be granted explicitly.
+The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep PostgreSQL's default `PUBLIC EXECUTE`, so granting `USAGE ON SCHEMA df` is the single access gate that makes them callable — no per-function `GRANT EXECUTE` is required. Only the **sensitive** functions (`df.http`, `df.metrics`, `df.grant_usage`, `df.revoke_usage`) have `PUBLIC EXECUTE` revoked at install time and must be granted explicitly.
 
 ```sql
 -- Access gate: schema USAGE makes every ordinary df.* function callable
 GRANT USAGE ON SCHEMA df TO app_role;
 -- Optional: HTTP access (include_http => true)
 -- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
+
+-- Optional: system-wide metrics access (also granted automatically by
+--           df.grant_usage(role, with_grant => true))
+-- GRANT EXECUTE ON FUNCTION df.metrics() TO app_role;
 
 -- Optional: delegated administration (with_grant => true)
 -- GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO app_role;
@@ -1742,7 +1749,7 @@ To remove a role's access to pg_durable:
 SELECT df.revoke_usage('app_role');
 ```
 
-This revokes all privileges previously granted by `df.grant_usage()`. It removes schema `USAGE`, EXECUTE on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`), and the table privileges — the mirror image of what `df.grant_usage()` grants.
+This revokes all privileges previously granted by `df.grant_usage()`. It removes schema `USAGE`, EXECUTE on the sensitive functions (`df.http`, `df.metrics`, `df.grant_usage`, `df.revoke_usage`), and the table privileges. `df.metrics()` is granted only by `df.grant_usage('role', with_grant => true)` (or a direct admin GRANT); `df.revoke_usage()` always removes it, which also cleans up roles that received it from older grant helper bodies before re-granting ordinary access.
 
 There is no explicit self-revoke guard, and none is needed: PostgreSQL's `REVOKE` only removes grants made by the current role. A non-superuser therefore cannot revoke privileges another role (e.g. a superuser) granted to it, so calling `df.revoke_usage()` on your own role is harmless — it cannot lock you out of grants you didn't issue yourself.
 

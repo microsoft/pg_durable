@@ -341,7 +341,7 @@ ALTER TABLE df.vars ENABLE ROW LEVEL SECURITY;
    - `df.instance_info()`: Already queries `df.instances` via SPI for label — RLS filters automatically. Add ownership check before calling duroxide client
    - `df.instance_executions()`: Add ownership check (SPI query on `df.instances`) before calling duroxide client
    - `df.instance_nodes()`: Already queries `df.nodes` via SPI — RLS filters automatically
-   - `df.metrics()`: No change — returns aggregate counts, OK for any user
+    - `df.metrics()`: System-wide metrics remain private by default. An ordinary `df.grant_usage()` omits it, fresh installs revoke PUBLIC EXECUTE, and admins can grant EXECUTE explicitly to trusted roles. `df.grant_usage('role', with_grant => true)` (a pg_durable admin) grants it automatically. ✅ Implemented in v0.2.4.
 
 5. **Update E2E tests**
    - Remove manual grants from `00_setup_playground.sql` (now automatic)
@@ -371,7 +371,7 @@ All decisions have been resolved. No open questions remain.
 - **Decision 7 (cancel/signal ownership)**: Explicit ownership check before duroxide client call. ✅
 - **Decision 8 (auto-grants)**: No automatic grants to PUBLIC. Admins must explicitly grant privileges to application roles after `CREATE EXTENSION`. ✅ Revised (was auto-grant to PUBLIC in v0.1.1).
 - **Monitoring functions**: Rework `df.list_instances()`, `df.instance_info()`, `df.instance_executions()`, and `df.instance_nodes()` to only show the calling user's own instances. Currently these functions fetch instance IDs from the duroxide client (which returns ALL instances via the worker's connection), then join with `df.instances` for labels. With RLS, the SPI label query is already filtered — but the duroxide client still returns other users' instance IDs, causing a mismatch. Fix: query `df.instances` via SPI first (RLS-filtered), then use only those IDs when calling the duroxide client. ✅
-- **`df.metrics()`**: OK for any user — returns aggregate system-wide counts with no per-instance data. No RLS consideration needed. ✅
+- **`df.metrics()`**: Controlled by explicit EXECUTE grants (security review Finding 6, v0.2.4). `df.metrics()` exposes system-wide aggregate counts (total instances, running/completed/failed counts, total executions and events) from the duroxide store without per-user filtering. Fresh installs revoke PUBLIC EXECUTE, an ordinary `df.grant_usage()` does not grant it, `df.grant_usage('role', with_grant => true)` (a pg_durable admin) grants it WITH GRANT OPTION, and `df.revoke_usage()` removes explicit metrics grants so admins can revoke and re-grant ordinary access without metrics. Roles without explicit metrics access should use `df.list_instances()` to view a summary of their own workflows. ✅
 
 ---
 
