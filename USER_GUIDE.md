@@ -1544,6 +1544,27 @@ The background worker then connects to PostgreSQL **directly as `submitted_by`**
 
 **Important:** The captured role must have the `LOGIN` attribute, because the background worker authenticates as that role. If `current_user` lacks `LOGIN`, `df.start()` will reject the submission with an error.
 
+### SECURITY DEFINER Warning
+
+Calling `df.start()` inside a `SECURITY DEFINER` function captures the **function owner's** identity, not the caller's identity. Any SQL embedded in the `fut` argument runs later with the owner's privileges, even if an unprivileged caller supplied that SQL.
+
+**Dangerous pattern:**
+
+```sql
+-- Admin creates a wrapper owned by a privileged role
+CREATE FUNCTION run_report(q TEXT) RETURNS TEXT
+LANGUAGE SQL SECURITY DEFINER AS $$
+    SELECT df.start(df.sql(q), 'report');
+$$;
+
+-- Unprivileged caller supplies SQL that runs as the function owner
+SELECT run_report('SELECT * FROM admin_only_table');
+```
+
+This follows normal PostgreSQL `SECURITY DEFINER` semantics: inside the function, `current_user` is the function owner, and pg_durable captures that effective role at `df.start()` time.
+
+Avoid passing untrusted SQL, futures, or SQL fragments to `df.start()` from a `SECURITY DEFINER` context unless you explicitly intend the resulting workflow to run as the function owner. Prefer `SECURITY INVOKER` functions, fixed server-side workflow definitions, and explicit argument validation.
+
 ### Working with Roles
 
 Since the captured role must have `LOGIN`, you cannot use `SET ROLE` to submit workflows as a `NOLOGIN` group role. Instead, grant the necessary table privileges directly to login-capable roles:
@@ -1615,6 +1636,7 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 2. **Review df.vars usage** — Variables are scoped per-user via RLS, but avoid storing secrets in plain text
 3. **Use labels carefully** — Instance labels are visible only to the submitting user (RLS-filtered) and superusers
 4. **Monitor instances** — Superusers can use `df.list_instances()` to see all users' instances; regular users see only their own
+5. **Avoid unsafe `SECURITY DEFINER` wrappers around `df.start()`** — Never allow untrusted callers to supply SQL or futures to `df.start()` from a `SECURITY DEFINER` context unless definer-level execution is intentional.
 
 ### Privilege Grants
 
