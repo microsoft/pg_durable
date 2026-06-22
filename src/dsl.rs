@@ -12,7 +12,6 @@ use std::str::FromStr;
 use std::cell::RefCell;
 use std::time::Instant;
 
-use crate::client::start_durable_function;
 use crate::types::{
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
 };
@@ -625,15 +624,73 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
         pgrx::error!("Instance not found or access denied: {}", instance_id);
     }
 
-    match raise_external_event(instance_id, signal_name, &signal_data) {
-        Ok(_) => "OK".to_string(),
-        Err(e) => pgrx::error!("Failed to send signal: {}", e),
+    // Enqueue the ExternalRaised work item. Prefer the in-transaction SPI path
+    // (atomic with the caller's transaction; fans out to running descendants in
+    // the wrapper) when the duroxide-pg SQL surface is present; otherwise fall
+    // back to the out-of-band client path.
+    let schema = crate::types::backend_duroxide_schema();
+    if in_tx_enqueue_supported(schema) {
+        if let Err(e) = Spi::run_with_args(
+            "SELECT df._enqueue_orchestrator_signal($1, $2, $3)",
+            &[
+                instance_id.into(),
+                signal_name.into(),
+                signal_data.as_str().into(),
+            ],
+        ) {
+            pgrx::error!("Failed to send signal: {:?}", e);
+        }
+        "OK".to_string()
+    } else {
+        pgrx::log!(
+            "pg_durable: df.signal() is using the non-atomic fallback enqueue \
+             (duroxide-pg SQL surface not detected)"
+        );
+        match raise_external_event(instance_id, signal_name, &signal_data) {
+            Ok(_) => "OK".to_string(),
+            Err(e) => pgrx::error!("Failed to send signal: {}", e),
+        }
     }
 }
 
 // ============================================================================
 // Orchestration Control Functions
 // ============================================================================
+
+/// True when both required pieces of the in-transaction enqueue path exist:
+/// the duroxide-pg SQL enqueue surface in the provider schema and the df-schema
+/// SECURITY DEFINER wrappers created by the extension/upgrade script. When
+/// false (a non-pg provider, or a schema that predates the wrappers), callers
+/// fall back to the out-of-band client path. The catalog probe never raises, so
+/// it is safe in a backend session even when the schema is absent.
+fn in_tx_enqueue_supported(schema: &str) -> bool {
+    Spi::get_one_with_args::<bool>(
+        "SELECT \
+            EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                   JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                   WHERE n.nspname = $1 \
+                     AND p.proname = 'enqueue_orchestrator_work') \
+            AND EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                       WHERE n.nspname = 'df' \
+                         AND p.proname = '_enqueue_orchestrator_start' \
+                         AND p.pronargs = 3) \
+            AND EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                       WHERE n.nspname = 'df' \
+                         AND p.proname = '_enqueue_orchestrator_cancel' \
+                         AND p.pronargs = 2) \
+            AND EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                       WHERE n.nspname = 'df' \
+                         AND p.proname = '_enqueue_orchestrator_signal' \
+                         AND p.pronargs = 3)",
+        &[schema.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
 
 /// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
@@ -924,24 +981,70 @@ pub fn start(
         vars
     });
 
-    // Start the orchestration via duroxide
+    // Start the orchestration durably.
     let input = FunctionInput {
         instance_id: instance_id.clone(),
         label: label.map(|s| s.to_string()),
         vars,
         loop_iteration: 0,
     };
-    let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
+    let input_json = serde_json::to_string(&input).unwrap_or_else(|_| instance_id.clone());
 
-    if let Err(e) = start_durable_function(
-        crate::orchestrations::execute_function_graph::NAME,
-        &instance_id,
-        &input_json,
-    ) {
+    // Prefer the atomic in-transaction enqueue (Option 3) when the duroxide-pg
+    // SQL provider is present; otherwise fall back to the provider-agnostic
+    // out-of-band client path (legacy behavior).
+    let schema = crate::types::backend_duroxide_schema();
+    if in_tx_enqueue_supported(schema) {
+        // Option 3 (atomic start): enqueue the StartOrchestration work item via
+        // SPI inside the CALLER'S transaction, so the df.nodes/df.instances
+        // INSERTs above and this orchestrator-queue INSERT commit or roll back
+        // together. A rolled-back df.start() leaves no duroxide orphan, and the
+        // worker only observes the queue row after the df.* rows are visible
+        // (which also removes the load-function-graph "wait for commit" race).
+        //
+        // Fail clearly (and atomically — the df.* INSERTs roll back) if the
+        // worker has not yet initialised the duroxide schema.
+        if !crate::client::is_worker_ready() {
+            pgrx::error!(
+                "pg_durable background worker not yet initialized — try again in a moment"
+            );
+        }
+
+        // The SECURITY DEFINER wrapper builds the StartOrchestration work item
+        // server-side from these trusted arguments (the caller cannot choose the
+        // work-item variant or target a foreign instance) and performs the
+        // privileged orchestrator-queue INSERT on the caller's transaction.
+        // Raising on failure aborts the whole df.start atomically.
+        if let Err(e) = Spi::run_with_args(
+            "SELECT df._enqueue_orchestrator_start($1, $2, $3)",
+            &[
+                instance_id.as_str().into(),
+                crate::orchestrations::execute_function_graph::NAME.into(),
+                input_json.as_str().into(),
+            ],
+        ) {
+            pgrx::error!("Failed to enqueue durable function start: {:?}", e);
+        }
+    } else {
+        // Fallback: no duroxide-pg SQL enqueue surface detected (a non-pg
+        // provider, or a schema predating the wrapper). Enqueue out-of-band via
+        // the duroxide client. NOTE: this path is NOT atomic with the caller's
+        // transaction — a rollback will NOT undo the start. Warn so the
+        // non-atomic semantics are observable.
         pgrx::log!(
-            "pg_durable: Warning - failed to start durable function: {}",
-            e
+            "pg_durable: df.start() is using the non-atomic fallback enqueue \
+             (duroxide-pg SQL surface not detected); a rollback will not undo this start"
         );
+        if let Err(e) = crate::client::start_durable_function(
+            crate::orchestrations::execute_function_graph::NAME,
+            &instance_id,
+            &input_json,
+        ) {
+            pgrx::log!(
+                "pg_durable: Warning - failed to start durable function: {}",
+                e
+            );
+        }
     }
 
     instance_id
@@ -965,8 +1068,26 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
         pgrx::error!("Instance not found or access denied: {}", instance_id);
     }
 
-    if let Err(e) = cancel_durable_function(instance_id, reason) {
-        return format!("Failed to cancel: {e}");
+    // Enqueue the CancelInstance work item and flip the status mirror together.
+    // On the in-transaction path the enqueue and the status UPDATE commit
+    // atomically (no df.* / duroxide divergence on cancel); otherwise fall back
+    // to the out-of-band client path.
+    let schema = crate::types::backend_duroxide_schema();
+    if in_tx_enqueue_supported(schema) {
+        if let Err(e) = Spi::run_with_args(
+            "SELECT df._enqueue_orchestrator_cancel($1, $2)",
+            &[instance_id.into(), reason.into()],
+        ) {
+            pgrx::error!("Failed to cancel: {:?}", e);
+        }
+    } else {
+        pgrx::log!(
+            "pg_durable: df.cancel() is using the non-atomic fallback enqueue \
+             (duroxide-pg SQL surface not detected)"
+        );
+        if let Err(e) = cancel_durable_function(instance_id, reason) {
+            return format!("Failed to cancel: {e}");
+        }
     }
 
     // Update the instance status to 'cancelled' via SPI only when the instance is not

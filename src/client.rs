@@ -36,7 +36,7 @@ thread_local! {
 /// row, or has a `schema_version` below `WORKER_SCHEMA_VERSION`. This is a fast
 /// SPI read called once per session on the first call to any `df.*` function
 /// that needs the duroxide client.
-fn is_worker_ready() -> bool {
+pub(crate) fn is_worker_ready() -> bool {
     let schema = backend_duroxide_schema();
 
     // First check if the readiness table exists via the catalogue.  Querying
@@ -194,7 +194,10 @@ async fn list_running_descendants(client: &Client, root_instance_id: &str) -> Ve
     descendants
 }
 
-/// Start a durable function via the shared PostgreSQL store.
+/// Start a durable function via the duroxide client (out-of-band, on the cached
+/// pool). This is the provider-agnostic fallback used by df.start() when the
+/// duroxide-pg SQL enqueue surface is not available; it is NOT atomic with the
+/// caller's transaction.
 pub fn start_durable_function(
     function_name: &str,
     instance_id: &str,

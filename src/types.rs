@@ -353,25 +353,29 @@ pub fn worker_provider_config(
     config
 }
 
-/// Calculate the duration until the next cron schedule match
-pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
+/// Calculate the duration until the next cron schedule match, relative to a
+/// caller-supplied `now`. Used by the WAIT_SCHEDULE node executor with the
+/// orchestration's deterministic clock so a looped `df.wait_for_schedule` waits
+/// until the *next* tick each generation instead of replaying a fixed offset.
+pub fn calculate_cron_wait_from(cron_expr: &str, now: DateTime<Utc>) -> Result<Duration, String> {
     let cron_with_seconds = format!("0 {cron_expr}");
 
     let schedule = CronSchedule::from_str(&cron_with_seconds)
         .map_err(|e| format!("Invalid cron expression '{cron_expr}': {e}"))?;
 
-    let now: DateTime<Utc> = Utc::now();
-
     let next = schedule
-        .upcoming(Utc)
+        .after(&now)
         .next()
         .ok_or_else(|| "No upcoming schedule found".to_string())?;
 
-    let duration = (next - now)
+    (next - now)
         .to_std()
-        .map_err(|_| "Failed to calculate wait duration".to_string())?;
+        .map_err(|_| "Failed to calculate wait duration".to_string())
+}
 
-    Ok(duration)
+/// Calculate the duration until the next cron schedule match
+pub fn calculate_cron_wait(cron_expr: &str) -> Result<Duration, String> {
+    calculate_cron_wait_from(cron_expr, Utc::now())
 }
 
 /// Evaluate a condition result to determine if it's truthy.

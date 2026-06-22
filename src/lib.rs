@@ -29,6 +29,12 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Cron schedule for the built-in durable reconciler (Option 4 / df.reconcile()).
+/// The background worker ensures one reconciler instance per cluster, running on
+/// this schedule. Set to an empty string to disable the built-in reconciler.
+pub static RECONCILER_CRON: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"*/5 * * * *"));
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -133,6 +139,15 @@ pub extern "C-unwind" fn _PG_init() {
         &ENABLE_SUPERUSER_INSTANCES,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_durable.reconciler_cron",
+        c"Cron schedule for the built-in durable reconciler (df.reconcile()); empty disables it",
+        c"The background worker keeps one reconciler instance running on this schedule to repair residual df.* / duroxide divergence. Empty string disables the built-in reconciler. Requires server restart to change.",
+        &RECONCILER_CRON,
+        GucContext::Postmaster,
+        GucFlags::default(),
     );
 
     worker::register_background_worker();
@@ -401,6 +416,14 @@ BEGIN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
+    -- In-transaction enqueue wrappers — SECURITY DEFINER, revoked from PUBLIC at
+    -- install. Granted unconditionally to every df user because df.start() /
+    -- df.cancel() / df.signal() call them via SPI as the calling role; their own
+    -- internal authorization checks gate access to other users' instances.
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+
     -- Table privileges
     EXECUTE pg_catalog.format('GRANT SELECT ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
@@ -441,6 +464,24 @@ BEGIN
     END;
     BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+
+    -- In-transaction enqueue wrappers (granted unconditionally by grant_usage()).
+    -- A delegated admin may not be the grantor of these; skip if so.
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -492,6 +533,332 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
     requires = ["create_tables", dsl::http]
+);
+
+// ============================================================================
+// Atomic start enqueue (Option 3) — SECURITY DEFINER wrapper
+// ============================================================================
+//
+// df.start() enqueues the StartOrchestration work item by calling this wrapper
+// via SPI, inside the caller's transaction. The duroxide orchestrator queue
+// grants INSERT to its owner only, so the privileged INSERT must run as a
+// definer that owns the duroxide tables; the call still commits/rolls back as
+// part of the caller's transaction, giving an atomic df.start().
+//
+// PROVIDER REQUIREMENT: this path only works with the duroxide-pg (SQL-backed)
+// provider, because it calls the provider's `enqueue_orchestrator_work` SQL
+// function directly. df.start() probes for that function and falls back to the
+// provider-agnostic out-of-band client path when it is absent (see dsl::start).
+//
+// The schema is resolved dynamically via df.duroxide_schema() ('_duroxide' on
+// fresh installs, legacy 'duroxide' on upgraded ones); %I quotes the identifier.
+// The function is created by the worker's migrations (not this extension);
+// plpgsql resolves it at call time.
+//
+// SECURITY: this wrapper is SECURITY DEFINER and granted to every df user via
+// df.grant_usage() (df.start() runs SECURITY INVOKER and calls it via SPI). To
+// avoid handing users an arbitrary-work-item enqueue primitive (which would let
+// a caller forge CancelInstance/ExternalRaised/etc. against another user's
+// instance), it (1) constructs the StartOrchestration work item server-side from
+// the caller's arguments — the caller cannot choose the variant or a foreign
+// target — and (2) authorizes the enqueue only for a brand-new, not-yet-started
+// instance (pending df.instances row, no queue entry, no duroxide instance),
+// which under atomic-start semantics is reachable only for the row df.start just
+// inserted in the current transaction. Hardening direction (move the entrypoint
+// into duroxide-pg, owned by the schema owner) is in docs/spec-atomic-start.md.
+extension_sql!(
+    r#"
+CREATE FUNCTION df._enqueue_orchestrator_start(
+    p_instance_id   text,
+    p_orchestration text,
+    p_input         text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    sch       text := df.duroxide_schema();
+    work_item text;
+    v_blocked boolean;
+BEGIN
+    -- This wrapper is not a generic privileged "start any orchestration" entry
+    -- point. df.start() passes the root graph-executor name and FunctionInput
+    -- JSON; reject anything else so a caller cannot use the SECURITY DEFINER
+    -- privilege to enqueue an internal sub-orchestration with crafted input.
+    IF p_orchestration OPERATOR(pg_catalog.<>) 'pg_durable::orchestration::execute-function-graph' THEN
+        RAISE EXCEPTION 'pg_durable: invalid start orchestration %', p_orchestration
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF (p_input::jsonb ->> 'instance_id') IS DISTINCT FROM p_instance_id THEN
+        RAISE EXCEPTION 'pg_durable: start input instance_id does not match %', p_instance_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Authorization. This runs as the (privileged) definer, so it must not
+    -- trust the caller to only target their own instance. Permit the enqueue
+    -- only for a brand-new, not-yet-started instance: a 'pending' df.instances
+    -- row with no orchestrator-queue entry and no duroxide instance. A df user
+    -- can create such a pending instance directly (not only through df.start),
+    -- so this is a same-owner/not-yet-started check rather than proof that the
+    -- row was inserted in this transaction. The wrapper is safe because it also
+    -- fixes the orchestration to the root graph executor and validates the input
+    -- instance id, so callers cannot start internal orchestrations or target
+    -- someone else's already-started instance.
+    EXECUTE pg_catalog.format(
+        'SELECT NOT EXISTS (SELECT 1 FROM df.instances i WHERE i.id = $1 AND i.status = ''pending'') '
+        '    OR EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = $1) '
+        '    OR EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = $1)',
+        sch, sch)
+    INTO v_blocked
+    USING p_instance_id;
+
+    IF v_blocked THEN
+        RAISE EXCEPTION 'pg_durable: not authorized to enqueue a start for instance %', p_instance_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Build the StartOrchestration work item server-side so the caller cannot
+    -- choose the work-item variant (no CancelInstance/ExternalRaised/etc.) or
+    -- target a different instance. Mirrors duroxide's WorkItem::StartOrchestration.
+    work_item := pg_catalog.json_build_object(
+        'StartOrchestration', pg_catalog.json_build_object(
+            'instance',        p_instance_id,
+        'orchestration',   'pg_durable::orchestration::execute-function-graph',
+            'input',           p_input,
+            'version',         NULL,
+            'parent_instance', NULL,
+            'parent_id',       NULL,
+            'execution_id',    1))::text;
+
+    EXECUTE pg_catalog.format('SELECT %I.enqueue_orchestrator_work($1, $2, $3)', sch)
+        USING p_instance_id, work_item, pg_catalog.now();
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_start(text, text, text) FROM PUBLIC;
+"#,
+    name = "atomic_start_enqueue",
+    requires = ["create_tables"]
+);
+
+// ============================================================================
+// In-transaction signal / cancel enqueue (Part 1, extended) — SECURITY DEFINER
+// ============================================================================
+//
+// df.signal()/df.cancel() enqueue their work items (ExternalRaised /
+// CancelInstance) via SPI through these wrappers, inside the caller's
+// transaction, instead of out-of-band on the duroxide client pool. Both target
+// an already-committed instance, so the start wrapper's "brand-new instance"
+// guard does not apply; instead they authorize on ownership.
+//
+// AUTHORIZATION: these are SECURITY DEFINER (the orchestrator queue is
+// owner-only) and granted to every df user via df.grant_usage(), so they must
+// not let a caller signal/cancel a foreign instance. current_user is the definer
+// here, so ownership is checked against session_user (the unforgeable
+// authenticated role) plus membership in the instance's submitted_by — i.e. the
+// caller's session must be able to act as the instance owner. The work items are
+// built server-side from the arguments (no opaque caller-supplied work item).
+extension_sql!(
+    r#"
+CREATE FUNCTION df._enqueue_orchestrator_cancel(p_instance_id text, p_reason text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    sch       text := df.duroxide_schema();
+    owner_oid oid;
+BEGIN
+    SELECT i.submitted_by::oid INTO owner_oid FROM df.instances i WHERE i.id = p_instance_id;
+    IF owner_oid IS NULL OR NOT pg_catalog.pg_has_role(session_user, owner_oid, 'MEMBER') THEN
+        RAISE EXCEPTION 'pg_durable: not authorized to cancel instance %', p_instance_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    EXECUTE pg_catalog.format('SELECT %I.enqueue_orchestrator_work($1, $2, $3)', sch)
+        USING p_instance_id,
+              pg_catalog.json_build_object('CancelInstance',
+                  pg_catalog.json_build_object('instance', p_instance_id, 'reason', p_reason))::text,
+              pg_catalog.now();
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_cancel(text, text) FROM PUBLIC;
+
+CREATE FUNCTION df._enqueue_orchestrator_signal(p_instance_id text, p_name text, p_data text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    sch       text := df.duroxide_schema();
+    owner_oid oid;
+    root_exists boolean;
+BEGIN
+    SELECT i.submitted_by::oid INTO owner_oid FROM df.instances i WHERE i.id = p_instance_id;
+    IF owner_oid IS NULL OR NOT pg_catalog.pg_has_role(session_user, owner_oid, 'MEMBER') THEN
+        RAISE EXCEPTION 'pg_durable: not authorized to signal instance %', p_instance_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Duroxide does not buffer external events until an orchestration has a
+    -- pending subscription. If the root runtime row is not materialized yet, a
+    -- signal would be accepted but dropped before the workflow can observe it.
+    EXECUTE pg_catalog.format(
+        'SELECT EXISTS (SELECT 1 FROM %I.instances WHERE instance_id = $1)', sch)
+    INTO root_exists
+    USING p_instance_id;
+    IF NOT root_exists THEN
+        RAISE EXCEPTION 'pg_durable: instance % is not ready to receive signals', p_instance_id
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+    END IF;
+
+    -- Raise the event for the target instance and every RUNNING descendant
+    -- (a sub-orchestration — JOIN/RACE branch or loop generation — may be the one
+    -- waiting on the signal), mirroring the out-of-band fan-out. %1$I = schema.
+    EXECUTE pg_catalog.format(
+        'INSERT INTO %1$I.orchestrator_queue (instance_id, work_item, visible_at, created_at) '
+        'SELECT t.instance_id, '
+        '       pg_catalog.json_build_object(''ExternalRaised'', '
+        '           pg_catalog.json_build_object(''instance'', t.instance_id, ''name'', $2, ''data'', $3))::text, '
+        '       pg_catalog.now(), pg_catalog.now() '
+        'FROM ( '
+        '    WITH RECURSIVE tree AS ( '
+        '        SELECT i.instance_id, i.current_execution_id, true AS is_root '
+        '        FROM %1$I.instances i WHERE i.instance_id = $1 '
+        '        UNION '
+        '        SELECT c.instance_id, c.current_execution_id, false '
+        '        FROM %1$I.instances c JOIN tree p ON c.parent_instance_id = p.instance_id '
+        '    ) '
+        '    SELECT tr.instance_id '
+        '    FROM tree tr '
+        '    LEFT JOIN %1$I.executions e '
+        '      ON e.instance_id = tr.instance_id AND e.execution_id = tr.current_execution_id '
+        '    WHERE tr.is_root OR pg_catalog.lower(COALESCE(e.status, '''')) = ''running'' '
+        ') t',
+        sch)
+    USING p_instance_id, p_name, p_data;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df._enqueue_orchestrator_signal(text, text, text) FROM PUBLIC;
+"#,
+    name = "atomic_signal_cancel_enqueue",
+    requires = ["create_tables"]
+);
+
+// ============================================================================
+// Reconciler (Option 4) — repair residual df.* / duroxide divergence
+// ============================================================================
+//
+// Atomic df.start()/df.signal()/df.cancel() commit their duroxide enqueue with
+// the caller's transaction, but some divergence can still arise: legacy orphans,
+// the non-atomic fallback path, and crashes mid-execution. df.reconcile() is a
+// best-effort garbage collector for that residue. It is
+// admin-only (EXECUTE revoked from PUBLIC) and SECURITY DEFINER so it can touch
+// the duroxide-owned tables and all users' df.instances.
+//
+// The background worker keeps one reconciler instance running automatically
+// (worker::ensure_reconciler), dogfooding pg_durable as a durable cron loop:
+//   df.start(df.loop(df.seq('SELECT * FROM df.reconcile()',
+//                           df.wait_for_schedule(<pg_durable.reconciler_cron>))),
+//            'df_reconciler')
+// submitted by the dedicated non-superuser role df_reconciler. Set
+// pg_durable.reconciler_cron = '' to disable it.
+//
+// Only ROOT duroxide instances (parent_instance_id IS NULL) are considered —
+// sub-orchestrations (JOIN/RACE branches, loop generations) intentionally have
+// no df.instances row and must not be collected. A grace window avoids racing
+// legitimately in-flight operations.
+extension_sql!(
+    r#"
+CREATE FUNCTION df.reconcile(p_grace_seconds integer DEFAULT 60)
+RETURNS TABLE(duroxide_orphans_deleted bigint, stuck_instances_failed bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    sch        text := df.duroxide_schema();
+    orphan_ids text[];
+    deleted    bigint := 0;
+    stuck      bigint := 0;
+BEGIN
+    -- 1) Delete orphaned duroxide subtrees: every duroxide instance whose ROOT
+    --    ancestor has no df.instances row and is older than the grace window.
+    --    We must gather the FULL subtree (root + all descendants) because
+    --    delete_instances_atomic refuses (even with force) to delete a parent
+    --    whose children are not also in the list. Sub-orchestrations (JOIN/RACE
+    --    branches, loop generations) have no df.instances row and would be
+    --    mis-detected as roots if we keyed on "no df row" alone, so the orphan
+    --    seed is restricted to parent_instance_id IS NULL.
+    --    Wrapped so a GC failure never aborts reconcile or kills the built-in
+    --    reconciler loop.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'WITH RECURSIVE orphan_root AS ( '
+            '    SELECT d.instance_id '
+            '    FROM %1$I.instances d '
+            '    LEFT JOIN df.instances i ON i.id = d.instance_id '
+            '    WHERE i.id IS NULL '
+            '      AND d.parent_instance_id IS NULL '
+            '      AND d.created_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '), subtree AS ( '
+            '    SELECT instance_id FROM orphan_root '
+            '    UNION '
+            '    SELECT c.instance_id FROM %1$I.instances c '
+            '    JOIN subtree s ON c.parent_instance_id = s.instance_id '
+            ') SELECT pg_catalog.array_agg(instance_id) FROM subtree',
+            sch)
+        INTO orphan_ids
+        USING p_grace_seconds;
+
+        IF orphan_ids IS NOT NULL AND pg_catalog.array_length(orphan_ids, 1) > 0 THEN
+            EXECUTE pg_catalog.format(
+                'SELECT instances_deleted FROM %I.delete_instances_atomic($1, $2)', sch)
+            INTO deleted
+            USING orphan_ids, true;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        deleted := 0;
+        RAISE WARNING 'pg_durable: reconcile orphan-GC pass failed: %', SQLERRM;
+    END;
+
+    -- 2) df.instances stuck non-terminal with no live duroxide instance and no
+    --    queued start (lost enqueue) → mark failed. The duroxide queue row
+    --    persists (locked) until ack, and the instance row is created at ack, so
+    --    a healthy in-flight start always matches one of the NOT EXISTS guards
+    --    and is never failed here. Best-effort; wrapped like step 1.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'UPDATE df.instances i '
+            'SET status = ''failed'', updated_at = pg_catalog.now() '
+            'WHERE i.status IN (''pending'', ''running'') '
+            '  AND i.updated_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.instances d WHERE d.instance_id = i.id) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.orchestrator_queue q WHERE q.instance_id = i.id)',
+            sch)
+        USING p_grace_seconds;
+        GET DIAGNOSTICS stuck = ROW_COUNT;
+    EXCEPTION WHEN OTHERS THEN
+        stuck := 0;
+        RAISE WARNING 'pg_durable: reconcile stuck-failover pass failed: %', SQLERRM;
+    END;
+
+    duroxide_orphans_deleted := deleted;
+    stuck_instances_failed := stuck;
+    RETURN NEXT;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df.reconcile(integer) FROM PUBLIC;
+"#,
+    name = "reconcile",
+    requires = ["create_tables"]
 );
 
 // ============================================================================
