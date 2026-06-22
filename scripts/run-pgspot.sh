@@ -28,9 +28,15 @@ PGSPOT_VENV="${PGSPOT_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/pg_durable/pgspot-ve
 # future unsafe instance of the same code still fails. Anything unmatched -- plus
 # unknowns, fatals, and unexplained non-zero exits -- fails the gate.
 PGSPOT_ALLOW=(
-  # pgrx emits `CREATE SCHEMA IF NOT EXISTS df` from #[pg_schema]; the IF NOT
-  # EXISTS (what PS010 flags) isn't controllable from source. Only df is allowed;
-  # any other PS010 still fails. Schemas we control omit IF NOT EXISTS.
+  # The real df schema is created by our `bootstrap` block as a plain
+  # `CREATE SCHEMA df` (no IF NOT EXISTS), so squatting fails loud. pgrx then
+  # additionally emits a redundant `CREATE SCHEMA IF NOT EXISTS df` from
+  # #[pg_schema] (required so df-qualified externs resolve); that line is a pure
+  # no-op since bootstrap already created df. The IF NOT EXISTS string isn't
+  # controllable from source and the line can't be removed without
+  # post-processing the generated SQL, so we allow this single PS010 finding.
+  # Only df is allowed; any other PS010 still fails. Schemas we control omit
+  # IF NOT EXISTS.
   '^PS010: Unsafe schema creation: df at line [0-9]+$'
   # pg_durable's DSL intentionally exposes unqualified custom operators (for
   # example, `df.sql(...) ~> df.sql(...)`) so users do not need df in search_path.
