@@ -531,19 +531,17 @@ ORDER BY t.typname;
 
 -- Constraints
 SELECT 'constraint' AS obj_type,
-       tc.table_name,
-       tc.constraint_name,
-       tc.constraint_type,
-       string_agg(kcu.column_name, ', ' ORDER BY kcu.ordinal_position) AS columns,
-       '' AS extra1,
+       rel.relname AS table_name,
+       con.conname AS constraint_name,
+       con.contype::text AS constraint_type,
+       pg_get_constraintdef(con.oid) AS definition,
+       con.convalidated::text AS validated,
        '' AS extra2
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name
-  AND tc.table_schema = kcu.table_schema
-WHERE tc.table_schema = 'df'
-GROUP BY tc.table_name, tc.constraint_name, tc.constraint_type
-ORDER BY tc.table_name, tc.constraint_name;
+FROM pg_constraint con
+JOIN pg_class rel ON rel.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = rel.relnamespace
+WHERE n.nspname = 'df'
+ORDER BY rel.relname, con.conname;
 
 -- RLS policies
 SELECT 'policy' AS obj_type,
