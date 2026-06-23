@@ -906,6 +906,24 @@ mod tests {
         let json = crate::dsl::wait_for_schedule("*/5 * * * *");
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "WAIT_SCHEDULE");
+
+        // The node stores only the cron expression; the next tick is computed at
+        // execution time, so there must be no pre-computed wait baked in at DSL time.
+        let config: serde_json::Value =
+            serde_json::from_str(fut.query.as_ref().expect("query must be set")).unwrap();
+        assert_eq!(
+            config["cron_expr"].as_str(),
+            Some("*/5 * * * *"),
+            "cron_expr should be preserved"
+        );
+        assert!(
+            config.get("wait_seconds").is_none(),
+            "config must not pre-compute wait_seconds at DSL time"
+        );
+        assert!(
+            config.get("target_timestamp").is_none(),
+            "config must not pre-compute a target_timestamp at DSL time"
+        );
     }
 
     #[pg_test]

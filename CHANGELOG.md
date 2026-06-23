@@ -8,6 +8,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Changed
 
+- **`df.wait_for_schedule()` cron timing:** the next cron tick is now computed at execution time using duroxide's deterministic clock (`ctx.utc_now()`) inside the `execute_function_graph` orchestration, instead of being pre-computed at `df.start()` time. This makes recurring `@>` schedules and any start-to-execution delay target the correct upcoming tick (#130).
+
+  > ⚠️ **Replay-breaking for in-flight `wait_for_schedule` instances.** This change adds a recorded `utc_now()` decision before the WAIT_SCHEDULE timer, altering the orchestration's history sequence. Any durable function that was started under a `<= 0.2.3` binary and is **mid-`wait_for_schedule`** (parked on its timer) when this `.so` is loaded will fail with a duroxide nondeterminism error on replay, because its recorded history no longer matches the new code. Drain or allow such in-flight `wait_for_schedule` instances to complete before upgrading. Instances that are not currently inside a `wait_for_schedule` node are unaffected. We accepted this break (rather than introducing orchestration versioning) given the early pre-1.0 stage of the project.
+
 - **`df.grant_usage()` / `df.revoke_usage()`:** dropped the explicit per-function `EXECUTE` allowlist. Schema `USAGE` on `df` is the real access gate for ordinary `df.*` functions, so the helpers now grant/revoke schema `USAGE`, the table privileges, and `EXECUTE` only on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`). Function signatures are unchanged and existing privileges are unaffected (#242).
 
 ### Removed

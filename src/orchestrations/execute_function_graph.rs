@@ -9,8 +9,11 @@
 //! - Same input must always produce the same scheduling decisions
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use cron::Schedule as CronSchedule;
 use duroxide::OrchestrationContext;
 
 use crate::activities;
@@ -509,20 +512,50 @@ async fn execute_wait_schedule_node(
         .as_ref()
         .ok_or_else(|| format!("WAIT_SCHEDULE node {node_id} has no config"))?;
 
-    // Parse pre-computed config from DSL time
     let config: serde_json::Value = serde_json::from_str(config_str)
         .map_err(|e| format!("Invalid WAIT_SCHEDULE config: {e}"))?;
 
-    let wait_seconds = config["wait_seconds"]
-        .as_u64()
-        .ok_or_else(|| "WAIT_SCHEDULE missing wait_seconds".to_string())?;
+    let cron_expr = config["cron_expr"]
+        .as_str()
+        .ok_or_else(|| "WAIT_SCHEDULE missing cron_expr".to_string())?;
 
-    let cron_expr = config["cron_expr"].as_str().unwrap_or("?");
+    // A cron schedule is a function of "now", so the next tick MUST be computed
+    // when this node actually executes — not at df.start() time — so that any
+    // delay before execution, and every iteration of a recurring `@>` loop,
+    // targets the correct upcoming tick.
+    //
+    // `ctx.utc_now()` is duroxide's deterministic clock (the only sanctioned way
+    // to read wall-clock time in this deterministic file): the value is recorded
+    // in history and replayed verbatim. The cron math below is pure given `now`,
+    // so the whole computation is replay-safe. The "0 " prefix supplies the
+    // seconds field the `cron` crate expects (mirrors df.wait_for_schedule()).
+    let now: DateTime<Utc> = ctx
+        .utc_now()
+        .await
+        .map_err(|e| format!("WAIT_SCHEDULE failed to read deterministic clock: {e}"))?
+        .into();
+
+    let cron_with_seconds = format!("0 {cron_expr}");
+    let schedule = CronSchedule::from_str(&cron_with_seconds)
+        .map_err(|e| format!("Invalid cron expression '{cron_expr}': {e}"))?;
+    let next = schedule
+        .after(&now)
+        .next()
+        .ok_or_else(|| format!("No upcoming schedule found for '{cron_expr}'"))?;
+
+    // Clamp to zero if the tick is already in the past by the time we get here.
+    //
+    // NOTE: once duroxide gains an absolute-deadline timer
+    // (https://github.com/microsoft/duroxide/issues/34), this `now`-read +
+    // subtraction can be replaced with `ctx.schedule_timer_until(next)`, which
+    // targets the absolute tick directly and drops the extra utc_now() syscall.
+    let wait = (next - now).to_std().unwrap_or(Duration::ZERO);
 
     ctx.trace_info(format!(
-        "Waiting {wait_seconds} seconds until schedule: {cron_expr}"
+        "Waiting {}s until next schedule tick {next} (cron: {cron_expr})",
+        wait.as_secs()
     ));
-    ctx.schedule_timer(Duration::from_secs(wait_seconds)).await;
+    ctx.schedule_timer(wait).await;
 
     Ok(r#"{"scheduled": true}"#.to_string())
 }

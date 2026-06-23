@@ -3,7 +3,6 @@
 
 //! DSL functions for defining durable SQL functions
 
-use chrono::Utc;
 use cron::Schedule as CronSchedule;
 use pgrx::datum::DatumWithOid;
 use pgrx::prelude::*;
@@ -272,29 +271,29 @@ pub fn sleep(seconds: i64) -> String {
 }
 
 /// Creates a wait-for-schedule node that waits until the next cron match.
-/// The wait duration is computed at DSL time (when this function is called)
-/// to ensure deterministic replay in the orchestration.
+///
+/// The cron expression is only *validated* here (at DSL time) so an invalid
+/// expression fails fast at `df.start()`. The actual "next tick" is computed at
+/// execution time inside the orchestration (see `execute_wait_schedule_node`),
+/// using duroxide's deterministic clock. This is intentional: a cron schedule is
+/// a function of the current wall-clock time, so it must be evaluated when the
+/// node actually runs — not at `df.start()` time — otherwise any delay between
+/// `df.start()` and execution (and, critically, every iteration of a recurring
+/// `@>` loop) would wake at the wrong moment. Only the cron expression is stored
+/// in the node config.
 #[pg_extern(schema = "df")]
 pub fn wait_for_schedule(cron_expr: &str) -> String {
+    // Validate eagerly so a bad expression is rejected at df.start() time. The
+    // "0 " prefix supplies the seconds field the `cron` crate expects; the same
+    // prefix is re-applied at execution time when the schedule is recomputed.
     let cron_with_seconds = format!("0 {cron_expr}");
-    let schedule = match CronSchedule::from_str(&cron_with_seconds) {
-        Ok(s) => s,
-        Err(e) => pgrx::error!("Invalid cron expression '{}': {}", cron_expr, e),
-    };
+    if let Err(e) = CronSchedule::from_str(&cron_with_seconds) {
+        pgrx::error!("Invalid cron expression '{}': {}", cron_expr, e);
+    }
 
-    // Compute wait duration NOW (at DSL time) for deterministic orchestration replay
-    let now = Utc::now();
-    let next = match schedule.upcoming(Utc).next() {
-        Some(t) => t,
-        None => pgrx::error!("No upcoming schedule found for '{}'", cron_expr),
-    };
-
-    let duration_secs = (next - now).num_seconds().max(0) as u64;
-
-    // Store pre-computed seconds, not the cron expression
+    // Store only the cron expression. The wait is computed at execution time.
     let config = serde_json::json!({
         "cron_expr": cron_expr,
-        "wait_seconds": duration_secs
     });
 
     Durofut {
