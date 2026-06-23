@@ -50,6 +50,15 @@ PGSPOT_ALLOW=(
   # object, so this is safe. Scoped to these two functions only.
   '^PS002: Unsafe function creation: df\.grant_usage\(p_role text,include_http boolean,with_grant boolean\) at line [0-9]+$'
   '^PS002: Unsafe function creation: df\.revoke_usage\(p_role text\) at line [0-9]+$'
+  # Upgrade scripts create idx_instances_created_at_desc_id on df.instances. As
+  # with PS002 above, pgspot flags PS014 only because a standalone upgrade script
+  # has no `CREATE SCHEMA df` to prove df.instances is extension-owned (the
+  # install SQL does, so the same CREATE INDEX is not flagged there). The index
+  # is a plain btree on the columns (created_at DESC, id) with the default
+  # operator class -- it references no user-defined function or operator whose
+  # resolution could be hijacked via search_path -- so it is safe. Scoped to this
+  # one index only.
+  '^PS014: Unsafe index creation: idx_instances_created_at_desc_id at line [0-9]+$'
 )
 
 # Whole codes to suppress globally (pgspot --ignore). Prefer PGSPOT_ALLOW. Empty.

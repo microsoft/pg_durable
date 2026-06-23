@@ -220,6 +220,9 @@ COMMENT ON COLUMN df.instances.submitted_by IS
 -- Index for finding pending instances
 CREATE INDEX idx_instances_status ON df.instances(status);
 
+-- Index for efficient chronological (keyset) listing of instances
+CREATE INDEX idx_instances_created_at_desc_id ON df.instances(created_at DESC, id);
+
 -- Index for finding nodes by instance
 CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);
 

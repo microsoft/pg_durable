@@ -166,3 +166,65 @@ CREATE FUNCTION df."await_instance"(
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'await_instance_wrapper';
+
+-- ============================================================================
+-- Chronological instance listing: index + timestamp columns + cursor pagination.
+--
+-- Adds a chronological keyset index, extends df.list_instances() with the
+-- created_at / completed_at timestamps, and introduces df.list_instances_paginated()
+-- for cursor-based paging. Fresh 0.2.4 installs create all three via src/lib.rs
+-- (the index) and the generated function SQL (src/monitoring.rs); this section
+-- brings pre-existing installs to the same shape (Scenario A).
+-- No data migration is required (Scenario B2); the new .so reads the same
+-- df.instances columns that already exist in all prior schemas (Scenario B1).
+-- ============================================================================
+
+-- Index for efficient chronological (keyset) listing of instances. Matches the
+-- ORDER BY (created_at DESC, id DESC) used by both listing functions so paging
+-- stays an index scan instead of a sort.
+CREATE INDEX IF NOT EXISTS idx_instances_created_at_desc_id
+    ON df.instances(created_at DESC, id);
+
+-- df.list_instances() gains created_at / completed_at output columns. The return
+-- TABLE shape changed, so the function must be dropped and recreated rather than
+-- CREATE OR REPLACE'd. It carries PostgreSQL's default PUBLIC EXECUTE and is not
+-- referenced by any other object, so the drop/recreate restores identical access.
+DROP FUNCTION IF EXISTS df."list_instances"(TEXT, INT);
+CREATE FUNCTION df."list_instances"(
+	"status_filter" TEXT DEFAULT NULL,
+	"limit_count" INT DEFAULT 100
+) RETURNS TABLE (
+	"instance_id" TEXT,
+	"label" TEXT,
+	"function_name" TEXT,
+	"status" TEXT,
+	"execution_count" bigint,
+	"output" TEXT,
+	"created_at" timestamp with time zone,
+	"completed_at" timestamp with time zone
+)
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'list_instances_wrapper';
+
+-- df.list_instances_paginated(): keyset (cursor) pagination ordered by
+-- (created_at DESC, id DESC), returning the page rows plus total_count and the
+-- next_cursor to fetch the following page. Bound to the C symbol
+-- list_instances_paginated_wrapper exported by the new .so.
+CREATE FUNCTION df."list_instances_paginated"(
+	"status_filter" TEXT DEFAULT NULL,
+	"limit_count" INT DEFAULT 100,
+	"after_cursor" TEXT DEFAULT NULL
+) RETURNS TABLE (
+	"instance_id" TEXT,
+	"label" TEXT,
+	"function_name" TEXT,
+	"status" TEXT,
+	"execution_count" bigint,
+	"output" TEXT,
+	"created_at" timestamp with time zone,
+	"completed_at" timestamp with time zone,
+	"total_count" bigint,
+	"next_cursor" TEXT
+)
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'list_instances_paginated_wrapper';
