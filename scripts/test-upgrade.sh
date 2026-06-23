@@ -530,6 +530,16 @@ GROUP BY t.typname, t.typtype, t.typbasetype, t.typtypmod
 ORDER BY t.typname;
 
 -- Constraints
+--
+-- Read from pg_constraint so CHECK bodies (pg_get_constraintdef) and the
+-- validated/NOT VALID state (convalidated) are compared, not just key columns.
+--
+-- Exclude NOT NULL constraints (contype = 'n'): on PG18+ these are first-class
+-- pg_constraint rows, but on PG17 they are not (they live in
+-- pg_attribute.attnotnull), so including them would make this snapshot
+-- PG-version-dependent. Per-column nullability is already captured by the
+-- 'column' section above via is_nullable, and the auto-generated NOT NULL
+-- constraint names add noise without extra coverage.
 SELECT 'constraint' AS obj_type,
        rel.relname AS table_name,
        con.conname AS constraint_name,
@@ -541,6 +551,7 @@ FROM pg_constraint con
 JOIN pg_class rel ON rel.oid = con.conrelid
 JOIN pg_namespace n ON n.oid = rel.relnamespace
 WHERE n.nspname = 'df'
+  AND con.contype <> 'n'
 ORDER BY rel.relname, con.conname;
 
 -- RLS policies
