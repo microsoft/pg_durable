@@ -181,3 +181,58 @@ CREATE FUNCTION df."await_instance"(
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'await_instance_wrapper';
+
+-- ============================================================================
+-- Promote df.nodes to a composite primary key (instance_id, id) (issue #129).
+--
+-- The single-column PRIMARY KEY (id) forced node IDs to be globally unique, so
+-- the random 8-hex node ID was the sole collision guard across every instance.
+-- Node IDs only need to be unique per instance, so the existing composite
+-- UNIQUE (instance_id, id) — already referenced by the same-instance foreign
+-- keys — is promoted to be the primary key and the global single-column key is
+-- dropped. This matches the fresh-install schema in src/lib.rs so a fresh
+-- install and an upgraded database end with identical df.nodes constraints.
+--
+-- The three same-instance foreign keys reference the composite key, so
+-- PostgreSQL will not allow dropping it (nor the old single-column PRIMARY KEY)
+-- while those foreign keys exist. Drop them first, restructure the keys, then
+-- recreate the foreign keys against the new primary key. The recreated foreign
+-- keys keep their original DEFERRABLE INITIALLY DEFERRED NOT VALID definition.
+--
+-- nodes_instance_identity_fkey references df.instances, not df.nodes, so it is
+-- left untouched. ADD PRIMARY KEY (instance_id, id) sets NOT NULL on both
+-- columns: id was already the old primary key (implicitly NOT NULL), and
+-- instance_id carries nodes_instance_id_present_chk CHECK (instance_id IS NOT
+-- NULL). That check is NOT VALID, so it only guarantees rows written on 0.2.2+;
+-- in the unlikely event a database still holds pre-0.2.2 rows with a NULL
+-- instance_id, the ALTER COLUMN ... SET NOT NULL below will abort and the
+-- operator must backfill or remove those rows before retrying the upgrade.
+-- ============================================================================
+ALTER TABLE df.nodes DROP CONSTRAINT nodes_left_node_same_instance_fkey;
+ALTER TABLE df.nodes DROP CONSTRAINT nodes_right_node_same_instance_fkey;
+ALTER TABLE df.instances DROP CONSTRAINT instances_root_node_same_instance_fkey;
+
+ALTER TABLE df.nodes DROP CONSTRAINT nodes_instance_node_key;
+ALTER TABLE df.nodes DROP CONSTRAINT nodes_pkey;
+
+ALTER TABLE df.nodes
+    ALTER COLUMN id SET NOT NULL,
+    ALTER COLUMN instance_id SET NOT NULL,
+    ADD CONSTRAINT nodes_pkey
+        PRIMARY KEY (instance_id, id);
+
+ALTER TABLE df.nodes
+    ADD CONSTRAINT nodes_left_node_same_instance_fkey
+        FOREIGN KEY (instance_id, left_node)
+        REFERENCES df.nodes (instance_id, id)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID,
+    ADD CONSTRAINT nodes_right_node_same_instance_fkey
+        FOREIGN KEY (instance_id, right_node)
+        REFERENCES df.nodes (instance_id, id)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID;
+
+ALTER TABLE df.instances
+    ADD CONSTRAINT instances_root_node_same_instance_fkey
+        FOREIGN KEY (id, root_node)
+        REFERENCES df.nodes (instance_id, id)
+        DEFERRABLE INITIALLY DEFERRED NOT VALID;

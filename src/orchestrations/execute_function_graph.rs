@@ -330,6 +330,7 @@ async fn execute_function_node_with_vars(
     // Mark node as running
     let running_input = serde_json::json!({
         "node_id": node_id,
+        "instance_id": graph.instance_id,
         "status": "running"
     });
     let _ = ctx
@@ -353,6 +354,7 @@ async fn execute_function_node_with_vars(
     };
     let status_input = serde_json::json!({
         "node_id": node_id,
+        "instance_id": graph.instance_id,
         "status": status,
         "result": status_result,
     });
