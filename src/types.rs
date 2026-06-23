@@ -99,7 +99,23 @@ pub const MAX_GRAPH_DEPTH: usize = 256;
 /// unbounded INSERTs and memory exhaustion from extremely large graphs.
 pub const MAX_GRAPH_NODES: usize = 10_000;
 
-/// Generate a short 8-character instance ID from a UUID
+/// Generate a short 8-character ID from a UUID.
+///
+/// This serves two distinct uniqueness contracts (#129). Both keep the value
+/// `VARCHAR(8)` HEX (the maintainer-requested minimal change) and manage
+/// collision risk by retrying on conflict rather than by widening the value:
+/// - **Instance IDs** (`df.instances.id`) are global with no scoping column.
+///   `df.start()` reserves the ID with `INSERT ... ON CONFLICT (id) DO NOTHING
+///   RETURNING id` and re-rolls on collision; the primary key on `df.instances`
+///   is the hard guarantee.
+/// - **Node IDs** (`df.nodes.id`) only need to be unique per instance. Node
+///   inserts use `INSERT ... ON CONFLICT (instance_id, id) DO NOTHING RETURNING
+///   id` and re-roll on collision; the composite primary key `(instance_id, id)`
+///   is the hard guarantee.
+///
+/// The mechanism is symmetric (re-roll on conflict); only the conflict target
+/// differs — the global `id` index for instances vs. the per-instance
+/// `(instance_id, id)` index for nodes.
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();
     uuid.to_string()

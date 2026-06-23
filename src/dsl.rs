@@ -634,6 +634,39 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 // Orchestration Control Functions
 // ============================================================================
 
+/// Maximum number of attempts to generate a collision-free random ID before
+/// giving up. The 8-hex ID space (`short_id`) makes collisions rare, so a small
+/// bound is plenty; exhausting it signals either an astronomically unlucky run
+/// or a genuinely saturated ID space, both of which should surface as an error
+/// rather than an unverified ID.
+const MAX_ID_ATTEMPTS: usize = 10;
+
+/// Generate a random ID and claim it, retrying on collision (issue #129).
+///
+/// `generate` produces a fresh candidate ID; `try_claim` attempts to durably
+/// reserve it, returning `Ok(true)` when the candidate was claimed, `Ok(false)`
+/// when it collided with an existing ID (re-roll), or `Err` when the claim
+/// failed for any other reason (propagated immediately).
+///
+/// The claim — not the generation — is the loop tail, so this only ever returns
+/// an ID that `try_claim` confirmed was inserted. On exhaustion it returns an
+/// `Err` rather than a last, unverified candidate (review finding C1).
+fn pick_id_with_retry(
+    mut generate: impl FnMut() -> String,
+    mut try_claim: impl FnMut(&str) -> Result<bool, String>,
+    max_attempts: usize,
+) -> Result<String, String> {
+    for _ in 0..max_attempts {
+        let candidate = generate();
+        if try_claim(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "exhausted {max_attempts} attempts to generate a collision-free ID"
+    ))
+}
+
 /// Starts a durable SQL function.
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
 /// Variables from df.vars are captured and passed to the orchestration.
@@ -653,7 +686,10 @@ pub fn start(
     if let Err(e) = durofut.validate_recursive() {
         pgrx::error!("Invalid durable function graph: {}", e);
     }
-    let instance_id = short_id();
+    // The instance ID is reserved later (after identity validation), using an
+    // INSERT ... ON CONFLICT (id) DO NOTHING retry so collisions — including
+    // against other roles' instances invisible under RLS — re-roll instead of
+    // surfacing a primary-key error (issue #129).
 
     // Validate that the target database exists (if specified)
     if let Some(db) = database {
@@ -729,6 +765,7 @@ pub fn start(
     fn insert_nodes(
         node: &Durofut,
         instance_id: &str,
+        force_id: Option<&str>,
         current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
         legacy_login_role: bool,
@@ -742,13 +779,12 @@ pub fn start(
                 crate::types::MAX_GRAPH_NODES
             );
         }
-        let node_id = short_id();
-
         // Recursively insert children FIRST to get their IDs
         let left_id = node.left_node.as_ref().map(|n| {
             insert_nodes(
                 n,
                 instance_id,
+                None,
                 current_user_oid,
                 database,
                 legacy_login_role,
@@ -759,6 +795,7 @@ pub fn start(
             insert_nodes(
                 n,
                 instance_id,
+                None,
                 current_user_oid,
                 database,
                 legacy_login_role,
@@ -771,6 +808,7 @@ pub fn start(
             Ok(insert_nodes(
                 child,
                 instance_id,
+                None,
                 current_user_oid,
                 database,
                 legacy_login_role,
@@ -781,124 +819,214 @@ pub fn start(
             Err(e) => pgrx::error!("Invalid config in {} node: {}", node.node_type, e),
         };
 
-        // Build parameterized args for the INSERT
-        let query_arg: DatumWithOid = match &query_val {
-            Some(q) => q.as_str().into(),
-            None => DatumWithOid::null::<String>(),
-        };
-        let result_name_arg: DatumWithOid = match &node.result_name {
-            Some(n) => n.as_str().into(),
-            None => DatumWithOid::null::<String>(),
-        };
-        let left_node_arg: DatumWithOid = match &left_id {
-            Some(id) => id.as_str().into(),
-            None => DatumWithOid::null::<String>(),
-        };
-        let right_node_arg: DatumWithOid = match &right_id {
-            Some(id) => id.as_str().into(),
-            None => DatumWithOid::null::<String>(),
-        };
-        let database_arg: DatumWithOid = match database {
-            Some(db) => db.into(),
-            None => DatumWithOid::null::<String>(),
-        };
-
-        // Insert this node with parameterized query
-        // B1 backward compat: v0.1.x schema has login_role NOT NULL on
-        // df.nodes; include it (= submitted_by) so the INSERT succeeds.
-        let (node_sql, node_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
-            (
-                "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)",
-                vec![
-                    node_id.as_str().into(),
-                    instance_id.into(),
-                    node.node_type.as_str().into(),
-                    query_arg,
-                    result_name_arg,
-                    left_node_arg,
-                    right_node_arg,
-                    current_user_oid.into(),
-                    current_user_oid.into(), // login_role = submitted_by
-                    database_arg,
-                ],
-            )
+        // Claim a per-instance-unique node ID. Node IDs only need to be unique
+        // within their owning instance — the df.nodes composite PRIMARY KEY
+        // (instance_id, id) is the guard — so we INSERT ... ON CONFLICT
+        // (instance_id, id) DO NOTHING RETURNING id and re-roll on collision
+        // instead of surfacing a raw key violation (issue #129). Near the
+        // MAX_GRAPH_NODES ceiling the per-instance birthday-collision odds are
+        // small but non-trivial, so the retry keeps large graphs from flaking.
+        // B1 backward compat: the v0.1.x schema has login_role NOT NULL on
+        // df.nodes, so the legacy branch still sets it (= submitted_by).
+        // Caveat: the ON CONFLICT (instance_id, id) clause below needs the
+        // composite key that 0.1.1->0.2.0 adds, so a true pre-0.2.0 runtime
+        // cannot run df.start() until it upgrades. That is fine: the supported
+        // B1 floor is 0.2.2 (docs/upgrade-testing.md), so this legacy branch is
+        // effectively dead code for every supported install.
+        // The root node's ID is forced (force_id) to the value the instance row
+        // already points at via root_node, so the deferred same-instance FK is
+        // satisfied at commit without an UPDATE the caller isn't privileged to
+        // run. The instance is freshly reserved, so the only way the forced
+        // insert can conflict is a child node in this same graph randomly
+        // claiming the identical 8-hex value (~1 in 2^32): give it a single
+        // attempt and let the error abort the txn (the caller retries) rather
+        // than re-rolling away from the reserved ID. Non-root nodes generate a
+        // random ID and re-roll on collision.
+        let mut forced_id = force_id.map(str::to_string);
+        let max_attempts = if force_id.is_some() {
+            1
         } else {
-            (
-                "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)",
-                vec![
-                    node_id.as_str().into(),
-                    instance_id.into(),
-                    node.node_type.as_str().into(),
-                    query_arg,
-                    result_name_arg,
-                    left_node_arg,
-                    right_node_arg,
-                    current_user_oid.into(),
-                    database_arg,
-                ],
-            )
+            MAX_ID_ATTEMPTS
         };
-        if let Err(e) = Spi::run_with_args(node_sql, &node_args) {
-            pgrx::error!("Failed to insert node {}: {:?}", node_id, e);
-        }
+        let node_id = match pick_id_with_retry(
+            move || forced_id.take().unwrap_or_else(short_id),
+            |candidate| {
+                let query_arg: DatumWithOid = match &query_val {
+                    Some(q) => q.as_str().into(),
+                    None => DatumWithOid::null::<String>(),
+                };
+                let result_name_arg: DatumWithOid = match &node.result_name {
+                    Some(n) => n.as_str().into(),
+                    None => DatumWithOid::null::<String>(),
+                };
+                let left_node_arg: DatumWithOid = match &left_id {
+                    Some(id) => id.as_str().into(),
+                    None => DatumWithOid::null::<String>(),
+                };
+                let right_node_arg: DatumWithOid = match &right_id {
+                    Some(id) => id.as_str().into(),
+                    None => DatumWithOid::null::<String>(),
+                };
+                let database_arg: DatumWithOid = match database {
+                    Some(db) => db.into(),
+                    None => DatumWithOid::null::<String>(),
+                };
+                let (node_sql, node_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
+                    (
+                        "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)
+                         ON CONFLICT (instance_id, id) DO NOTHING
+                         RETURNING id",
+                        vec![
+                            candidate.into(),
+                            instance_id.into(),
+                            node.node_type.as_str().into(),
+                            query_arg,
+                            result_name_arg,
+                            left_node_arg,
+                            right_node_arg,
+                            current_user_oid.into(),
+                            current_user_oid.into(), // login_role = submitted_by
+                            database_arg,
+                        ],
+                    )
+                } else {
+                    (
+                        "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)
+                         ON CONFLICT (instance_id, id) DO NOTHING
+                         RETURNING id",
+                        vec![
+                            candidate.into(),
+                            instance_id.into(),
+                            node.node_type.as_str().into(),
+                            query_arg,
+                            result_name_arg,
+                            left_node_arg,
+                            right_node_arg,
+                            current_user_oid.into(),
+                            database_arg,
+                        ],
+                    )
+                };
+                Spi::connect_mut(
+                    |client| match client.update(node_sql, Some(1), &node_args) {
+                        Ok(table) => Ok(!table.is_empty()),
+                        Err(e) => Err(format!("{e:?}")),
+                    },
+                )
+            },
+            max_attempts,
+        ) {
+            Ok(id) => id,
+            Err(e) => match force_id {
+                // The forced root id collided with an already-inserted child
+                // node id in this same graph (~1 in 2^32). The whole df.start()
+                // txn aborts cleanly (no orphan, no corruption) so the caller
+                // can simply retry df.start().
+                Some(forced) => pgrx::error!(
+                    "root node id '{}' collided with a child node id in the same graph \
+                     (~1 in 2^32); df.start() aborted safely, retry it ({})",
+                    forced,
+                    e
+                ),
+                None => pgrx::error!("Failed to insert node: {}", e),
+            },
+        };
 
         // Return the generated ID for parent to reference
         node_id
     }
 
     let legacy_login_role = legacy_login_role_schema();
+
+    // Pre-generate the root node's ID so the instance row can point at it up
+    // front. The same-instance FK on root_node is DEFERRABLE INITIALLY
+    // DEFERRED, so the referenced node row need not exist yet — insert_nodes
+    // below inserts the root node with this exact ID before commit.
+    let root_id = short_id();
+
+    // Reserve the instance ID before inserting nodes so node rows can reference
+    // it. Collisions on the 8-hex ID space are rare, but we reserve via
+    // INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id and re-roll on
+    // collision so a raw primary-key error never reaches the caller (issue
+    // #129). ON CONFLICT arbitration runs against the global id index *below*
+    // RLS, so this also re-rolls on collisions with another role's instance
+    // that the caller cannot SELECT — closing the gap left by the old
+    // RLS-limited pre-check. root_node is set to the pre-generated root_id; the
+    // same-instance FK on root_node is DEFERRABLE INITIALLY DEFERRED, so the
+    // referenced root node row is inserted (with that ID) before commit — no
+    // post-insert UPDATE is needed (df callers aren't granted UPDATE on
+    // root_node).
+    let instance_id = match pick_id_with_retry(
+        short_id,
+        |candidate| {
+            let label_arg: DatumWithOid = match label {
+                Some(l) => l.into(),
+                None => DatumWithOid::null::<String>(),
+            };
+            let database_arg: DatumWithOid = match database {
+                Some(db) => db.into(),
+                None => DatumWithOid::null::<String>(),
+            };
+            let (inst_sql, inst_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
+                (
+                    "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database)
+                     VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)
+                     ON CONFLICT (id) DO NOTHING
+                     RETURNING id",
+                    vec![
+                        candidate.into(),
+                        label_arg,
+                        root_id.as_str().into(),
+                        current_user_oid.into(),
+                        current_user_oid.into(), // login_role = submitted_by
+                        database_arg,
+                    ],
+                )
+            } else {
+                (
+                    "INSERT INTO df.instances (id, label, root_node, submitted_by, database)
+                     VALUES ($1, $2, $3, $4::oid::regrole, $5)
+                     ON CONFLICT (id) DO NOTHING
+                     RETURNING id",
+                    vec![
+                        candidate.into(),
+                        label_arg,
+                        root_id.as_str().into(),
+                        current_user_oid.into(),
+                        database_arg,
+                    ],
+                )
+            };
+            Spi::connect_mut(
+                |client| match client.update(inst_sql, Some(1), &inst_args) {
+                    Ok(table) => Ok(!table.is_empty()),
+                    Err(e) => Err(format!("{e:?}")),
+                },
+            )
+        },
+        MAX_ID_ATTEMPTS,
+    ) {
+        Ok(id) => id,
+        Err(e) => pgrx::error!("Failed to create instance: {}", e),
+    };
+
+    // Insert the graph. The top-level (root) node's ID is forced to root_id —
+    // the value the instance row already points at via root_node — so the
+    // deferred same-instance FK is satisfied at commit with no UPDATE (df
+    // callers aren't granted UPDATE on root_node). Child node IDs are random
+    // with collision re-roll.
     let mut node_count: usize = 0;
-    let root_node_id = insert_nodes(
+    insert_nodes(
         &durofut,
         &instance_id,
+        Some(&root_id),
         current_user_oid,
         database,
         legacy_login_role,
         &mut node_count,
     );
-
-    // Build parameterized args for the instance INSERT
-    let label_arg: DatumWithOid = match label {
-        Some(l) => l.into(),
-        None => DatumWithOid::null::<String>(),
-    };
-    let database_arg: DatumWithOid = match database {
-        Some(db) => db.into(),
-        None => DatumWithOid::null::<String>(),
-    };
-
-    // Create instance record with root node ID
-    // B1 backward compat: v0.1.x schema has login_role NOT NULL on
-    // df.instances; include it (= submitted_by) so the INSERT succeeds.
-    let (inst_sql, inst_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
-        (
-            "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database) VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)",
-            vec![
-                instance_id.as_str().into(),
-                label_arg,
-                root_node_id.as_str().into(),
-                current_user_oid.into(),
-                current_user_oid.into(), // login_role = submitted_by
-                database_arg,
-            ],
-        )
-    } else {
-        (
-            "INSERT INTO df.instances (id, label, root_node, submitted_by, database) VALUES ($1, $2, $3, $4::oid::regrole, $5)",
-            vec![
-                instance_id.as_str().into(),
-                label_arg,
-                root_node_id.as_str().into(),
-                current_user_oid.into(),
-                database_arg,
-            ],
-        )
-    };
-    if let Err(e) = Spi::run_with_args(inst_sql, &inst_args) {
-        pgrx::error!("Failed to create instance: {:?}", e);
-    }
 
     // Capture vars from df.vars using the installed extension version as the
     // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
@@ -1010,8 +1138,9 @@ pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
 pub fn result(instance_id: &str) -> Option<String> {
     Spi::get_one_with_args::<String>(
         r#"SELECT result::text FROM df.nodes
-           WHERE id = (SELECT root_node FROM df.instances WHERE id = $1)
-           AND status = 'completed'"#,
+           WHERE instance_id = $1
+             AND id = (SELECT root_node FROM df.instances WHERE id = $1)
+             AND status = 'completed'"#,
         &[instance_id.into()],
     )
     .ok()
@@ -1126,7 +1255,7 @@ pub fn wait_for_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_semver;
+    use super::{parse_semver, pick_id_with_retry};
 
     #[test]
     fn test_parse_semver_basic() {
@@ -1157,5 +1286,68 @@ mod tests {
         assert!(parse_semver("0.1.1").unwrap() < (0, 2, 0));
         assert!(parse_semver("0.3.0").unwrap() >= (0, 2, 0));
         assert!(parse_semver("1.0.0").unwrap() >= (0, 2, 0));
+    }
+
+    #[test]
+    fn test_pick_id_with_retry_succeeds_first_try() {
+        let mut gen_calls = 0;
+        let id = pick_id_with_retry(
+            || {
+                gen_calls += 1;
+                "aaaa0000".to_string()
+            },
+            |_candidate| Ok(true),
+            10,
+        )
+        .expect("first candidate should be claimed");
+        assert_eq!(id, "aaaa0000");
+        assert_eq!(gen_calls, 1);
+    }
+
+    #[test]
+    fn test_pick_id_with_retry_rerolls_on_collision() {
+        // generate yields two colliding candidates then a free one; try_claim
+        // reports the known duplicate as a collision and accepts anything else.
+        let mut candidates = vec!["dup00000", "dup00000", "uniq0000"].into_iter();
+        let mut claim_attempts = 0;
+        let id = pick_id_with_retry(
+            || candidates.next().unwrap().to_string(),
+            |candidate| {
+                claim_attempts += 1;
+                Ok(candidate != "dup00000")
+            },
+            10,
+        )
+        .expect("should re-roll past collisions to a free ID");
+        assert_eq!(id, "uniq0000");
+        assert_eq!(claim_attempts, 3);
+    }
+
+    #[test]
+    fn test_pick_id_with_retry_exhausts_without_returning_unverified_id() {
+        // Every claim collides, so the helper must error (review finding C1)
+        // rather than hand back an unverified candidate.
+        let mut claim_attempts = 0;
+        let result = pick_id_with_retry(
+            || "same0000".to_string(),
+            |_candidate| {
+                claim_attempts += 1;
+                Ok(false)
+            },
+            3,
+        );
+        assert_eq!(claim_attempts, 3);
+        let err = result.unwrap_err();
+        assert!(err.contains("exhausted"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_pick_id_with_retry_propagates_claim_error() {
+        let result = pick_id_with_retry(
+            || "x".to_string(),
+            |_candidate| Err("claim blew up".to_string()),
+            10,
+        );
+        assert_eq!(result.unwrap_err(), "claim blew up");
     }
 }

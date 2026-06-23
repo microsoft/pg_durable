@@ -58,6 +58,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `07_signals.sql` | `df.signal()` — send signals to a running workflow from within the polling loop |
 | `08_scenarios.sql` | End-to-end workflow scenarios using `playground.*` tables (ETL, parallel counts, conditional load, order processing, three-step) |
 | `09_graph_and_validation.sql` | `df.explain()` graph reuse, invalid `node_type` rejection |
+| `51_node_composite_pk.sql` | `df.nodes` composite PRIMARY KEY `(instance_id, id)` — schema contract (legacy `nodes_instance_node_key` UNIQUE promoted to the PK) and multi-node workflow regression under `instance_id`-scoped node-status updates and `df.result()` (issue #129) |
 
 ### Superuser Tests (runs as `postgres`)
 
@@ -70,6 +71,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `14_database.sql` | Wrong-database `CREATE EXTENSION` rejection; `df.start(query, label, database)` multi-database routing |
 | `15_rls.sql` | RLS on `df.instances` / `df.nodes` / `df.vars` — per-user visibility, cross-user cancel/signal denied, column-level UPDATE, superuser bypass, per-user variable isolation |
 | `16_heartbeat.sql` | Worker heartbeat liveness — `df._worker_epoch.last_seen_at` advances over time |
+| `52_node_id_collision_across_instances.sql` | Cross-instance node-ID collision — two instances own the same 8-hex node id; asserts composite-PK coexistence, that `(instance_id, id)` addresses exactly one row, `df.result()` is instance-scoped, and a scoped `update_node_status`-style UPDATE affects exactly one row (issue #129) |
 
 ### Build-Phase Specific
 
@@ -99,7 +101,11 @@ pg_durable/
             ├── 45_connection_limit_timeout.sql
             ├── 46_connection_limit_startup_validation.sql
             ├── 47_http_dsl_disabled.sql
-            └── 48_http_allow_all.sql
+            ├── 48_http_allow_all.sql
+            ├── 49_quoted_role_names.sql
+            ├── 50_metrics_grants.sql
+            ├── 51_node_composite_pk.sql
+            └── 52_node_id_collision_across_instances.sql
 ```
 
 ## Writing New Tests

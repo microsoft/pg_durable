@@ -182,8 +182,8 @@ extension_sql!(
     r#"
 -- Table to store function nodes (SQL steps, THEN chains, etc.)
 CREATE TABLE df.nodes (
-    id VARCHAR(8) PRIMARY KEY,
-    instance_id VARCHAR(8),
+    id VARCHAR(8) NOT NULL,
+    instance_id VARCHAR(8) NOT NULL,
     node_type TEXT NOT NULL,
     query TEXT,
     result_name TEXT,
@@ -297,8 +297,12 @@ ALTER TABLE df.nodes
                 ELSE FALSE
             END
         ) NOT VALID,
-    ADD CONSTRAINT nodes_instance_node_key
-        UNIQUE (instance_id, id);
+    -- Composite primary key: node IDs only need to be unique per instance, so
+    -- the random 8-hex node ID is never the sole uniqueness guarantee (issue
+    -- #129). The same-instance foreign keys below reference (instance_id, id),
+    -- which this primary key satisfies.
+    ADD CONSTRAINT nodes_pkey
+        PRIMARY KEY (instance_id, id);
 
 ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_instance_identity_fkey
