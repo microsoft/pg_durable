@@ -1433,7 +1433,31 @@ SELECT * FROM df.list_instances('failed');
 SELECT * FROM df.list_instances(NULL, 10);
 ```
 
-**Columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`
+**Columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`, `created_at`, `completed_at`
+
+Instances are ordered newest-first by `(created_at DESC, id DESC)`.
+
+### List Instances with Pagination
+
+For large instance counts, use cursor (keyset) pagination instead of a raw limit:
+
+```sql
+-- First page (no cursor)
+SELECT * FROM df.list_instances_paginated(NULL, 100, NULL);
+
+-- Filter by status, 50 per page
+SELECT * FROM df.list_instances_paginated('completed', 50, NULL);
+
+-- Next page: pass the previous page's next_cursor as after_cursor
+SELECT * FROM df.list_instances_paginated(NULL, 100, '2026-06-23 12:00:00+00|a1b2c3d4');
+```
+
+**Columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`, `created_at`, `completed_at`, `total_count`, `next_cursor`
+
+- `total_count` is the number of instances visible to the caller for the given `status_filter`.
+- `next_cursor` is the value to pass as `after_cursor` for the next page; it is `NULL` once the last page has been returned.
+
+Pages are ordered by `(created_at DESC, id DESC)` and backed by the `idx_instances_created_at_desc_id` index, so paging stays efficient regardless of offset.
 
 ### Instance Details
 

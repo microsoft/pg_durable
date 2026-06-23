@@ -6,8 +6,13 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.4] - Unreleased
 
+### Added
+
+- **`df.list_instances_paginated()`:** new monitoring function that lists instances with keyset (cursor) pagination, ordered by `(created_at DESC, id DESC)`. It returns the page rows plus a `total_count` and a `next_cursor` (pass the previous page's `next_cursor` as `after_cursor`, or `NULL` for the first page). A new `idx_instances_created_at_desc_id` index keeps paging an index scan.
+
 ### Changed
 
+- **`df.list_instances()`:** now also returns the `created_at` and `completed_at` timestamps for each instance, and orders by `(created_at DESC, id DESC)` for a stable total order.
 - **`df.grant_usage()` / `df.revoke_usage()`:** dropped the explicit per-function `EXECUTE` allowlist. Schema `USAGE` on `df` is the real access gate for ordinary `df.*` functions, so the helpers now grant/revoke schema `USAGE`, the table privileges, and `EXECUTE` only on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`). Function signatures are unchanged and existing privileges are unaffected (#242).
 
 ### Removed
