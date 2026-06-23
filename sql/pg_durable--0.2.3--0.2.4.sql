@@ -166,3 +166,27 @@ CREATE FUNCTION df."await_instance"(
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'await_instance_wrapper';
+
+-- ============================================================================
+-- Node-level 'skipped' terminal status for downstream unexecuted steps (#240).
+--
+-- Widen df.nodes.nodes_status_chk to allow 'skipped' in addition to the existing
+-- 'pending', 'running', 'completed', and 'failed'. On node-level workflow
+-- failure the background worker reconciles remaining 'pending' nodes to
+-- 'skipped' so consumers can distinguish "not executed because an upstream node
+-- failed" from "not yet reached". The runtime only writes 'skipped' after this
+-- constraint accepts it (it probes the constraint definition first), so on
+-- pre-0.2.4 schemas it safely no-ops and leaves nodes 'pending' (Scenario B1).
+--
+-- This brings pre-existing installs in line with fresh 0.2.4 installs, whose
+-- install DDL (src/lib.rs) lists 'skipped' in the same ARRAY. The constraint is
+-- re-added NOT VALID to match the install DDL exactly; this is a pure widening
+-- of the allowed set, so every existing row already satisfies it and no data
+-- migration is required (Scenario B2).
+-- ============================================================================
+ALTER TABLE df.nodes
+    DROP CONSTRAINT nodes_status_chk;
+
+ALTER TABLE df.nodes
+    ADD CONSTRAINT nodes_status_chk
+        CHECK (status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running', 'completed', 'failed', 'skipped'])) NOT VALID;

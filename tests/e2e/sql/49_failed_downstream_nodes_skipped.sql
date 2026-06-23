@@ -28,7 +28,7 @@ DECLARE
     step3_status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_skip1;
-    SELECT df.wait_for_completion(inst_id) INTO wf_status;
+    SELECT df.await_instance(inst_id) INTO wf_status;
 
     IF lower(wf_status) != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED [skipped-seq]: expected failed, got %', wf_status;
@@ -89,7 +89,7 @@ DECLARE
     skipped_branch_count INT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_skip2;
-    SELECT df.wait_for_completion(inst_id) INTO wf_status;
+    SELECT df.await_instance(inst_id) INTO wf_status;
 
     IF lower(wf_status) != 'failed' THEN
         RAISE EXCEPTION 'TEST FAILED [skipped-if]: expected failed, got %', wf_status;
@@ -99,7 +99,7 @@ BEGIN
     FROM df.nodes
     WHERE instance_id = inst_id
       AND node_type = 'SQL'
-            AND query IN ('SELECT ''skip-then-branch''::text', 'SELECT ''skip-else-branch''::text')
+      AND query IN ('SELECT ''skip-then-branch''::text', 'SELECT ''skip-else-branch''::text')
       AND status = 'skipped';
 
     IF skipped_branch_count != 2 THEN
