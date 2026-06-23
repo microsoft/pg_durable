@@ -276,7 +276,7 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_result_name_chk
         CHECK (result_name IS NULL OR result_name OPERATOR(pg_catalog.~) '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
     ADD CONSTRAINT nodes_status_chk
-        CHECK (status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running', 'completed', 'failed'])) NOT VALID,
+        CHECK (status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running', 'completed', 'failed', 'skipped'])) NOT VALID,
     ADD CONSTRAINT nodes_result_status_chk
         CHECK (result IS NULL OR status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed'])) NOT VALID,
     ADD CONSTRAINT nodes_structure_chk

@@ -1300,6 +1300,7 @@ SQL |=> 'a': SELECT 1
 | `✗ Failed` | Node encountered an error |
 | `⏳ Running` | Node currently executing |
 | `○ Pending` | Node waiting to execute |
+| `⊘ Skipped` | Node was not executed because an upstream node failed |
 
 ### Visualizing Complex Structures
 

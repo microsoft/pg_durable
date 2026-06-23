@@ -229,6 +229,12 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario B2 considerations:** No data migration. Existing instances, nodes, and vars are untouched. After `ALTER EXTENSION UPDATE`, `df.debug_connection()` no longer exists; the simplified `df.grant_usage()` never references it.
 - **Dependent-object note:** The upgrade runs `DROP FUNCTION IF EXISTS df.debug_connection()` with PostgreSQL's default `RESTRICT` behavior. If a customer created their own object that depends on the function (e.g. a view or SQL function that calls it), `ALTER EXTENSION UPDATE` aborts with a dependency error and the customer must drop or repoint that object first. This is intentional for a removed debug helper — the script deliberately does not `CASCADE`, to avoid silently dropping customer-owned objects. The fresh-install (`tests/e2e/sql/18_delegated_grants.sql`) and upgrade (`scripts/test-upgrade.sh` B2 grant test) suites assert the function is absent and that `df.grant_usage()` still works after the drop.
 
+#### #240 node-level `skipped` status for downstream unexecuted steps
+- **DDL change:** `df.nodes.status` constraint (`nodes_status_chk`) now allows `skipped` in addition to `pending`, `running`, `completed`, and `failed`. Upgrade script: `sql/pg_durable--0.2.3--0.2.4.sql`.
+- **Scenario A considerations:** fresh-install and upgraded schemas must agree on the `nodes_status_chk` status vocabulary including `skipped`.
+- **Scenario B1 considerations:** the new `.so` must still run against pre-0.2.4 schemas where `nodes_status_chk` does not allow `skipped`. Runtime logic therefore detects schema support first and no-ops (retains legacy `pending` behavior) when unsupported.
+- **Scenario B2 considerations:** no data migration required. Existing rows are preserved; only new terminal reconciliation on failed runs can mark unexecuted nodes as `skipped` post-upgrade.
+
 ### v0.2.2 → v0.2.3
 
 #### Rename duroxide provider schema to `_duroxide` for fresh installs
