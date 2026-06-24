@@ -21,6 +21,16 @@ use crate::types::{
     postgres_connection_string, resolve_duroxide_schema_pool, worker_provider_config,
 };
 
+const TERMINAL_INSTANCE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const TERMINAL_INSTANCE_RETENTION_DAYS: i32 = 30;
+const TERMINAL_INSTANCE_MIN_KEEP: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PruneStats {
+    pub instances_deleted: i64,
+    pub nodes_deleted: i64,
+}
+
 /// Initialize tracing subscriber for duroxide logs.
 /// Must be called before Runtime::start_with_store() to capture all logs.
 fn init_tracing() {
@@ -228,6 +238,7 @@ async fn run_duroxide_runtime() {
 
         run_until_extension_dropped_or_shutdown(
             &poll_pool,
+            &mgmt_pool,
             duroxide_runtime,
             EXTENSION_DROP_POLL_INTERVAL,
             SHUTDOWN_CHECK_INTERVAL,
@@ -627,8 +638,91 @@ async fn check_epoch_sentinel(pool: &sqlx::PgPool, epoch_id: &str) -> bool {
     matches!(result, Ok(Some(_)))
 }
 
+async fn prune_terminal_instances(pool: &sqlx::PgPool) -> Result<PruneStats, sqlx::Error> {
+    prune_terminal_instances_with_limits(
+        pool,
+        TERMINAL_INSTANCE_RETENTION_DAYS,
+        TERMINAL_INSTANCE_MIN_KEEP,
+    )
+    .await
+}
+
+pub(crate) async fn prune_terminal_instances_with_limits(
+    pool: &sqlx::PgPool,
+    retention_days: i32,
+    min_keep: i64,
+) -> Result<PruneStats, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let stats = prune_terminal_instances_transaction(&mut tx, retention_days, min_keep).await?;
+    tx.commit().await?;
+
+    Ok(stats)
+}
+
+pub(crate) async fn prune_terminal_instances_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    retention_days: i32,
+    min_keep: i64,
+) -> Result<PruneStats, sqlx::Error> {
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut **tx)
+        .await?;
+
+    let (instances_deleted, nodes_deleted): (i64, i64) = sqlx::query_as(
+        r#"
+        WITH terminal_instances AS (
+            SELECT
+                ranked.id,
+                ranked.terminal_at,
+                pg_catalog.row_number() OVER (
+                    ORDER BY ranked.terminal_at DESC NULLS LAST, ranked.id DESC
+                ) AS terminal_rank
+            FROM (
+                SELECT
+                    id,
+                    COALESCE(completed_at, updated_at, created_at) AS terminal_at
+                FROM df.instances
+                WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
+            ) ranked
+        ),
+        prune_candidates AS (
+            SELECT id
+            FROM terminal_instances
+            WHERE terminal_rank OPERATOR(pg_catalog.>) $1
+              AND terminal_at OPERATOR(pg_catalog.<)
+                  pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int)
+        ),
+        deleted_nodes AS (
+            DELETE FROM df.nodes n
+            USING prune_candidates pc
+            WHERE n.instance_id OPERATOR(pg_catalog.=) pc.id
+            RETURNING n.instance_id
+        ),
+        deleted_instances AS (
+            DELETE FROM df.instances i
+            USING prune_candidates pc
+            WHERE i.id OPERATOR(pg_catalog.=) pc.id
+            RETURNING i.id
+        )
+        SELECT
+            (SELECT pg_catalog.count(*)::bigint FROM deleted_instances) AS instances_deleted,
+            (SELECT pg_catalog.count(*)::bigint FROM deleted_nodes) AS nodes_deleted
+        "#,
+    )
+    .bind(min_keep)
+    .bind(retention_days)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(PruneStats {
+        instances_deleted,
+        nodes_deleted,
+    })
+}
+
 async fn run_until_extension_dropped_or_shutdown(
     poll_pool: &sqlx::PgPool,
+    maintenance_pool: &sqlx::PgPool,
     duroxide_runtime: Arc<runtime::Runtime>,
     drop_poll_interval: Duration,
     shutdown_check_interval: Duration,
@@ -638,6 +732,12 @@ async fn run_until_extension_dropped_or_shutdown(
 
     let mut drop_check = tokio::time::interval(drop_poll_interval);
     drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let mut prune_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + TERMINAL_INSTANCE_PRUNE_INTERVAL,
+        TERMINAL_INSTANCE_PRUNE_INTERVAL,
+    );
+    prune_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -656,6 +756,21 @@ async fn run_until_extension_dropped_or_shutdown(
                 if !still_valid {
                     log!("pg_durable: epoch sentinel gone — extension dropped or recreated");
                     break;
+                }
+            }
+            _ = prune_check.tick() => {
+                match prune_terminal_instances(maintenance_pool).await {
+                    Ok(stats) if stats.instances_deleted > 0 || stats.nodes_deleted > 0 => {
+                        log!(
+                            "pg_durable: pruned {} terminal instance(s) and {} node row(s)",
+                            stats.instances_deleted,
+                            stats.nodes_deleted
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log!("pg_durable: terminal instance pruning failed: {}", e);
+                    }
                 }
             }
         }
