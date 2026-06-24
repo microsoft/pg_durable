@@ -865,7 +865,7 @@ mod tests {
     fn test_database_connection_string() -> String {
         use crate::types::{get_host, get_port, get_worker_role};
 
-        let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()")
+        let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
             .expect("current_database query should succeed")
             .expect("current_database should return a value");
         format!(
