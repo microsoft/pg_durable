@@ -316,13 +316,24 @@ df.cancel('a1b2c3d4', 'Manual stop')
 
 Gets instance status.
 
+> **Note:** the argument is an **`instance_id`** (returned by `df.start()`), **not** a label. Passing a label returns `NULL`, since no instance has that ID. To check a labeled run, resolve the label to an `instance_id` first (see example below).
+
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
-| `instance_id` | TEXT | ❌ Literal | Target instance ID |
+| `instance_id` | TEXT | ❌ Literal | Target instance ID from `df.start()` (not a label) |
 
 ```sql
-SELECT df.status('a1b2c3d4');  -- Returns: 'Running', 'Completed', etc.
+-- By instance_id. Returns a lowercase status:
+-- 'pending', 'running', 'completed', 'failed', or 'cancelled'.
+SELECT df.status('a1b2c3d4');
+
+-- Have a label instead of an instance_id? Resolve it first:
+SELECT df.status(instance_id)
+FROM df.list_instances()
+WHERE label = 'my-job';
 ```
+
+If you reuse a label across runs, multiple instances can match — pass the specific `instance_id` you want.
 
 ---
 

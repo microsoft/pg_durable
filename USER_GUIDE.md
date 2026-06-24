@@ -183,8 +183,8 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
-| `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
-| `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
+| `df.status(id)` | Get status by instance_id (not label) | `df.status('a1b2c3d4')` |
+| `df.result(id)` | Get result by instance_id (not label) | `df.result('a1b2c3d4')` |
 | `df.explain(input)` | Visualize graph | `df.explain('a1b2c3d4')` |
 | `df.setvar(name, value)` | Set durable function variable | `df.setvar('api_url', 'https://...')` |
 | `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
@@ -1484,13 +1484,26 @@ SELECT * FROM df.metrics();
 
 ### Quick Status Check
 
+`df.status()` and `df.result()` take an **`instance_id`** (returned by `df.start()`), **not** a label. Passing a label returns `NULL`.
+
 ```sql
--- Status only
+-- Status only (lowercase: 'pending', 'running', 'completed', 'failed', 'cancelled')
 SELECT df.status('a1b2c3d4');
 
 -- Result only
 SELECT df.result('a1b2c3d4');
 ```
+
+If you started the run with a label, resolve the label to an `instance_id` first:
+
+```sql
+-- Status for a labeled run
+SELECT df.status(instance_id)
+FROM df.list_instances()
+WHERE label = 'my-job';
+```
+
+If you reuse a label across runs, multiple instances can match — pass the specific `instance_id` you want.
 
 ### Worker Liveness
 
