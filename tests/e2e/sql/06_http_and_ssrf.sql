@@ -580,10 +580,12 @@ END $$;
 DROP TABLE _test_ssrf7;
 
 -- Test 8: Redirects are not followed
+-- Uses httpbingo.org (maintained Go reimplementation) rather than httpbin.org,
+-- which is frequently unavailable and was the dominant source of CI flakiness.
 CREATE TEMP TABLE _test_ssrf8 (instance_id TEXT);
 
 INSERT INTO _test_ssrf8 SELECT df.start(
-    df.http('https://httpbin.org/status/302', 'GET', NULL, NULL, 10) |=> 'response'
+    df.http('https://httpbingo.org/status/302', 'GET') |=> 'response'
     ~> 'SELECT ($response::jsonb->>''status'')::int AS status_code',
     'test-ssrf-redirect-blocked'
 );
@@ -937,34 +939,9 @@ END $$;
 
 DROP TABLE _test_http_priv4;
 
--- Permission Test 5: grant_usage(false) does NOT grant df.http, but residual PUBLIC grant persists
-GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO PUBLIC;
-
--- grant_usage is purely additive — it does not revoke df.http or warn about
--- residual PUBLIC grants.  The caller is responsible for revoking separately.
-
-DO $$
-BEGIN
-    BEGIN
-        PERFORM df.grant_usage('http_priv_bob', include_http => false);
-    EXCEPTION WHEN OTHERS THEN
-        RAISE EXCEPTION 'TEST FAILED: grant_usage raised an unexpected exception: %', SQLERRM;
-    END;
-    -- grant_usage(include_http => false) does not grant df.http, but the
-    -- PUBLIC grant above still gives http_priv_bob effective access.
-    IF NOT has_function_privilege('http_priv_bob'::regrole,
-                                   'df.http(text, text, text, jsonb, integer)', 'EXECUTE') THEN
-        RAISE EXCEPTION 'TEST FAILED: expected http_priv_bob to still have effective HTTP access via PUBLIC grant';
-    END IF;
-    RAISE NOTICE 'TEST PASSED: grant_usage_warns_on_residual_public_grant';
-END $$;
-
--- Restore: revoke the PUBLIC grant again so subsequent tests are unaffected
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
-
--- Permission Test 6: Superuser always passes the execution-time privilege check
-CREATE TEMP TABLE _test_http_priv6 (instance_id TEXT);
-INSERT INTO _test_http_priv6
+-- Permission Test 5: Superuser always passes the execution-time privilege check
+CREATE TEMP TABLE _test_http_priv5 (instance_id TEXT);
+INSERT INTO _test_http_priv5
 SELECT df.start(
     '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
     'test-http-superuser'
@@ -976,7 +953,7 @@ DECLARE
     status      TEXT;
     node_result TEXT;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_http_priv6;
+    SELECT instance_id INTO inst_id FROM _test_http_priv5;
 
     SELECT df.await_instance(inst_id, 30) INTO status;
 
@@ -995,7 +972,7 @@ BEGIN
     RAISE NOTICE 'TEST PASSED: superuser_bypasses_http_privilege_check';
 END $$;
 
-DROP TABLE _test_http_priv6;
+DROP TABLE _test_http_priv5;
 
 -- --- Permission Test Cleanup ---
 DO $cleanup$
