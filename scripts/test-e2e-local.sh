@@ -363,7 +363,7 @@ show_version_once() {
 
 grant_e2e_df_usage() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
-        -c "SELECT df.grant_usage('$E2E_USER');" >/dev/null 2>&1
+        -c "SELECT df.grant_usage('$E2E_USER', include_http => true);" >/dev/null 2>&1
 }
 
 ensure_e2e_role() {
