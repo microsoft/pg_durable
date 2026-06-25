@@ -1477,21 +1477,26 @@ mod tests {
                 .expect("defer fixture constraints");
             sqlx::query(
                 r#"
-                -- `forge_future_updated_at` rows simulate a low-privilege user
-                -- who set `updated_at` far into the future on their own terminal
-                -- rows (PUBLIC has column-level UPDATE on `updated_at`). These
-                -- rows have NULL `completed_at` ('failed'/'cancelled'), so if the
-                -- prune ranked/aged by `updated_at` they would float to the top of
-                -- the keep-window and never age out. The pruner must ignore
-                -- `updated_at` and still prune them by their (old) `created_at`.
+                -- max_keep=2, retention=30d. Terminal rows are ranked newest-first
+                -- by COALESCE(completed_at, created_at):
+                --   aa261001 (1d, r1)  -> keep (within cap, young)
+                --   aa261002 (2d, r2)  -> keep (within cap, young)
+                --   aa261003 (3d, r3)  -> PRUNE by the hard cap even though it is
+                --                         only 3 days old (rank > max_keep)
+                --   aa261004 (40d, r4) -> PRUNE (beyond cap and past retention)
+                --   aa261005 (50d, r5) -> PRUNE (beyond cap and past retention)
+                --   aa261006 (running) -> keep (non-terminal, never considered)
+                -- aa261004/aa261005 are 'failed'/'cancelled' (NULL completed_at) with
+                -- a forged far-future `updated_at`; they must still rank/age by their
+                -- old `created_at`, proving `updated_at` is not trusted.
                 WITH fixtures(id, label, root_node, status, age_days, has_completed_at, forge_future_updated_at) AS (
                     VALUES
-                        ('aa261001', 'prune-old-completed', 'bb261001', 'completed', 60, true, false),
-                        ('aa261002', 'prune-old-failed', 'bb261002', 'failed', 50, false, true),
-                        ('aa261003', 'keep-old-because-rank', 'bb261003', 'completed', 40, true, false),
-                        ('aa261004', 'keep-recent-terminal', 'bb261004', 'completed', 5, true, false),
-                        ('aa261005', 'keep-running', 'bb261005', 'running', 90, false, false),
-                        ('aa261006', 'prune-old-cancelled', 'bb261006', 'cancelled', 80, false, true)
+                        ('aa261001', 'keep-recent-1', 'bb261001', 'completed', 1, true, false),
+                        ('aa261002', 'keep-recent-2', 'bb261002', 'completed', 2, true, false),
+                        ('aa261003', 'prune-young-over-cap', 'bb261003', 'completed', 3, true, false),
+                        ('aa261004', 'prune-old-failed-forged', 'bb261004', 'failed', 40, false, true),
+                        ('aa261005', 'prune-old-cancelled-forged', 'bb261005', 'cancelled', 50, false, true),
+                        ('aa261006', 'keep-running', 'bb261006', 'running', 90, false, false)
                 )
                 INSERT INTO df.instances
                     (id, label, root_node, status, submitted_by, created_at, updated_at, completed_at)
@@ -1520,12 +1525,12 @@ mod tests {
                 r#"
                 WITH fixtures(id, instance_id, status, age_days) AS (
                     VALUES
-                        ('bb261001', 'aa261001', 'completed', 60),
-                        ('bb261002', 'aa261002', 'failed', 50),
-                        ('bb261003', 'aa261003', 'completed', 40),
-                        ('bb261004', 'aa261004', 'completed', 5),
-                        ('bb261005', 'aa261005', 'running', 90),
-                        ('bb261006', 'aa261006', 'completed', 80)
+                        ('bb261001', 'aa261001', 'completed', 1),
+                        ('bb261002', 'aa261002', 'completed', 2),
+                        ('bb261003', 'aa261003', 'completed', 3),
+                        ('bb261004', 'aa261004', 'failed', 40),
+                        ('bb261005', 'aa261005', 'completed', 50),
+                        ('bb261006', 'aa261006', 'running', 90)
                 )
                 INSERT INTO df.nodes
                     (id, instance_id, node_type, query, status, submitted_by, created_at, updated_at)
@@ -1571,7 +1576,7 @@ mod tests {
             .fetch_all(&mut *fixture_tx)
             .await
             .expect("load remaining ids");
-            assert_eq!(remaining_ids, vec!["aa261003", "aa261004", "aa261005"]);
+            assert_eq!(remaining_ids, vec!["aa261001", "aa261002", "aa261006"]);
 
             fixture_tx
                 .rollback()

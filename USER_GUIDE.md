@@ -1520,6 +1520,39 @@ SELECT started_at, last_seen_at,
 
 The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
 
+### Data Retention (Automatic Pruning)
+
+To keep `df.instances` and `df.nodes` from growing without bound, the background
+worker runs a **best-effort pruning pass roughly once an hour** that deletes old
+**terminal** instances (status `completed`, `failed`, or `cancelled`) and their
+associated `df.nodes` rows. Running and pending instances are **never** pruned,
+regardless of age.
+
+The policy is currently fixed (no configuration GUC):
+
+- **Hard cap — at most 10,000 terminal instances are retained, regardless of
+  age.** The newest 10,000 terminal instances are kept; any beyond that are
+  pruned even if they are only minutes old.
+- **Retention window — 30 days.** Terminal instances older than 30 days are
+  pruned even if the table holds fewer than 10,000 of them.
+
+Equivalently, a terminal instance is retained only while it is **both** among the
+newest 10,000 terminal instances **and** less than 30 days old; otherwise it is
+eligible for pruning.
+
+Notes:
+
+- "Age" is measured from `completed_at` when set (instances that reached
+  `completed`), otherwise from `created_at`. `updated_at` is intentionally **not**
+  used, because it is user-writable and would let a low-privilege user influence
+  pruning.
+- Pruning runs in a single transaction with foreign-key constraints deferred:
+  matching `df.nodes` rows are deleted first, then the instance rows.
+- Pruning is best-effort: if a pass fails it is logged and retried on the next
+  interval; it never stops workflow execution.
+- If you need to retain terminal history beyond these limits (e.g. for auditing),
+  copy the rows you care about into your own table before they age out.
+
 ---
 
 ## User Isolation & Privileges

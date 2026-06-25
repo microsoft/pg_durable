@@ -22,8 +22,15 @@ use crate::types::{
 };
 
 const TERMINAL_INSTANCE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+// Retention policy for terminal ('completed'/'failed'/'cancelled') instances.
+// A terminal instance is pruned when it is OUTSIDE the newest
+// TERMINAL_INSTANCE_MAX_KEEP rows (a hard cap enforced regardless of age) OR
+// older than TERMINAL_INSTANCE_RETENTION_DAYS. Equivalently, an instance is
+// retained only while it is BOTH among the newest TERMINAL_INSTANCE_MAX_KEEP
+// terminal rows AND younger than the retention window. The number of retained
+// terminal instances therefore never exceeds TERMINAL_INSTANCE_MAX_KEEP.
 const TERMINAL_INSTANCE_RETENTION_DAYS: i32 = 30;
-const TERMINAL_INSTANCE_MIN_KEEP: i64 = 10_000;
+const TERMINAL_INSTANCE_MAX_KEEP: i64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PruneStats {
@@ -642,7 +649,7 @@ async fn prune_terminal_instances(pool: &sqlx::PgPool) -> Result<PruneStats, sql
     prune_terminal_instances_with_limits(
         pool,
         TERMINAL_INSTANCE_RETENTION_DAYS,
-        TERMINAL_INSTANCE_MIN_KEEP,
+        TERMINAL_INSTANCE_MAX_KEEP,
     )
     .await
 }
@@ -650,10 +657,10 @@ async fn prune_terminal_instances(pool: &sqlx::PgPool) -> Result<PruneStats, sql
 pub(crate) async fn prune_terminal_instances_with_limits(
     pool: &sqlx::PgPool,
     retention_days: i32,
-    min_keep: i64,
+    max_keep: i64,
 ) -> Result<PruneStats, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let stats = prune_terminal_instances_transaction(&mut tx, retention_days, min_keep).await?;
+    let stats = prune_terminal_instances_transaction(&mut tx, retention_days, max_keep).await?;
     tx.commit().await?;
 
     Ok(stats)
@@ -662,7 +669,7 @@ pub(crate) async fn prune_terminal_instances_with_limits(
 pub(crate) async fn prune_terminal_instances_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     retention_days: i32,
-    min_keep: i64,
+    max_keep: i64,
 ) -> Result<PruneStats, sqlx::Error> {
     sqlx::query("SET CONSTRAINTS ALL DEFERRED")
         .execute(&mut **tx)
@@ -695,8 +702,13 @@ pub(crate) async fn prune_terminal_instances_transaction(
         prune_candidates AS (
             SELECT id
             FROM terminal_instances
+            -- Prune when the row is beyond the newest $1 terminal instances (a
+            -- hard cap enforced regardless of age) OR older than the retention
+            -- window ($2 days). Retained rows are thus always within the newest
+            -- $1 AND younger than the retention window, so the retained terminal
+            -- count never exceeds $1.
             WHERE terminal_rank OPERATOR(pg_catalog.>) $1
-              AND terminal_at OPERATOR(pg_catalog.<)
+               OR terminal_at OPERATOR(pg_catalog.<)
                   (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
         ),
         deleted_nodes AS (
@@ -716,7 +728,7 @@ pub(crate) async fn prune_terminal_instances_transaction(
             (SELECT pg_catalog.count(*)::bigint FROM deleted_nodes) AS nodes_deleted
         "#,
     )
-    .bind(min_keep)
+    .bind(max_keep)
     .bind(retention_days)
     .fetch_one(&mut **tx)
     .await?;
