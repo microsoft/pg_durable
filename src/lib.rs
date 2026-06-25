@@ -863,14 +863,21 @@ mod tests {
     }
 
     fn test_database_connection_string() -> String {
-        use crate::types::{get_host, get_port, get_worker_role};
+        use crate::types::{get_host, get_port};
 
         let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
             .expect("current_database query should succeed")
             .expect("current_database should return a value");
+        // Connect as the current session role rather than the worker role GUC
+        // (which defaults to "postgres"). The pgrx test cluster's superuser is
+        // the OS account, so "postgres" may not exist; the current role always
+        // does and can log in.
+        let role = Spi::get_one::<String>("SELECT current_user::text")
+            .expect("current_user query should succeed")
+            .expect("current_user should return a value");
         format!(
             "postgres://{}@{}:{}/{}",
-            get_worker_role(),
+            role,
             get_host(),
             get_port(),
             database
@@ -1470,14 +1477,21 @@ mod tests {
                 .expect("defer fixture constraints");
             sqlx::query(
                 r#"
-                WITH fixtures(id, label, root_node, status, age_days, has_completed_at) AS (
+                -- `forge_future_updated_at` rows simulate a low-privilege user
+                -- who set `updated_at` far into the future on their own terminal
+                -- rows (PUBLIC has column-level UPDATE on `updated_at`). These
+                -- rows have NULL `completed_at` ('failed'/'cancelled'), so if the
+                -- prune ranked/aged by `updated_at` they would float to the top of
+                -- the keep-window and never age out. The pruner must ignore
+                -- `updated_at` and still prune them by their (old) `created_at`.
+                WITH fixtures(id, label, root_node, status, age_days, has_completed_at, forge_future_updated_at) AS (
                     VALUES
-                        ('aa261001', 'prune-old-completed', 'bb261001', 'completed', 60, true),
-                        ('aa261002', 'prune-old-failed', 'bb261002', 'failed', 50, false),
-                        ('aa261003', 'keep-old-because-rank', 'bb261003', 'completed', 40, true),
-                        ('aa261004', 'keep-recent-terminal', 'bb261004', 'completed', 5, true),
-                        ('aa261005', 'keep-running', 'bb261005', 'running', 90, false),
-                        ('aa261006', 'prune-old-cancelled', 'bb261006', 'cancelled', 80, false)
+                        ('aa261001', 'prune-old-completed', 'bb261001', 'completed', 60, true, false),
+                        ('aa261002', 'prune-old-failed', 'bb261002', 'failed', 50, false, true),
+                        ('aa261003', 'keep-old-because-rank', 'bb261003', 'completed', 40, true, false),
+                        ('aa261004', 'keep-recent-terminal', 'bb261004', 'completed', 5, true, false),
+                        ('aa261005', 'keep-running', 'bb261005', 'running', 90, false, false),
+                        ('aa261006', 'prune-old-cancelled', 'bb261006', 'cancelled', 80, false, true)
                 )
                 INSERT INTO df.instances
                     (id, label, root_node, status, submitted_by, created_at, updated_at, completed_at)
@@ -1487,7 +1501,10 @@ mod tests {
                        status,
                        current_user::regrole,
                        pg_catalog.now() - (age_days::int * INTERVAL '1 day'),
-                       pg_catalog.now() - (age_days::int * INTERVAL '1 day'),
+                       CASE WHEN forge_future_updated_at
+                            THEN pg_catalog.now() + INTERVAL '3650 days'
+                            ELSE pg_catalog.now() - (age_days::int * INTERVAL '1 day')
+                       END,
                        CASE WHEN has_completed_at
                             THEN pg_catalog.now() - (age_days::int * INTERVAL '1 day')
                             ELSE NULL

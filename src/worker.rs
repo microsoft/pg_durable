@@ -680,7 +680,14 @@ pub(crate) async fn prune_terminal_instances_transaction(
             FROM (
                 SELECT
                     id,
-                    COALESCE(completed_at, updated_at, created_at) AS terminal_at
+                    -- Rank/age only by server-controlled timestamps. `updated_at`
+                    -- is intentionally excluded: PUBLIC has column-level UPDATE on
+                    -- it, and for 'failed'/'cancelled' rows `completed_at` is NULL,
+                    -- so including `updated_at` would let a low-privilege user forge
+                    -- the prune ordering/age. `completed_at` (set by the worker on
+                    -- completion) and `created_at` (insert-time default, not
+                    -- grantable) are not user-writable.
+                    COALESCE(completed_at, created_at) AS terminal_at
                 FROM df.instances
                 WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
             ) ranked
@@ -690,7 +697,7 @@ pub(crate) async fn prune_terminal_instances_transaction(
             FROM terminal_instances
             WHERE terminal_rank OPERATOR(pg_catalog.>) $1
               AND terminal_at OPERATOR(pg_catalog.<)
-                  pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int)
+                  (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
         ),
         deleted_nodes AS (
             DELETE FROM df.nodes n
