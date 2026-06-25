@@ -211,11 +211,14 @@ CREATE TABLE df.instances (
     database TEXT,
     created_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
     updated_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    blocked_on_signal TEXT
 );
 
 COMMENT ON COLUMN df.instances.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
+COMMENT ON COLUMN df.instances.blocked_on_signal IS
+    'Signal name while the instance is parked on a SIGNAL node; NULL otherwise';
 
 -- Index for finding pending instances
 CREATE INDEX idx_instances_status ON df.instances(status);
@@ -413,7 +416,7 @@ BEGIN
 
     -- Table privileges
     EXECUTE pg_catalog.format('GRANT SELECT ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
-    EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at, blocked_on_signal) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT SELECT ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
@@ -466,7 +469,7 @@ BEGIN
     EXECUTE pg_catalog.format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
-    EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at, blocked_on_signal) ON df.instances FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
 
     -- Schema access — the access gate for all ordinary df.* functions.

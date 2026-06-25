@@ -184,7 +184,7 @@ SELECT df.start(
 
 **Threat**: User queries `df.instances` or `df.nodes` to see other users' durable functions.
 
-**Mitigation (implemented)**: RLS policies on `df.instances` and `df.nodes` enforce per-user visibility using `submitted_by = current_user::regrole`. Auto-grants provide SELECT+INSERT on both tables and column-level `UPDATE (status, updated_at)` on instances (no DELETE). Ownership checks in `df.cancel()` and `df.signal()` prevent cross-user operations via the duroxide client. Monitoring functions (`df.list_instances()`, `df.instance_info()`, etc.) also enforce ownership.
+**Mitigation (implemented)**: RLS policies on `df.instances` and `df.nodes` enforce per-user visibility using `submitted_by = current_user::regrole`. Auto-grants provide SELECT+INSERT on both tables and column-level `UPDATE` on runtime status columns for instances (no DELETE). Ownership checks in `df.cancel()` and `df.signal()` prevent cross-user operations via the duroxide client. Monitoring functions (`df.list_instances()`, `df.instance_info()`, etc.) also enforce ownership.
 
 See [rls.md](rls.md) for the full design, policy definitions, grant strategy, and decisions.
 

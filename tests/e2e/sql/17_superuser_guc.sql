@@ -38,7 +38,7 @@ CREATE ROLE su_guc_forger LOGIN BYPASSRLS;
 SELECT df.grant_usage('su_guc_forger');
 GRANT TEMPORARY ON DATABASE postgres TO su_guc_forger;
 -- The forger needs UPDATE on submitted_by to simulate the attack.
--- df.grant_usage() only grants UPDATE (status, updated_at).
+-- df.grant_usage() only grants UPDATE on runtime status columns.
 GRANT UPDATE (submitted_by) ON df.instances TO su_guc_forger;
 GRANT UPDATE (submitted_by) ON df.nodes TO su_guc_forger;
 

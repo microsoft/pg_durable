@@ -7,6 +7,66 @@
 -- requirements (Scenario A / B1 / B2).
 
 -- ============================================================================
+-- Expose signal waits at the instance level (issue #239).
+--
+-- `df.instances.blocked_on_signal` is set to the signal name while the instance
+-- is parked on a SIGNAL node, and cleared when no SIGNAL wait remains or the
+-- instance reaches a terminal state. Backfill is unnecessary: existing terminal
+-- rows remain NULL, and newly executing SIGNAL nodes set the column when their
+-- node status transitions to `running`.
+--
+-- Preserve existing delegated permissions by granting UPDATE on the new column
+-- to every role that already had UPDATE on df.instances.status or updated_at.
+-- ============================================================================
+ALTER TABLE df.instances ADD COLUMN blocked_on_signal TEXT;
+
+COMMENT ON COLUMN df.instances.blocked_on_signal IS
+    'Signal name while the instance is parked on a SIGNAL node; NULL otherwise';
+
+DO $do$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT role_ident, pg_catalog.bool_and(is_grantable) AS all_grantable
+        FROM (
+            SELECT
+                CASE
+                    WHEN acl.grantee OPERATOR(pg_catalog.=) 0::oid THEN 'PUBLIC'
+                    ELSE grantee_role.rolname
+                END AS role_ident,
+                acl.is_grantable
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+            JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid
+            CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl
+            LEFT JOIN pg_catalog.pg_roles grantee_role ON grantee_role.oid OPERATOR(pg_catalog.=) acl.grantee
+            WHERE n.nspname OPERATOR(pg_catalog.=) 'df'
+              AND c.relname OPERATOR(pg_catalog.=) 'instances'
+              AND a.attname OPERATOR(pg_catalog.=) ANY (ARRAY['status', 'updated_at'])
+              AND acl.privilege_type OPERATOR(pg_catalog.=) 'UPDATE'
+        ) grants
+        WHERE role_ident IS NOT NULL
+        GROUP BY role_ident
+    LOOP
+        IF r.role_ident OPERATOR(pg_catalog.=) 'PUBLIC' THEN
+            EXECUTE 'GRANT UPDATE (blocked_on_signal) ON df.instances TO PUBLIC';
+        ELSIF r.all_grantable THEN
+            EXECUTE pg_catalog.format(
+                'GRANT UPDATE (blocked_on_signal) ON df.instances TO %I WITH GRANT OPTION',
+                r.role_ident
+            );
+        ELSE
+            EXECUTE pg_catalog.format(
+                'GRANT UPDATE (blocked_on_signal) ON df.instances TO %I',
+                r.role_ident
+            );
+        END IF;
+    END LOOP;
+END;
+$do$;
+
+-- ============================================================================
 -- Remove df.debug_connection() (issue #110, reclassified non-security cleanup).
 --
 -- The function returned the worker connection string (postgres://role@host:port/db)
@@ -87,7 +147,7 @@ BEGIN
 
     -- Table privileges
     EXECUTE pg_catalog.format('GRANT SELECT ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
-    EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at, blocked_on_signal) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT SELECT ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
@@ -155,7 +215,7 @@ BEGIN
     EXECUTE pg_catalog.format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
-    EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at, blocked_on_signal) ON df.instances FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
 
     -- Schema access — the access gate for all ordinary df.* functions.

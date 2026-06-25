@@ -5,7 +5,10 @@
 
 use duroxide::ActivityContext;
 use sqlx::PgPool;
+use sqlx::Row;
 use std::sync::Arc;
+
+use crate::activities::update_instance_status::instances_have_blocked_on_signal;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::update-node-status";
@@ -75,6 +78,11 @@ pub async fn execute(
         Ok(done) => {
             let rows = done.rows_affected();
             if rows == 1 {
+                if let Err(e) = sync_instance_signal_wait(pool.as_ref(), instance_id, node_id).await
+                {
+                    ctx.trace_info(&e);
+                    return Err(e);
+                }
                 Ok("Node status updated".to_string())
             } else {
                 // Exactly one row must match (instance_id, id). Anything else
@@ -95,4 +103,106 @@ pub async fn execute(
             Err(err_msg)
         }
     }
+}
+
+async fn sync_instance_signal_wait(
+    pool: &PgPool,
+    instance_id: &str,
+    node_id: &str,
+) -> Result<(), String> {
+    if !instances_have_blocked_on_signal(pool).await? {
+        return Ok(());
+    }
+
+    let row = sqlx::query(
+        "SELECT node_type
+         FROM df.nodes
+         WHERE id = $1 AND instance_id = $2",
+    )
+    .bind(node_id)
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load node for signal wait sync: {e}"))?;
+
+    let Some(row) = row else {
+        return Err(format!(
+            "signal wait sync found no node {node_id} in instance {instance_id}"
+        ));
+    };
+
+    let node_type: String = row
+        .try_get("node_type")
+        .map_err(|e| format!("Failed to read node_type for signal wait sync: {e}"))?;
+    if node_type != "SIGNAL" {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start signal wait sync transaction: {e}"))?;
+
+    let instance_row = sqlx::query(
+        "SELECT 1
+         FROM df.instances
+         WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')
+         FOR UPDATE",
+    )
+    .bind(instance_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to lock instance for signal wait sync: {e}"))?;
+
+    if instance_row.is_none() {
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to finish signal wait sync transaction: {e}"))?;
+        return Ok(());
+    }
+
+    // Parallel branches can have overlapping SIGNAL waits. Recompute from the
+    // current running SIGNAL nodes instead of blindly clearing this node's name.
+    let running_signal_query = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT query
+         FROM df.nodes
+         WHERE instance_id = $1
+           AND node_type = 'SIGNAL'
+           AND status = 'running'
+         ORDER BY updated_at DESC, id
+         LIMIT 1",
+    )
+    .bind(instance_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to find running SIGNAL node: {e}"))?
+    .flatten();
+
+    let blocked_on_signal = running_signal_query.and_then(|config_str| {
+        serde_json::from_str::<serde_json::Value>(&config_str)
+            .ok()
+            .and_then(|config| {
+                config
+                    .get("signal_name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+    });
+
+    sqlx::query(
+        "UPDATE df.instances
+         SET blocked_on_signal = $1, updated_at = now()
+         WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(blocked_on_signal)
+    .bind(instance_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to sync instance signal wait marker: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to finish signal wait sync transaction: {e}"))?;
+
+    Ok(())
 }

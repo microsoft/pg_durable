@@ -34,15 +34,23 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
+    blocked TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_basic;
-    SELECT s INTO status FROM df.status(inst_id) s;
+    SELECT i.status, i.blocked_on_signal
+      INTO status, blocked
+      FROM df.instances i
+     WHERE i.id = inst_id;
     
     IF lower(status) = 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: workflow should be waiting for signal, not completed';
     END IF;
+
+    IF blocked IS DISTINCT FROM 'go' THEN
+        RAISE EXCEPTION 'TEST FAILED: blocked_on_signal = %, expected go', blocked;
+    END IF;
     
-    RAISE NOTICE 'Verified workflow is waiting (status: %)', status;
+    RAISE NOTICE 'Verified workflow is waiting (status: %, blocked_on_signal: %)', status, blocked;
 END $$;
 
 -- Send the signal
@@ -60,6 +68,7 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
+    blocked TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_basic;
     RAISE NOTICE 'Testing basic signal: %', inst_id;
@@ -68,6 +77,11 @@ BEGIN
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: basic signal status = %', status;
+    END IF;
+
+    SELECT blocked_on_signal INTO blocked FROM df.instances WHERE id = inst_id;
+    IF blocked IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: blocked_on_signal should clear after signal, got %', blocked;
     END IF;
     
     IF NOT EXISTS (
@@ -96,7 +110,7 @@ DELETE FROM signal_test_log;
 CREATE TEMP TABLE _test_signal_timeout (instance_id TEXT);
 
 INSERT INTO _test_signal_timeout SELECT df.start(
-    df.wait_for_signal('never_arrives', 2) |=> 'sig'
+    df.wait_for_signal('never_arrives', 4) |=> 'sig'
     ~> 'INSERT INTO signal_test_log (msg, data) 
         VALUES (''timeout_result'', $sig::jsonb)',
     'test-signal-timeout'
@@ -106,14 +120,26 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
+    blocked TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_timeout;
     RAISE NOTICE 'Testing signal timeout: %', inst_id;
+
+    PERFORM pg_sleep(1);
+    SELECT blocked_on_signal INTO blocked FROM df.instances WHERE id = inst_id;
+    IF blocked IS DISTINCT FROM 'never_arrives' THEN
+        RAISE EXCEPTION 'TEST FAILED: timeout blocked_on_signal = %, expected never_arrives', blocked;
+    END IF;
 
     SELECT df.await_instance(inst_id, 10) INTO status;
 
     IF status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED: signal timeout status = %', status;
+    END IF;
+
+    SELECT blocked_on_signal INTO blocked FROM df.instances WHERE id = inst_id;
+    IF blocked IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: blocked_on_signal should clear after timeout, got %', blocked;
     END IF;
     
     IF NOT EXISTS (

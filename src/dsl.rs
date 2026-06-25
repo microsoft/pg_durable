@@ -129,6 +129,24 @@ fn legacy_login_role_schema() -> bool {
     !owner_scoped_vars_enabled()
 }
 
+fn instances_have_blocked_on_signal() -> bool {
+    Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM pg_catalog.pg_attribute a
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'df'
+               AND c.relname = 'instances'
+               AND a.attname = 'blocked_on_signal'
+               AND NOT a.attisdropped
+         )",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -1101,13 +1119,26 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
     // 1. Overwriting a 'completed' or 'failed' instance that finished before the cancel
     //    signal was processed by duroxide.
     // 2. Calling df.cancel twice in a row (idempotent by guard).
-    // User has column-level UPDATE on (status, updated_at) with RLS restricting to own rows.
-    Spi::run_with_args(
-        "UPDATE df.instances SET status = 'cancelled', updated_at = pg_catalog.now() \
-         WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
-        &[instance_id.into()],
-    )
-    .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
+    // User has column-level UPDATE on runtime status columns with RLS restricting to own rows.
+    if instances_have_blocked_on_signal() {
+        Spi::run_with_args(
+            "UPDATE df.instances
+             SET status = 'cancelled',
+                 blocked_on_signal = NULL,
+                 updated_at = pg_catalog.now()
+             WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+            &[instance_id.into()],
+        )
+        .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
+    } else {
+        Spi::run_with_args(
+            "UPDATE df.instances
+             SET status = 'cancelled', updated_at = pg_catalog.now()
+             WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+            &[instance_id.into()],
+        )
+        .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
+    }
 
     format!("Instance {instance_id} cancelled: {reason}")
 }
