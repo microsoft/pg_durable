@@ -217,8 +217,21 @@ CREATE TABLE df.instances (
 COMMENT ON COLUMN df.instances.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
--- Index for finding pending instances
-CREATE INDEX idx_instances_status ON df.instances(status);
+-- Index for status-filtered listing, newest-first
+-- (df.list_instances() WHERE status = $1 ORDER BY created_at DESC). Also serves the
+-- pending-instance scan via the leading status column. The trailing id prepares the
+-- access path for the keyset pagination planned for df.list_instances
+-- (ORDER BY created_at DESC, id ASC); df.list_instances() does not order by id yet,
+-- so this does not change the current result ordering.
+-- NOTE: keep these two index definitions byte-identical to the 0.2.3->0.2.4 upgrade
+-- script (sql/pg_durable--0.2.3--0.2.4.sql) until 0.2.4 is released -- Scenario A
+-- compares pg_get_indexdef() across the fresh-install and upgrade paths.
+CREATE INDEX idx_instances_status ON df.instances(status, created_at DESC, id);
+
+-- Index for unfiltered listing, newest-first (df.list_instances() ORDER BY created_at DESC).
+-- The trailing id prepares the access path for the same future keyset pagination
+-- (ORDER BY created_at DESC, id ASC); it does not affect the current ordering.
+CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
 
 -- Index for finding nodes by instance
 CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);

@@ -236,3 +236,23 @@ ALTER TABLE df.instances
         FOREIGN KEY (id, root_node)
         REFERENCES df.nodes (instance_id, id)
         DEFERRABLE INITIALLY DEFERRED NOT VALID;
+
+-- ============================================================================
+-- Indexes for efficient instance listing (monitoring redesign, issues #167/#87/#146).
+--
+-- df.list_instances() returns rows newest-first (ORDER BY created_at DESC),
+-- optionally filtered by status. The previous single-column
+-- idx_instances_status(status) did not cover created_at, so a status-filtered
+-- listing still required a sort, and an unfiltered listing had no supporting
+-- index at all. Replace the single-column index with a composite
+-- (status, created_at DESC, id) and add (created_at DESC, id) for the unfiltered
+-- path. The trailing id prepares the access path for the keyset pagination planned
+-- for df.list_instances (ORDER BY created_at DESC, id ASC); df.list_instances() does
+-- not order by id yet, so this does not change the current result ordering. These
+-- definitions are byte-identical to the fresh-install DDL in src/lib.rs, so the
+-- Scenario A index snapshot matches.
+-- ============================================================================
+DROP INDEX IF EXISTS df.idx_instances_status;
+CREATE INDEX idx_instances_status ON df.instances(status, created_at DESC, id);
+DROP INDEX IF EXISTS df.idx_instances_created_at;
+CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
