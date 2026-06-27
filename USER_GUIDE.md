@@ -948,6 +948,12 @@ SELECT df.start(
 
 Use `@>` operator or `df.loop()` to create functions that run forever. Each iteration creates a new execution with fresh state (via continue-as-new).
 
+> **Note:** Each `df.loop()` runs as its own child orchestration. The loop's iterations
+> (the continue-as-new generations) are scoped to that child, so any nodes *before* the
+> loop in the graph run exactly once and any nodes *after* the loop run once the loop
+> exits. When inspecting `df.instances`, a looping function therefore shows a parent
+> instance plus a separate child instance for the loop.
+
 ```sql
 -- Simple heartbeat every 30 seconds (using @> operator)
 SELECT df.start(

@@ -572,32 +572,119 @@ const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
 /// This prevents runaway infinite loops from consuming resources indefinitely.
 /// At the minimum 1-second rate limit, this allows ~27 hours of looping.
 const MAX_LOOP_ITERATIONS: u64 = 100_000;
-async fn execute_loop_node(
-    ctx: &OrchestrationContext,
-    graph: &FunctionGraph,
-    node: &FunctionNode,
-    node_id: &str,
-    results: &mut HashMap<String, String>,
-    exec_ctx: &ExecutionContext,
-) -> NodeResult {
+
+/// Orchestration name for the loop sub-orchestration.
+///
+/// Each `df.loop()` node spawns a child orchestration under this name.  The
+/// child handles all iterations via `continue_as_new`; when the loop exits it
+/// returns a `SubtreeEnvelope` to the parent.  The parent link is preserved
+/// across `continue_as_new` generations by duroxide (see duroxide PR #31), so
+/// the parent orchestration is notified when the loop finally completes.
+pub const LOOP_NAME: &str = "pg_durable::orchestration::execute-loop";
+
+/// Build the `SubtreeEnvelope` a loop returns to its parent on exit.
+///
+/// A loop always exits with a *normal* result: a `df.break()` inside the body is the loop's
+/// own terminator (caught here as `NodeError::Break`), not a break that should unwind past
+/// the loop, so the envelope is always tagged `Normal`. `execute_loop_node` merges `results`
+/// back into the parent map via `parse_subtree_envelope`.
+fn loop_exit_envelope(result: String, results: HashMap<String, String>) -> Result<String, String> {
+    let envelope = SubtreeEnvelope {
+        control: Some(SubtreeControl::Normal),
+        result,
+        results,
+    };
+    serde_json::to_string(&envelope).map_err(|e| format!("Failed to serialize loop envelope: {e}"))
+}
+
+/// Sub-orchestration that runs a single loop iteration and either returns or
+/// calls `continue_as_new` for the next iteration.
+///
+/// Input JSON:
+/// ```json
+/// { "instance_id": "...", "loop_node_id": "...",
+///   "results": "<results_json>", "vars": "<vars_json>", "label": "...",
+///   "iteration": 0 }
+/// ```
+///
+/// `load_function_graph` is called at the start of **every** generation
+/// (including after `continue_as_new`) so that cross-iteration security
+/// tampering is caught and the instance is failed — the same guarantee the
+/// main `execute()` orchestration provides at its generation boundary.
+///
+/// On loop exit the function returns a `SubtreeEnvelope` containing the final
+/// result and any named results accumulated during the loop.
+pub async fn execute_loop(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
+    let input: serde_json::Value = serde_json::from_str(&input_json)
+        .map_err(|e| format!("Failed to parse ExecuteLoop input: {e}"))?;
+
+    let instance_id = input["instance_id"]
+        .as_str()
+        .ok_or("Missing instance_id in ExecuteLoop input")?
+        .to_string();
+    let loop_node_id = input["loop_node_id"]
+        .as_str()
+        .ok_or("Missing loop_node_id in ExecuteLoop input")?
+        .to_string();
+    let results_json = input["results"]
+        .as_str()
+        .ok_or("Missing results in ExecuteLoop input")?;
+
+    // Iteration counter threaded across continue_as_new generations (M7).
+    // Absent on the first generation (spawned by execute_loop_node), so default to 0.
+    let iteration = input["iteration"].as_u64().unwrap_or(0);
+
+    // re-load the graph from the database on every generation — this re-validates
+    // submitted_by and catches cross-iteration security tampering.
+    let graph_json = ctx
+        .schedule_activity(activities::load_function_graph::NAME, instance_id.clone())
+        .await?;
+    let graph: FunctionGraph = serde_json::from_str(&graph_json)
+        .map_err(|e| format!("Failed to parse graph in ExecuteLoop: {e}"))?;
+
+    let mut results: HashMap<String, String> = serde_json::from_str(results_json)
+        .map_err(|e| format!("Failed to parse results in ExecuteLoop: {e}"))?;
+
+    let vars: HashMap<String, String> = if let Some(vars_str) = input["vars"].as_str() {
+        serde_json::from_str(vars_str)
+            .map_err(|e| format!("Failed to parse vars in ExecuteLoop: {e}"))?
+    } else {
+        HashMap::new()
+    };
+    let label: Option<String> = input["label"].as_str().map(|s| s.to_string());
+
+    let exec_ctx = ExecutionContext {
+        vars,
+        label,
+        loop_iteration: iteration,
+    };
+
+    let node = graph
+        .nodes
+        .get(&loop_node_id)
+        .ok_or_else(|| format!("Loop node not found: {loop_node_id}"))?;
+
     let body_id = node
         .left_node
         .as_ref()
-        .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
+        .ok_or_else(|| format!("LOOP node {loop_node_id} has no body"))?
+        .clone();
 
-    // Capture the iteration start time so we can rate-limit `continue_as_new`
-    // below.  `utc_now()` is duroxide's deterministic clock (recorded in
-    // history and replayed verbatim), so this remains replay-safe.
+    // Capture iteration start time for rate-limiting continue_as_new.
     let iter_started = ctx.utc_now().await.ok();
 
     ctx.trace_info("Executing loop iteration");
 
-    // The loop is the only place that catches `NodeError::Break`: a break unwinds through
-    // every compound node in the body via `?` and is converted here into a normal loop exit.
-    // A `Failure` still propagates out of the loop unchanged.
-    let body_result = match Box::pin(execute_function_node_with_vars(
-        ctx, graph, body_id, results, exec_ctx,
-    ))
+    // The loop is where `NodeError::Break` is caught: a break unwinds through the body via
+    // `?` and is converted here into the loop's normal exit value.  A `Failure` propagates
+    // out of the sub-orchestration unchanged.
+    let body_result = match execute_function_node_with_vars(
+        &ctx,
+        &graph,
+        &body_id,
+        &mut results,
+        &exec_ctx,
+    )
     .await
     {
         Ok(v) => v,
@@ -605,26 +692,34 @@ async fn execute_loop_node(
             ctx.trace_info(format!(
                 "Loop terminated by break with value: {break_value}"
             ));
-            store_named_result(ctx, node, &break_value, results, "LOOP");
-            return Ok(break_value);
+            store_named_result(&ctx, node, &break_value, &mut results, "LOOP");
+            return loop_exit_envelope(break_value, results);
         }
-        Err(e @ NodeError::Failure(_)) => return Err(e),
+        Err(NodeError::Failure(e)) => return Err(e),
     };
 
-    // Check while-condition if present
+    // While-condition: if present and false, exit the loop.
     if let Some(ref config_str) = node.query {
         match serde_json::from_str::<serde_json::Value>(config_str) {
             Ok(config) => {
                 if let Some(condition_node_id) = config["condition_node"].as_str() {
                     ctx.trace_info("Evaluating loop condition");
-                    let condition_result = Box::pin(execute_function_node_with_vars(
-                        ctx,
-                        graph,
+                    let condition_result = match execute_function_node_with_vars(
+                        &ctx,
+                        &graph,
                         condition_node_id,
-                        results,
-                        exec_ctx,
-                    ))
-                    .await?;
+                        &mut results,
+                        &exec_ctx,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(NodeError::Break(break_value)) => {
+                            store_named_result(&ctx, node, &break_value, &mut results, "LOOP");
+                            return loop_exit_envelope(break_value, results);
+                        }
+                        Err(NodeError::Failure(e)) => return Err(e),
+                    };
 
                     // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
                     let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
@@ -634,17 +729,17 @@ async fn execute_loop_node(
 
                     if !should_continue {
                         ctx.trace_info("Loop condition false, exiting loop");
-                        store_named_result(ctx, node, &body_result, results, "LOOP");
-                        return Ok(body_result);
+                        store_named_result(&ctx, node, &body_result, &mut results, "LOOP");
+                        return loop_exit_envelope(body_result, results);
                     }
                 }
             }
             Err(e) => {
                 // M8: Malformed condition config should fail the loop rather than
                 // silently creating an infinite loop without exit condition.
-                return Err(NodeError::Failure(format!(
-                    "LOOP node {node_id}: failed to parse condition config: {e}"
-                )));
+                return Err(format!(
+                    "LOOP node {loop_node_id}: failed to parse condition config: {e}"
+                ));
             }
         }
     }
@@ -654,17 +749,13 @@ async fn execute_loop_node(
     // M7: Enforce maximum iteration count to prevent runaway infinite loops
     let next_iteration = exec_ctx.loop_iteration + 1;
     if next_iteration >= MAX_LOOP_ITERATIONS {
-        return Err(NodeError::Failure(format!(
+        return Err(format!(
             "Loop exceeded maximum iteration count of {MAX_LOOP_ITERATIONS}. \
              Use df.break() to exit the loop or restructure the workflow."
-        )));
+        ));
     }
 
-    // Enforce a minimum per-iteration wall-clock duration to prevent
-    // busy-looping (e.g. `df.loop(df.sleep(0))`).  Compute the elapsed time
-    // from the deterministic clock; if the iteration finished faster than
-    // LOOP_MIN_ITER_DURATION, schedule a timer for the deficit so the next
-    // continue_as_new is gated by at least that much real-clock time.
+    // Enforce a minimum per-iteration wall-clock duration to prevent busy-looping.
     if let Some(started) = iter_started {
         if let Ok(now) = ctx.utc_now().await {
             let elapsed = now.duration_since(started).unwrap_or(Duration::ZERO);
@@ -679,20 +770,86 @@ async fn execute_loop_node(
         }
     }
 
-    // Preserve vars in continue_as_new input
-    let new_input = FunctionInput {
-        instance_id: graph.instance_id.clone(),
-        label: exec_ctx.label.clone(),
-        vars: exec_ctx.vars.clone(),
-        loop_iteration: next_iteration,
-    };
-
-    // duroxide 0.1.1: continue_as_new returns an awaitable future - return it directly
-    return ctx
-        .continue_as_new(serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()))
+    // Another iteration needed: continue_as_new within this sub-orchestration.
+    // The parent orchestration keeps its awaiting handle because duroxide preserves
+    // the parent link across continue_as_new (duroxide PR #31).
+    ctx.trace_info(format!(
+        "Loop continuing with continue_as_new at node {loop_node_id}"
+    ));
+    let new_results_json = serde_json::to_string(&results)
+        .map_err(|e| format!("Failed to serialize updated results: {e}"))?;
+    let mut new_input = input.clone();
+    new_input["results"] = serde_json::Value::String(new_results_json);
+    // Persist the incremented iteration counter for the next generation (M7).
+    new_input["iteration"] = serde_json::Value::Number(next_iteration.into());
+    let new_input_json = serde_json::to_string(&new_input)
+        .map_err(|e| format!("Failed to serialize loop input: {e}"))?;
+    ctx.continue_as_new(new_input_json)
         .await
-        .map(|_| body_result)
-        .map_err(|e| NodeError::Failure(format!("continue_as_new failed: {e:?}")));
+        .map(|_| String::new())
+        .map_err(|e| format!("continue_as_new failed: {e:?}"))
+}
+
+/// Build a deterministic, generation-qualified child instance ID for a sub-orchestration.
+///
+/// Duroxide's auto-generated child IDs (`{parent}::sub::{event_id}`) reset their event
+/// counter across `continue_as_new` generations. When a loop body itself spawns
+/// sub-orchestrations (a nested `df.loop`, or a parallel/race branch), each loop
+/// generation would otherwise re-derive the *same* child ID, colliding with the previous
+/// (now terminal) generation's child and stalling forever. Embedding the current
+/// execution (generation) ID plus the spawning node ID makes the child ID unique per
+/// generation while staying deterministic across replays of the same generation.
+fn child_instance_id(ctx: &OrchestrationContext, tag: &str, node_id: &str) -> String {
+    format!(
+        "{}::e{}::{tag}::{node_id}",
+        ctx.instance_id(),
+        ctx.execution_id()
+    )
+}
+
+async fn execute_loop_node(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> NodeResult {
+    // Validate that the loop has a body before spawning the sub-orchestration.
+    node.left_node
+        .as_ref()
+        .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
+
+    let results_json =
+        serde_json::to_string(results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+    let vars_json = serde_json::to_string(&exec_ctx.vars)
+        .map_err(|e| format!("Failed to serialize vars: {e}"))?;
+
+    let loop_input = serde_json::json!({
+        "instance_id": graph.instance_id,
+        "loop_node_id": node_id,
+        "results": results_json,
+        "vars": vars_json,
+        "label": exec_ctx.label,
+        "iteration": 0,
+    })
+    .to_string();
+
+    ctx.trace_info(format!(
+        "Spawning loop sub-orchestration for node {node_id}"
+    ));
+
+    let child_id = child_instance_id(ctx, "loop", node_id);
+    let raw = ctx
+        .schedule_sub_orchestration_with_id(LOOP_NAME, child_id, loop_input)
+        .await
+        .map_err(|e| format!("Loop sub-orchestration failed: {e}"))?;
+
+    // Merge named results from the loop sub-orchestration back into the parent map and
+    // return the loop's final result.  The loop always returns a `Normal` envelope (a break
+    // inside the body is the loop's own terminator), so `parse_subtree_envelope` will not
+    // re-raise a `NodeError::Break` here.
+    parse_subtree_envelope(&raw, "LOOP", results)
 }
 
 async fn execute_break_node(
@@ -918,8 +1075,11 @@ async fn execute_join_node(
     })
     .to_string();
 
-    // Build list of branch inputs
-    let mut branch_inputs = vec![left_input, right_input];
+    // Build list of (branch node id, branch input) pairs.
+    let mut branch_inputs: Vec<(String, String)> = vec![
+        (left_id.clone(), left_input),
+        (right_id.clone(), right_input),
+    ];
 
     // Check for extra nodes (join3)
     if let Some(config_str) = &node.query {
@@ -935,17 +1095,20 @@ async fn execute_join_node(
                             "label": exec_ctx.label
                         })
                         .to_string();
-                        branch_inputs.push(extra_input);
+                        branch_inputs.push((extra_id.to_string(), extra_input));
                     }
                 }
             }
         }
     }
 
-    // Schedule sub-orchestrations and collect DurableFutures
+    // Schedule sub-orchestrations and collect DurableFutures. Use explicit,
+    // generation-qualified child IDs so a JOIN inside a loop body does not collide
+    // across continue_as_new generations.
     let mut durable_futures = Vec::new();
-    for input in branch_inputs {
-        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, input);
+    for (branch_node_id, input) in branch_inputs {
+        let child_id = child_instance_id(ctx, "subtree", &branch_node_id);
+        let fut = ctx.schedule_sub_orchestration_with_id(SUBTREE_NAME, child_id, input);
         durable_futures.push(fut);
     }
 
@@ -1037,9 +1200,18 @@ async fn execute_race_node(
     })
     .to_string();
 
-    // Schedule sub-orchestrations
-    let left_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, left_input);
-    let right_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, right_input);
+    // Schedule sub-orchestrations with explicit, generation-qualified child IDs so a
+    // RACE inside a loop body does not collide across continue_as_new generations.
+    let left_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        child_instance_id(ctx, "subtree", left_id),
+        left_input,
+    );
+    let right_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        child_instance_id(ctx, "subtree", right_id),
+        right_input,
+    );
 
     // Use ctx.select2() - first to complete wins
     // select2 now returns Either2<Left, Right> instead of (winner_idx, DurableOutput)
