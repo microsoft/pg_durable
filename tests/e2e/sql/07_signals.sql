@@ -45,13 +45,26 @@ BEGIN
     RAISE NOTICE 'Verified workflow is waiting (status: %)', status;
 END $$;
 
--- Send the signal
+-- Send the signal, retrying until the workflow consumes it. The leading
+-- 'SELECT 1' activity runs before df.wait_for_signal, and duroxide drops any
+-- event raised before the subscription is registered ("no pending subscription
+-- slot", duroxide #154). A single fire-once signal races that registration and
+-- is flaky under load, so re-raise until the instance leaves 'running'.
 DO $$
 DECLARE
     inst_id TEXT;
+    status TEXT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_basic;
-    PERFORM df.signal(inst_id, 'go', '{"value": 42}');
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled');
+        EXIT WHEN attempts > 100;
+        PERFORM df.signal(inst_id, 'go', '{"value": 42}');
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
     RAISE NOTICE 'Sent signal to %', inst_id;
 END $$;
 
@@ -146,17 +159,24 @@ INSERT INTO _test_signal_data SELECT df.start(
     'test-signal-data'
 );
 
-SELECT pg_sleep(1);
-
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_data;
-    
-    PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
     RAISE NOTICE 'Testing signal with data: %', inst_id;
+
+    -- Retry the signal until consumed; see Test 1 / duroxide #154.
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled');
+        EXIT WHEN attempts > 100;
+        PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
 
     SELECT df.await_instance(inst_id, 10) INTO status;
 
@@ -195,17 +215,24 @@ INSERT INTO _test_signal_text SELECT df.start(
     'test-signal-text'
 );
 
-SELECT pg_sleep(1);
-
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_text;
-
-    PERFORM df.signal(inst_id, 'plain_text', 'approve');
     RAISE NOTICE 'Testing signal with plain text data: %', inst_id;
+
+    -- Retry the signal until consumed; see Test 1 / duroxide #154.
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled');
+        EXIT WHEN attempts > 100;
+        PERFORM df.signal(inst_id, 'plain_text', 'approve');
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
 
     SELECT df.await_instance(inst_id, 10) INTO status;
 
@@ -243,14 +270,30 @@ INSERT INTO _test_signal_then_named SELECT df.start(
     'test-signal-then-named'
 );
 
-SELECT pg_sleep(1);
-
+-- Retry the signal until the workflow consumes it. This workflow runs a leading
+-- INSERT activity *before* df.wait_for_signal, and duroxide only registers the
+-- signal subscription a few hundred ms after that INSERT commits. An event
+-- raised before the subscription exists is dropped ("no pending subscription
+-- slot", duroxide #154), so a single fire-once signal (after a fixed pg_sleep
+-- or even after observing the leading INSERT's row) races the subscription and
+-- is flaky under CI load. Re-raising until the instance leaves 'running'
+-- guarantees at least one signal lands after the subscription is registered;
+-- extra events raised earlier are harmlessly dropped.
 DO $$
 DECLARE
     inst_id TEXT;
+    status TEXT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_then_named;
-    PERFORM df.signal(inst_id, 'test_approval_then', '{"approved": true}');
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled');
+        EXIT WHEN attempts > 100;
+        PERFORM df.signal(inst_id, 'test_approval_then', '{"approved": true}');
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
 END $$;
 
 DO $$
