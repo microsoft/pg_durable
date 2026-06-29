@@ -245,17 +245,19 @@ ALTER TABLE df.instances
 -- idx_instances_status(status) did not cover created_at, so a status-filtered
 -- listing still required a sort, and an unfiltered listing had no supporting
 -- index at all. Replace the single-column index with a composite
--- (status, created_at DESC, id) and add (created_at DESC, id) for the unfiltered
--- path. The trailing id prepares the access path for the keyset pagination planned
--- for df.list_instances (ORDER BY created_at DESC, id ASC); df.list_instances() does
--- not order by id yet, so this does not change the current result ordering. These
--- definitions are byte-identical to the fresh-install DDL in src/lib.rs, so the
+-- (status, created_at DESC, id), add (created_at DESC, id) for the unfiltered
+-- path, and add a partial (label, created_at DESC, id) WHERE label IS NOT NULL
+-- for the label-filtered path (issue #87). The trailing id prepares the access path
+-- for the keyset pagination on df.list_instances (ORDER BY created_at DESC, id ASC).
+-- These definitions are byte-identical to the fresh-install DDL in src/lib.rs, so the
 -- Scenario A index snapshot matches.
 -- ============================================================================
 DROP INDEX IF EXISTS df.idx_instances_status;
 CREATE INDEX idx_instances_status ON df.instances(status, created_at DESC, id);
 DROP INDEX IF EXISTS df.idx_instances_created_at;
 CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
+DROP INDEX IF EXISTS df.idx_instances_label;
+CREATE INDEX idx_instances_label ON df.instances(label, created_at DESC, id) WHERE label IS NOT NULL;
 
 -- ============================================================================
 -- Node state-transition model: add df.nodes.status_details (PR #263).
@@ -340,3 +342,52 @@ CREATE  FUNCTION df."instance_nodes"(
 STRICT 
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'instance_nodes_v2_wrapper';
+
+-- ============================================================================
+-- df.list_instances(): label filter, keyset pagination, timestamps (issues #87/#146).
+--
+-- This adds a NEW overload of df.list_instances rather than changing the existing
+-- one. The prior two-argument definition
+-- (df.list_instances(status_filter text, limit_count integer) -> 6 columns) is
+-- left in place UNCHANGED, so existing positional calls
+-- (df.list_instances(), df.list_instances('Running'), df.list_instances('Running', 50))
+-- keep resolving to it and Scenario B1 holds: the released 0.2.2/0.2.3 .so already
+-- binds that 6-column SQL declaration to the list_instances_wrapper symbol, and the
+-- new .so still implements that symbol with the same 6-column shape.
+--
+-- The new four-argument overload (status_filter, limit_count, label_filter,
+-- after_cursor) returns three extra trailing columns (created_at, completed_at,
+-- next_cursor) and is backed by a distinct symbol (list_instances_paged_wrapper).
+-- Only after_cursor defaults, giving the overload a minimum arity of 3; the old
+-- function matches calls of arity 0-2 and the new one arity 3-4, so the two never
+-- overlap and PostgreSQL never reports "function is not unique". Ordering is
+-- created_at DESC, id ASC, served by the (created_at DESC, id) indexes added
+-- earlier in this upgrade. The CREATE below is the pgrx-generated fresh-install DDL
+-- (src/monitoring.rs) verbatim, so the Scenario A schema snapshot (function
+-- arguments + result type) matches a fresh 0.2.4 install.
+--
+-- Backward compatibility (Scenario B1): the new .so's list_instances overloads read
+-- only columns that exist in every prior df.instances schema (id, label, status,
+-- created_at, completed_at), so both run correctly against a pre-0.2.4 schema until
+-- this upgrade applies (just without the new (created_at DESC, id) index serving
+-- the keyset path).
+-- ============================================================================
+CREATE  FUNCTION df."list_instances"(
+	"status_filter" TEXT, /* core::option::Option<&str> */
+	"limit_count" INT, /* i32 */
+	"label_filter" TEXT, /* core::option::Option<&str> */
+	"after_cursor" TEXT DEFAULT NULL /* core::option::Option<&str> */
+) RETURNS TABLE (
+	"instance_id" TEXT,  /* alloc::string::String */
+	"label" TEXT,  /* core::option::Option<alloc::string::String> */
+	"function_name" TEXT,  /* alloc::string::String */
+	"status" TEXT,  /* alloc::string::String */
+	"execution_count" bigint,  /* i64 */
+	"output" TEXT,  /* core::option::Option<alloc::string::String> */
+	"created_at" timestamp with time zone,  /* pgrx::datum::time_stamp_with_timezone::TimestampWithTimeZone */
+	"completed_at" timestamp with time zone,  /* core::option::Option<pgrx::datum::time_stamp_with_timezone::TimestampWithTimeZone> */
+	"next_cursor" TEXT  /* core::option::Option<alloc::string::String> */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'list_instances_paged_wrapper';
