@@ -6,7 +6,9 @@
 #![allow(clippy::type_complexity)] // Required for pgrx TableIterator return types
 
 use duroxide::Client;
+use pgrx::datum::TimestampWithTimeZone;
 use pgrx::prelude::*;
+use std::collections::HashMap;
 
 use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
 
@@ -408,11 +410,165 @@ pub fn metrics() -> TableIterator<
     TableIterator::new(results)
 }
 
-/// Get function nodes for an instance with execution history.
+struct NodeRow {
+    id: String,
+    node_type: String,
+    query: Option<String>,
+    result_name: Option<String>,
+    left_node: Option<String>,
+    right_node: Option<String>,
+    status: Option<String>,
+    result: Option<String>,
+    status_details: Option<String>,
+    updated_at: Option<TimestampWithTimeZone>,
+}
+
+impl crate::node_status::NodeFacts for NodeRow {
+    fn node_type(&self) -> &str {
+        &self.node_type
+    }
+    fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+    fn left_node(&self) -> Option<&str> {
+        self.left_node.as_deref()
+    }
+    fn right_node(&self) -> Option<&str> {
+        self.right_node.as_deref()
+    }
+    fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+    fn status_details(&self) -> Option<&str> {
+        self.status_details.as_deref()
+    }
+}
+
+fn load_instance_nodes(instance_id: &str) -> (Option<String>, Vec<NodeRow>) {
+    Spi::connect(|client| {
+        let status_details_expr = crate::node_status::status_details_select_expr(client);
+        let node_sql = format!(
+            "SELECT id, node_type, query, result_name, left_node, right_node,
+                    status, result::text, {status_details_expr}, updated_at
+             FROM df.nodes WHERE instance_id = $1"
+        );
+        let mut nodes = Vec::new();
+        if let Ok(table) = client.select(&node_sql, None, &[instance_id.into()]) {
+            for row in table {
+                if let Ok(Some(id)) = row.get::<String>(1) {
+                    nodes.push(NodeRow {
+                        id,
+                        node_type: row.get::<String>(2).ok().flatten().unwrap_or_default(),
+                        query: row.get(3).ok().flatten(),
+                        result_name: row.get(4).ok().flatten(),
+                        left_node: row.get(5).ok().flatten(),
+                        right_node: row.get(6).ok().flatten(),
+                        status: row.get(7).ok().flatten(),
+                        result: row.get(8).ok().flatten(),
+                        status_details: row.get(9).ok().flatten(),
+                        updated_at: row.get(10).ok().flatten(),
+                    });
+                }
+            }
+        }
+
+        let mut root: Option<String> = None;
+        if let Ok(table) = client.select(
+            "SELECT root_node FROM df.instances WHERE id = $1",
+            None,
+            &[instance_id.into()],
+        ) {
+            if let Some(row) = table.into_iter().next() {
+                root = row.get::<String>(1).ok().flatten();
+            }
+        }
+
+        (root, nodes)
+    })
+}
+
+/// Get one row per node, with stored status plus read-time inferred status.
+#[pg_extern(name = "instance_nodes", schema = "df")]
+pub fn instance_nodes_v2(
+    instance_id_param: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(node_id, String),
+        name!(node_type, String),
+        name!(query, Option<String>),
+        name!(result_name, Option<String>),
+        name!(left_node, Option<String>),
+        name!(right_node, Option<String>),
+        name!(status, Option<String>),
+        name!(result, Option<String>),
+        name!(status_details, Option<String>),
+        name!(inferred_status, String),
+        name!(inferred_status_from_ancestor_id, Option<String>),
+        name!(updated_at, Option<pgrx::datum::TimestampWithTimeZone>),
+    ),
+> {
+    use crate::node_status::infer_statuses;
+
+    let (root_node, node_rows) = load_instance_nodes(instance_id_param);
+    let nodes: HashMap<String, NodeRow> =
+        node_rows.into_iter().map(|n| (n.id.clone(), n)).collect();
+
+    // Shared with df.explain() so both views agree on skipped/superseded nodes.
+    let inferred = infer_statuses(root_node.as_deref(), &nodes);
+
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<TimestampWithTimeZone>,
+    );
+
+    let mut rows: Vec<Row> = Vec::with_capacity(nodes.len());
+    for (id, n) in &nodes {
+        let inf = inferred.get(id);
+        let inferred_status = inf
+            .map(|i| i.status.clone())
+            .unwrap_or_else(|| n.status.clone().unwrap_or_else(|| "pending".to_string()));
+        let from_anc = inf.and_then(|i| i.from_ancestor_id.clone());
+        rows.push((
+            id.clone(),
+            n.node_type.clone(),
+            n.query.clone(),
+            n.result_name.clone(),
+            n.left_node.clone(),
+            n.right_node.clone(),
+            n.status.clone(),
+            n.result.clone(),
+            n.status_details.clone(),
+            inferred_status,
+            from_anc,
+            n.updated_at,
+        ));
+    }
+
+    TableIterator::new(rows)
+}
+
+/// Compatibility wrapper for df.instance_nodes(text, integer).
+///
+/// A pure projection of df.nodes in the pre-0.2.4 result shape: no inference, no
+/// execution-history fan-out, and a constant execution_id of 1. It selects only
+/// columns present in every 0.2.x schema, so it behaves identically whether the
+/// running schema has df.nodes.status_details (0.2.4) or not (0.2.3 under a newer
+/// .so) — no column probe required. last_n_executions is ignored.
 #[pg_extern(schema = "df")]
 pub fn instance_nodes(
     instance_id_param: &str,
-    last_n_executions: default!(i32, "5"),
+    _last_n_executions: i32,
 ) -> TableIterator<
     'static,
     (
@@ -428,14 +584,8 @@ pub fn instance_nodes(
         name!(updated_at, Option<pgrx::datum::TimestampWithTimeZone>),
     ),
 > {
-    use pgrx::datum::TimestampWithTimeZone;
-
-    let instance_id = instance_id_param.to_string();
-    let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
-
-    // Get node definitions from PostgreSQL (including status, result and updated_at)
-    let node_defs: Vec<(
+    type CompatRow = (
+        i64,
         String,
         String,
         Option<String>,
@@ -445,127 +595,34 @@ pub fn instance_nodes(
         Option<String>,
         Option<String>,
         Option<TimestampWithTimeZone>,
-    )> = Spi::connect(|client| {
-        let sql = r#"SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, updated_at
-                   FROM df.nodes WHERE instance_id = $1"#;
-        let mut nodes = Vec::new();
+    );
+
+    let instance_id = instance_id_param.to_string();
+    let rows: Vec<CompatRow> = Spi::connect(|client| {
+        let sql = "SELECT id, node_type, query, result_name, left_node, right_node,
+                          status, result::text, updated_at
+                   FROM df.nodes WHERE instance_id = $1";
+        let mut rows = Vec::new();
         if let Ok(table) = client.select(sql, None, &[instance_id.as_str().into()]) {
             for row in table {
                 if let Ok(Some(id)) = row.get::<String>(1) {
-                    let node_type: String = row.get(2).ok().flatten().unwrap_or_default();
-                    let query: Option<String> = row.get(3).ok().flatten();
-                    let result_name: Option<String> = row.get(4).ok().flatten();
-                    let left_node: Option<String> = row.get(5).ok().flatten();
-                    let right_node: Option<String> = row.get(6).ok().flatten();
-                    let node_status: Option<String> = row.get(7).ok().flatten();
-                    let node_result: Option<String> = row.get(8).ok().flatten();
-                    let updated_at: Option<TimestampWithTimeZone> = row.get(9).ok().flatten();
-                    nodes.push((
+                    rows.push((
+                        1i64,
                         id,
-                        node_type,
-                        query,
-                        result_name,
-                        left_node,
-                        right_node,
-                        node_status,
-                        node_result,
-                        updated_at,
+                        row.get::<String>(2).ok().flatten().unwrap_or_default(),
+                        row.get(3).ok().flatten(),
+                        row.get(4).ok().flatten(),
+                        row.get(5).ok().flatten(),
+                        row.get(6).ok().flatten(),
+                        row.get(7).ok().flatten(),
+                        row.get(8).ok().flatten(),
+                        row.get(9).ok().flatten(),
                     ));
                 }
             }
         }
-        nodes
-    });
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return TableIterator::new(vec![]),
-    };
-
-    let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-
-        let client = Client::new(store);
-
-        let execution_ids = match client.list_executions(&instance_id).await {
-            Ok(ids) => ids,
-            Err(_) => return vec![],
-        };
-
-        let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
-        sorted_ids.sort_by(|a, b| b.cmp(a));
-        let limited: Vec<_> = sorted_ids
-            .into_iter()
-            .take(last_n_executions as usize)
-            .collect();
-
-        let mut rows = Vec::new();
-
-        for exec_id in limited {
-            for (
-                node_id,
-                node_type,
-                query,
-                result_name,
-                left_node,
-                right_node,
-                node_status,
-                node_result,
-                updated_at,
-            ) in &node_defs
-            {
-                rows.push((
-                    exec_id as i64,
-                    node_id.clone(),
-                    node_type.clone(),
-                    query.clone(),
-                    result_name.clone(),
-                    left_node.clone(),
-                    right_node.clone(),
-                    node_status.clone(),
-                    node_result.clone(),
-                    *updated_at,
-                ));
-            }
-        }
-
-        // If no executions found, return static node definitions
-        if rows.is_empty() {
-            for (
-                node_id,
-                node_type,
-                query,
-                result_name,
-                left_node,
-                right_node,
-                node_status,
-                node_result,
-                updated_at,
-            ) in node_defs
-            {
-                rows.push((
-                    0i64,
-                    node_id,
-                    node_type,
-                    query,
-                    result_name,
-                    left_node,
-                    right_node,
-                    node_status,
-                    node_result,
-                    updated_at,
-                ));
-            }
-        }
-
         rows
     });
 
-    TableIterator::new(results)
+    TableIterator::new(rows)
 }

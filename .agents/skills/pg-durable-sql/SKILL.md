@@ -153,8 +153,9 @@ df.list_instances(status_filter TEXT DEFAULT NULL, limit_count INT DEFAULT 100)
 df.instance_info(instance_id TEXT)
 -- Columns: instance_id, label, function_name, function_version, current_execution_id, status, output
 
-df.instance_nodes(instance_id TEXT, last_n_executions INT DEFAULT 5)
--- Columns: execution_id, node_id, node_type, query, result_name, left_node, right_node, status, result, updated_at
+df.instance_nodes(instance_id TEXT)
+-- Columns: node_id, node_type, query, result_name, left_node, right_node, status, result, status_details, inferred_status, inferred_status_from_ancestor_id, updated_at
+-- inferred_status reinterprets status with a derived 'skipped' (untaken if/then/race branch) and loop re-entry as 'pending'
 
 df.instance_executions(instance_id TEXT, limit_count INT DEFAULT 5)
 -- Columns: execution_id, status, event_count, duration_ms, output

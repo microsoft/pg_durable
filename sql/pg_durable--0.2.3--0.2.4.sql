@@ -256,3 +256,87 @@ DROP INDEX IF EXISTS df.idx_instances_status;
 CREATE INDEX idx_instances_status ON df.instances(status, created_at DESC, id);
 DROP INDEX IF EXISTS df.idx_instances_created_at;
 CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
+
+-- ============================================================================
+-- Node state-transition model: add df.nodes.status_details (PR #263).
+--
+-- The background worker stamps every node transition with the orchestration
+-- generation "{instance_id}::{execution_id}" in status_details->>'execution_id'.
+-- df.instance_nodes() parses that stamp to derive the pending/skipped statuses
+-- and to reconcile loop re-entry, and update_node_status() uses it to fence stale
+-- writes. The column is nullable and is deliberately NOT added to any user INSERT
+-- grant on df.nodes -- only the background worker writes it.
+--
+-- Backward compatibility (Scenario B1): the new .so probes for this column at
+-- runtime (update_node_status) and degrades to the plain status/result write when
+-- it is absent, so a pre-0.2.4 schema keeps running until this upgrade applies.
+--
+-- Upgrade ordering (in-flight instances): the worker's orchestration history
+-- changed shape in this release -- update_node_status activity inputs gained an
+-- execution_id field, and JOIN/RACE branch sub-orchestrations now use
+-- deterministic composed instance ids instead of auto-generated ones. duroxide
+-- replays by exact equality on recorded inputs/ids, so instances in flight across
+-- the upgrade cannot resume; drain or recreate them before upgrading (the same
+-- constraint documented for issue #129).
+-- ============================================================================
+ALTER TABLE df.nodes ADD COLUMN status_details JSONB;
+
+COMMENT ON COLUMN df.nodes.status_details IS
+    'Execution metadata written by the worker (never inserted by users). JSON object with key '
+    '"execution_id": the orchestration instance_id::execution_id stamp recorded when the node last '
+    'transitioned. df.instance_nodes() parses it to derive pending/skipped statuses; see USER_GUIDE.md.';
+
+-- ============================================================================
+-- df.instance_nodes(): one row per node with derived status (PR #263).
+--
+-- The return shape changed: the per-execution fan-out is gone, replaced by a
+-- single row per node carrying the stored status plus the derived status_details,
+-- inferred_status and inferred_status_from_ancestor_id columns. Keep the old
+-- two-argument overload callable for binary/schema compatibility, but implement
+-- it as a one-row-per-node adapter that ignores last_n_executions and returns a
+-- dummy execution_id of 1. Remove its default argument so one-argument calls
+-- resolve to the new API after the schema upgrade. The definitions below are the
+-- pgrx-generated fresh-install DDL (src/monitoring.rs) verbatim, so the Scenario
+-- A schema snapshot (function arguments + result type) matches a fresh 0.2.4
+-- install.
+-- ============================================================================
+DROP FUNCTION IF EXISTS df.instance_nodes(text, integer);
+
+CREATE  FUNCTION df."instance_nodes"(
+    "instance_id_param" TEXT, /* &str */
+    "_last_n_executions" INT /* i32 */
+) RETURNS TABLE (
+    "execution_id" bigint,  /* i64 */
+    "node_id" TEXT,  /* alloc::string::String */
+    "node_type" TEXT,  /* alloc::string::String */
+    "query" TEXT,  /* core::option::Option<alloc::string::String> */
+    "result_name" TEXT,  /* core::option::Option<alloc::string::String> */
+    "left_node" TEXT,  /* core::option::Option<alloc::string::String> */
+    "right_node" TEXT,  /* core::option::Option<alloc::string::String> */
+    "status" TEXT,  /* core::option::Option<alloc::string::String> */
+    "result" TEXT,  /* core::option::Option<alloc::string::String> */
+    "updated_at" timestamp with time zone  /* core::option::Option<pgrx::datum::time_stamp_with_timezone::TimestampWithTimeZone> */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'instance_nodes_wrapper';
+
+CREATE  FUNCTION df."instance_nodes"(
+	"instance_id_param" TEXT /* &str */
+) RETURNS TABLE (
+	"node_id" TEXT,  /* alloc::string::String */
+	"node_type" TEXT,  /* alloc::string::String */
+	"query" TEXT,  /* core::option::Option<alloc::string::String> */
+	"result_name" TEXT,  /* core::option::Option<alloc::string::String> */
+	"left_node" TEXT,  /* core::option::Option<alloc::string::String> */
+	"right_node" TEXT,  /* core::option::Option<alloc::string::String> */
+	"status" TEXT,  /* core::option::Option<alloc::string::String> */
+	"result" TEXT,  /* core::option::Option<alloc::string::String> */
+	"status_details" TEXT,  /* core::option::Option<alloc::string::String> */
+	"inferred_status" TEXT,  /* alloc::string::String */
+	"inferred_status_from_ancestor_id" TEXT,  /* core::option::Option<alloc::string::String> */
+	"updated_at" timestamp with time zone  /* core::option::Option<pgrx::datum::time_stamp_with_timezone::TimestampWithTimeZone> */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'instance_nodes_v2_wrapper';

@@ -19,6 +19,28 @@ struct ExplainNode {
     status: Option<String>,
     #[allow(dead_code)]
     result: Option<String>,
+    status_details: Option<String>,
+}
+
+impl crate::node_status::NodeFacts for ExplainNode {
+    fn node_type(&self) -> &str {
+        &self.node_type
+    }
+    fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+    fn left_node(&self) -> Option<&str> {
+        self.left_node.as_deref()
+    }
+    fn right_node(&self) -> Option<&str> {
+        self.right_node.as_deref()
+    }
+    fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+    fn status_details(&self) -> Option<&str> {
+        self.status_details.as_deref()
+    }
 }
 
 /// Explain a durable function - either an existing instance or a DSL expression
@@ -74,7 +96,16 @@ fn explain_instance(instance_id: &str) -> String {
     let (duroxide_status, output) = get_duroxide_instance_info(instance_id);
 
     // Load all nodes for this instance
-    let nodes = load_nodes_from_table("df.nodes", Some(instance_id));
+    let mut nodes = load_nodes_from_table("df.nodes", Some(instance_id));
+
+    // Overwrite each node's status with the derived status so the tree shows the
+    // same `skipped`/`pending` interpretation as df.instance_nodes() (shared walk).
+    let inferred = crate::node_status::infer_statuses(Some(&root_id), &nodes);
+    for (id, node) in nodes.iter_mut() {
+        if let Some(inf) = inferred.get(id) {
+            node.status = Some(inf.status.clone());
+        }
+    }
 
     if nodes.is_empty() {
         return format!("No nodes found for instance '{instance_id}'");
@@ -292,6 +323,7 @@ fn collect_nodes(
             right_node: right_id,
             status: None,
             result: None,
+            status_details: None,
         },
     );
 
@@ -305,10 +337,11 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
     let mut nodes = HashMap::new();
 
     Spi::connect(|client| {
+        let status_details_expr = crate::node_status::status_details_select_expr(client);
         let (sql, args): (String, Vec<pgrx::datum::DatumWithOid>) = if let Some(id) = instance_id {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {} WHERE instance_id = $1",
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {} WHERE instance_id = $1",
                     table
                 ),
                 vec![id.into()],
@@ -316,7 +349,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
         } else {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {table}"
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {table}"
                 ),
                 vec![],
             )
@@ -333,6 +366,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
                         right_node: row.get(6).ok().flatten(),
                         status: row.get(7).ok().flatten(),
                         result: row.get(8).ok().flatten(),
+                        status_details: row.get(9).ok().flatten(),
                     };
                     nodes.insert(id, node);
                 }
@@ -394,6 +428,7 @@ fn build_tree_recursive(
             Some("failed") => " ✗",
             Some("running") => " ⏳",
             Some("pending") => " ○",
+            Some("skipped") => " ⊘",
             _ => "",
         }
     } else {
@@ -423,6 +458,7 @@ fn build_tree_recursive(
                         Some("failed") => " ✗",
                         Some("running") => " ⏳",
                         Some("pending") => " ○",
+                        Some("skipped") => " ⊘",
                         _ => "",
                     }
                 } else {

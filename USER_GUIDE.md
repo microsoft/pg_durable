@@ -1459,17 +1459,70 @@ SELECT * FROM df.instance_executions('a1b2c3d4', 20);
 
 ### Function Nodes
 
-See the function graph structure:
+See the function graph structure, one row per node, with both the stored status
+and a derived status that interprets the durable-execution state model:
 
 ```sql
--- Last 5 executions (default)
 SELECT * FROM df.instance_nodes('a1b2c3d4');
-
--- Last 10 executions
-SELECT * FROM df.instance_nodes('a1b2c3d4', 10);
 ```
 
-**Columns:** `execution_id`, `node_id`, `node_type`, `query`, `result_name`, `left_node`, `right_node`, `status`, `result`
+**Columns:** `node_id`, `node_type`, `query`, `result_name`, `left_node`, `right_node`, `status`, `result`, `status_details`, `inferred_status`, `inferred_status_from_ancestor_id`, `updated_at`
+
+- **`status`** — the status physically stored on the node: `pending`, `running`,
+  `completed`, or `failed`.
+- **`status_details`** — JSON execution metadata written by the worker (the
+  `execution_id` generation stamp). You normally do not read this directly; it is
+  what `inferred_status` is derived from.
+- **`inferred_status`** — the stored status reinterpreted top-down from the root
+  node. It adds one derived value, **`skipped`**, and reconciles loop re-entry:
+  - `skipped` — a node on a branch that was decided against and will not (further)
+    run: the untaken arm of a completed `df.if()`, the right side of a failed
+    `df.then()`, or the abandoned arm of a resolved `df.race()`.
+  - a node from a previous loop iteration reads back as `pending` (it will re-run),
+    rather than showing the old iteration's terminal status.
+  - a node that physically ran keeps its stored `completed`/`failed`/`running`.
+- **`inferred_status_from_ancestor_id`** — when `inferred_status` was *derived*
+  from an ancestor (a `skipped` branch, or a superseded loop node), this names the
+  ancestor node that drove the inference; otherwise `NULL`.
+
+> This is read-time interpretation only — it does not change how the graph
+> executes. `df.race()` still abandons the losing branch and `df.join()` still
+> waits for every branch; `inferred_status` only changes how those outcomes are
+> *reported*.
+
+#### Node state transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> running: scheduled (written)
+    running --> completed: success (written)
+    running --> failed: error (written)
+
+    pending --> skipped: ancestor failed / not taken / race lost (derived)
+    running --> skipped: ancestor failed / not taken / race lost (derived)
+    completed --> pending: superseded by newer execution (derived)
+    failed --> pending: superseded by newer execution (derived)
+
+    classDef physical fill:#dfd,stroke:#080;
+    classDef derived stroke-dasharray: 5 5,fill:#eee;
+    classDef hybrid fill:#dfd,stroke:#080,stroke-dasharray: 5 5;
+    class running,completed,failed physical
+    class skipped derived
+    class pending hybrid
+```
+
+Solid edges are **physical**: the worker writes them and they persist in
+`df.nodes.status` (the `status` column). Dashed edges are **derived**: nothing
+writes them — they are how `df.instance_nodes()` *reinterprets* a stored status
+(via `inferred_status`) when a node's `execution_id` no longer matches its live
+lineage. `pending` (drawn with a dashed border) is **both**: it is written once by
+`df.start()`, and it is *also* what the read path reports for a node superseded by a
+newer loop iteration. That terminal → `pending` edge is therefore not a write — it
+is what a previous iteration's stored `completed`/`failed` (or an in-flight
+`running`) *looks like* once a newer iteration supersedes it and has not yet
+re-reached the node.
+
 
 ### System Metrics (Explicit Grant Required)
 
@@ -2118,14 +2171,17 @@ This shows the graph structure with status markers on each node:
 - `✓ Completed` — node finished successfully
 - `✗ Failed` — node encountered an error
 - `⏳ Running` — node was in progress when the instance failed or was inspected
+- `⊘ Skipped` — branch was decided away (untaken `if` arm, right side of a failed `then`, or race loser) so the node will never run
 - `○ Pending` — node never started
+
+The markers reflect the same derived status as the `inferred_status` column of `df.instance_nodes()`, so the tree view and the node table always agree.
 
 `df.explain()` tells you **where** in the graph execution stopped, but not **why**. For that, inspect individual nodes.
 
 #### Step 4: Inspect Individual Nodes
 
 ```sql
-SELECT node_id, node_type, result_name, status, 
+SELECT node_id, node_type, result_name, status, inferred_status,
        left(query, 80) AS query,
        left(result, 120) AS result
 FROM df.instance_nodes('a1b2c3d4');
@@ -2137,6 +2193,8 @@ This shows every node in the graph with its status and result. Key things to loo
 |---------------|---------------|
 | A node with `status = 'failed'` | This is the node that caused the failure |
 | A node with `result = NULL` and `status = 'completed'` | The SQL returned no rows |
+| A node with `inferred_status = 'skipped'` | The node was on a branch that was decided against (untaken `df.if()` arm, right side of a failed `df.then()`, or losing `df.race()` arm) and never (further) ran |
+| `inferred_status = 'pending'` on a node that previously completed | The node belongs to an earlier loop iteration and will re-run |
 | Result contains `{"jsonb": null}` | Possible type extraction issue — see "Known Limitations" below |
 | A `running` node with no result | Execution was interrupted at this node |
 
