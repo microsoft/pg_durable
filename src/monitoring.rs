@@ -74,6 +74,26 @@ pub fn list_instances(
         return TableIterator::new(vec![]);
     }
 
+    // function_name, execution_count, and output live in duroxide's internal
+    // schema, which restricted session roles are not granted to read directly.
+    // The previous implementation called the duroxide Client once per instance
+    // (an N+1 of separate provider round-trips). Replace that loop with a single
+    // batched query that invokes duroxide-pg's published get_instance_info(TEXT)
+    // SQL function once per id via LATERAL — the same function the duroxide
+    // Client uses internally — rather than hand-joining duroxide's internal
+    // instances/executions tables. This keeps our dependency on duroxide's
+    // deliberate function contract instead of its internal table layout.
+    // KEEP IN SYNC: we read the function's `instance_id`, `orchestration_name`,
+    // `current_execution_id`, and `output` OUT columns; if duroxide-pg renames
+    // them this query must follow (grep the duroxide-pg migrations for
+    // "get_instance_info"). The lookup runs over a worker-credentialed connection
+    // — the same trust boundary the per-instance Client path used — so it is not
+    // subject to the calling role's privileges on the duroxide schema. The id set
+    // is still constrained to ids already RLS-filtered from df.instances above, so
+    // no cross-user data can leak. Status is taken from df.instances so all
+    // monitoring APIs agree on the status value.
+    let ids: Vec<String> = user_instances.iter().map(|(id, _, _)| id.clone()).collect();
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -82,32 +102,77 @@ pub fn list_instances(
         Err(_) => return TableIterator::new(vec![]),
     };
 
-    let results = rt.block_on(async {
-        let store = match new_backend_provider(&pg_conn_str, provider_schema).await {
-            Ok(s) => s,
-            Err(_) => return vec![],
+    let mut info_by_id = rt.block_on(async {
+        use sqlx::postgres::PgPoolOptions;
+        use std::collections::HashMap;
+
+        let mut info_by_id: HashMap<String, (String, i64, Option<String>)> = HashMap::new();
+
+        let pool = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&pg_conn_str)
+            .await
+        {
+            Ok(p) => p,
+            // A connection failure (e.g. duroxide store unreachable on a freshly
+            // initialized database) yields no duroxide info — every instance is
+            // skipped below, matching the previous provider-failure behavior. Warn
+            // so a silently-empty result is diagnosable rather than looking like
+            // "no instances".
+            Err(e) => {
+                pgrx::warning!("df.list_instances: could not connect to duroxide store: {e}");
+                return info_by_id;
+            }
         };
 
-        let client = Client::new(store);
+        // provider_schema is a trusted config value (see backend_duroxide_schema),
+        // so format! interpolation of the schema name is safe; the id set is bound
+        // as a text[] parameter and expanded with unnest. CROSS JOIN LATERAL drops
+        // ids the function returns no row for (instances not yet known to
+        // duroxide), preserving the prior skip-on-missing behavior.
+        let batch_sql = format!(
+            "SELECT gi.instance_id, gi.orchestration_name, gi.current_execution_id, gi.output \
+             FROM unnest($1::text[]) AS t(id) \
+             CROSS JOIN LATERAL {schema}.get_instance_info(t.id) AS gi",
+            schema = provider_schema
+        );
 
-        let mut rows = Vec::new();
-        // Only query duroxide for function_name, execution_count, and output.
-        // Status is read from df.instances (already fetched above) to ensure all
-        // monitoring APIs agree on the status value.
-        for (id, label, df_status) in &user_instances {
-            if let Ok(info) = client.get_instance_info(id).await {
-                rows.push((
-                    info.instance_id,
-                    label.clone(),
-                    info.orchestration_name,
-                    df_status.clone(),
-                    info.current_execution_id as i64,
-                    info.output,
-                ));
+        let rows = match sqlx::query_as::<_, (String, String, i64, Option<String>)>(&batch_sql)
+            .bind(&ids)
+            .fetch_all(&pool)
+            .await
+        {
+            Ok(rows) => rows,
+            // Best-effort: a duroxide lookup failure must not fail the whole
+            // listing (consistent with the other df monitoring functions), but
+            // surface it as a warning so a silently-empty result is diagnosable
+            // rather than looking like "no instances".
+            Err(e) => {
+                pgrx::warning!("df.list_instances: duroxide instance-info lookup failed: {e}");
+                Vec::new()
             }
+        };
+
+        for (id, function_name, execution_count, output) in rows {
+            info_by_id.insert(id, (function_name, execution_count, output));
         }
-        rows
+
+        info_by_id
     });
+
+    // Reassemble in df.instances order (created_at DESC). Instances with no
+    // corresponding duroxide row are intentionally skipped — same as the prior
+    // per-instance skip-on-error behavior, and consistent with df.instance_info(),
+    // which returns nothing for an instance duroxide does not (yet) know about. id
+    // is unique in df.instances, so remove() (a move, not a clone) is safe.
+    let results: Vec<(String, Option<String>, String, String, i64, Option<String>)> =
+        user_instances
+            .into_iter()
+            .filter_map(|(id, label, df_status)| {
+                let (function_name, execution_count, output) = info_by_id.remove(&id)?;
+                Some((id, label, function_name, df_status, execution_count, output))
+            })
+            .collect();
 
     TableIterator::new(results)
 }
