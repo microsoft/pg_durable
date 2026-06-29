@@ -618,7 +618,7 @@ fn render_children(
                 );
             }
         }
-        "JOIN" => {
+        "JOIN" | "RACE" => {
             let mut branches = Vec::new();
             if let Some(ref left_id) = node.left_node {
                 branches.push(left_id.clone());
@@ -627,13 +627,15 @@ fn render_children(
                 branches.push(right_id.clone());
             }
 
-            // Check for extra nodes in join3
-            if let Some(ref query) = node.query {
-                if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(query) {
-                    if let Some(extras) = cfg["extra_nodes"].as_array() {
-                        for extra in extras {
-                            if let Some(extra_id) = extra.as_str() {
-                                branches.push(extra_id.to_string());
+            if node.node_type == "JOIN" {
+                // Check for extra nodes in join3
+                if let Some(ref query) = node.query {
+                    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(query) {
+                        if let Some(extras) = cfg["extra_nodes"].as_array() {
+                            for extra in extras {
+                                if let Some(extra_id) = extra.as_str() {
+                                    branches.push(extra_id.to_string());
+                                }
                             }
                         }
                     }

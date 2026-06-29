@@ -77,6 +77,34 @@ BEGIN
     RAISE NOTICE 'Dry-run explain passed';
 END $body$;
 
+-- Test dry-run explain renders RACE branches for both operator and function forms
+DO $body$
+DECLARE
+    explain_output TEXT;
+BEGIN
+    SELECT df.explain($$ 'SELECT ''winner''' | df.sleep(30) $$) INTO explain_output;
+
+    IF explain_output NOT LIKE '%RACE%'
+        OR explain_output NOT LIKE '%branch 1:%'
+        OR explain_output NOT LIKE '%branch 2:%'
+        OR explain_output NOT LIKE '%SELECT ''winner''%'
+        OR explain_output NOT LIKE '%SLEEP 30s%' THEN
+        RAISE EXCEPTION 'TEST FAILED: operator RACE explain should show both branches, got: %', explain_output;
+    END IF;
+
+    SELECT df.explain($$ df.race('SELECT ''winner''', df.sleep(30)) $$) INTO explain_output;
+
+    IF explain_output NOT LIKE '%RACE%'
+        OR explain_output NOT LIKE '%branch 1:%'
+        OR explain_output NOT LIKE '%branch 2:%'
+        OR explain_output NOT LIKE '%SELECT ''winner''%'
+        OR explain_output NOT LIKE '%SLEEP 30s%' THEN
+        RAISE EXCEPTION 'TEST FAILED: df.race() explain should show both branches, got: %', explain_output;
+    END IF;
+
+    RAISE NOTICE 'Dry-run RACE explain passed';
+END $body$;
+
 -- Test live instance explain
 CREATE TEMP TABLE _test_state (instance_id TEXT);
 
@@ -107,6 +135,45 @@ BEGIN
 END $$;
 
 DROP TABLE _test_state;
+
+-- Test live RACE explain shows the skipped losing branch
+CREATE TEMP TABLE _test_race_explain_state (instance_id TEXT);
+
+INSERT INTO _test_race_explain_state
+SELECT df.start(df.race('SELECT ''winner''', df.sleep(10)), 'test-race-explain');
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    explain_output TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_race_explain_state;
+
+    SELECT df.await_instance(inst_id, 20) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected completed RACE instance, got %', status;
+    END IF;
+
+    SELECT df.explain(inst_id) INTO explain_output;
+
+    IF explain_output NOT LIKE '%RACE%'
+        OR explain_output NOT LIKE '%branch 1:%'
+        OR explain_output NOT LIKE '%branch 2:%'
+        OR explain_output NOT LIKE '%SELECT ''winner''%'
+        OR explain_output NOT LIKE '%SLEEP 10s%' THEN
+        RAISE EXCEPTION 'TEST FAILED: live RACE explain should show both branches, got: %', explain_output;
+    END IF;
+
+    IF explain_output NOT LIKE '%⊘%' THEN
+        RAISE EXCEPTION 'TEST FAILED: live RACE explain should show skipped marker for losing branch, got: %', explain_output;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: live race explain';
+END $$;
+
+DROP TABLE _test_race_explain_state;
 
 -- === Test: 31_explain_plain_sql ===
 
