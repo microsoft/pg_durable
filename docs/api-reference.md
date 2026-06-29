@@ -351,6 +351,68 @@ SELECT df.result('a1b2c3d4');
 
 ---
 
+### df.instance_nodes(instance_id)
+
+Returns one row per node in an instance's graph, with each node's stored physical
+status alongside a read-time **derived** status. This is the primary tool for
+inspecting *where* an instance is and *why* a branch did or did not run.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `instance_id` | TEXT | ❌ Literal | Target instance ID |
+
+Return columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `node_id` | TEXT | Node id (unique within the instance) |
+| `node_type` | TEXT | `SQL`, `THEN`, `IF`, `JOIN`, `RACE`, `LOOP`, `SLEEP`, `SIGNAL`, `HTTP`, … |
+| `query` | TEXT | SQL text for `SQL` nodes; a JSON config for compound/leaf nodes |
+| `result_name` | TEXT | Capture name (`\|=>`), or `NULL` |
+| `left_node` | TEXT | First child node id, or `NULL` |
+| `right_node` | TEXT | Second child node id, or `NULL` |
+| `status` | TEXT | **Physical** stored status: `pending`, `running`, `completed`, `failed` |
+| `result` | JSONB | Result/error payload for `completed`/`failed` nodes, else `NULL` |
+| `status_details` | JSONB | Worker-written node metadata (see below), or `NULL` if never transitioned |
+| `inferred_status` | TEXT | **Derived** status: physical status plus `skipped`, and loop re-entry surfaced as `pending` |
+| `inferred_status_from_ancestor_id` | TEXT | Ancestor node id that drove a derived `skipped`/`pending`, or `NULL` |
+| `updated_at` | TIMESTAMPTZ | Last physical status change |
+
+**`status_details` JSON contract.** Written by the worker through the
+`update-node-status` activity and stored verbatim in `df.nodes.status_details`:
+
+- `execution_id` — the node's full segmented execution path, e.g.
+  `a1b2c3d4::1::7f9a0012::1`. Parse it positionally: the second `::`-token is the
+  root loop generation (used to detect superseded loop iterations), and the
+  trailing segments encode `JOIN`/`RACE` sub-orchestration lineage.
+
+`inferred_status` and `inferred_status_from_ancestor_id` are **computed at read
+time** and are not stored in `df.nodes.status_details`.
+
+**Derived statuses.** `skipped` is never written to `df.nodes.status` (it is not a
+member of the `nodes_status_chk` constraint) — it exists only in `inferred_status`:
+
+- `skipped` — a non-terminal node whose nearest terminal ancestor already decided
+  the branch will not run: the untaken arm of a completed `df.if()`, the right side
+  of a failed `df.then()`/`~>`, or the abandoned (still-running) loser of a resolved
+  `df.race()`. A loser that already reached `completed`/`failed` keeps its physical
+  status.
+- `pending` (derived) — a node from an older loop generation that a newer ancestor
+  generation has superseded; it will re-run, so it reads back as `pending` rather
+  than showing the previous iteration's terminal status.
+
+`df.explain()` renders the same derived status for each node, so the two views
+always agree.
+
+```sql
+SELECT node_id, node_type, status AS physical, inferred_status,
+       status_details->>'execution_id' AS execution_id
+FROM df.instance_nodes('a1b2c3d4')
+ORDER BY node_id;
+```
+
+---
+
 ## Variable Functions
 
 ### df.setvar(name, value)

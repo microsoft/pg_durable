@@ -309,6 +309,24 @@ pub async fn execute_subtree(
         .map_err(|e| format!("Failed to serialize subtree envelope: {e}"))
 }
 
+/// Compose the deterministic instance id for a JOIN/RACE branch sub-orchestration.
+///
+/// `schedule_sub_orchestration_with_id` uses this value verbatim (no parent prefix), so we
+/// build `{parent_instance_id}::{parent_execution_id}::{child_root_node_id}`. This guarantees
+/// (a) the second `::`-token is always the ROOT loop generation — the parent instance id
+/// already begins with `{df_instance_id}::{generation}` at every nesting level, so the
+/// generation token survives nesting; and (b) per-iteration uniqueness — the parent execution
+/// id advances on every loop `continue_as_new`, while the child root node id distinguishes
+/// sibling branches. df.instance_nodes() and the write fence both rely on that second token.
+fn subtree_instance_id(ctx: &OrchestrationContext, child_root_node_id: &str) -> String {
+    format!(
+        "{}::{}::{}",
+        ctx.instance_id(),
+        ctx.execution_id(),
+        child_root_node_id
+    )
+}
+
 /// Recursively execute function nodes with vars support
 async fn execute_function_node_with_vars(
     ctx: &OrchestrationContext,
@@ -327,11 +345,22 @@ async fn execute_function_node_with_vars(
         node_id, node.node_type
     ));
 
+    // Stamp identifying which orchestration generation is transitioning this
+    // node: "{orchestration_instance_id}::{execution_id}". For the root
+    // orchestration this is "{df_instance_id}::{loop_generation}"; for a JOIN/RACE
+    // sub-orchestration the instance id already carries the composed lineage (see
+    // `subtree_instance_id`), so the second "::"-token is always the root loop
+    // generation. df.instance_nodes() parses that token to derive pending/skipped
+    // and update_node_status uses it to fence stale writes. Both reads are
+    // deterministic (instance_id/execution_id are stable within an execution).
+    let execution_stamp = format!("{}::{}", ctx.instance_id(), ctx.execution_id());
+
     // Mark node as running
     let running_input = serde_json::json!({
         "node_id": node_id,
         "instance_id": graph.instance_id,
-        "status": "running"
+        "status": "running",
+        "execution_id": execution_stamp,
     });
     let _ = ctx
         .schedule_activity(
@@ -357,6 +386,7 @@ async fn execute_function_node_with_vars(
         "instance_id": graph.instance_id,
         "status": status,
         "result": status_result,
+        "execution_id": execution_stamp,
     });
     let _ = ctx
         .schedule_activity(
@@ -918,8 +948,13 @@ async fn execute_join_node(
     })
     .to_string();
 
-    // Build list of branch inputs
-    let mut branch_inputs = vec![left_input, right_input];
+    // Build list of branch inputs, each paired with its branch root node id so the
+    // sub-orchestration can be scheduled with a deterministic, generation-stamped
+    // instance id (see `subtree_instance_id`).
+    let mut branch_inputs: Vec<(String, String)> = vec![
+        (left_id.clone(), left_input),
+        (right_id.clone(), right_input),
+    ];
 
     // Check for extra nodes (join3)
     if let Some(config_str) = &node.query {
@@ -935,17 +970,23 @@ async fn execute_join_node(
                             "label": exec_ctx.label
                         })
                         .to_string();
-                        branch_inputs.push(extra_input);
+                        branch_inputs.push((extra_id.to_string(), extra_input));
                     }
                 }
             }
         }
     }
 
-    // Schedule sub-orchestrations and collect DurableFutures
+    // Schedule sub-orchestrations and collect DurableFutures. Each branch gets a
+    // deterministic `{parent}::{generation}::{branch_root}` instance id so its node
+    // stamps carry the root loop generation and remain unique across loop iterations.
     let mut durable_futures = Vec::new();
-    for input in branch_inputs {
-        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, input);
+    for (child_root, input) in branch_inputs {
+        let fut = ctx.schedule_sub_orchestration_with_id(
+            SUBTREE_NAME,
+            subtree_instance_id(ctx, &child_root),
+            input,
+        );
         durable_futures.push(fut);
     }
 
@@ -1037,9 +1078,19 @@ async fn execute_race_node(
     })
     .to_string();
 
-    // Schedule sub-orchestrations
-    let left_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, left_input);
-    let right_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, right_input);
+    // Schedule sub-orchestrations with deterministic, generation-stamped instance
+    // ids so each branch's node stamps carry the root loop generation (see
+    // `subtree_instance_id`).
+    let left_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        subtree_instance_id(ctx, left_id),
+        left_input,
+    );
+    let right_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        subtree_instance_id(ctx, right_id),
+        right_input,
+    );
 
     // Use ctx.select2() - first to complete wins
     // select2 now returns Either2<Left, Right> instead of (winner_idx, DurableOutput)

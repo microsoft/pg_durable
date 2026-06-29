@@ -35,6 +35,7 @@ pub mod client;
 pub mod dsl;
 pub mod explain;
 pub mod monitoring;
+pub mod node_status;
 pub mod orchestrations;
 pub mod registry;
 pub mod ssrf;
@@ -195,11 +196,19 @@ CREATE TABLE df.nodes (
     submitted_by REGROLE,
     database TEXT,
     created_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
-    updated_at TIMESTAMPTZ DEFAULT pg_catalog.now()
+    updated_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
+    -- Appended last so the fresh-install column order matches the upgrade path,
+    -- where ALTER TABLE ADD COLUMN can only append (see pg_durable--0.2.3--0.2.4.sql).
+    status_details JSONB
 );
 
 COMMENT ON COLUMN df.nodes.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
+
+COMMENT ON COLUMN df.nodes.status_details IS
+    'Execution metadata written by the worker (never inserted by users). JSON object with key '
+    '"execution_id": the orchestration instance_id::execution_id stamp recorded when the node last '
+    'transitioned. df.instance_nodes() parses it to derive pending/skipped statuses; see USER_GUIDE.md.';
 
 -- Table to store function instances
 CREATE TABLE df.instances (
