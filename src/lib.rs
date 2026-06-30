@@ -620,7 +620,6 @@ AS $fn$
 DECLARE
     sch       text := df.duroxide_schema();
     work_item text;
-    owner_oid oid;
     v_blocked boolean;
 BEGIN
     -- This wrapper is not a generic privileged "start any orchestration" entry
@@ -639,27 +638,27 @@ BEGIN
 
     -- Authorization. This runs as the (privileged) definer, so it must not
     -- trust the caller to only target their own instance. Permit the enqueue
-    -- only for a caller-owned, brand-new, not-yet-started instance: a 'pending'
-    -- df.instances row with no orchestrator-queue entry and no duroxide
-    -- instance. A df user can create such a pending instance directly (not only
-    -- through df.start), so this is an owner/not-yet-started check rather than
-    -- proof that the row was inserted in this transaction. The wrapper is safe
-    -- because it also fixes the orchestration to the root graph executor and
-    -- validates the input instance id, so callers cannot start internal
-    -- orchestrations or target someone else's already-started instance.
+    -- only for the transaction that inserted a brand-new, not-yet-started
+    -- instance: a 'pending' df.instances row with no orchestrator-queue entry,
+    -- no duroxide instance, and xmin equal to the current transaction id. This
+    -- preserves SECURITY DEFINER / SET ROLE df.start() semantics while blocking
+    -- a caller from starting another user's previously-committed pending row.
+    -- The wrapper is safe because it also fixes the orchestration to the root
+    -- graph executor and validates the input instance id, so callers cannot
+    -- start internal orchestrations or target someone else's already-started
+    -- instance.
     EXECUTE pg_catalog.format(
-        'SELECT i.submitted_by::oid, '
-        '       i.status <> ''pending'' '
+        'SELECT NOT EXISTS (SELECT 1 FROM df.instances i '
+        '                   WHERE i.id = $1 '
+        '                     AND i.status = ''pending'' '
+        '                     AND i.xmin::text = pg_catalog.pg_current_xact_id()::text) '
         '       OR EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = $1) '
-        '       OR EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = $1) '
-        'FROM df.instances i WHERE i.id = $1',
+        '       OR EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = $1)',
         sch, sch)
-    INTO owner_oid, v_blocked
+    INTO v_blocked
     USING p_instance_id;
 
-    IF owner_oid IS NULL
-       OR NOT pg_catalog.pg_has_role(session_user, owner_oid, 'MEMBER')
-       OR v_blocked THEN
+    IF v_blocked THEN
         RAISE EXCEPTION 'pg_durable: not authorized to enqueue a start for instance %', p_instance_id
             USING ERRCODE = 'insufficient_privilege';
     END IF;
