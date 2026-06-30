@@ -183,6 +183,95 @@ LANGUAGE c
 AS 'MODULE_PATHNAME', 'await_instance_wrapper';
 
 -- ============================================================================
+-- df.reconcile(): repair residual df.* / duroxide divergence.
+--
+-- Best-effort admin backstop: delete orphaned duroxide instance subtrees whose
+-- root has no df.instances row, and mark stale df.instances rows failed when
+-- the runtime has neither a live instance nor a queued start. Fresh installs
+-- define the same function in src/lib.rs.
+-- ============================================================================
+CREATE FUNCTION df.reconcile(p_grace_seconds integer DEFAULT 60)
+RETURNS TABLE(duroxide_orphans_deleted bigint, stuck_instances_failed bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    sch        text := df.duroxide_schema();
+    orphan_ids text[];
+    deleted    bigint := 0;
+    stuck      bigint := 0;
+BEGIN
+    -- 1) Delete orphaned duroxide subtrees: every duroxide instance whose ROOT
+    --    ancestor has no df.instances row and is older than the grace window.
+    --    We must gather the FULL subtree (root + all descendants) because
+    --    delete_instances_atomic refuses (even with force) to delete a parent
+    --    whose children are not also in the list. Sub-orchestrations (JOIN/RACE
+    --    branches, loop generations) have no df.instances row and would be
+    --    mis-detected as roots if we keyed on "no df row" alone, so the orphan
+    --    seed is restricted to parent_instance_id IS NULL.
+    --    Wrapped so a GC failure never aborts reconcile or kills the built-in
+    --    reconciler loop.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'WITH RECURSIVE orphan_root AS ( '
+            '    SELECT d.instance_id '
+            '    FROM %1$I.instances d '
+            '    LEFT JOIN df.instances i ON i.id = d.instance_id '
+            '    WHERE i.id IS NULL '
+            '      AND d.parent_instance_id IS NULL '
+            '      AND d.created_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '), subtree AS ( '
+            '    SELECT instance_id FROM orphan_root '
+            '    UNION '
+            '    SELECT c.instance_id FROM %1$I.instances c '
+            '    JOIN subtree s ON c.parent_instance_id = s.instance_id '
+            ') SELECT pg_catalog.array_agg(instance_id) FROM subtree',
+            sch)
+        INTO orphan_ids
+        USING p_grace_seconds;
+
+        IF orphan_ids IS NOT NULL AND pg_catalog.array_length(orphan_ids, 1) > 0 THEN
+            EXECUTE pg_catalog.format(
+                'SELECT instances_deleted FROM %I.delete_instances_atomic($1, $2)', sch)
+            INTO deleted
+            USING orphan_ids, true;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        deleted := 0;
+        RAISE WARNING 'pg_durable: reconcile orphan-GC pass failed: %', SQLERRM;
+    END;
+
+    -- 2) df.instances stuck non-terminal with no live duroxide instance and no
+    --    queued start (lost enqueue) -> mark failed. The duroxide queue row
+    --    persists (locked) until ack, and the instance row is created at ack, so
+    --    a healthy in-flight start always matches one of the NOT EXISTS guards
+    --    and is never failed here. Best-effort; wrapped like step 1.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'UPDATE df.instances i '
+            'SET status = ''failed'', updated_at = pg_catalog.now() '
+            'WHERE i.status IN (''pending'', ''running'') '
+            '  AND i.updated_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.instances d WHERE d.instance_id = i.id) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.orchestrator_queue q WHERE q.instance_id = i.id)',
+            sch)
+        USING p_grace_seconds;
+        GET DIAGNOSTICS stuck = ROW_COUNT;
+    EXCEPTION WHEN OTHERS THEN
+        stuck := 0;
+        RAISE WARNING 'pg_durable: reconcile stuck-failover pass failed: %', SQLERRM;
+    END;
+
+    duroxide_orphans_deleted := deleted;
+    stuck_instances_failed := stuck;
+    RETURN NEXT;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df.reconcile(integer) FROM PUBLIC;
+
+-- ============================================================================
 -- Promote df.nodes to a composite primary key (instance_id, id) (issue #129).
 --
 -- The single-column PRIMARY KEY (id) forced node IDs to be globally unique, so

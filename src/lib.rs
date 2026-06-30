@@ -29,6 +29,12 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Cron schedule for the built-in durable reconciler.
+/// The background worker ensures one reconciler instance per cluster, running on
+/// this schedule. Set to an empty string to disable the built-in reconciler.
+pub static RECONCILER_CRON: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"*/5 * * * *"));
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -134,6 +140,15 @@ pub extern "C-unwind" fn _PG_init() {
         &ENABLE_SUPERUSER_INSTANCES,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_durable.reconciler_cron",
+        c"Cron schedule for the built-in durable reconciler (df.reconcile()); empty disables it",
+        c"The background worker keeps one reconciler instance running on this schedule to repair residual df.* / duroxide divergence. Empty string disables the built-in reconciler. Requires server restart to change.",
+        &RECONCILER_CRON,
+        GucContext::Postmaster,
+        GucFlags::default(),
     );
 
     worker::register_background_worker();
@@ -532,6 +547,114 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
     requires = ["create_tables", dsl::http, monitoring::metrics]
+);
+
+// ============================================================================
+// Reconciler — repair residual df.* / duroxide divergence
+// ============================================================================
+//
+// Some divergence can arise from legacy non-atomic starts, fallback paths, or
+// crashes mid-execution. df.reconcile() is a best-effort garbage collector for
+// that residue. It is admin-only (EXECUTE revoked from PUBLIC) and SECURITY
+// DEFINER so it can touch the duroxide-owned tables and all users' df.instances.
+//
+// The background worker keeps one reconciler instance running automatically,
+// dogfooding pg_durable as a durable cron loop:
+//   df.start(df.loop(df.seq('SELECT * FROM df.reconcile()',
+//                           df.wait_for_schedule(<pg_durable.reconciler_cron>))),
+//            'df_reconciler')
+// submitted by the dedicated non-superuser role df_reconciler. Set
+// pg_durable.reconciler_cron = '' to disable it.
+//
+// Only ROOT duroxide instances (parent_instance_id IS NULL) are considered —
+// sub-orchestrations (JOIN/RACE branches, loop generations) intentionally have
+// no df.instances row and must not be collected. A grace window avoids racing
+// legitimately in-flight operations.
+extension_sql!(
+    r#"
+CREATE FUNCTION df.reconcile(p_grace_seconds integer DEFAULT 60)
+RETURNS TABLE(duroxide_orphans_deleted bigint, stuck_instances_failed bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    sch        text := df.duroxide_schema();
+    orphan_ids text[];
+    deleted    bigint := 0;
+    stuck      bigint := 0;
+BEGIN
+    -- 1) Delete orphaned duroxide subtrees: every duroxide instance whose ROOT
+    --    ancestor has no df.instances row and is older than the grace window.
+    --    We must gather the FULL subtree (root + all descendants) because
+    --    delete_instances_atomic refuses (even with force) to delete a parent
+    --    whose children are not also in the list. Sub-orchestrations (JOIN/RACE
+    --    branches, loop generations) have no df.instances row and would be
+    --    mis-detected as roots if we keyed on "no df row" alone, so the orphan
+    --    seed is restricted to parent_instance_id IS NULL.
+    --    Wrapped so a GC failure never aborts reconcile or kills the built-in
+    --    reconciler loop.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'WITH RECURSIVE orphan_root AS ( '
+            '    SELECT d.instance_id '
+            '    FROM %1$I.instances d '
+            '    LEFT JOIN df.instances i ON i.id = d.instance_id '
+            '    WHERE i.id IS NULL '
+            '      AND d.parent_instance_id IS NULL '
+            '      AND d.created_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '), subtree AS ( '
+            '    SELECT instance_id FROM orphan_root '
+            '    UNION '
+            '    SELECT c.instance_id FROM %1$I.instances c '
+            '    JOIN subtree s ON c.parent_instance_id = s.instance_id '
+            ') SELECT pg_catalog.array_agg(instance_id) FROM subtree',
+            sch)
+        INTO orphan_ids
+        USING p_grace_seconds;
+
+        IF orphan_ids IS NOT NULL AND pg_catalog.array_length(orphan_ids, 1) > 0 THEN
+            EXECUTE pg_catalog.format(
+                'SELECT instances_deleted FROM %I.delete_instances_atomic($1, $2)', sch)
+            INTO deleted
+            USING orphan_ids, true;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        deleted := 0;
+        RAISE WARNING 'pg_durable: reconcile orphan-GC pass failed: %', SQLERRM;
+    END;
+
+    -- 2) df.instances stuck non-terminal with no live duroxide instance and no
+    --    queued start (lost enqueue) -> mark failed. The duroxide queue row
+    --    persists (locked) until ack, and the instance row is created at ack, so
+    --    a healthy in-flight start always matches one of the NOT EXISTS guards
+    --    and is never failed here. Best-effort; wrapped like step 1.
+    BEGIN
+        EXECUTE pg_catalog.format(
+            'UPDATE df.instances i '
+            'SET status = ''failed'', updated_at = pg_catalog.now() '
+            'WHERE i.status IN (''pending'', ''running'') '
+            '  AND i.updated_at < pg_catalog.now() - pg_catalog.make_interval(secs => $1) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.instances d WHERE d.instance_id = i.id) '
+            '  AND NOT EXISTS (SELECT 1 FROM %1$I.orchestrator_queue q WHERE q.instance_id = i.id)',
+            sch)
+        USING p_grace_seconds;
+        GET DIAGNOSTICS stuck = ROW_COUNT;
+    EXCEPTION WHEN OTHERS THEN
+        stuck := 0;
+        RAISE WARNING 'pg_durable: reconcile stuck-failover pass failed: %', SQLERRM;
+    END;
+
+    duroxide_orphans_deleted := deleted;
+    stuck_instances_failed := stuck;
+    RETURN NEXT;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION df.reconcile(integer) FROM PUBLIC;
+"#,
+    name = "reconcile",
+    requires = ["create_tables"]
 );
 
 // ============================================================================
@@ -973,8 +1096,7 @@ mod tests {
         // Test that is_durofut recognizes it
         assert!(
             Durofut::is_durofut(&sleep_json),
-            "Durofut::is_durofut should recognize SLEEP node JSON: {}",
-            sleep_json
+            "Durofut::is_durofut should recognize SLEEP node JSON: {sleep_json}"
         );
 
         // Test that ensure doesn't wrap it in SQL
@@ -2766,9 +2888,8 @@ mod tests {
         use crate::types::evaluate_condition;
         // Simulates a SQL condition query that returns zero rows
         let empty_result = r#"{"rows":[],"row_count":0}"#;
-        assert_eq!(
-            evaluate_condition(empty_result).unwrap(),
-            false,
+        assert!(
+            !evaluate_condition(empty_result).unwrap(),
             "Empty result set should evaluate as false for conditions"
         );
     }
@@ -2777,9 +2898,8 @@ mod tests {
     fn test_evaluate_condition_single_true_row() {
         use crate::types::evaluate_condition;
         let result = r#"{"rows":[{"col":true}],"row_count":1}"#;
-        assert_eq!(
+        assert!(
             evaluate_condition(result).unwrap(),
-            true,
             "Single row with true value should be truthy"
         );
     }
@@ -2788,9 +2908,8 @@ mod tests {
     fn test_evaluate_condition_single_false_row() {
         use crate::types::evaluate_condition;
         let result = r#"{"rows":[{"col":false}],"row_count":1}"#;
-        assert_eq!(
-            evaluate_condition(result).unwrap(),
-            false,
+        assert!(
+            !evaluate_condition(result).unwrap(),
             "Single row with false value should be falsy"
         );
     }
@@ -2800,9 +2919,8 @@ mod tests {
         use crate::types::evaluate_condition;
         // A query like SELECT count(*) FROM empty_table returns 0
         let result = r#"{"rows":[{"count":0}],"row_count":1}"#;
-        assert_eq!(
-            evaluate_condition(result).unwrap(),
-            false,
+        assert!(
+            !evaluate_condition(result).unwrap(),
             "Row with zero value should be falsy"
         );
     }

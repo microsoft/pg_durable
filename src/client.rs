@@ -56,10 +56,7 @@ fn is_worker_ready() -> bool {
     }
 
     Spi::get_one_with_args::<bool>(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM {}._worker_ready WHERE schema_version >= $1)",
-            schema
-        ),
+        &format!("SELECT EXISTS(SELECT 1 FROM {schema}._worker_ready WHERE schema_version >= $1)"),
         &[crate::WORKER_SCHEMA_VERSION.into()],
     )
     .ok()

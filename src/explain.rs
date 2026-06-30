@@ -290,7 +290,7 @@ fn collect_nodes(
     id_counter: &mut i32,
 ) -> String {
     *id_counter += 1;
-    let node_id = format!("N{}", id_counter);
+    let node_id = format!("N{id_counter}");
 
     // Recursively collect children first to get their IDs
     let left_id = node
@@ -341,8 +341,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
         let (sql, args): (String, Vec<pgrx::datum::DatumWithOid>) = if let Some(id) = instance_id {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {} WHERE instance_id = $1",
-                    table
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {table} WHERE instance_id = $1"
                 ),
                 vec![id.into()],
             )

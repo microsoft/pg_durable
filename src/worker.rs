@@ -243,6 +243,10 @@ async fn run_duroxide_runtime() {
             }
         };
 
+        // Ensure the built-in durable reconciler is running for this epoch.
+        // Idempotent: starts one only if none is pending/running.
+        ensure_reconciler(&mgmt_pool).await;
+
         run_until_extension_dropped_or_shutdown(
             &poll_pool,
             &mgmt_pool,
@@ -256,6 +260,106 @@ async fn run_duroxide_runtime() {
 
     mgmt_pool.close().await;
     poll_pool.close().await;
+}
+
+/// Built-in durable reconciler. Ensures one reconciler instance is running per
+/// cluster: an infinite durable loop that calls `df.reconcile()` on the
+/// `pg_durable.reconciler_cron` schedule.
+///
+/// Idempotent: does nothing if a reconciler is already pending/running, and
+/// (re)starts one if it has died. Called once per epoch and then periodically
+/// from the steady-state poll loop, so a reconciler that fails mid-epoch is
+/// restarted within the poll interval rather than only at the next epoch. The
+/// instance is submitted by a dedicated non-superuser role (`df_reconciler`)
+/// granted only df usage plus EXECUTE on the SECURITY DEFINER `df.reconcile()`.
+async fn ensure_reconciler(pool: &sqlx::PgPool) {
+    const ROLE: &str = "df_reconciler";
+    const LABEL: &str = "df_reconciler";
+
+    let cron = crate::RECONCILER_CRON
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cron = cron.trim().to_string();
+    if cron.is_empty() {
+        return;
+    }
+
+    // Runs as the worker role (bypasses RLS). Use submitted_by, not label, as
+    // the singleton key because labels are user-controlled.
+    let already_running: i64 = match sqlx::query_scalar(
+        "SELECT count(*) FROM df.instances \
+         WHERE submitted_by::text = $1 AND status IN ('pending', 'running')",
+    )
+    .bind(ROLE)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            log!("pg_durable: reconciler liveness check failed: {}", e);
+            return;
+        }
+    };
+    if already_running > 0 {
+        return;
+    }
+
+    if let Err(e) = ensure_reconciler_role(pool, ROLE).await {
+        log!("pg_durable: failed to provision reconciler role: {}", e);
+        return;
+    }
+
+    // Start the durable loop as the dedicated role on a single connection so the
+    // SET ROLE applies to df.start() (which captures submitted_by = current_user).
+    let started = async {
+        let mut conn = pool.acquire().await?;
+        sqlx::query(&format!("SET ROLE {ROLE}"))
+            .execute(&mut *conn)
+            .await?;
+        let res = sqlx::query(
+            "SELECT df.start(\
+               df.loop(df.seq('SELECT * FROM df.reconcile()', df.wait_for_schedule($1))), \
+               $2)",
+        )
+        .bind(&cron)
+        .bind(LABEL)
+        .execute(&mut *conn)
+        .await;
+        let _ = sqlx::query("RESET ROLE").execute(&mut *conn).await;
+        res.map(|_| ())
+    }
+    .await;
+
+    match started {
+        Ok(()) => log!("pg_durable: started built-in reconciler (cron='{cron}')"),
+        Err(e) => log!("pg_durable: failed to start built-in reconciler: {}", e),
+    }
+}
+
+/// Create the dedicated non-superuser reconciler role (if absent) and grant it
+/// df usage plus EXECUTE on df.reconcile(). Idempotent.
+async fn ensure_reconciler_role(pool: &sqlx::PgPool, role: &str) -> Result<(), sqlx::Error> {
+    // role is a fixed compile-time constant, so the format! is injection-safe.
+    sqlx::query(&format!(
+        "DO $$ BEGIN \
+           IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{role}') THEN \
+             CREATE ROLE {role} LOGIN; \
+           END IF; \
+         END $$;"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query("SELECT df.grant_usage($1)")
+        .bind(role)
+        .execute(pool)
+        .await?;
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION df.reconcile(integer) TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
@@ -346,7 +450,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
+        WHERE n.nspname = '{schema_name}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TRIGGER '
                 || r.trigger_name || ' ON ' || r.table_name;
@@ -364,7 +468,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
+        WHERE n.nspname = '{schema_name}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP FUNCTION ' || r.sig;
     END LOOP;
@@ -381,7 +485,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'r'
+        WHERE n.nspname = '{schema_name}' AND c.relkind = 'r'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TABLE ' || r.name;
     END LOOP;
@@ -400,7 +504,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'i'
+        WHERE n.nspname = '{schema_name}' AND c.relkind = 'i'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP INDEX ' || r.name;
     END LOOP;
@@ -417,12 +521,11 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'S'
+        WHERE n.nspname = '{schema_name}' AND c.relkind = 'S'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP SEQUENCE ' || r.name;
     END LOOP;
-END $$"#,
-        schema = schema_name
+END $$"#
     ))
     .execute(pool)
     .await?;
@@ -585,40 +688,34 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
 /// schema version was first established rather than the last BGW restart.
 async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
+        "CREATE TABLE IF NOT EXISTS {schema_name}._worker_ready (
             sentinel        BOOLEAN PRIMARY KEY DEFAULT TRUE,
             CONSTRAINT      only_one_sentinel CHECK (sentinel),
             schema_version  INT NOT NULL,
             initialized_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-        )",
-        schema = schema_name
+        )"
     ))
     .execute(pool)
     .await?;
 
     // Allow non-superuser sessions to read the readiness record via
     // is_worker_ready() which runs SPI in the caller's security context.
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema_name} TO PUBLIC"))
+        .execute(pool)
+        .await?;
     sqlx::query(&format!(
-        "GRANT USAGE ON SCHEMA {schema} TO PUBLIC",
-        schema = schema_name
-    ))
-    .execute(pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT ON {schema}._worker_ready TO PUBLIC",
-        schema = schema_name
+        "GRANT SELECT ON {schema_name}._worker_ready TO PUBLIC"
     ))
     .execute(pool)
     .await?;
 
     sqlx::query(&format!(
-        "INSERT INTO {schema}._worker_ready (sentinel, schema_version, initialized_at) \
+        "INSERT INTO {schema_name}._worker_ready (sentinel, schema_version, initialized_at) \
          VALUES (TRUE, $1, now()) \
          ON CONFLICT (sentinel) DO UPDATE SET \
              schema_version = EXCLUDED.schema_version, \
              initialized_at = EXCLUDED.initialized_at \
-         WHERE {schema}._worker_ready.schema_version != EXCLUDED.schema_version",
-        schema = schema_name
+         WHERE {schema_name}._worker_ready.schema_version != EXCLUDED.schema_version"
     ))
     .bind(crate::WORKER_SCHEMA_VERSION)
     .execute(pool)
@@ -776,6 +873,11 @@ async fn run_until_extension_dropped_or_shutdown(
                     log!("pg_durable: epoch sentinel gone — extension dropped or recreated");
                     break;
                 }
+
+                // Self-heal: re-assert the built-in reconciler so a loop that
+                // failed/cancelled mid-epoch gets restarted without waiting for
+                // the next extension epoch.
+                ensure_reconciler(maintenance_pool).await;
             }
             _ = prune_check.tick() => {
                 match prune_terminal_instances(maintenance_pool).await {

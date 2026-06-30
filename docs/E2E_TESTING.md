@@ -71,6 +71,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `14_database.sql` | Wrong-database `CREATE EXTENSION` rejection; `df.start(query, label, database)` multi-database routing |
 | `15_rls.sql` | RLS on `df.instances` / `df.nodes` / `df.vars` — per-user visibility, cross-user cancel/signal denied, column-level UPDATE, superuser bypass, per-user variable isolation |
 | `16_heartbeat.sql` | Worker heartbeat liveness — `df._worker_epoch.last_seen_at` advances over time |
+| `26_reconcile_orphan_gc.sql` | `df.reconcile()` deletes orphaned runtime root subtrees and leaves healthy instances untouched |
 | `52_node_id_collision_across_instances.sql` | Cross-instance node-ID collision — two instances own the same 8-hex node id; asserts composite-PK coexistence, that `(instance_id, id)` addresses exactly one row, `df.result()` is instance-scoped, and a scoped `update_node_status`-style UPDATE affects exactly one row (issue #129) |
 
 ### Build-Phase Specific
@@ -237,4 +238,3 @@ tail -f ~/.pgrx/17.log
 Error: cargo pgrx install failed
 ```
 → Run `cargo build --features pg17` and then retry the test runner
-

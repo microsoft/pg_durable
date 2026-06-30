@@ -1205,7 +1205,7 @@ pub fn await_instance(
             "SELECT status FROM df.instances WHERE id = $1",
             &[instance_id.into()],
         )
-        .map_err(|e| format!("Failed to query status: {:?}", e))?;
+        .map_err(|e| format!("Failed to query status: {e:?}"))?;
 
         if let Some(ref s) = status {
             let s_lower = s.to_lowercase();
@@ -1220,7 +1220,7 @@ pub fn await_instance(
                 return Ok(s_lower);
             }
         } else {
-            return Err(format!("Instance not found: {}", instance_id).into());
+            return Err(format!("Instance not found: {instance_id}").into());
         }
 
         attempts += 1;

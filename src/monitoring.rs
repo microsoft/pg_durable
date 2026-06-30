@@ -135,8 +135,7 @@ pub fn list_instances(
         let batch_sql = format!(
             "SELECT gi.instance_id, gi.orchestration_name, gi.current_execution_id, gi.output \
              FROM unnest($1::text[]) AS t(id) \
-             CROSS JOIN LATERAL {schema}.get_instance_info(t.id) AS gi",
-            schema = provider_schema
+             CROSS JOIN LATERAL {provider_schema}.get_instance_info(t.id) AS gi"
         );
 
         let rows = match sqlx::query_as::<_, (String, String, i64, Option<String>)>(&batch_sql)
