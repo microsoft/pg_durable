@@ -9,8 +9,11 @@
 //! - Same input must always produce the same scheduling decisions
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use cron::Schedule as CronSchedule;
 use duroxide::OrchestrationContext;
 
 use crate::activities;
@@ -306,6 +309,24 @@ pub async fn execute_subtree(
         .map_err(|e| format!("Failed to serialize subtree envelope: {e}"))
 }
 
+/// Compose the deterministic instance id for a JOIN/RACE branch sub-orchestration.
+///
+/// `schedule_sub_orchestration_with_id` uses this value verbatim (no parent prefix), so we
+/// build `{parent_instance_id}::{parent_execution_id}::{child_root_node_id}`. This guarantees
+/// (a) the second `::`-token is always the ROOT loop generation — the parent instance id
+/// already begins with `{df_instance_id}::{generation}` at every nesting level, so the
+/// generation token survives nesting; and (b) per-iteration uniqueness — the parent execution
+/// id advances on every loop `continue_as_new`, while the child root node id distinguishes
+/// sibling branches. df.instance_nodes() and the write fence both rely on that second token.
+fn subtree_instance_id(ctx: &OrchestrationContext, child_root_node_id: &str) -> String {
+    format!(
+        "{}::{}::{}",
+        ctx.instance_id(),
+        ctx.execution_id(),
+        child_root_node_id
+    )
+}
+
 /// Recursively execute function nodes with vars support
 async fn execute_function_node_with_vars(
     ctx: &OrchestrationContext,
@@ -324,10 +345,22 @@ async fn execute_function_node_with_vars(
         node_id, node.node_type
     ));
 
+    // Stamp identifying which orchestration generation is transitioning this
+    // node: "{orchestration_instance_id}::{execution_id}". For the root
+    // orchestration this is "{df_instance_id}::{loop_generation}"; for a JOIN/RACE
+    // sub-orchestration the instance id already carries the composed lineage (see
+    // `subtree_instance_id`), so the second "::"-token is always the root loop
+    // generation. df.instance_nodes() parses that token to derive pending/skipped
+    // and update_node_status uses it to fence stale writes. Both reads are
+    // deterministic (instance_id/execution_id are stable within an execution).
+    let execution_stamp = format!("{}::{}", ctx.instance_id(), ctx.execution_id());
+
     // Mark node as running
     let running_input = serde_json::json!({
         "node_id": node_id,
-        "status": "running"
+        "instance_id": graph.instance_id,
+        "status": "running",
+        "execution_id": execution_stamp,
     });
     let _ = ctx
         .schedule_activity(
@@ -350,8 +383,10 @@ async fn execute_function_node_with_vars(
     };
     let status_input = serde_json::json!({
         "node_id": node_id,
+        "instance_id": graph.instance_id,
         "status": status,
         "result": status_result,
+        "execution_id": execution_stamp,
     });
     let _ = ctx
         .schedule_activity(
@@ -509,33 +544,48 @@ async fn execute_wait_schedule_node(
         .as_ref()
         .ok_or_else(|| format!("WAIT_SCHEDULE node {node_id} has no config"))?;
 
-    // Parse pre-computed config from DSL time
     let config: serde_json::Value = serde_json::from_str(config_str)
         .map_err(|e| format!("Invalid WAIT_SCHEDULE config: {e}"))?;
 
-    let baked_wait_seconds = config["wait_seconds"].as_u64().unwrap_or(0);
-    let cron_expr = config["cron_expr"].as_str();
+    let cron_expr = config["cron_expr"]
+        .as_str()
+        .ok_or_else(|| "WAIT_SCHEDULE missing cron_expr".to_string())?;
 
-    // Recompute the delay from the orchestration's deterministic clock on each
-    // execution, so a df.loop around df.wait_for_schedule waits until the NEXT
-    // cron tick rather than replaying the fixed offset baked at DSL-build time
-    // (which would make every loop generation wait the same — possibly ~0s —
-    // interval, busy-looping). ctx.utc_now() is recorded in history, so this
-    // stays deterministic on replay. Falls back to the baked seconds if the
-    // clock read or cron parse is unavailable.
-    let wait = match (cron_expr, ctx.utc_now().await) {
-        (Some(cron), Ok(now_st)) => {
-            let now_dt: chrono::DateTime<chrono::Utc> = now_st.into();
-            crate::types::calculate_cron_wait_from(cron, now_dt)
-                .unwrap_or_else(|_| Duration::from_secs(baked_wait_seconds))
-        }
-        _ => Duration::from_secs(baked_wait_seconds),
-    };
+    // A cron schedule is a function of "now", so the next tick MUST be computed
+    // when this node actually executes — not at df.start() time — so that any
+    // delay before execution, and every iteration of a recurring `@>` loop,
+    // targets the correct upcoming tick.
+    //
+    // `ctx.utc_now()` is duroxide's deterministic clock (the only sanctioned way
+    // to read wall-clock time in this deterministic file): the value is recorded
+    // in history and replayed verbatim. The cron math below is pure given `now`,
+    // so the whole computation is replay-safe. The "0 " prefix supplies the
+    // seconds field the `cron` crate expects (mirrors df.wait_for_schedule()).
+    let now: DateTime<Utc> = ctx
+        .utc_now()
+        .await
+        .map_err(|e| format!("WAIT_SCHEDULE failed to read deterministic clock: {e}"))?
+        .into();
+
+    let cron_with_seconds = format!("0 {cron_expr}");
+    let schedule = CronSchedule::from_str(&cron_with_seconds)
+        .map_err(|e| format!("Invalid cron expression '{cron_expr}': {e}"))?;
+    let next = schedule
+        .after(&now)
+        .next()
+        .ok_or_else(|| format!("No upcoming schedule found for '{cron_expr}'"))?;
+
+    // Clamp to zero if the tick is already in the past by the time we get here.
+    //
+    // NOTE: once duroxide gains an absolute-deadline timer
+    // (https://github.com/microsoft/duroxide/issues/34), this `now`-read +
+    // subtraction can be replaced with `ctx.schedule_timer_until(next)`, which
+    // targets the absolute tick directly and drops the extra utc_now() syscall.
+    let wait = (next - now).to_std().unwrap_or(Duration::ZERO);
 
     ctx.trace_info(format!(
-        "Waiting {}s until schedule: {}",
-        wait.as_secs(),
-        cron_expr.unwrap_or("?")
+        "Waiting {}s until next schedule tick {next} (cron: {cron_expr})",
+        wait.as_secs()
     ));
     ctx.schedule_timer(wait).await;
 
@@ -898,8 +948,13 @@ async fn execute_join_node(
     })
     .to_string();
 
-    // Build list of branch inputs
-    let mut branch_inputs = vec![left_input, right_input];
+    // Build list of branch inputs, each paired with its branch root node id so the
+    // sub-orchestration can be scheduled with a deterministic, generation-stamped
+    // instance id (see `subtree_instance_id`).
+    let mut branch_inputs: Vec<(String, String)> = vec![
+        (left_id.clone(), left_input),
+        (right_id.clone(), right_input),
+    ];
 
     // Check for extra nodes (join3)
     if let Some(config_str) = &node.query {
@@ -915,17 +970,23 @@ async fn execute_join_node(
                             "label": exec_ctx.label
                         })
                         .to_string();
-                        branch_inputs.push(extra_input);
+                        branch_inputs.push((extra_id.to_string(), extra_input));
                     }
                 }
             }
         }
     }
 
-    // Schedule sub-orchestrations and collect DurableFutures
+    // Schedule sub-orchestrations and collect DurableFutures. Each branch gets a
+    // deterministic `{parent}::{generation}::{branch_root}` instance id so its node
+    // stamps carry the root loop generation and remain unique across loop iterations.
     let mut durable_futures = Vec::new();
-    for input in branch_inputs {
-        let fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, input);
+    for (child_root, input) in branch_inputs {
+        let fut = ctx.schedule_sub_orchestration_with_id(
+            SUBTREE_NAME,
+            subtree_instance_id(ctx, &child_root),
+            input,
+        );
         durable_futures.push(fut);
     }
 
@@ -1017,9 +1078,19 @@ async fn execute_race_node(
     })
     .to_string();
 
-    // Schedule sub-orchestrations
-    let left_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, left_input);
-    let right_fut = ctx.schedule_sub_orchestration(SUBTREE_NAME, right_input);
+    // Schedule sub-orchestrations with deterministic, generation-stamped instance
+    // ids so each branch's node stamps carry the root loop generation (see
+    // `subtree_instance_id`).
+    let left_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        subtree_instance_id(ctx, left_id),
+        left_input,
+    );
+    let right_fut = ctx.schedule_sub_orchestration_with_id(
+        SUBTREE_NAME,
+        subtree_instance_id(ctx, right_id),
+        right_input,
+    );
 
     // Use ctx.select2() - first to complete wins
     // select2 now returns Either2<Left, Right> instead of (winner_idx, DurableOutput)

@@ -15,8 +15,26 @@ SELECT df.start(
     'test-timeout-blocker'
 ), 'blocker';
 
--- Give the blocker time to start executing and acquire the semaphore.
-SELECT pg_sleep(3);
+-- Wait until the blocker is actually running before starting the victim.
+DO $$
+DECLARE
+    blocker_id TEXT;
+    blocker_status TEXT;
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO blocker_id FROM _test_state WHERE label = 'blocker';
+
+    LOOP
+        SELECT s INTO blocker_status FROM df.status(blocker_id) s;
+        EXIT WHEN lower(blocker_status) = 'running' OR attempts >= 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF lower(blocker_status) != 'running' THEN
+        RAISE EXCEPTION 'TEST FAILED: blocker did not reach running state, got status = %', blocker_status;
+    END IF;
+END $$;
 
 -- Now start a second workflow. With max_user_connections=1, its SQL node
 -- cannot acquire the semaphore and should time out after ~2s.
@@ -33,6 +51,8 @@ DECLARE
     blocker_status TEXT;
     victim_status TEXT;
     victim_output TEXT;
+    node_result TEXT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO blocker_id FROM _test_state WHERE label = 'blocker';
     SELECT instance_id INTO victim_id FROM _test_state WHERE label = 'victim';
@@ -44,12 +64,26 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: victim status = %, expected failed', victim_status;
     END IF;
 
-    -- Verify the error message mentions connection limit
-    SELECT output INTO victim_output
-    FROM df.instance_info(victim_id);
+    -- Status becomes visible via df.instances before the failure payload is always
+    -- available through df.instance_info(), so poll briefly and fall back to the
+    -- SQL node result if needed.
+    LOOP
+        SELECT output INTO victim_output
+        FROM df.instance_info(victim_id);
+
+        SELECT result::text INTO node_result
+        FROM df.nodes
+        WHERE instance_id = victim_id AND node_type = 'SQL';
+
+        EXIT WHEN victim_output IS NOT NULL OR node_result IS NOT NULL OR attempts >= 50;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    victim_output := COALESCE(victim_output, node_result);
 
     IF victim_output IS NULL THEN
-        RAISE EXCEPTION 'TEST FAILED: victim output is NULL';
+        RAISE EXCEPTION 'TEST FAILED: victim output is NULL (status = %)', victim_status;
     END IF;
 
     IF victim_output NOT LIKE '%connection limit reached%' THEN

@@ -530,20 +530,29 @@ GROUP BY t.typname, t.typtype, t.typbasetype, t.typtypmod
 ORDER BY t.typname;
 
 -- Constraints
+--
+-- Read from pg_constraint so CHECK bodies (pg_get_constraintdef) and the
+-- validated/NOT VALID state (convalidated) are compared, not just key columns.
+--
+-- Exclude NOT NULL constraints (contype = 'n'): on PG18+ these are first-class
+-- pg_constraint rows, but on PG17 they are not (they live in
+-- pg_attribute.attnotnull), so including them would make this snapshot
+-- PG-version-dependent. Per-column nullability is already captured by the
+-- 'column' section above via is_nullable, and the auto-generated NOT NULL
+-- constraint names add noise without extra coverage.
 SELECT 'constraint' AS obj_type,
-       tc.table_name,
-       tc.constraint_name,
-       tc.constraint_type,
-       string_agg(kcu.column_name, ', ' ORDER BY kcu.ordinal_position) AS columns,
-       '' AS extra1,
+       rel.relname AS table_name,
+       con.conname AS constraint_name,
+       con.contype::text AS constraint_type,
+       pg_get_constraintdef(con.oid) AS definition,
+       con.convalidated::text AS validated,
        '' AS extra2
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name
-  AND tc.table_schema = kcu.table_schema
-WHERE tc.table_schema = 'df'
-GROUP BY tc.table_name, tc.constraint_name, tc.constraint_type
-ORDER BY tc.table_name, tc.constraint_name;
+FROM pg_constraint con
+JOIN pg_class rel ON rel.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = rel.relnamespace
+WHERE n.nspname = 'df'
+  AND con.contype <> 'n'
+ORDER BY rel.relname, con.conname;
 
 -- RLS policies
 SELECT 'policy' AS obj_type,

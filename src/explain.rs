@@ -19,6 +19,28 @@ struct ExplainNode {
     status: Option<String>,
     #[allow(dead_code)]
     result: Option<String>,
+    status_details: Option<String>,
+}
+
+impl crate::node_status::NodeFacts for ExplainNode {
+    fn node_type(&self) -> &str {
+        &self.node_type
+    }
+    fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+    fn left_node(&self) -> Option<&str> {
+        self.left_node.as_deref()
+    }
+    fn right_node(&self) -> Option<&str> {
+        self.right_node.as_deref()
+    }
+    fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+    fn status_details(&self) -> Option<&str> {
+        self.status_details.as_deref()
+    }
 }
 
 /// Explain a durable function - either an existing instance or a DSL expression
@@ -74,7 +96,16 @@ fn explain_instance(instance_id: &str) -> String {
     let (duroxide_status, output) = get_duroxide_instance_info(instance_id);
 
     // Load all nodes for this instance
-    let nodes = load_nodes_from_table("df.nodes", Some(instance_id));
+    let mut nodes = load_nodes_from_table("df.nodes", Some(instance_id));
+
+    // Overwrite each node's status with the derived status so the tree shows the
+    // same `skipped`/`pending` interpretation as df.instance_nodes() (shared walk).
+    let inferred = crate::node_status::infer_statuses(Some(&root_id), &nodes);
+    for (id, node) in nodes.iter_mut() {
+        if let Some(inf) = inferred.get(id) {
+            node.status = Some(inf.status.clone());
+        }
+    }
 
     if nodes.is_empty() {
         return format!("No nodes found for instance '{instance_id}'");
@@ -259,7 +290,7 @@ fn collect_nodes(
     id_counter: &mut i32,
 ) -> String {
     *id_counter += 1;
-    let node_id = format!("N{}", id_counter);
+    let node_id = format!("N{id_counter}");
 
     // Recursively collect children first to get their IDs
     let left_id = node
@@ -292,6 +323,7 @@ fn collect_nodes(
             right_node: right_id,
             status: None,
             result: None,
+            status_details: None,
         },
     );
 
@@ -305,18 +337,18 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
     let mut nodes = HashMap::new();
 
     Spi::connect(|client| {
+        let status_details_expr = crate::node_status::status_details_select_expr(client);
         let (sql, args): (String, Vec<pgrx::datum::DatumWithOid>) = if let Some(id) = instance_id {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {} WHERE instance_id = $1",
-                    table
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {table} WHERE instance_id = $1"
                 ),
                 vec![id.into()],
             )
         } else {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text FROM {table}"
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {table}"
                 ),
                 vec![],
             )
@@ -333,6 +365,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
                         right_node: row.get(6).ok().flatten(),
                         status: row.get(7).ok().flatten(),
                         result: row.get(8).ok().flatten(),
+                        status_details: row.get(9).ok().flatten(),
                     };
                     nodes.insert(id, node);
                 }
@@ -394,6 +427,7 @@ fn build_tree_recursive(
             Some("failed") => " ✗",
             Some("running") => " ⏳",
             Some("pending") => " ○",
+            Some("skipped") => " ⊘",
             _ => "",
         }
     } else {
@@ -423,6 +457,7 @@ fn build_tree_recursive(
                         Some("failed") => " ✗",
                         Some("running") => " ⏳",
                         Some("pending") => " ○",
+                        Some("skipped") => " ⊘",
                         _ => "",
                     }
                 } else {
@@ -582,7 +617,7 @@ fn render_children(
                 );
             }
         }
-        "JOIN" => {
+        "JOIN" | "RACE" => {
             let mut branches = Vec::new();
             if let Some(ref left_id) = node.left_node {
                 branches.push(left_id.clone());
@@ -591,13 +626,15 @@ fn render_children(
                 branches.push(right_id.clone());
             }
 
-            // Check for extra nodes in join3
-            if let Some(ref query) = node.query {
-                if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(query) {
-                    if let Some(extras) = cfg["extra_nodes"].as_array() {
-                        for extra in extras {
-                            if let Some(extra_id) = extra.as_str() {
-                                branches.push(extra_id.to_string());
+            if node.node_type == "JOIN" {
+                // Check for extra nodes in join3
+                if let Some(ref query) = node.query {
+                    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(query) {
+                        if let Some(extras) = cfg["extra_nodes"].as_array() {
+                            for extra in extras {
+                                if let Some(extra_id) = extra.as_str() {
+                                    branches.push(extra_id.to_string());
+                                }
                             }
                         }
                     }
@@ -647,18 +684,15 @@ fn format_node_display(node: &ExplainNode) -> String {
             format!("SLEEP {seconds}s{name_suffix}")
         }
         "WAIT_SCHEDULE" => {
-            // Parse config to get cron expression and wait seconds
-            let (cron, secs) = node
+            // Parse config to get the cron expression. The next tick is computed
+            // at execution time (not stored), so only the cron expr is shown.
+            let cron = node
                 .query
                 .as_ref()
                 .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
-                .map(|cfg| {
-                    let c = cfg["cron_expr"].as_str().unwrap_or("?").to_string();
-                    let s = cfg["wait_seconds"].as_u64().unwrap_or(0);
-                    (c, s)
-                })
-                .unwrap_or_else(|| ("?".to_string(), 0));
-            format!("WAIT '{cron}' ({secs}s){name_suffix}")
+                .and_then(|cfg| cfg["cron_expr"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "?".to_string());
+            format!("WAIT '{cron}'{name_suffix}")
         }
         "HTTP" => {
             // Parse config to get method and URL

@@ -41,6 +41,7 @@ pub mod client;
 pub mod dsl;
 pub mod explain;
 pub mod monitoring;
+pub mod node_status;
 pub mod orchestrations;
 pub mod registry;
 pub mod ssrf;
@@ -157,7 +158,35 @@ pub extern "C-unwind" fn _PG_init() {
 // Schema Declaration
 // ============================================================================
 
-/// The 'df' schema contains all pg_durable functions (df = durable functions)
+// Create both extension-owned schemas as the very first statements of the
+// install script. `bootstrap` guarantees this runs before every other extension
+// object, including the redundant `CREATE SCHEMA IF NOT EXISTS df` that pgrx
+// emits for the `#[pg_schema] mod df` entity below.
+extension_sql!(
+    r#"
+CREATE SCHEMA df;
+CREATE SCHEMA _duroxide;
+
+-- Returns the name of the duroxide provider schema selected for this install.
+-- Fresh installs return '_duroxide'. The body is version-specific: the upgrade
+-- script pg_durable--0.2.2--0.2.3.sql replaces it to return 'duroxide' for
+-- installs that originated on pg_durable <= 0.2.2 (which keep the legacy
+-- 'duroxide' schema). Both backend sessions and the background worker call
+-- df.duroxide_schema() to discover which schema to use, falling back to
+-- 'duroxide' when the helper is absent (installs predating it).
+CREATE FUNCTION df.duroxide_schema() RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $$ SELECT '_duroxide'::text $$;
+"#,
+    name = "bootstrap_schemas",
+    bootstrap
+);
+
+/// The 'df' schema contains all pg_durable functions (df = durable functions).
+/// pgrx requires this entity so that `#[pg_extern(schema = "df")]` functions can
+/// resolve their target schema. It emits a redundant `CREATE SCHEMA IF NOT
+/// EXISTS df` that no-ops after the bootstrap block above has already created df.
 #[pg_schema]
 mod df {}
 
@@ -168,9 +197,9 @@ mod df {}
 extension_sql!(
     r#"
 -- Table to store function nodes (SQL steps, THEN chains, etc.)
-CREATE TABLE IF NOT EXISTS df.nodes (
-    id VARCHAR(8) PRIMARY KEY,
-    instance_id VARCHAR(8),
+CREATE TABLE df.nodes (
+    id VARCHAR(8) NOT NULL,
+    instance_id VARCHAR(8) NOT NULL,
     node_type TEXT NOT NULL,
     query TEXT,
     result_name TEXT,
@@ -182,14 +211,22 @@ CREATE TABLE IF NOT EXISTS df.nodes (
     submitted_by REGROLE,
     database TEXT,
     created_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
-    updated_at TIMESTAMPTZ DEFAULT pg_catalog.now()
+    updated_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
+    -- Appended last so the fresh-install column order matches the upgrade path,
+    -- where ALTER TABLE ADD COLUMN can only append (see pg_durable--0.2.3--0.2.4.sql).
+    status_details JSONB
 );
 
 COMMENT ON COLUMN df.nodes.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
+COMMENT ON COLUMN df.nodes.status_details IS
+    'Execution metadata written by the worker (never inserted by users). JSON object with key '
+    '"execution_id": the orchestration instance_id::execution_id stamp recorded when the node last '
+    'transitioned. df.instance_nodes() parses it to derive pending/skipped statuses; see USER_GUIDE.md.';
+
 -- Table to store function instances
-CREATE TABLE IF NOT EXISTS df.instances (
+CREATE TABLE df.instances (
     id VARCHAR(8) PRIMARY KEY,
     label TEXT,
     root_node VARCHAR(8) NOT NULL,
@@ -204,15 +241,28 @@ CREATE TABLE IF NOT EXISTS df.instances (
 COMMENT ON COLUMN df.instances.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
--- Index for finding pending instances
-CREATE INDEX IF NOT EXISTS idx_instances_status ON df.instances(status);
+-- Index for status-filtered listing, newest-first
+-- (df.list_instances() WHERE status = $1 ORDER BY created_at DESC). Also serves the
+-- pending-instance scan via the leading status column. The trailing id prepares the
+-- access path for the keyset pagination planned for df.list_instances
+-- (ORDER BY created_at DESC, id ASC); df.list_instances() does not order by id yet,
+-- so this does not change the current result ordering.
+-- NOTE: keep these two index definitions byte-identical to the 0.2.3->0.2.4 upgrade
+-- script (sql/pg_durable--0.2.3--0.2.4.sql) until 0.2.4 is released -- Scenario A
+-- compares pg_get_indexdef() across the fresh-install and upgrade paths.
+CREATE INDEX idx_instances_status ON df.instances(status, created_at DESC, id);
+
+-- Index for unfiltered listing, newest-first (df.list_instances() ORDER BY created_at DESC).
+-- The trailing id prepares the access path for the same future keyset pagination
+-- (ORDER BY created_at DESC, id ASC); it does not affect the current ordering.
+CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
 
 -- Index for finding nodes by instance
-CREATE INDEX IF NOT EXISTS idx_nodes_instance ON df.nodes(instance_id);
+CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);
 
 -- Table to store workflow variables (captured at df.start())
 -- Per-user scoping: each user has their own variable namespace.
-CREATE TABLE IF NOT EXISTS df.vars (
+CREATE TABLE df.vars (
     name TEXT NOT NULL,
     value TEXT,
     owner REGROLE NOT NULL DEFAULT pg_catalog.quote_ident(current_user)::pg_catalog.regrole,
@@ -223,7 +273,7 @@ CREATE TABLE IF NOT EXISTS df.vars (
 -- initialising.  If the extension is DROP-ed and re-CREATEd between
 -- two poll ticks the epoch row disappears, so the worker detects the
 -- recreation even though the extension is always "present" in pg_extension.
-CREATE TABLE IF NOT EXISTS df._worker_epoch (
+CREATE TABLE df._worker_epoch (
     epoch_id UUID PRIMARY KEY,
     started_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
     last_seen_at TIMESTAMPTZ DEFAULT pg_catalog.now()
@@ -284,8 +334,12 @@ ALTER TABLE df.nodes
                 ELSE FALSE
             END
         ) NOT VALID,
-    ADD CONSTRAINT nodes_instance_node_key
-        UNIQUE (instance_id, id);
+    -- Composite primary key: node IDs only need to be unique per instance, so
+    -- the random 8-hex node ID is never the sole uniqueness guarantee (issue
+    -- #129). The same-instance foreign keys below reference (instance_id, id),
+    -- which this primary key satisfies.
+    ADD CONSTRAINT nodes_pkey
+        PRIMARY KEY (instance_id, id);
 
 ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_instance_identity_fkey
@@ -352,12 +406,15 @@ CREATE POLICY vars_user_isolation ON df.vars
 --
 -- Access gate: schema USAGE makes the ordinary df.* functions callable (they
 -- keep PostgreSQL's default PUBLIC EXECUTE). Sensitive functions (df.http,
--- df.grant_usage, df.revoke_usage) have PUBLIC EXECUTE revoked at install time
--- and are granted explicitly below — keep a new private function private the
--- same way (REVOKE ... FROM PUBLIC in rls_and_grants, then grant it here).
+-- df.metrics, df.grant_usage, df.revoke_usage) have PUBLIC EXECUTE revoked at
+-- install time and are granted explicitly below when appropriate — keep a new
+-- private function private the same way (REVOKE ... FROM PUBLIC in
+-- rls_and_grants, then grant it here).
 --   include_http => true  also grants EXECUTE on df.http() (opt-in: network).
---   with_grant   => true  grants everything WITH GRANT OPTION and lets the role
---                         call df.grant_usage()/df.revoke_usage() for others.
+--   with_grant   => true  marks a pg_durable admin: grants everything WITH GRANT
+--                         OPTION, lets the role call df.grant_usage()/
+--                         df.revoke_usage() for others, and grants df.metrics()
+--                         (system-wide aggregate counts).
 CREATE OR REPLACE FUNCTION df.grant_usage(
     p_role TEXT,
     include_http boolean DEFAULT false,
@@ -382,10 +439,13 @@ BEGIN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
-    -- Admin helpers — only for delegated administrators.
+    -- Admin helpers and system-wide metrics — with_grant => true marks a
+    -- pg_durable admin, so it also grants df.metrics() (cluster-wide aggregate
+    -- counts).
     IF with_grant THEN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.revoke_usage(text) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.metrics() TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- In-transaction enqueue wrappers — SECURITY DEFINER, revoked from PUBLIC at
@@ -426,6 +486,11 @@ BEGIN
     -- admin may lack privilege on some of these (e.g. df.http); skip those.
     BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.metrics() FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -496,15 +561,18 @@ BEGIN
     END IF;
 END $$;
 
--- df.http(), df.grant_usage() and df.revoke_usage() are sensitive (network
--- access / privilege management), so revoke PostgreSQL's default PUBLIC
--- EXECUTE. df.grant_usage() re-grants them explicitly to authorized roles.
+-- df.http(), df.metrics(), df.grant_usage() and df.revoke_usage() are sensitive
+-- (network access / system-wide monitoring / privilege management), so revoke
+-- PostgreSQL's default PUBLIC EXECUTE. df.grant_usage() re-grants the helper
+-- functions explicitly to authorized roles; df.metrics() is granted to
+-- with_grant => true admins or by a direct administrator GRANT.
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.metrics() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
-    requires = ["create_tables", dsl::http]
+    requires = ["create_tables", dsl::http, monitoring::metrics]
 );
 
 // ============================================================================
@@ -887,37 +955,6 @@ END $$;
 );
 
 // ============================================================================
-// Duroxide Schema
-// ============================================================================
-
-extension_sql!(
-    r#"
--- The duroxide provider schema is created here so the extension owns it.
--- No IF NOT EXISTS: fails loudly if a _duroxide schema already exists,
--- preventing adoption of a potentially attacker-crafted schema.
--- The background worker populates this schema at startup via ApplyAll.
---
--- Fresh installs use the '_duroxide' schema. Installs that originated on
--- pg_durable <= 0.2.2 keep the legacy 'duroxide' schema; the upgrade script
--- pg_durable--0.2.2--0.2.3.sql defines df.duroxide_schema() to return
--- 'duroxide' for those installs. Both backend sessions and the background
--- worker call df.duroxide_schema() to discover which schema to use, falling
--- back to 'duroxide' when the helper is absent (installs predating it).
-CREATE SCHEMA _duroxide;
-
--- Returns the name of the duroxide provider schema selected for this install.
--- Fresh installs return '_duroxide'. The body is version-specific: the upgrade
--- script for pre-existing installs replaces it to return 'duroxide'.
-CREATE FUNCTION df.duroxide_schema() RETURNS text
-    LANGUAGE sql IMMUTABLE PARALLEL SAFE
-    SET search_path = pg_catalog, pg_temp
-    AS $$ SELECT '_duroxide'::text $$;
-"#,
-    name = "create_duroxide_schema",
-    requires = ["validate_database"]
-);
-
-// ============================================================================
 // SQL Operators
 // ============================================================================
 
@@ -1210,6 +1247,51 @@ mod tests {
         })
     }
 
+    fn sql_literal(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+
+    fn test_database_connection_string() -> String {
+        use crate::types::{get_host, get_port};
+
+        let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+            .expect("current_database query should succeed")
+            .expect("current_database should return a value");
+        // Connect as the current session role rather than the worker role GUC
+        // (which defaults to "postgres"). The pgrx test cluster's superuser is
+        // the OS account, so "postgres" may not exist; the current role always
+        // does and can log in.
+        let role = Spi::get_one::<String>("SELECT current_user::text")
+            .expect("current_user query should succeed")
+            .expect("current_user should return a value");
+        format!(
+            "postgres://{}@{}:{}/{}",
+            role,
+            get_host(),
+            get_port(),
+            database
+        )
+    }
+
+    async fn delete_prune_test_rows(pool: &sqlx::PgPool, id_list: &str) {
+        let mut tx = pool.begin().await.expect("begin cleanup transaction");
+        sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+            .execute(&mut *tx)
+            .await
+            .expect("defer cleanup constraints");
+        sqlx::query(&format!(
+            "DELETE FROM df.nodes WHERE instance_id IN ({id_list})"
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("clean prune test nodes");
+        sqlx::query(&format!("DELETE FROM df.instances WHERE id IN ({id_list})"))
+            .execute(&mut *tx)
+            .await
+            .expect("clean prune test instances");
+        tx.commit().await.expect("commit cleanup");
+    }
+
     // ========================================================================
     // Unit Tests - DSL Node Creation
     // ========================================================================
@@ -1258,8 +1340,7 @@ mod tests {
         // Test that is_durofut recognizes it
         assert!(
             Durofut::is_durofut(&sleep_json),
-            "Durofut::is_durofut should recognize SLEEP node JSON: {}",
-            sleep_json
+            "Durofut::is_durofut should recognize SLEEP node JSON: {sleep_json}"
         );
 
         // Test that ensure doesn't wrap it in SQL
@@ -1276,6 +1357,24 @@ mod tests {
         let json = crate::dsl::wait_for_schedule("*/5 * * * *");
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "WAIT_SCHEDULE");
+
+        // The node stores only the cron expression; the next tick is computed at
+        // execution time, so there must be no pre-computed wait baked in at DSL time.
+        let config: serde_json::Value =
+            serde_json::from_str(fut.query.as_ref().expect("query must be set")).unwrap();
+        assert_eq!(
+            config["cron_expr"].as_str(),
+            Some("*/5 * * * *"),
+            "cron_expr should be preserved"
+        );
+        assert!(
+            config.get("wait_seconds").is_none(),
+            "config must not pre-compute wait_seconds at DSL time"
+        );
+        assert!(
+            config.get("target_timestamp").is_none(),
+            "config must not pre-compute a target_timestamp at DSL time"
+        );
     }
 
     #[pg_test]
@@ -1730,6 +1829,159 @@ mod tests {
         // Fresh installs use the "_duroxide" provider schema; upgraded installs
         // use the legacy "duroxide". Both contain "duroxide" as a substring.
         assert!(backend_duroxide_schema().contains("duroxide"));
+    }
+
+    #[pg_test]
+    fn test_prune_terminal_instances_respects_age_and_keep_count() {
+        let conn = test_database_connection_string();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        let stats = rt.block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&conn)
+                .await
+                .expect("connect to test database");
+
+            let test_ids = [
+                "aa261001", "aa261002", "aa261003", "aa261004", "aa261005", "aa261006",
+            ];
+            let id_list = test_ids
+                .iter()
+                .map(|id| sql_literal(id))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            delete_prune_test_rows(&pool, &id_list).await;
+
+            let mut fixture_tx = pool.begin().await.expect("begin fixture transaction");
+            sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+                .execute(&mut *fixture_tx)
+                .await
+                .expect("defer fixture constraints");
+            sqlx::query(
+                r#"
+                -- max_keep=2, retention=30d. Terminal rows are ranked newest-first
+                -- by COALESCE(completed_at, created_at):
+                --   aa261001 (1d, r1)  -> keep (within cap, young)
+                --   aa261002 (2d, r2)  -> keep (within cap, young)
+                --   aa261003 (3d, r3)  -> PRUNE by the hard cap even though it is
+                --                         only 3 days old (rank > max_keep)
+                --   aa261004 (40d, r4) -> PRUNE (beyond cap and past retention)
+                --   aa261005 (50d, r5) -> PRUNE (beyond cap and past retention)
+                --   aa261006 (running) -> keep (non-terminal, never considered)
+                -- aa261004/aa261005 are 'failed'/'cancelled' (NULL completed_at) with
+                -- a forged far-future `updated_at`; they must still rank/age by their
+                -- old `created_at`, proving `updated_at` is not trusted.
+                WITH fixtures(id, label, root_node, status, age_days, has_completed_at, forge_future_updated_at) AS (
+                    VALUES
+                        ('aa261001', 'keep-recent-1', 'bb261001', 'completed', 1, true, false),
+                        ('aa261002', 'keep-recent-2', 'bb261002', 'completed', 2, true, false),
+                        ('aa261003', 'prune-young-over-cap', 'bb261003', 'completed', 3, true, false),
+                        ('aa261004', 'prune-old-failed-forged', 'bb261004', 'failed', 40, false, true),
+                        ('aa261005', 'prune-old-cancelled-forged', 'bb261005', 'cancelled', 50, false, true),
+                        ('aa261006', 'keep-running', 'bb261006', 'running', 90, false, false)
+                )
+                INSERT INTO df.instances
+                    (id, label, root_node, status, submitted_by, created_at, updated_at, completed_at)
+                SELECT id,
+                       label,
+                       root_node,
+                       status,
+                       current_user::regrole,
+                       pg_catalog.now() - (age_days::int * INTERVAL '1 day'),
+                       CASE WHEN forge_future_updated_at
+                            THEN pg_catalog.now() + INTERVAL '3650 days'
+                            ELSE pg_catalog.now() - (age_days::int * INTERVAL '1 day')
+                       END,
+                       CASE WHEN has_completed_at
+                            THEN pg_catalog.now() - (age_days::int * INTERVAL '1 day')
+                            ELSE NULL
+                       END
+                FROM fixtures;
+                "#,
+            )
+            .execute(&mut *fixture_tx)
+            .await
+            .expect("insert prune instances");
+
+            sqlx::query(
+                r#"
+                WITH fixtures(id, instance_id, status, age_days) AS (
+                    VALUES
+                        ('bb261001', 'aa261001', 'completed', 1),
+                        ('bb261002', 'aa261002', 'completed', 2),
+                        ('bb261003', 'aa261003', 'completed', 3),
+                        ('bb261004', 'aa261004', 'failed', 40),
+                        ('bb261005', 'aa261005', 'completed', 50),
+                        ('bb261006', 'aa261006', 'running', 90)
+                )
+                INSERT INTO df.nodes
+                    (id, instance_id, node_type, query, status, submitted_by, created_at, updated_at)
+                SELECT id,
+                       instance_id,
+                       'SQL',
+                       'SELECT 1',
+                       status,
+                       current_user::regrole,
+                       pg_catalog.now() - (age_days::int * INTERVAL '1 day'),
+                       pg_catalog.now() - (age_days::int * INTERVAL '1 day')
+                FROM fixtures;
+                "#,
+            )
+            .execute(&mut *fixture_tx)
+            .await
+            .expect("insert prune nodes");
+
+            let stats =
+                crate::worker::prune_terminal_instances_transaction(&mut fixture_tx, 30, 2)
+                    .await
+                    .expect("prune terminal instances");
+
+            let remaining_instances: i64 = sqlx::query_scalar(&format!(
+                "SELECT pg_catalog.count(*)::bigint FROM df.instances WHERE id IN ({id_list})"
+            ))
+            .fetch_one(&mut *fixture_tx)
+            .await
+            .expect("count remaining instances");
+            assert_eq!(remaining_instances, 3);
+
+            let remaining_nodes: i64 = sqlx::query_scalar(&format!(
+                "SELECT pg_catalog.count(*)::bigint FROM df.nodes WHERE instance_id IN ({id_list})"
+            ))
+            .fetch_one(&mut *fixture_tx)
+            .await
+            .expect("count remaining nodes");
+            assert_eq!(remaining_nodes, 3);
+
+            let remaining_ids: Vec<String> = sqlx::query_scalar(&format!(
+                "SELECT id FROM df.instances WHERE id IN ({id_list}) ORDER BY id"
+            ))
+            .fetch_all(&mut *fixture_tx)
+            .await
+            .expect("load remaining ids");
+            assert_eq!(remaining_ids, vec!["aa261001", "aa261002", "aa261006"]);
+
+            fixture_tx
+                .rollback()
+                .await
+                .expect("rollback prune test fixture");
+
+            pool.close().await;
+            stats
+        });
+
+        assert_eq!(
+            stats,
+            crate::worker::PruneStats {
+                instances_deleted: 3,
+                nodes_deleted: 3,
+            }
+        );
     }
 
     // ========================================================================
@@ -2880,9 +3132,8 @@ mod tests {
         use crate::types::evaluate_condition;
         // Simulates a SQL condition query that returns zero rows
         let empty_result = r#"{"rows":[],"row_count":0}"#;
-        assert_eq!(
-            evaluate_condition(empty_result).unwrap(),
-            false,
+        assert!(
+            !evaluate_condition(empty_result).unwrap(),
             "Empty result set should evaluate as false for conditions"
         );
     }
@@ -2891,9 +3142,8 @@ mod tests {
     fn test_evaluate_condition_single_true_row() {
         use crate::types::evaluate_condition;
         let result = r#"{"rows":[{"col":true}],"row_count":1}"#;
-        assert_eq!(
+        assert!(
             evaluate_condition(result).unwrap(),
-            true,
             "Single row with true value should be truthy"
         );
     }
@@ -2902,9 +3152,8 @@ mod tests {
     fn test_evaluate_condition_single_false_row() {
         use crate::types::evaluate_condition;
         let result = r#"{"rows":[{"col":false}],"row_count":1}"#;
-        assert_eq!(
-            evaluate_condition(result).unwrap(),
-            false,
+        assert!(
+            !evaluate_condition(result).unwrap(),
             "Single row with false value should be falsy"
         );
     }
@@ -2914,9 +3163,8 @@ mod tests {
         use crate::types::evaluate_condition;
         // A query like SELECT count(*) FROM empty_table returns 0
         let result = r#"{"rows":[{"count":0}],"row_count":1}"#;
-        assert_eq!(
-            evaluate_condition(result).unwrap(),
-            false,
+        assert!(
+            !evaluate_condition(result).unwrap(),
             "Row with zero value should be falsy"
         );
     }

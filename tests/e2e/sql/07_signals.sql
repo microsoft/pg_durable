@@ -15,6 +15,53 @@ CREATE TABLE signal_test_log (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+RESET SESSION AUTHORIZATION;
+
+CREATE OR REPLACE FUNCTION public.signal_test_send_until_terminal(
+    p_instance_id TEXT,
+    p_signal_name TEXT,
+    p_signal_data TEXT,
+    p_max_attempts INT DEFAULT 100
+) RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    status TEXT;
+    err_msg TEXT;
+    connstr TEXT := format('host=localhost dbname=postgres port=%s user=postgres', current_setting('port'));
+    attempts INT := 0;
+BEGIN
+    LOOP
+        SELECT t.status INTO status
+        FROM dblink(connstr, format('SELECT df.status(%L)', p_instance_id))
+             AS t(status TEXT);
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled');
+        EXIT WHEN attempts > p_max_attempts;
+
+        BEGIN
+            PERFORM 1
+            FROM dblink(
+                connstr,
+                format('SELECT df.signal(%L, %L, %L)', p_instance_id, p_signal_name, p_signal_data)
+            ) AS t(result TEXT);
+        EXCEPTION
+            WHEN OTHERS THEN
+                GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+                IF err_msg NOT LIKE '%not ready to receive signals%' THEN
+                    RAISE;
+                END IF;
+        END;
+
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+END $$;
+GRANT EXECUTE ON FUNCTION public.signal_test_send_until_terminal(TEXT, TEXT, TEXT, INT) TO df_e2e_user;
+
+SET SESSION AUTHORIZATION df_e2e_user;
+
 -- Test 1: Basic Signal Send/Receive
 CREATE TEMP TABLE _test_signal_basic (instance_id TEXT);
 
@@ -45,13 +92,17 @@ BEGIN
     RAISE NOTICE 'Verified workflow is waiting (status: %)', status;
 END $$;
 
--- Send the signal
+-- Send the signal, retrying until the workflow consumes it. The leading
+-- 'SELECT 1' activity runs before df.wait_for_signal, and duroxide drops any
+-- event raised before the subscription is registered ("no pending subscription
+-- slot", duroxide #154). A single fire-once signal races that registration and
+-- is flaky under load, so re-raise until the instance leaves 'running'.
 DO $$
 DECLARE
     inst_id TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_basic;
-    PERFORM df.signal(inst_id, 'go', '{"value": 42}');
+    PERFORM public.signal_test_send_until_terminal(inst_id, 'go', '{"value": 42}');
     RAISE NOTICE 'Sent signal to %', inst_id;
 END $$;
 
@@ -146,17 +197,16 @@ INSERT INTO _test_signal_data SELECT df.start(
     'test-signal-data'
 );
 
-SELECT pg_sleep(1);
-
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_data;
-    
-    PERFORM df.signal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
     RAISE NOTICE 'Testing signal with data: %', inst_id;
+
+    -- Retry the signal until consumed; see Test 1 / duroxide #154.
+    PERFORM public.signal_test_send_until_terminal(inst_id, 'approval', '{"approved": true, "approver": "jane@acme.com"}');
 
     SELECT df.await_instance(inst_id, 10) INTO status;
 
@@ -195,17 +245,16 @@ INSERT INTO _test_signal_text SELECT df.start(
     'test-signal-text'
 );
 
-SELECT pg_sleep(1);
-
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_text;
-
-    PERFORM df.signal(inst_id, 'plain_text', 'approve');
     RAISE NOTICE 'Testing signal with plain text data: %', inst_id;
+
+    -- Retry the signal until consumed; see Test 1 / duroxide #154.
+    PERFORM public.signal_test_send_until_terminal(inst_id, 'plain_text', 'approve');
 
     SELECT df.await_instance(inst_id, 10) INTO status;
 
@@ -243,14 +292,21 @@ INSERT INTO _test_signal_then_named SELECT df.start(
     'test-signal-then-named'
 );
 
-SELECT pg_sleep(1);
-
+-- Retry the signal until the workflow consumes it. This workflow runs a leading
+-- INSERT activity *before* df.wait_for_signal, and duroxide only registers the
+-- signal subscription a few hundred ms after that INSERT commits. An event
+-- raised before the subscription exists is dropped ("no pending subscription
+-- slot", duroxide #154), so a single fire-once signal (after a fixed pg_sleep
+-- or even after observing the leading INSERT's row) races the subscription and
+-- is flaky under CI load. Re-raising until the instance leaves 'running'
+-- guarantees at least one signal lands after the subscription is registered;
+-- extra events raised earlier are harmlessly dropped.
 DO $$
 DECLARE
     inst_id TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_signal_then_named;
-    PERFORM df.signal(inst_id, 'test_approval_then', '{"approved": true}');
+    PERFORM public.signal_test_send_until_terminal(inst_id, 'test_approval_then', '{"approved": true}');
 END $$;
 
 DO $$
@@ -281,4 +337,5 @@ DROP TABLE _test_signal_then_named;
 DROP TABLE signal_test_log;
 
 RESET SESSION AUTHORIZATION;
+DROP FUNCTION public.signal_test_send_until_terminal(TEXT, TEXT, TEXT, INT);
 SELECT 'ALL SIGNAL TESTS PASSED' AS result;

@@ -222,9 +222,8 @@ pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
             }
 
             Err(format!(
-                "Blocked: '{}' is not in the allowed endpoint list. \
-                 Only requests to approved Azure service domains are permitted.",
-                host
+                "Blocked: '{host}' is not in the allowed endpoint list. \
+                 Only requests to approved Azure service domains are permitted."
             ))
         }
     }

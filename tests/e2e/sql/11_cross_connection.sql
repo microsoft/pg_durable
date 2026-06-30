@@ -56,15 +56,38 @@ DECLARE
     inst_id TEXT;
     connstr TEXT;
     result TEXT;
+    status TEXT;
+    err_msg TEXT;
+    attempts INT := 0;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_cross_signal;
     SELECT c.connstr INTO connstr FROM _dblink_conn c;
-    
-    SELECT * INTO result FROM dblink(
-        connstr,
-        format('SELECT df.signal(%L, ''external_trigger'', ''{"source": "other_connection", "value": 123}'')', inst_id)
-    ) AS t(result TEXT);
-    
+
+    LOOP
+        SELECT * INTO status FROM dblink(
+            connstr,
+            format('SELECT df.status(%L)', inst_id)
+        ) AS t(status TEXT);
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled');
+        EXIT WHEN attempts > 100;
+
+        BEGIN
+            SELECT * INTO result FROM dblink(
+                connstr,
+                format('SELECT df.signal(%L, ''external_trigger'', ''{"source": "other_connection", "value": 123}'')', inst_id)
+            ) AS t(result TEXT);
+        EXCEPTION
+            WHEN OTHERS THEN
+                GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+                IF err_msg NOT LIKE '%not ready to receive signals%' THEN
+                    RAISE;
+                END IF;
+        END;
+
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
     RAISE NOTICE 'Signal sent from other connection: %', result;
 END $$;
 

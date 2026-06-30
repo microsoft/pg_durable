@@ -183,8 +183,8 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
-| `df.status(id)` | Get status | `df.status('a1b2c3d4')` |
-| `df.result(id)` | Get result | `df.result('a1b2c3d4')` |
+| `df.status(id)` | Get status by instance_id (not label) | `df.status('a1b2c3d4')` |
+| `df.result(id)` | Get result by instance_id (not label) | `df.result('a1b2c3d4')` |
 | `df.explain(input)` | Visualize graph | `df.explain('a1b2c3d4')` |
 | `df.setvar(name, value)` | Set durable function variable | `df.setvar('api_url', 'https://...')` |
 | `df.getvar(name)` | Get durable function variable | `df.getvar('api_url')` |
@@ -251,7 +251,7 @@ Access specific columns by name instead of just the first column:
 ```sql
 SELECT df.start(
     $$SELECT 42 AS id, 'Alice' AS name$$ |=> 'user'
-    ~> $$SELECT $user.id, $user.name$$          -- access specific columns
+    ~> $$SELECT $user.id AS id, $user.name AS name$$  -- access specific columns
 );
 ```
 
@@ -557,11 +557,11 @@ Use `df.if_rows()` to branch based on whether a named result has rows — withou
 
 ```sql
 SELECT df.start(
-    $$SELECT id FROM orders WHERE status = 'pending'$$ |=> 'pending'
+    $$SELECT id FROM playground.orders WHERE status = 'pending'$$ |=> 'pending'
     ~> df.if_rows(
         'pending',                                               -- result name
-        $$UPDATE orders SET status = 'processing' WHERE id = $pending.id$$,  -- then
-        $$INSERT INTO logs (msg) VALUES ('No pending orders')$$               -- else
+        $$UPDATE playground.orders SET status = 'processing' WHERE id = $pending.id$$,  -- then
+        $$INSERT INTO playground.logs (msg) VALUES ('No pending orders')$$               -- else
     ),
     'check-pending'
 );
@@ -877,7 +877,7 @@ SELECT df.setvar('batch_size', '100');
 -- Start the pipeline
 SELECT df.start(
     'SELECT * FROM {source_table} LIMIT {batch_size}::int' |=> 'batch'
-    ~> 'INSERT INTO {target_table} SELECT * FROM ($batch) AS source',
+    ~> 'INSERT INTO {target_table} SELECT * FROM $batch.*',
     'etl-pipeline'
 );
 ```
@@ -1136,13 +1136,13 @@ If the signal times out:
 
 ```sql
 SELECT df.start(
-    'SELECT order_id, total FROM orders WHERE id = 1' |=> 'order'
+    'SELECT id, total FROM orders WHERE id = 1' |=> 'order'
     ~> df.wait_for_signal('approval', 86400) |=> 'sig'  -- 24h timeout
     ~> df.if(
         'SELECT NOT ($sig::jsonb->>''timed_out'')::boolean 
             AND ($sig::jsonb->''data''->>''approved'')::boolean',
-        'UPDATE orders SET status = ''approved'' WHERE id = $order_id',
-        'UPDATE orders SET status = ''rejected'' WHERE id = $order_id'
+        'UPDATE orders SET status = ''approved'' WHERE id = $order.id',
+        'UPDATE orders SET status = ''rejected'' WHERE id = $order.id'
     ),
     'order-approval'
 );
@@ -1157,13 +1157,13 @@ Wait for multiple approvals using `df.join3()`:
 
 ```sql
 SELECT df.start(
-    'SELECT doc_id FROM documents WHERE id = 1' |=> 'doc'
+    'SELECT id FROM documents WHERE id = 1' |=> 'doc'
     ~> df.join3(
         df.wait_for_signal('legal_approval'),
         df.wait_for_signal('tech_approval'),
         df.wait_for_signal('mgmt_approval')
     ) |=> 'approvals'
-    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc_id',
+    ~> 'UPDATE documents SET status = ''approved'' WHERE id = $doc.id',
     'multi-approval'
 );
 
@@ -1459,35 +1459,104 @@ SELECT * FROM df.instance_executions('a1b2c3d4', 20);
 
 ### Function Nodes
 
-See the function graph structure:
+See the function graph structure, one row per node, with both the stored status
+and a derived status that interprets the durable-execution state model:
 
 ```sql
--- Last 5 executions (default)
 SELECT * FROM df.instance_nodes('a1b2c3d4');
-
--- Last 10 executions
-SELECT * FROM df.instance_nodes('a1b2c3d4', 10);
 ```
 
-**Columns:** `execution_id`, `node_id`, `node_type`, `query`, `result_name`, `left_node`, `right_node`, `status`, `result`
+**Columns:** `node_id`, `node_type`, `query`, `result_name`, `left_node`, `right_node`, `status`, `result`, `status_details`, `inferred_status`, `inferred_status_from_ancestor_id`, `updated_at`
 
-### System Metrics
+- **`status`** — the status physically stored on the node: `pending`, `running`,
+  `completed`, or `failed`.
+- **`status_details`** — JSON execution metadata written by the worker (the
+  `execution_id` generation stamp). You normally do not read this directly; it is
+  what `inferred_status` is derived from.
+- **`inferred_status`** — the stored status reinterpreted top-down from the root
+  node. It adds one derived value, **`skipped`**, and reconciles loop re-entry:
+  - `skipped` — a node on a branch that was decided against and will not (further)
+    run: the untaken arm of a completed `df.if()`, the right side of a failed
+    `df.then()`, or the abandoned arm of a resolved `df.race()`.
+  - a node from a previous loop iteration reads back as `pending` (it will re-run),
+    rather than showing the old iteration's terminal status.
+  - a node that physically ran keeps its stored `completed`/`failed`/`running`.
+- **`inferred_status_from_ancestor_id`** — when `inferred_status` was *derived*
+  from an ancestor (a `skipped` branch, or a superseded loop node), this names the
+  ancestor node that drove the inference; otherwise `NULL`.
+
+> This is read-time interpretation only — it does not change how the graph
+> executes. `df.race()` still abandons the losing branch and `df.join()` still
+> waits for every branch; `inferred_status` only changes how those outcomes are
+> *reported*.
+
+#### Node state transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> running: scheduled (written)
+    running --> completed: success (written)
+    running --> failed: error (written)
+
+    pending --> skipped: ancestor failed / not taken / race lost (derived)
+    running --> skipped: ancestor failed / not taken / race lost (derived)
+    completed --> pending: superseded by newer execution (derived)
+    failed --> pending: superseded by newer execution (derived)
+
+    classDef physical fill:#dfd,stroke:#080;
+    classDef derived stroke-dasharray: 5 5,fill:#eee;
+    classDef hybrid fill:#dfd,stroke:#080,stroke-dasharray: 5 5;
+    class running,completed,failed physical
+    class skipped derived
+    class pending hybrid
+```
+
+Solid edges are **physical**: the worker writes them and they persist in
+`df.nodes.status` (the `status` column). Dashed edges are **derived**: nothing
+writes them — they are how `df.instance_nodes()` *reinterprets* a stored status
+(via `inferred_status`) when a node's `execution_id` no longer matches its live
+lineage. `pending` (drawn with a dashed border) is **both**: it is written once by
+`df.start()`, and it is *also* what the read path reports for a node superseded by a
+newer loop iteration. That terminal → `pending` edge is therefore not a write — it
+is what a previous iteration's stored `completed`/`failed` (or an in-flight
+`running`) *looks like* once a newer iteration supersedes it and has not yet
+re-reached the node.
+
+
+### System Metrics (Explicit Grant Required)
 
 ```sql
+-- Requires a direct admin grant; df.grant_usage() does not include it.
 SELECT * FROM df.metrics();
 ```
 
 **Columns:** `total_instances`, `running_instances`, `completed_instances`, `failed_instances`, `total_executions`, `total_events`
 
+> **Note:** `df.metrics()` returns system-wide aggregate counts across all users and is omitted from an ordinary `df.grant_usage('role')`. It is granted automatically to pg_durable admins via `df.grant_usage('role', with_grant => true)`, or you can grant EXECUTE on `df.metrics()` directly to any role that may view cluster-wide pg_durable activity. Other users can call `df.list_instances()` to view a summary of their own workflows.
+
 ### Quick Status Check
 
+`df.status()` and `df.result()` take an **`instance_id`** (returned by `df.start()`), **not** a label. Passing a label returns `NULL`.
+
 ```sql
--- Status only
+-- Status only (lowercase: 'pending', 'running', 'completed', 'failed', 'cancelled')
 SELECT df.status('a1b2c3d4');
 
 -- Result only
 SELECT df.result('a1b2c3d4');
 ```
+
+If you started the run with a label, resolve the label to an `instance_id` first:
+
+```sql
+-- Status for a labeled run
+SELECT df.status(instance_id)
+FROM df.list_instances()
+WHERE label = 'my-job';
+```
+
+If you reuse a label across runs, multiple instances can match — pass the specific `instance_id` you want.
 
 ### Worker Liveness
 
@@ -1503,6 +1572,39 @@ SELECT started_at, last_seen_at,
 - No rows in `df._worker_epoch` → worker hasn't initialized yet
 
 The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
+
+### Data Retention (Automatic Pruning)
+
+To keep `df.instances` and `df.nodes` from growing without bound, the background
+worker runs a **best-effort pruning pass roughly once an hour** that deletes old
+**terminal** instances (status `completed`, `failed`, or `cancelled`) and their
+associated `df.nodes` rows. Running and pending instances are **never** pruned,
+regardless of age.
+
+The policy is currently fixed (no configuration GUC):
+
+- **Hard cap — at most 10,000 terminal instances are retained, regardless of
+  age.** The newest 10,000 terminal instances are kept; any beyond that are
+  pruned even if they are only minutes old.
+- **Retention window — 30 days.** Terminal instances older than 30 days are
+  pruned even if the table holds fewer than 10,000 of them.
+
+Equivalently, a terminal instance is retained only while it is **both** among the
+newest 10,000 terminal instances **and** less than 30 days old; otherwise it is
+eligible for pruning.
+
+Notes:
+
+- "Age" is measured from `completed_at` when set (instances that reached
+  `completed`), otherwise from `created_at`. `updated_at` is intentionally **not**
+  used, because it is user-writable and would let a low-privilege user influence
+  pruning.
+- Pruning runs in a single transaction with foreign-key constraints deferred:
+  matching `df.nodes` rows are deleted first, then the instance rows.
+- Pruning is best-effort: if a pass fails it is logged and retried on the next
+  interval; it never stops workflow execution.
+- If you need to retain terminal history beyond these limits (e.g. for auditing),
+  copy the rows you care about into your own table before they age out.
 
 ---
 
@@ -1543,6 +1645,27 @@ When you call `df.start()`, pg_durable captures **one** piece of identity:
 The background worker then connects to PostgreSQL **directly as `submitted_by`** and executes your SQL with that role's privileges. There is no `SET ROLE` indirection.
 
 **Important:** The captured role must have the `LOGIN` attribute, because the background worker authenticates as that role. If `current_user` lacks `LOGIN`, `df.start()` will reject the submission with an error.
+
+### SECURITY DEFINER Warning
+
+Calling `df.start()` inside a `SECURITY DEFINER` function captures the **function owner's** identity, not the caller's identity. Any SQL embedded in the `fut` argument runs later with the owner's privileges, even if an unprivileged caller supplied that SQL.
+
+**Dangerous pattern:**
+
+```sql
+-- Admin creates a wrapper owned by a privileged role
+CREATE FUNCTION run_report(q TEXT) RETURNS TEXT
+LANGUAGE SQL SECURITY DEFINER AS $$
+    SELECT df.start(df.sql(q), 'report');
+$$;
+
+-- Unprivileged caller supplies SQL that runs as the function owner
+SELECT run_report('SELECT * FROM admin_only_table');
+```
+
+This follows normal PostgreSQL `SECURITY DEFINER` semantics: inside the function, `current_user` is the function owner, and pg_durable captures that effective role at `df.start()` time.
+
+Avoid passing untrusted SQL, futures, or SQL fragments to `df.start()` from a `SECURITY DEFINER` context unless you explicitly intend the resulting workflow to run as the function owner. Prefer `SECURITY INVOKER` functions, fixed server-side workflow definitions, and explicit argument validation.
 
 ### Working with Roles
 
@@ -1615,6 +1738,7 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 2. **Review df.vars usage** — Variables are scoped per-user via RLS, but avoid storing secrets in plain text
 3. **Use labels carefully** — Instance labels are visible only to the submitting user (RLS-filtered) and superusers
 4. **Monitor instances** — Superusers can use `df.list_instances()` to see all users' instances; regular users see only their own
+5. **Avoid unsafe `SECURITY DEFINER` wrappers around `df.start()`** — Never allow untrusted callers to supply SQL or futures to `df.start()` from a `SECURITY DEFINER` context unless definer-level execution is intentional.
 
 ### Privilege Grants
 
@@ -1645,18 +1769,22 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 |-----------|---------|-------------|
 | `p_role` | *(required)* | Target role name |
 | `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
-| `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
+| `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. Also grants EXECUTE on `df.metrics()` (system-wide aggregate counts), since `with_grant => true` designates a pg_durable admin. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
 
-The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep PostgreSQL's default `PUBLIC EXECUTE`, so granting `USAGE ON SCHEMA df` is the single access gate that makes them callable — no per-function `GRANT EXECUTE` is required. Only the **sensitive** functions (`df.http`, `df.grant_usage`, `df.revoke_usage`) have `PUBLIC EXECUTE` revoked at install time and must be granted explicitly.
+The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep PostgreSQL's default `PUBLIC EXECUTE`, so granting `USAGE ON SCHEMA df` is the single access gate that makes them callable — no per-function `GRANT EXECUTE` is required. Only the **sensitive** functions (`df.http`, `df.metrics`, `df.grant_usage`, `df.revoke_usage`) have `PUBLIC EXECUTE` revoked at install time and must be granted explicitly.
 
 ```sql
 -- Access gate: schema USAGE makes every ordinary df.* function callable
 GRANT USAGE ON SCHEMA df TO app_role;
 -- Optional: HTTP access (include_http => true)
 -- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
+
+-- Optional: system-wide metrics access (also granted automatically by
+--           df.grant_usage(role, with_grant => true))
+-- GRANT EXECUTE ON FUNCTION df.metrics() TO app_role;
 
 -- Optional: delegated administration (with_grant => true)
 -- GRANT EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) TO app_role;
@@ -1720,7 +1848,7 @@ To remove a role's access to pg_durable:
 SELECT df.revoke_usage('app_role');
 ```
 
-This revokes all privileges previously granted by `df.grant_usage()`. It removes schema `USAGE`, EXECUTE on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`), and the table privileges — the mirror image of what `df.grant_usage()` grants.
+This revokes all privileges previously granted by `df.grant_usage()`. It removes schema `USAGE`, EXECUTE on the sensitive functions (`df.http`, `df.metrics`, `df.grant_usage`, `df.revoke_usage`), and the table privileges. `df.metrics()` is granted only by `df.grant_usage('role', with_grant => true)` (or a direct admin GRANT); `df.revoke_usage()` always removes it, which also cleans up roles that received it from older grant helper bodies before re-granting ordinary access.
 
 There is no explicit self-revoke guard, and none is needed: PostgreSQL's `REVOKE` only removes grants made by the current role. A non-superuser therefore cannot revoke privileges another role (e.g. a superuser) granted to it, so calling `df.revoke_usage()` on your own role is harmless — it cannot lock you out of grants you didn't issue yourself.
 
@@ -2043,14 +2171,17 @@ This shows the graph structure with status markers on each node:
 - `✓ Completed` — node finished successfully
 - `✗ Failed` — node encountered an error
 - `⏳ Running` — node was in progress when the instance failed or was inspected
+- `⊘ Skipped` — branch was decided away (untaken `if` arm, right side of a failed `then`, or race loser) so the node will never run
 - `○ Pending` — node never started
+
+The markers reflect the same derived status as the `inferred_status` column of `df.instance_nodes()`, so the tree view and the node table always agree.
 
 `df.explain()` tells you **where** in the graph execution stopped, but not **why**. For that, inspect individual nodes.
 
 #### Step 4: Inspect Individual Nodes
 
 ```sql
-SELECT node_id, node_type, result_name, status, 
+SELECT node_id, node_type, result_name, status, inferred_status,
        left(query, 80) AS query,
        left(result, 120) AS result
 FROM df.instance_nodes('a1b2c3d4');
@@ -2062,6 +2193,8 @@ This shows every node in the graph with its status and result. Key things to loo
 |---------------|---------------|
 | A node with `status = 'failed'` | This is the node that caused the failure |
 | A node with `result = NULL` and `status = 'completed'` | The SQL returned no rows |
+| A node with `inferred_status = 'skipped'` | The node was on a branch that was decided against (untaken `df.if()` arm, right side of a failed `df.then()`, or losing `df.race()` arm) and never (further) ran |
+| `inferred_status = 'pending'` on a node that previously completed | The node belongs to an earlier loop iteration and will re-run |
 | Result contains `{"jsonb": null}` | Possible type extraction issue — see "Known Limitations" below |
 | A `running` node with no result | Execution was interrupted at this node |
 

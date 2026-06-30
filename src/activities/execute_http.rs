@@ -49,6 +49,10 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 
 /// Build a reqwest Client with optional SSRF-safe DNS resolver.
 ///
+/// A default `User-Agent` is set so requests are not anonymous: some endpoints
+/// (e.g. fly.io-hosted services) reject requests that omit it. Nodes may still
+/// override it via an explicit `User-Agent` header.
+///
 /// Redirects are disabled to prevent redirect-based SSRF bypasses: an attacker
 /// could host a 302 redirecting to `http://169.254.169.254/...`, and reqwest
 /// would follow it without calling our DNS resolver (since the target is an IP
@@ -56,6 +60,7 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
+        .user_agent(concat!("pg_durable/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none());
 
     // Inject the SSRF-safe DNS resolver unless http-allow-all removes all guards.

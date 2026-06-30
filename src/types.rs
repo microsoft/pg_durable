@@ -71,10 +71,9 @@ pub fn is_role_superuser_oid(role_oid: pgrx::pg_sys::Oid) -> Result<bool, String
         &[role_oid.into()],
     ) {
         Ok(Some(v)) => Ok(v),
-        Ok(None) => Err(format!("role oid {} not found in pg_roles", role_oid)),
+        Ok(None) => Err(format!("role oid {role_oid} not found in pg_roles")),
         Err(e) => Err(format!(
-            "superuser check failed for role oid {}: {}",
-            role_oid, e
+            "superuser check failed for role oid {role_oid}: {e}"
         )),
     }
 }
@@ -87,8 +86,8 @@ pub async fn is_role_superuser_name(pool: &sqlx::PgPool, role_name: &str) -> Res
         .bind(role_name)
         .fetch_optional(pool)
         .await
-        .map_err(|e| format!("superuser check failed for role '{}': {}", role_name, e))
-        .and_then(|opt| opt.ok_or_else(|| format!("role '{}' not found in pg_roles", role_name)))
+        .map_err(|e| format!("superuser check failed for role '{role_name}': {e}"))
+        .and_then(|opt| opt.ok_or_else(|| format!("role '{role_name}' not found in pg_roles")))
 }
 
 /// Maximum nesting depth for workflow graphs. Prevents stack overflow from
@@ -99,7 +98,23 @@ pub const MAX_GRAPH_DEPTH: usize = 256;
 /// unbounded INSERTs and memory exhaustion from extremely large graphs.
 pub const MAX_GRAPH_NODES: usize = 10_000;
 
-/// Generate a short 8-character instance ID from a UUID
+/// Generate a short 8-character ID from a UUID.
+///
+/// This serves two distinct uniqueness contracts (#129). Both keep the value
+/// `VARCHAR(8)` HEX (the maintainer-requested minimal change) and manage
+/// collision risk by retrying on conflict rather than by widening the value:
+/// - **Instance IDs** (`df.instances.id`) are global with no scoping column.
+///   `df.start()` reserves the ID with `INSERT ... ON CONFLICT (id) DO NOTHING
+///   RETURNING id` and re-rolls on collision; the primary key on `df.instances`
+///   is the hard guarantee.
+/// - **Node IDs** (`df.nodes.id`) only need to be unique per instance. Node
+///   inserts use `INSERT ... ON CONFLICT (instance_id, id) DO NOTHING RETURNING
+///   id` and re-roll on collision; the composite primary key `(instance_id, id)`
+///   is the hard guarantee.
+///
+/// The mechanism is symmetric (re-roll on conflict); only the conflict target
+/// differs — the global `id` index for instances vs. the per-instance
+/// `(instance_id, id)` index for nodes.
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();
     uuid.to_string()
@@ -143,8 +158,7 @@ fn normalize_role_name_for_connection(user: &str) -> Result<Cow<'_, str>, String
     if !user.starts_with('"') {
         if user.ends_with('"') {
             return Err(format!(
-                "Invalid role name '{}': unexpected trailing double quote in connection username",
-                user
+                "Invalid role name '{user}': unexpected trailing double quote in connection username"
             ));
         }
         return Ok(Cow::Borrowed(user));
@@ -152,8 +166,7 @@ fn normalize_role_name_for_connection(user: &str) -> Result<Cow<'_, str>, String
 
     if !user.ends_with('"') || user.len() < 2 {
         return Err(format!(
-            "Invalid role name '{}': unterminated quoted identifier in connection username",
-            user
+            "Invalid role name '{user}': unterminated quoted identifier in connection username"
         ));
     }
 
@@ -174,8 +187,7 @@ fn normalize_role_name_for_connection(user: &str) -> Result<Cow<'_, str>, String
         }
 
         return Err(format!(
-            "Invalid quoted role name '{}': expected doubled double quotes inside identifier",
-            user
+            "Invalid quoted role name '{user}': expected doubled double quotes inside identifier"
         ));
     }
 
@@ -233,7 +245,7 @@ pub async fn connect_as_user(
     sqlx::query("SET df.in_workflow = 'true'")
         .execute(&mut conn)
         .await
-        .map_err(|e| format!("SET df.in_workflow failed: {}", e))?;
+        .map_err(|e| format!("SET df.in_workflow failed: {e}"))?;
 
     Ok(conn)
 }
@@ -473,8 +485,7 @@ pub fn validate_result_name(name: &str) -> Result<(), String> {
     let parsed = parse_identifier(name);
     if parsed.len() != name.len() {
         return Err(format!(
-            "result name '{}' is not a valid identifier — must match [a-zA-Z_][a-zA-Z0-9_]*",
-            name
+            "result name '{name}' is not a valid identifier — must match [a-zA-Z_][a-zA-Z0-9_]*"
         ));
     }
     Ok(())
@@ -986,8 +997,7 @@ impl Durofut {
         }
 
         let marker = Spi::get_one::<String>(&format!(
-            "SELECT pg_catalog.current_setting('{}', true)",
-            NON_FUTURE_HELPER_GUC
+            "SELECT pg_catalog.current_setting('{NON_FUTURE_HELPER_GUC}', true)"
         ))
         .ok()
         .flatten()?;
@@ -1002,8 +1012,7 @@ impl Durofut {
 
     fn non_future_helper_error(helper_name: &str) -> String {
         format!(
-            "{} cannot be used as a workflow step. Call {} before df.start().",
-            helper_name, helper_name
+            "{helper_name} cannot be used as a workflow step. Call {helper_name} before df.start()."
         )
     }
 
@@ -1014,7 +1023,7 @@ impl Durofut {
     /// Fallible deserialization from JSON. Preferred over `from_json()` in
     /// production code paths where corrupted data must not crash the worker.
     pub fn try_from_json(s: &str) -> Result<Self, String> {
-        serde_json::from_str(s).map_err(|e| format!("failed to deserialize Durofut: {}", e))
+        serde_json::from_str(s).map_err(|e| format!("failed to deserialize Durofut: {e}"))
     }
 
     /// Deserialize from JSON, panicking on failure.
@@ -1072,8 +1081,7 @@ impl Durofut {
                         if VALID_NODE_TYPES.contains(&nt) {
                             // Valid node_type but malformed structure
                             return Err(format!(
-                                "Malformed Durofut JSON with node_type '{}': {}",
-                                nt, serde_err
+                                "Malformed Durofut JSON with node_type '{nt}': {serde_err}"
                             ));
                         }
                         return Err(format!(
@@ -1106,16 +1114,14 @@ impl Durofut {
         *node_count += 1;
         if *node_count > MAX_GRAPH_NODES {
             return Err(format!(
-                "Workflow exceeds maximum node count of {}. \
-                 Simplify the workflow or break it into multiple instances.",
-                MAX_GRAPH_NODES
+                "Workflow exceeds maximum node count of {MAX_GRAPH_NODES}. \
+                 Simplify the workflow or break it into multiple instances."
             ));
         }
         if depth > MAX_GRAPH_DEPTH {
             return Err(format!(
-                "Graph exceeds maximum nesting depth of {}. \
-                 Simplify the workflow or break it into multiple instances.",
-                MAX_GRAPH_DEPTH
+                "Graph exceeds maximum nesting depth of {MAX_GRAPH_DEPTH}. \
+                 Simplify the workflow or break it into multiple instances."
             ));
         }
         if !VALID_NODE_TYPES.contains(&self.node_type.as_str()) {

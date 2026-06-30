@@ -21,6 +21,23 @@ use crate::types::{
     postgres_connection_string, resolve_duroxide_schema_pool, worker_provider_config,
 };
 
+const TERMINAL_INSTANCE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+// Retention policy for terminal ('completed'/'failed'/'cancelled') instances.
+// A terminal instance is pruned when it is OUTSIDE the newest
+// TERMINAL_INSTANCE_MAX_KEEP rows (a hard cap enforced regardless of age) OR
+// older than TERMINAL_INSTANCE_RETENTION_DAYS. Equivalently, an instance is
+// retained only while it is BOTH among the newest TERMINAL_INSTANCE_MAX_KEEP
+// terminal rows AND younger than the retention window. The number of retained
+// terminal instances therefore never exceeds TERMINAL_INSTANCE_MAX_KEEP.
+const TERMINAL_INSTANCE_RETENTION_DAYS: i32 = 30;
+const TERMINAL_INSTANCE_MAX_KEEP: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PruneStats {
+    pub instances_deleted: i64,
+    pub nodes_deleted: i64,
+}
+
 /// Initialize tracing subscriber for duroxide logs.
 /// Must be called before Runtime::start_with_store() to capture all logs.
 fn init_tracing() {
@@ -232,6 +249,7 @@ async fn run_duroxide_runtime() {
 
         run_until_extension_dropped_or_shutdown(
             &poll_pool,
+            &mgmt_pool,
             duroxide_runtime,
             EXTENSION_DROP_POLL_INTERVAL,
             SHUTDOWN_CHECK_INTERVAL,
@@ -451,7 +469,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
+        WHERE n.nspname = '{schema_name}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TRIGGER '
                 || r.trigger_name || ' ON ' || r.table_name;
@@ -469,7 +487,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
+        WHERE n.nspname = '{schema_name}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP FUNCTION ' || r.sig;
     END LOOP;
@@ -486,7 +504,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'r'
+        WHERE n.nspname = '{schema_name}' AND c.relkind = 'r'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TABLE ' || r.name;
     END LOOP;
@@ -505,7 +523,7 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'i'
+        WHERE n.nspname = '{schema_name}' AND c.relkind = 'i'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP INDEX ' || r.name;
     END LOOP;
@@ -522,12 +540,11 @@ BEGIN
         JOIN pg_extension e
             ON e.oid = d.refobjid
             AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'S'
+        WHERE n.nspname = '{schema_name}' AND c.relkind = 'S'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP SEQUENCE ' || r.name;
     END LOOP;
-END $$"#,
-        schema = schema_name
+END $$"#
     ))
     .execute(pool)
     .await?;
@@ -690,40 +707,34 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
 /// schema version was first established rather than the last BGW restart.
 async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
+        "CREATE TABLE IF NOT EXISTS {schema_name}._worker_ready (
             sentinel        BOOLEAN PRIMARY KEY DEFAULT TRUE,
             CONSTRAINT      only_one_sentinel CHECK (sentinel),
             schema_version  INT NOT NULL,
             initialized_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-        )",
-        schema = schema_name
+        )"
     ))
     .execute(pool)
     .await?;
 
     // Allow non-superuser sessions to read the readiness record via
     // is_worker_ready() which runs SPI in the caller's security context.
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema_name} TO PUBLIC"))
+        .execute(pool)
+        .await?;
     sqlx::query(&format!(
-        "GRANT USAGE ON SCHEMA {schema} TO PUBLIC",
-        schema = schema_name
-    ))
-    .execute(pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT ON {schema}._worker_ready TO PUBLIC",
-        schema = schema_name
+        "GRANT SELECT ON {schema_name}._worker_ready TO PUBLIC"
     ))
     .execute(pool)
     .await?;
 
     sqlx::query(&format!(
-        "INSERT INTO {schema}._worker_ready (sentinel, schema_version, initialized_at) \
+        "INSERT INTO {schema_name}._worker_ready (sentinel, schema_version, initialized_at) \
          VALUES (TRUE, $1, now()) \
          ON CONFLICT (sentinel) DO UPDATE SET \
              schema_version = EXCLUDED.schema_version, \
              initialized_at = EXCLUDED.initialized_at \
-         WHERE {schema}._worker_ready.schema_version != EXCLUDED.schema_version",
-        schema = schema_name
+         WHERE {schema_name}._worker_ready.schema_version != EXCLUDED.schema_version"
     ))
     .bind(crate::WORKER_SCHEMA_VERSION)
     .execute(pool)
@@ -750,8 +761,103 @@ async fn check_epoch_sentinel(pool: &sqlx::PgPool, epoch_id: &str) -> bool {
     matches!(result, Ok(Some(_)))
 }
 
+async fn prune_terminal_instances(pool: &sqlx::PgPool) -> Result<PruneStats, sqlx::Error> {
+    prune_terminal_instances_with_limits(
+        pool,
+        TERMINAL_INSTANCE_RETENTION_DAYS,
+        TERMINAL_INSTANCE_MAX_KEEP,
+    )
+    .await
+}
+
+pub(crate) async fn prune_terminal_instances_with_limits(
+    pool: &sqlx::PgPool,
+    retention_days: i32,
+    max_keep: i64,
+) -> Result<PruneStats, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let stats = prune_terminal_instances_transaction(&mut tx, retention_days, max_keep).await?;
+    tx.commit().await?;
+
+    Ok(stats)
+}
+
+pub(crate) async fn prune_terminal_instances_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    retention_days: i32,
+    max_keep: i64,
+) -> Result<PruneStats, sqlx::Error> {
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut **tx)
+        .await?;
+
+    let (instances_deleted, nodes_deleted): (i64, i64) = sqlx::query_as(
+        r#"
+        WITH terminal_instances AS (
+            SELECT
+                ranked.id,
+                ranked.terminal_at,
+                pg_catalog.row_number() OVER (
+                    ORDER BY ranked.terminal_at DESC NULLS LAST, ranked.id DESC
+                ) AS terminal_rank
+            FROM (
+                SELECT
+                    id,
+                    -- Rank/age only by server-controlled timestamps. `updated_at`
+                    -- is intentionally excluded: PUBLIC has column-level UPDATE on
+                    -- it, and for 'failed'/'cancelled' rows `completed_at` is NULL,
+                    -- so including `updated_at` would let a low-privilege user forge
+                    -- the prune ordering/age. `completed_at` (set by the worker on
+                    -- completion) and `created_at` (insert-time default, not
+                    -- grantable) are not user-writable.
+                    COALESCE(completed_at, created_at) AS terminal_at
+                FROM df.instances
+                WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
+            ) ranked
+        ),
+        prune_candidates AS (
+            SELECT id
+            FROM terminal_instances
+            -- Prune when the row is beyond the newest $1 terminal instances (a
+            -- hard cap enforced regardless of age) OR older than the retention
+            -- window ($2 days). Retained rows are thus always within the newest
+            -- $1 AND younger than the retention window, so the retained terminal
+            -- count never exceeds $1.
+            WHERE terminal_rank OPERATOR(pg_catalog.>) $1
+               OR terminal_at OPERATOR(pg_catalog.<)
+                  (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
+        ),
+        deleted_nodes AS (
+            DELETE FROM df.nodes n
+            USING prune_candidates pc
+            WHERE n.instance_id OPERATOR(pg_catalog.=) pc.id
+            RETURNING n.instance_id
+        ),
+        deleted_instances AS (
+            DELETE FROM df.instances i
+            USING prune_candidates pc
+            WHERE i.id OPERATOR(pg_catalog.=) pc.id
+            RETURNING i.id
+        )
+        SELECT
+            (SELECT pg_catalog.count(*)::bigint FROM deleted_instances) AS instances_deleted,
+            (SELECT pg_catalog.count(*)::bigint FROM deleted_nodes) AS nodes_deleted
+        "#,
+    )
+    .bind(max_keep)
+    .bind(retention_days)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(PruneStats {
+        instances_deleted,
+        nodes_deleted,
+    })
+}
+
 async fn run_until_extension_dropped_or_shutdown(
     poll_pool: &sqlx::PgPool,
+    maintenance_pool: &sqlx::PgPool,
     duroxide_runtime: Arc<runtime::Runtime>,
     drop_poll_interval: Duration,
     shutdown_check_interval: Duration,
@@ -761,6 +867,12 @@ async fn run_until_extension_dropped_or_shutdown(
 
     let mut drop_check = tokio::time::interval(drop_poll_interval);
     drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let mut prune_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + TERMINAL_INSTANCE_PRUNE_INTERVAL,
+        TERMINAL_INSTANCE_PRUNE_INTERVAL,
+    );
+    prune_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -784,6 +896,21 @@ async fn run_until_extension_dropped_or_shutdown(
                 // died mid-epoch is restarted within the poll interval rather
                 // than only at the next epoch. Idempotent (no-op while alive).
                 ensure_reconciler(poll_pool).await;
+            }
+            _ = prune_check.tick() => {
+                match prune_terminal_instances(maintenance_pool).await {
+                    Ok(stats) if stats.instances_deleted > 0 || stats.nodes_deleted > 0 => {
+                        log!(
+                            "pg_durable: pruned {} terminal instance(s) and {} node row(s)",
+                            stats.instances_deleted,
+                            stats.nodes_deleted
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log!("pg_durable: terminal instance pruning failed: {}", e);
+                    }
+                }
             }
         }
     }
