@@ -292,6 +292,10 @@ if [ -f "$DATA_DIR/postgresql.conf" ]; then
         sed -i.bak '/^#*pg_durable.database/d' "$DATA_DIR/postgresql.conf"
         echo "pg_durable.database = 'postgres'" >> "$DATA_DIR/postgresql.conf"
     fi
+    if ! grep -q "^pg_durable.reconciler_cron = ''" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
+        sed -i.bak '/^#*pg_durable.reconciler_cron/d' "$DATA_DIR/postgresql.conf"
+        echo "pg_durable.reconciler_cron = ''" >> "$DATA_DIR/postgresql.conf"
+    fi
     if ! grep -q "^port = $PG_PORT$" "$DATA_DIR/postgresql.conf" 2>/dev/null; then
         sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
         echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
