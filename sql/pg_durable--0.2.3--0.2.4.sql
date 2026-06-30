@@ -263,9 +263,11 @@ BEGIN
     -- trust the caller to only target their own instance. Permit the enqueue
     -- only for the transaction that inserted a brand-new, not-yet-started
     -- instance: a 'pending' df.instances row with no orchestrator-queue entry,
-    -- no duroxide instance, and xmin equal to the current transaction id. This
-    -- preserves SECURITY DEFINER / SET ROLE df.start() semantics while blocking
-    -- a caller from starting another user's previously-committed pending row.
+    -- no duroxide instance, and an in-progress xmin visible to this transaction.
+    -- This preserves SECURITY DEFINER / SET ROLE df.start() semantics while
+    -- blocking a caller from starting another user's previously-committed
+    -- pending row. Checking pg_xact_status(xmin) rather than equality to
+    -- pg_current_xact_id() keeps PL/pgSQL exception subtransactions working.
     -- The wrapper is safe because it also fixes the orchestration to the root
     -- graph executor and validates the input instance id, so callers cannot
     -- start internal orchestrations or target someone else's already-started
@@ -274,7 +276,7 @@ BEGIN
         'SELECT NOT EXISTS (SELECT 1 FROM df.instances i '
         '                   WHERE i.id = $1 '
         '                     AND i.status = ''pending'' '
-        '                     AND i.xmin::text = pg_catalog.pg_current_xact_id()::text) '
+        '                     AND pg_catalog.pg_xact_status(i.xmin::text::xid8) = ''in progress'') '
         '       OR EXISTS (SELECT 1 FROM %I.orchestrator_queue q WHERE q.instance_id = $1) '
         '       OR EXISTS (SELECT 1 FROM %I.instances d WHERE d.instance_id = $1)',
         sch, sch)
