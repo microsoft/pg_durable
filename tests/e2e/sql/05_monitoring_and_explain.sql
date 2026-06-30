@@ -520,4 +520,113 @@ END $fail$;
 DROP TABLE _fail_state;
 
 RESET SESSION AUTHORIZATION;
+
+-- ============================================================================
+-- list_instances max-limit GUC (pg_durable.list_instances_max_limit, PR5 / #146)
+-- Runs as the postgres superuser (after RESET SESSION AUTHORIZATION) so it can
+-- SET the Suset-context GUC. Verifies: (1) default cap raises a loud error on
+-- both overloads instead of silently truncating, (2) the cap is tunable at
+-- runtime, and (3) an ordinary (non-superuser) caller cannot raise it.
+-- ============================================================================
+
+-- (1) Default cap (1000): a request above the cap raises on BOTH overloads.
+DO $lim_default$
+DECLARE
+    msg TEXT;
+BEGIN
+    -- Basic overload (2 args).
+    BEGIN
+        PERFORM * FROM df.list_instances(NULL, 1001);
+        RAISE EXCEPTION 'TEST FAILED: list_instances(NULL, 1001) did not raise (expected over-limit error)';
+    EXCEPTION WHEN OTHERS THEN
+        msg := SQLERRM;
+        IF strpos(msg, 'list_instances_max_limit') = 0 THEN
+            RAISE EXCEPTION 'TEST FAILED: basic overload error did not mention the GUC: %', msg;
+        END IF;
+    END;
+
+    -- Paginated overload (3 args).
+    BEGIN
+        PERFORM * FROM df.list_instances(NULL, 1001, NULL);
+        RAISE EXCEPTION 'TEST FAILED: list_instances(NULL, 1001, NULL) did not raise (expected over-limit error)';
+    EXCEPTION WHEN OTHERS THEN
+        msg := SQLERRM;
+        IF strpos(msg, 'list_instances_max_limit') = 0 THEN
+            RAISE EXCEPTION 'TEST FAILED: paginated overload error did not mention the GUC: %', msg;
+        END IF;
+    END;
+
+    -- At the default cap (1000): must NOT raise on either overload. This pins the
+    -- boundary to "> cap" (not ">= cap") so the at-limit page is provably allowed.
+    PERFORM * FROM df.list_instances(NULL, 1000);
+    PERFORM * FROM df.list_instances(NULL, 1000, NULL);
+
+    RAISE NOTICE 'TEST PASSED: default list_instances_max_limit raises over-limit error';
+END $lim_default$;
+
+-- (2) The cap is tunable at runtime: lower it, confirm at-limit passes and
+--     over-limit raises with the new ceiling echoed in the message.
+SET pg_durable.list_instances_max_limit = 3;
+DO $lim_tunable$
+DECLARE
+    msg TEXT;
+BEGIN
+    -- At the limit: must NOT raise (basic and paginated overloads).
+    PERFORM * FROM df.list_instances(NULL, 3);
+    PERFORM * FROM df.list_instances(NULL, 3, NULL);
+
+    -- Over the (lowered) limit: must raise and echo the configured ceiling (basic).
+    BEGIN
+        PERFORM * FROM df.list_instances(NULL, 4);
+        RAISE EXCEPTION 'TEST FAILED: list_instances(NULL, 4) did not raise with cap = 3';
+    EXCEPTION WHEN OTHERS THEN
+        msg := SQLERRM;
+        IF strpos(msg, 'list_instances_max_limit (3)') = 0 THEN
+            RAISE EXCEPTION 'TEST FAILED: over-limit error did not echo the configured cap (3): %', msg;
+        END IF;
+    END;
+
+    -- Same guard on the paginated overload: must raise and echo the same ceiling.
+    BEGIN
+        PERFORM * FROM df.list_instances(NULL, 4, NULL);
+        RAISE EXCEPTION 'TEST FAILED: list_instances(NULL, 4, NULL) did not raise with cap = 3';
+    EXCEPTION WHEN OTHERS THEN
+        msg := SQLERRM;
+        IF strpos(msg, 'list_instances_max_limit (3)') = 0 THEN
+            RAISE EXCEPTION 'TEST FAILED: paginated over-limit error did not echo the configured cap (3): %', msg;
+        END IF;
+    END;
+
+    RAISE NOTICE 'TEST PASSED: list_instances_max_limit is tunable at runtime';
+END $lim_tunable$;
+RESET pg_durable.list_instances_max_limit;
+
+-- (3) Guardrail: a non-superuser cannot raise the cap (Suset context).
+SET SESSION AUTHORIZATION df_e2e_user;
+DO $lim_guard$
+DECLARE
+    allowed BOOLEAN := false;
+    sqlstate_caught TEXT;
+BEGIN
+    BEGIN
+        PERFORM set_config('pg_durable.list_instances_max_limit', '1000000', false);
+        allowed := true;  -- set_config returned without error => guardrail breached
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            NULL;  -- expected: SQLSTATE 42501, permission denied to set parameter
+        WHEN OTHERS THEN
+            sqlstate_caught := SQLSTATE;
+            IF sqlstate_caught <> '42501' THEN
+                RAISE EXCEPTION 'TEST FAILED: expected insufficient_privilege (42501) when a non-superuser raises the GUC, got SQLSTATE %: %', sqlstate_caught, SQLERRM;
+            END IF;
+    END;
+
+    IF allowed THEN
+        RAISE EXCEPTION 'TEST FAILED: non-superuser was allowed to raise list_instances_max_limit';
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: non-superuser cannot raise list_instances_max_limit';
+END $lim_guard$;
+RESET SESSION AUTHORIZATION;
+
 SELECT 'TEST PASSED' AS result;

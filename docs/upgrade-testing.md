@@ -254,6 +254,15 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Scenario B2 considerations:** No data migration. The `CREATE FUNCTION` adds catalog metadata only; `df.instances` rows are untouched. The new `created_at`/`completed_at` result columns are read from columns that already exist and are already populated on every prior install.
 - **Dependent-object note:** Because the upgrade only adds a function (no `DROP FUNCTION`), no customer-owned object that depends on the existing two-argument `df.list_instances` is affected — there is nothing to drop or repoint.
 
+#### `pg_durable.list_instances_max_limit` GUC — page-size cap is now a loud error (issue #146)
+- **DDL change:** None. The cap is enforced entirely in the `.so`: a new `pg_durable.list_instances_max_limit` GUC (`SUSET` context, default `1000`, range `1`–`1000000`) is registered in `_PG_init` (`src/lib.rs`) and read on the `df.list_instances()` query path (`src/monitoring.rs`). There are no SQL function, table, or index changes, so this change adds no upgrade-script DDL and has no Scenario A snapshot impact.
+- **Behavior change:** Both `df.list_instances()` overloads previously truncated `limit_count` silently to a fixed 10000. They now raise an error when `limit_count` exceeds the GUC (default `1000`), so an over-cap request fails fast instead of returning a silently short page. This is a runtime behavior change to a function that shipped in 0.2.2/0.2.3; it is recorded in `CHANGELOG.md` under the unreleased 0.2.4 changeset.
+- **Scenario A considerations:** No schema changes — the `df` schema equivalence contract is unchanged.
+- **Scenario B1 considerations:** The new `.so` works against all previous schemas. The guard runs before any SQL is issued and reads no catalog or table state — it only compares the caller's `limit_count` against an in-memory GUC value — so it is correct against a pre-0.2.4 schema that has not run `ALTER EXTENSION UPDATE`. The only visible difference against an old schema is the intended one: a large `limit_count` now errors instead of being silently capped at 10000.
+- **Scenario B2 considerations:** No data migration. The GUC has no effect on schema shape or existing data.
+
+This follows the runtime-only precedent of `pg_durable.enable_superuser_instances` below (DDL change: None, enforced entirely in the `.so`).
+
 ### v0.2.2 → v0.2.3
 
 #### Rename duroxide provider schema to `_duroxide` for fresh installs

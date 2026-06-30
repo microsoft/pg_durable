@@ -29,6 +29,16 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Maximum page size (`limit_count`) accepted by `df.list_instances()`. A call
+/// requesting more rows than this raises an error instead of silently truncating
+/// the result, steering external clients toward keyset pagination
+/// (`after_cursor`/`next_cursor`) for large result sets (issue #146). Superuser-
+/// settable (Suset) so it can be tuned at runtime without a restart.
+///
+/// NOTE: the default (`1000`) and max (`1_000_000`) below are also documented in
+/// `docs/api-reference.md` and `USER_GUIDE.md`; update those mirrors if you change them.
+pub static LIST_INSTANCES_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -134,6 +144,23 @@ pub extern "C-unwind" fn _PG_init() {
         &ENABLE_SUPERUSER_INSTANCES,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
+    );
+
+    // First Suset-context GUC in this extension (the connection-limit and
+    // enable_superuser_instances GUCs above are Postmaster). Suset is deliberate:
+    // this guardrail is read on the df.list_instances() query path, so a superuser
+    // must be able to tune it per-session at runtime. Its long description is
+    // intentionally populated (unlike the c"" connection GUCs) because the
+    // raise-instead-of-truncate behavior is not obvious from the name alone.
+    GucRegistry::define_int_guc(
+        c"pg_durable.list_instances_max_limit",
+        c"Maximum number of rows df.list_instances() returns in a single call before raising an error",
+        c"A call to df.list_instances() with limit_count above this value raises an error instead of silently truncating the result. Clients needing more rows should use the paginated df.list_instances overload (after_cursor/next_cursor). Superusers can change this at runtime without a restart; by default ordinary callers cannot raise it.",
+        &LIST_INSTANCES_MAX_LIMIT,
+        1,
+        1_000_000,
+        GucContext::Suset,
+        GucFlags::default(),
     );
 
     worker::register_background_worker();

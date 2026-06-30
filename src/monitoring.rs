@@ -97,6 +97,29 @@ fn cursor_timestamp_well_formed(ts: &str) -> bool {
     })
 }
 
+/// Enforce the configurable upper bound on a `df.list_instances()` page size.
+///
+/// Both `df.list_instances` overloads share this guard. A `limit_count` below 1 is
+/// always rejected. When it exceeds `pg_durable.list_instances_max_limit` (default
+/// 1000) the call raises a loud error rather than silently truncating to the cap:
+/// a silently short page is indistinguishable from "no more rows" and breaks
+/// external clients that page by `limit_count`. Such clients should use keyset
+/// pagination (`after_cursor`/`next_cursor`) for large result sets (issue #146).
+/// The cap is a superuser-settable (Suset) GUC, so it is tunable at runtime without
+/// a restart and, by default, cannot be raised by an ordinary caller — the guardrail
+/// holds for ordinary user sessions unless a superuser delegates SET on the parameter.
+fn enforce_list_instances_limit(limit_count: i32) {
+    if limit_count < 1 {
+        pgrx::error!("limit_count must be at least 1");
+    }
+    let max_limit = crate::LIST_INSTANCES_MAX_LIMIT.get();
+    if limit_count > max_limit {
+        pgrx::error!(
+            "df.list_instances: limit_count ({limit_count}) exceeds pg_durable.list_instances_max_limit ({max_limit}); request fewer rows, or use the paginated df.list_instances overload (after_cursor/next_cursor) for large result sets"
+        );
+    }
+}
+
 /// Batch-fetch (function_name, execution_count, output) for a set of instance ids
 /// from duroxide's published `<schema>.get_instance_info(TEXT)` SQL function.
 ///
@@ -214,10 +237,7 @@ pub fn list_instances(
         name!(output, Option<String>),
     ),
 > {
-    if limit_count < 1 {
-        pgrx::error!("limit_count must be at least 1");
-    }
-    let limit_count = limit_count.min(10000);
+    enforce_list_instances_limit(limit_count);
 
     let pg_conn_str = postgres_connection_string();
     let provider_schema = backend_duroxide_schema();
@@ -325,10 +345,7 @@ pub fn list_instances_paged(
         name!(next_cursor, Option<String>),
     ),
 > {
-    if limit_count < 1 {
-        pgrx::error!("limit_count must be at least 1");
-    }
-    let limit_count = limit_count.min(10000);
+    enforce_list_instances_limit(limit_count);
 
     // Decode the opaque keyset cursor up front. A malformed cursor is a client
     // error (the token must be passed back verbatim from a prior next_cursor), so
@@ -636,6 +653,11 @@ pub fn instance_executions(
     if limit_count < 1 {
         pgrx::error!("limit_count must be at least 1");
     }
+    // NOTE: df.instance_executions reports a single instance's execution history
+    // (keyed by instance_id) — a different surface from df.list_instances, with a
+    // naturally small result set. It intentionally keeps this fixed min(10000)
+    // clamp rather than the tunable pg_durable.list_instances_max_limit GUC
+    // (PR5 / #146); give it its own bound if per-instance history ever needs one.
     let limit_count = limit_count.min(10000);
 
     let pg_conn_str = postgres_connection_string();
