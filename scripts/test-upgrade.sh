@@ -241,7 +241,9 @@ stop_server() {
 
 cleanup_databases() {
     "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
-        -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" 2>/dev/null || true
+        -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;
+            DROP SCHEMA IF EXISTS _duroxide CASCADE;
+            DROP SCHEMA IF EXISTS duroxide CASCADE;" 2>/dev/null || true
 }
 
 cleanup() {
@@ -468,8 +470,7 @@ create_extension_at_version() {
         return 1
     fi
 
-    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
-        -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+    cleanup_databases
     "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
         -v ON_ERROR_STOP=1 \
         -c "CREATE EXTENSION pg_durable VERSION '${base_version}';" >/dev/null 2>&1
@@ -691,16 +692,14 @@ test_schema_upgrade() {
     snapshot_schema "$tmpdir/upgraded.txt"
 
     # Step 2: Fresh install at current version
-    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
-        -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+    cleanup_databases
     "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
         -v ON_ERROR_STOP=1 \
         -c "CREATE EXTENSION pg_durable;" >/dev/null 2>&1
     snapshot_schema "$tmpdir/fresh.txt"
 
     # Clean up
-    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d "$PG_DB" \
-        -c "DROP EXTENSION IF EXISTS pg_durable CASCADE;" >/dev/null 2>&1
+    cleanup_databases
 
     # Filter out PUBLIC grant rows (grant_table, grant_routine, grant_schema)
     # from both snapshots before comparison. Grants to PUBLIC intentionally
