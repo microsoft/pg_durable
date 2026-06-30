@@ -399,6 +399,27 @@ assert_sql_contains() {
     fi
 }
 
+assert_sql_contains_eventually() {
+    local sql="$1"
+    local expected_fragment="$2"
+    local attempts="${3:-100}"
+    local result=""
+
+    for _ in $(seq 1 "$attempts"); do
+        result=$(run_sql_capture "$sql") || return 1
+        if [[ "$result" == *"$expected_fragment"* ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo ""
+    echo "    SQL: $sql"
+    echo "    Expected fragment: $expected_fragment"
+    echo "    Got: $result"
+    return 1
+}
+
 assert_sql_empty() {
     local sql="$1"
     local result
@@ -856,7 +877,7 @@ test_b1_status_instance() {
 }
 
 test_b1_result() {
-    assert_sql_contains "SELECT df.result('${B1_INSTANCE_ID}');" "test_value"
+    assert_sql_contains_eventually "SELECT df.result('${B1_INSTANCE_ID}');" "test_value"
 }
 
 test_b1_status_nonexistent() {
@@ -965,14 +986,14 @@ test_b2_data_survives_upgrade() {
 
 test_b2_pre_upgrade_instance_after_upgrade() {
     assert_sql_equals "SELECT df.status('${B2_PRE_INSTANCE_ID}');" "completed" &&
-    assert_sql_contains "SELECT df.result('${B2_PRE_INSTANCE_ID}');" "b2_value" &&
+    assert_sql_contains_eventually "SELECT df.result('${B2_PRE_INSTANCE_ID}');" "b2_value" &&
     assert_sql_equals "SELECT lower(status) FROM df.instance_info('${B2_PRE_INSTANCE_ID}');" "completed" &&
     assert_sql_equals "SELECT EXISTS (SELECT 1 FROM df.list_instances() WHERE instance_id = '${B2_PRE_INSTANCE_ID}');" "t"
 }
 
 test_b2_inflight_work_after_upgrade() {
     assert_sql_equals_ignoring_warnings "SELECT df.wait_for_completion('${B2_INFLIGHT_INSTANCE_ID}', 30);" "completed" &&
-    assert_sql_contains "SELECT df.result('${B2_INFLIGHT_INSTANCE_ID}');" "b2-running"
+    assert_sql_contains_eventually "SELECT df.result('${B2_INFLIGHT_INSTANCE_ID}');" "b2-running"
 }
 
 test_b2_new_data_after_upgrade() {

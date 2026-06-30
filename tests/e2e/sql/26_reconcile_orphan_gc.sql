@@ -13,16 +13,6 @@
 -- _duroxide is read as the superuser (postgres); durable functions run as
 -- df_e2e_user.
 
--- Helper (superuser): does a _duroxide instance row exist for this id?
-CREATE OR REPLACE FUNCTION pg_temp.duroxide_instance_exists(p_id text)
-RETURNS boolean LANGUAGE plpgsql AS $$
-DECLARE sch text := df.duroxide_schema(); ex boolean;
-BEGIN
-    EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.instances WHERE instance_id = $1)', sch)
-        INTO ex USING p_id;
-    RETURN ex;
-END $$;
-
 -- Helper (superuser): number of direct children (sub-orchestrations) of a root.
 CREATE OR REPLACE FUNCTION pg_temp.duroxide_child_count(p_root text)
 RETURNS bigint LANGUAGE plpgsql AS $$

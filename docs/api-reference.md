@@ -351,6 +351,23 @@ SELECT df.result('a1b2c3d4');
 
 ---
 
+### df.reconcile([p_grace_seconds])
+
+Repairs residual drift between `df.*` control-plane rows and the configured
+duroxide provider schema. Admin-only; `EXECUTE` is revoked from `PUBLIC`.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `p_grace_seconds` | INTEGER | ❌ Literal | Minimum orphan/stuck age before repair; defaults to 60 |
+
+```sql
+SELECT * FROM df.reconcile();
+```
+
+Returns `duroxide_orphans_deleted` and `stuck_instances_failed`.
+
+---
+
 ### df.instance_nodes(instance_id)
 
 Returns one row per node in an instance's graph, with each node's stored physical
@@ -562,4 +579,3 @@ SHOW pg_durable.enable_superuser_instances;
 ```
 
 **Security note:** Setting this GUC to `on` in a multi-tenant environment allows any role with `BYPASSRLS` to forge `submitted_by` to a superuser OID and execute arbitrary SQL as superuser. Keep `off` unless you have a specific need and understand the risk. See [docs/superuser_guc.md](superuser_guc.md) for the full threat analysis.
-

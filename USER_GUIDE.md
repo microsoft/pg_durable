@@ -1535,6 +1535,23 @@ SELECT * FROM df.metrics();
 
 > **Note:** `df.metrics()` returns system-wide aggregate counts across all users and is omitted from an ordinary `df.grant_usage('role')`. It is granted automatically to pg_durable admins via `df.grant_usage('role', with_grant => true)`, or you can grant EXECUTE on `df.metrics()` directly to any role that may view cluster-wide pg_durable activity. Other users can call `df.list_instances()` to view a summary of their own workflows.
 
+### Reconcile Runtime Drift (Admin Only)
+
+```sql
+-- Requires an explicit admin grant or superuser.
+SELECT * FROM df.reconcile();
+SELECT * FROM df.reconcile(0);  -- no grace window, useful for tests
+```
+
+**Columns:** `duroxide_orphans_deleted`, `stuck_instances_failed`
+
+`df.reconcile()` is a best-effort repair backstop. It deletes old runtime root
+instances whose full `_duroxide` subtree has no matching `df.instances` row, and
+marks stale non-terminal `df.instances` rows failed when there is no live runtime
+instance and no queued start. The background worker keeps one built-in reconciler
+loop running on `pg_durable.reconciler_cron` (default `*/5 * * * *`); set the GUC
+to an empty string and restart to disable the built-in loop.
+
 ### Quick Status Check
 
 `df.status()` and `df.result()` take an **`instance_id`** (returned by `df.start()`), **not** a label. Passing a label returns `NULL`.
