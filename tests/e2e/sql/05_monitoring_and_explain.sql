@@ -296,5 +296,228 @@ END $multi$;
 
 DROP TABLE _multi_state;
 
+-- === Test: PR4 — label_filter, timestamps, and keyset pagination (issues #87/#146) ===
+-- Start five instances that all share one label ('pr4-page') so the label filter
+-- scopes df.list_instances() to exactly this set, independent of any other
+-- instances this role created earlier in the suite. That makes the keyset
+-- pagination assertion self-contained and deterministic. The five are created in
+-- two batches: the first three share one transaction timestamp and the last two
+-- share a later one, so created_at has ties within each batch -- exercising BOTH
+-- branches of the keyset predicate (created_at < cursor, and created_at = cursor
+-- AND id > cursor_id).
+CREATE TEMP TABLE _page_state (instance_id TEXT);
+INSERT INTO _page_state SELECT df.start('SELECT ' || g, 'pr4-page') FROM generate_series(2001, 2003) g;
+SELECT pg_sleep(0.05);
+INSERT INTO _page_state SELECT df.start('SELECT ' || g, 'pr4-page') FROM generate_series(2004, 2005) g;
+
+DO $page$
+DECLARE
+    rec RECORD;
+    total INT;
+    labeled INT;
+    with_created INT;
+    with_completed INT;
+    single_page_cursors INT;
+    ref_ids TEXT[];
+    paged_ids TEXT[];
+    page_ids TEXT[];
+    page_cursor TEXT;
+    page_n INT;
+    cur TEXT;
+    pages INT := 0;
+    settled INT;
+    attempts INT := 0;
+    combo_status TEXT;
+    combo INT;
+    combo_none INT;
+BEGIN
+    FOR rec IN SELECT instance_id FROM _page_state LOOP
+        PERFORM df.await_instance(rec.instance_id);
+    END LOOP;
+
+    -- Wait until every instance's output has materialized (same completion-boundary
+    -- race the SF-3 block documents).
+    LOOP
+        SELECT count(*) INTO settled
+        FROM df.list_instances(NULL, 100, 'pr4-page')
+        WHERE output IS NOT NULL;
+        EXIT WHEN settled = 5 OR attempts > 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    IF settled <> 5 THEN
+        RAISE EXCEPTION 'TEST FAILED: only % of 5 pr4-page instances settled', settled;
+    END IF;
+
+    -- (a) label_filter returns exactly our five, all carrying that label, and the
+    -- timestamps sourced from df.instances are populated (created_at always;
+    -- completed_at because every instance completed successfully).
+    SELECT count(*),
+           count(*) FILTER (WHERE label = 'pr4-page'),
+           count(*) FILTER (WHERE created_at IS NOT NULL),
+           count(*) FILTER (WHERE completed_at IS NOT NULL)
+    INTO total, labeled, with_created, with_completed
+    FROM df.list_instances(NULL, 100, 'pr4-page');
+
+    IF total <> 5 OR labeled <> 5 THEN
+        RAISE EXCEPTION 'TEST FAILED: label_filter returned % rows (% labeled), expected 5/5', total, labeled;
+    END IF;
+    IF with_created <> 5 THEN
+        RAISE EXCEPTION 'TEST FAILED: % of 5 rows have created_at, expected 5', with_created;
+    END IF;
+    IF with_completed <> 5 THEN
+        RAISE EXCEPTION 'TEST FAILED: % of 5 completed rows have completed_at, expected 5', with_completed;
+    END IF;
+
+    -- (a2) status_filter composes with label_filter. The label-only calls above
+    -- never push a status placeholder, so this is the only assertion that
+    -- exercises the two-filter dynamic placeholder numbering (status = $1 AND
+    -- label = $2). Read the actual stored status of our set (uniform: all five
+    -- completed) rather than hard-coding the literal, then assert the combined
+    -- filter returns exactly those five and that a non-matching status returns none.
+    SELECT status INTO combo_status FROM df.list_instances(NULL, 1, 'pr4-page');
+    SELECT count(*) INTO combo FROM df.list_instances(combo_status, 100, 'pr4-page');
+    IF combo <> 5 THEN
+        RAISE EXCEPTION 'TEST FAILED: status+label filter returned % rows for status %, expected 5', combo, combo_status;
+    END IF;
+    SELECT count(*) INTO combo_none
+    FROM df.list_instances('definitely-not-a-status', 100, 'pr4-page');
+    IF combo_none <> 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: status+label filter with non-matching status returned % rows, expected 0', combo_none;
+    END IF;
+
+    -- (b) A single page large enough to hold the whole set must report no further
+    -- page: next_cursor is NULL on every row.
+    SELECT count(*) FILTER (WHERE next_cursor IS NOT NULL) INTO single_page_cursors
+    FROM df.list_instances(NULL, 100, 'pr4-page');
+    IF single_page_cursors <> 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: single full page exposed % non-null next_cursor', single_page_cursors;
+    END IF;
+
+    -- Authoritative order (created_at DESC, id ASC) from one unpaginated call.
+    SELECT array_agg(instance_id ORDER BY ord) INTO ref_ids
+    FROM df.list_instances(NULL, 100, 'pr4-page')
+        WITH ORDINALITY AS t(instance_id, label, function_name, status, execution_count, output, created_at, completed_at, next_cursor, ord);
+
+    -- (c) Walk the same set two-at-a-time via next_cursor and rebuild the id list.
+    -- A correct keyset traversal must reproduce the unpaginated order exactly with
+    -- no duplicates and no gaps.
+    cur := NULL;
+    paged_ids := '{}';
+    LOOP
+        SELECT array_agg(instance_id ORDER BY ord), max(next_cursor), count(*)
+        INTO page_ids, page_cursor, page_n
+        FROM df.list_instances(NULL, 2, 'pr4-page', cur)
+            WITH ORDINALITY AS t(instance_id, label, function_name, status, execution_count, output, created_at, completed_at, next_cursor, ord);
+
+        EXIT WHEN page_n = 0;
+        paged_ids := paged_ids || page_ids;
+        pages := pages + 1;
+
+        -- A non-final page (cursor present) must be full and advance; the final
+        -- page carries a NULL cursor and ends the walk.
+        IF page_cursor IS NOT NULL AND page_n <> 2 THEN
+            RAISE EXCEPTION 'TEST FAILED: non-final page had % rows, expected 2', page_n;
+        END IF;
+        EXIT WHEN page_cursor IS NULL;
+        cur := page_cursor;
+        EXIT WHEN pages > 50;
+    END LOOP;
+
+    IF paged_ids IS DISTINCT FROM ref_ids THEN
+        RAISE EXCEPTION 'TEST FAILED: paginated order % != unpaginated order %', paged_ids, ref_ids;
+    END IF;
+    IF pages <> 3 THEN
+        RAISE EXCEPTION 'TEST FAILED: 5 rows at limit 2 produced % pages, expected 3', pages;
+    END IF;
+
+    -- (d) A malformed cursor is a client error, not a silent restart.
+    BEGIN
+        PERFORM instance_id FROM df.list_instances(NULL, 2, 'pr4-page', 'zz');
+        RAISE EXCEPTION 'TEST FAILED: invalid after_cursor did not raise';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE '%TEST FAILED%' THEN
+            RAISE;
+        END IF;
+        -- expected: df.list_instances: invalid after_cursor
+    END;
+
+    -- (d2) A structurally valid cursor (correct hex + recognized version) that
+    -- carries a non-timestamp payload must ALSO be rejected. Without up-front
+    -- validation this would fail the ::timestamptz cast deep in the query and be
+    -- swallowed as an empty page -- silently ending a client's pagination instead
+    -- of surfacing the bad token. The payload below decodes cleanly to
+    -- ('not-a-timestamp', 'abc') under version v1.
+    BEGIN
+        PERFORM instance_id FROM df.list_instances(
+            NULL, 2, 'pr4-page',
+            encode(convert_to('v1|not-a-timestamp|abc', 'UTF8'), 'hex'));
+        RAISE EXCEPTION 'TEST FAILED: malformed-timestamp after_cursor did not raise';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE '%TEST FAILED%' THEN
+            RAISE;
+        END IF;
+        -- expected: df.list_instances: invalid after_cursor
+    END;
+
+    RAISE NOTICE 'TEST PASSED: label_filter + timestamps + keyset pagination';
+END $page$;
+
+DROP TABLE _page_state;
+
+-- === Test: PR4 — completed_at is NULL for a non-completed (failed) instance ===
+-- df.instances.completed_at is set only on successful completion (it stays NULL
+-- for failed/cancelled instances). The pr4-page block above covers the completed
+-- case; this block covers the failed case so the timestamp column's contract is
+-- asserted in both directions. 'SELECT 1/0' fails the SQL node -> the instance
+-- ends 'failed'.
+CREATE TEMP TABLE _fail_state (instance_id TEXT);
+INSERT INTO _fail_state SELECT df.start('SELECT 1/0', 'pr4-fail');
+
+DO $fail$
+DECLARE
+    fid TEXT;
+    fstatus TEXT;
+    seen INT;
+    fcreated INT;
+    fcompleted INT;
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO fid FROM _fail_state;
+    fstatus := df.await_instance(fid);
+    IF fstatus <> 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: pr4-fail instance status = %, expected failed', fstatus;
+    END IF;
+
+    -- Wait until the failed instance is resolvable through list_instances (its
+    -- duroxide info row is available). A failed instance has no output, so we
+    -- cannot wait on output IS NOT NULL like the completed case does.
+    LOOP
+        SELECT count(*) INTO seen FROM df.list_instances(NULL, 100, 'pr4-fail');
+        EXIT WHEN seen = 1 OR attempts > 100;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+    IF seen <> 1 THEN
+        RAISE EXCEPTION 'TEST FAILED: pr4-fail instance not listed (seen=%)', seen;
+    END IF;
+
+    SELECT count(*) FILTER (WHERE created_at IS NOT NULL),
+           count(*) FILTER (WHERE completed_at IS NOT NULL)
+    INTO fcreated, fcompleted
+    FROM df.list_instances(NULL, 100, 'pr4-fail');
+
+    IF fcreated <> 1 THEN
+        RAISE EXCEPTION 'TEST FAILED: failed instance created_at not populated (count=%)', fcreated;
+    END IF;
+    IF fcompleted <> 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: failed instance has completed_at set (count=%), expected NULL', fcompleted;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: completed_at is NULL for failed instance';
+END $fail$;
+
+DROP TABLE _fail_state;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

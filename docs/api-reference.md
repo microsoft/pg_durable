@@ -337,6 +337,50 @@ If you reuse a label across runs, multiple instances can match — pass the spec
 
 ---
 
+### df.list_instances(...)
+
+Lists your durable function instances, newest-first. Results are RLS-scoped to your own instances (superusers see all). The function comes in **two overloads**, distinguished by argument count:
+
+| Overload | Call shape | Returned columns |
+|----------|-----------|------------------|
+| **Basic** (0–2 args) | `df.list_instances([status_filter[, limit_count]])` | 6 columns (no timestamps or cursor) |
+| **Paginated** (3–4 args) | `df.list_instances(status_filter, limit_count, label_filter[, after_cursor])` | 9 columns (adds `created_at`, `completed_at`, `next_cursor`) |
+
+The two overloads have non-overlapping arities (basic matches 0–2 arguments, paginated matches 3–4), so a call is never ambiguous. To reach the paginated overload you must pass at least the first three arguments — use `NULL` for any you don't want to filter on (e.g. `df.list_instances(NULL, 100, NULL)`).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status_filter` | TEXT | `NULL` (basic only) | Only instances with this status (lowercase: `pending`, `running`, `completed`, `failed`, `cancelled`). `NULL` = any. |
+| `limit_count` | INTEGER | `100` (basic only) | Max rows per page (must be ≥ 1; capped at 10000). |
+| `label_filter` | TEXT | — (required to select the paginated overload) | Only instances whose label equals this value (issue #87). `NULL` = any. |
+| `after_cursor` | TEXT | `NULL` | Opaque keyset cursor from a prior page's `next_cursor`; returns the page that sorts strictly after it (issue #146). `NULL` = first page. |
+
+> `status_filter` and `limit_count` default only in the basic overload. The paginated overload requires all three of `status_filter`, `limit_count`, and `label_filter` to be supplied positionally (pass `NULL` to skip a filter); only `after_cursor` is optional.
+
+**Basic overload columns:** `instance_id`, `label`, `function_name`, `status`, `execution_count`, `output`.
+
+**Paginated overload columns:** the six above plus `created_at`, `completed_at`, `next_cursor`.
+
+- `created_at` / `completed_at` are the submit and completion timestamps from `df.instances`. `completed_at` is `NULL` until the instance reaches `completed` (it stays `NULL` for `failed`/`cancelled`).
+- Rows are ordered `created_at DESC, id ASC` (deterministic, served by the `(created_at DESC, id)` indexes on `df.instances`).
+- `next_cursor` is the token to fetch the page *after* this one. It is the same value on every row of a page and `NULL` on the final page.
+
+```sql
+-- Basic overload: most recent 50 completed runs (6 columns, no timestamps/cursor)
+SELECT instance_id, status FROM df.list_instances('completed', 50);
+
+-- Paginated overload: all instances carrying a given label (9 columns)
+SELECT instance_id, status, created_at, completed_at, next_cursor
+FROM df.list_instances(NULL, 100, 'nightly-report');
+
+-- Keyset pagination: pass the previous page's next_cursor back in as after_cursor
+SELECT * FROM df.list_instances(NULL, 50, NULL, '323032362d...');
+```
+
+> **Pagination note:** `next_cursor` is computed over `df.instances` (the authoritative, RLS-filtered set) independently of the per-row execution-metadata lookup, so it normally advances correctly. In a brief start-up window an instance can exist in `df.instances` before its execution metadata is queryable; such a row is omitted from the current page. Edge case: if *every* row of a non-final page is omitted this way, that page returns zero rows and you cannot read `next_cursor` (it is carried on each row) — retry shortly. A malformed `after_cursor` raises an error; always pass a `next_cursor` value back verbatim.
+
+---
+
 ### df.result(instance_id)
 
 Gets instance result (for completed instances).

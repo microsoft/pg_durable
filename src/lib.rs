@@ -227,20 +227,34 @@ COMMENT ON COLUMN df.instances.submitted_by IS
     'Effective role (current_user) at df.start() time - used for connection authentication and SQL execution';
 
 -- Index for status-filtered listing, newest-first
--- (df.list_instances() WHERE status = $1 ORDER BY created_at DESC). Also serves the
--- pending-instance scan via the leading status column. The trailing id prepares the
--- access path for the keyset pagination planned for df.list_instances
--- (ORDER BY created_at DESC, id ASC); df.list_instances() does not order by id yet,
--- so this does not change the current result ordering.
+-- (df.list_instances() WHERE status = $1 ORDER BY created_at DESC, id ASC). Also
+-- serves the pending-instance scan via the leading status column. The trailing id
+-- is the keyset tiebreaker for df.list_instances() pagination (ORDER BY
+-- created_at DESC, id ASC), so both the sort and the after_cursor range predicate
+-- are index-served.
 -- NOTE: keep these two index definitions byte-identical to the 0.2.3->0.2.4 upgrade
 -- script (sql/pg_durable--0.2.3--0.2.4.sql) until 0.2.4 is released -- Scenario A
 -- compares pg_get_indexdef() across the fresh-install and upgrade paths.
 CREATE INDEX idx_instances_status ON df.instances(status, created_at DESC, id);
 
--- Index for unfiltered listing, newest-first (df.list_instances() ORDER BY created_at DESC).
--- The trailing id prepares the access path for the same future keyset pagination
--- (ORDER BY created_at DESC, id ASC); it does not affect the current ordering.
+-- Index for unfiltered listing, newest-first
+-- (df.list_instances() ORDER BY created_at DESC, id ASC). The trailing id is the
+-- keyset tiebreaker that makes the after_cursor range predicate index-served.
 CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
+
+-- Index for label-filtered listing, newest-first
+-- (df.list_instances(..., label_filter => $n) WHERE label = $n ORDER BY
+-- created_at DESC, id ASC). Partial on (label IS NOT NULL) because label_filter only
+-- matches non-NULL labels and many instances are unlabeled, keeping the index small;
+-- the planner still uses it since `label = $n` implies the partial predicate. The
+-- trailing id keeps the after_cursor keyset range predicate index-served on the
+-- label-scoped page. (Not leading with submitted_by -- consistent with the indexes
+-- above; an owner-leading variant is a future refinement if RLS-scoped label listing
+-- becomes hot.)
+-- NOTE: keep this definition byte-identical to the 0.2.3->0.2.4 upgrade script
+-- (sql/pg_durable--0.2.3--0.2.4.sql) until 0.2.4 is released -- Scenario A compares
+-- pg_get_indexdef() across the fresh-install and upgrade paths.
+CREATE INDEX idx_instances_label ON df.instances(label, created_at DESC, id) WHERE label IS NOT NULL;
 
 -- Index for finding nodes by instance
 CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);
