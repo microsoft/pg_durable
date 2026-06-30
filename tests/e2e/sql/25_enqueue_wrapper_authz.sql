@@ -120,6 +120,52 @@ END $$;
 RESET SESSION AUTHORIZATION;
 
 -- =========================================================================== 
+-- A non-owner cannot forge a start against another user's pending instance.
+-- ===========================================================================
+
+SET SESSION AUTHORIZATION authz_owner;
+DO $$
+DECLARE
+    inst_id CONSTANT TEXT := 'badc0ffe';
+    root_id CONSTANT TEXT := 'cafebabe';
+BEGIN
+    INSERT INTO df.instances (id, label, root_node, submitted_by, database)
+    VALUES (inst_id, 'authz-foreign-pending-start', root_id, current_user::regrole, 'postgres');
+
+    INSERT INTO df.nodes (id, instance_id, node_type, query, submitted_by, database)
+    VALUES (root_id, inst_id, 'SQL', 'SELECT 1', current_user::regrole, 'postgres');
+END $$;
+RESET SESSION AUTHORIZATION;
+
+SET SESSION AUTHORIZATION authz_other;
+DO $$
+DECLARE inst_id CONSTANT TEXT := 'badc0ffe';
+BEGIN
+    BEGIN
+        PERFORM df._enqueue_orchestrator_start(
+            inst_id,
+            'pg_durable::orchestration::execute-function-graph',
+            json_build_object('instance_id', inst_id)::text);
+        RAISE EXCEPTION 'TEST FAILED: authz_other was allowed to enqueue a start for owner pending instance %', inst_id;
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            IF SQLERRM LIKE '%not authorized%' THEN
+                RAISE NOTICE 'PASSED [start_forge_denied]: %', SQLERRM;
+            ELSE
+                RAISE EXCEPTION 'TEST FAILED: start denied, but not by the wrapper authorization check: %', SQLERRM;
+            END IF;
+        WHEN undefined_function THEN
+            RAISE EXCEPTION 'TEST FAILED: df._enqueue_orchestrator_start is missing (change not present): %', SQLERRM;
+    END;
+END $$;
+RESET SESSION AUTHORIZATION;
+
+BEGIN;
+DELETE FROM df.instances WHERE id = 'badc0ffe';
+DELETE FROM df.nodes WHERE instance_id = 'badc0ffe';
+COMMIT;
+
+-- ===========================================================================
 -- A caller cannot use the start wrapper as a generic privileged entrypoint.
 -- =========================================================================== 
 
