@@ -1606,36 +1606,65 @@ SELECT started_at, last_seen_at,
 
 The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
 
-### Data Retention (Automatic Pruning)
+### Automatic Reconciliation
 
-To keep `df.instances` and `df.nodes` from growing without bound, the background
-worker runs a **best-effort pruning pass roughly once an hour** that deletes old
-**terminal** instances (status `completed`, `failed`, or `cancelled`) and their
-associated `df.nodes` rows. Running and pending instances are **never** pruned,
-regardless of age.
+pg_durable tracks each workflow in its own `df` tables, while the durable engine
+keeps workflow state in a separate schema. To keep those two stores consistent —
+and to keep `df.instances`/`df.nodes` from growing without bound — the background
+worker runs a **best-effort reconciliation pass** that does two things:
 
-The policy is currently fixed (no configuration GUC):
+- **Removes expired terminal instances.** Old **terminal** instances (status
+  `completed`, `failed`, or `cancelled`) and their `df.nodes` rows are deleted,
+  along with their engine records. Running and pending instances are **never**
+  removed, regardless of age.
+- **Reclaims orphaned engine records.** `df.start()` writes the `df` rows in the
+  caller's transaction but hands the workflow to the engine over a separate
+  connection; if that transaction **rolls back**, the `df` rows vanish while the
+  engine keeps an inert record (it can never load its rolled-back graph, so it
+  ends up failed). Reconciliation deletes such df-less engine records once they
+  age past `retention_days`. Anything the engine is still tracking with a live
+  `df` row is left untouched.
+
+Two Postmaster-context GUCs govern it (set in `postgresql.conf`, restart to apply):
+
+```ini
+# How often (seconds) a reconciliation pass runs. 0 disables reconciliation.
+pg_durable.reconcile_interval = 3600
+
+# Days a terminal instance is retained before reconciliation removes it (and its
+# engine record); also the age bound for reclaiming orphaned engine records.
+# 0 removes terminal instances as soon as the next pass runs.
+pg_durable.retention_days = 30
+```
+
+Retention combines that window with a fixed hard cap:
 
 - **Hard cap — at most 10,000 terminal instances are retained, regardless of
   age.** The newest 10,000 terminal instances are kept; any beyond that are
-  pruned even if they are only minutes old.
-- **Retention window — 30 days.** Terminal instances older than 30 days are
-  pruned even if the table holds fewer than 10,000 of them.
+  removed even if they are only minutes old. (This cap is fixed, not a GUC.)
+- **Retention window — `retention_days`.** Terminal instances older than the
+  window are removed even if the table holds fewer than 10,000 of them.
 
 Equivalently, a terminal instance is retained only while it is **both** among the
-newest 10,000 terminal instances **and** less than 30 days old; otherwise it is
-eligible for pruning.
+newest 10,000 terminal instances **and** younger than `retention_days`; otherwise
+it is eligible for removal.
 
 Notes:
 
 - "Age" is measured from `completed_at` when set (instances that reached
   `completed`), otherwise from `created_at`. `updated_at` is intentionally **not**
   used, because it is user-writable and would let a low-privilege user influence
-  pruning.
-- Pruning runs in a single transaction with foreign-key constraints deferred:
-  matching `df.nodes` rows are deleted first, then the instance rows.
-- Pruning is best-effort: if a pass fails it is logged and retried on the next
-  interval; it never stops workflow execution.
+  what is removed.
+- A pass retires an instance's engine record **before** deleting its `df` rows, so
+  an interrupted pass can only leave the harmless direction — an engine record with
+  no `df` row (which the next pass reclaims) — never a `df` row without its engine
+  record. Because `df` and the engine are separate stores written by separate
+  transactions, they are therefore **eventually consistent**: read-only views like
+  `df.list_instances()` can briefly show a just-terminal row with empty
+  engine-derived columns until a later pass reconciles it. The artifact is
+  transient, self-healing, and never affects workflow execution or results.
+- Reconciliation is best-effort: if a pass fails it is logged and retried on the
+  next interval; it never stops workflow execution.
 - If you need to retain terminal history beyond these limits (e.g. for auditing),
   copy the rows you care about into your own table before they age out.
 

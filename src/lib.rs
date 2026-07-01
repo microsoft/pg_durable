@@ -39,6 +39,16 @@ pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::ne
 /// `docs/api-reference.md` and `USER_GUIDE.md`; update those mirrors if you change them.
 pub static LIST_INSTANCES_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000);
 
+/// Days a terminal ('completed'/'failed'/'cancelled') instance is retained
+/// before reconciliation removes it and its engine record. The same age bound
+/// governs when orphaned engine records left by a rolled-back `df.start()` are
+/// reclaimed. `0` removes terminal instances as soon as the next pass runs.
+pub static RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(30);
+
+/// Seconds between background reconciliation passes. Each pass removes expired
+/// terminal instances and reclaims orphaned engine records. `0` disables it.
+pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(3600);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -160,6 +170,28 @@ pub extern "C-unwind" fn _PG_init() {
         1,
         1_000_000,
         GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.retention_days",
+        c"Days a terminal instance is retained before reconciliation removes it",
+        c"Background reconciliation removes 'completed'/'failed'/'cancelled' df.instances rows (and their engine records) once they are older than this many days, subject to a fixed hard cap on the number retained. The same age bound governs when orphaned engine records left by a rolled-back df.start() are reclaimed. 0 removes terminal instances as soon as the next pass runs.",
+        &RETENTION_DAYS,
+        0,
+        36500,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.reconcile_interval",
+        c"Seconds between background reconciliation passes (0 disables reconciliation)",
+        c"Each background reconciliation pass removes expired terminal instances and reclaims orphaned engine records left by a rolled-back df.start(). Set to 0 to disable background reconciliation entirely.",
+        &RECONCILE_INTERVAL,
+        0,
+        86400,
+        GucContext::Postmaster,
         GucFlags::default(),
     );
 
@@ -947,23 +979,23 @@ mod tests {
         )
     }
 
-    async fn delete_prune_test_rows(pool: &sqlx::PgPool, id_list: &str) {
-        let mut tx = pool.begin().await.expect("begin cleanup transaction");
+    async fn delete_expired_test_rows(pool: &sqlx::PgPool, id_list: &str) {
+        let mut tx = pool.begin().await.expect("begin teardown transaction");
         sqlx::query("SET CONSTRAINTS ALL DEFERRED")
             .execute(&mut *tx)
             .await
-            .expect("defer cleanup constraints");
+            .expect("defer teardown constraints");
         sqlx::query(&format!(
             "DELETE FROM df.nodes WHERE instance_id IN ({id_list})"
         ))
         .execute(&mut *tx)
         .await
-        .expect("clean prune test nodes");
+        .expect("clean test nodes");
         sqlx::query(&format!("DELETE FROM df.instances WHERE id IN ({id_list})"))
             .execute(&mut *tx)
             .await
-            .expect("clean prune test instances");
-        tx.commit().await.expect("commit cleanup");
+            .expect("clean test instances");
+        tx.commit().await.expect("commit teardown");
     }
 
     // ========================================================================
@@ -1507,7 +1539,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_prune_terminal_instances_respects_age_and_keep_count() {
+    fn test_expired_instance_removal_respects_age_and_keep_count() {
         let conn = test_database_connection_string();
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1531,7 +1563,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            delete_prune_test_rows(&pool, &id_list).await;
+            delete_expired_test_rows(&pool, &id_list).await;
 
             let mut fixture_tx = pool.begin().await.expect("begin fixture transaction");
             sqlx::query("SET CONSTRAINTS ALL DEFERRED")
@@ -1544,10 +1576,10 @@ mod tests {
                 -- by COALESCE(completed_at, created_at):
                 --   aa261001 (1d, r1)  -> keep (within cap, young)
                 --   aa261002 (2d, r2)  -> keep (within cap, young)
-                --   aa261003 (3d, r3)  -> PRUNE by the hard cap even though it is
+                --   aa261003 (3d, r3)  -> REMOVE by the hard cap even though it is
                 --                         only 3 days old (rank > max_keep)
-                --   aa261004 (40d, r4) -> PRUNE (beyond cap and past retention)
-                --   aa261005 (50d, r5) -> PRUNE (beyond cap and past retention)
+                --   aa261004 (40d, r4) -> REMOVE (beyond cap and past retention)
+                --   aa261005 (50d, r5) -> REMOVE (beyond cap and past retention)
                 --   aa261006 (running) -> keep (non-terminal, never considered)
                 -- aa261004/aa261005 are 'failed'/'cancelled' (NULL completed_at) with
                 -- a forged far-future `updated_at`; they must still rank/age by their
@@ -1556,9 +1588,9 @@ mod tests {
                     VALUES
                         ('aa261001', 'keep-recent-1', 'bb261001', 'completed', 1, true, false),
                         ('aa261002', 'keep-recent-2', 'bb261002', 'completed', 2, true, false),
-                        ('aa261003', 'prune-young-over-cap', 'bb261003', 'completed', 3, true, false),
-                        ('aa261004', 'prune-old-failed-forged', 'bb261004', 'failed', 40, false, true),
-                        ('aa261005', 'prune-old-cancelled-forged', 'bb261005', 'cancelled', 50, false, true),
+                        ('aa261003', 'expire-young-over-cap', 'bb261003', 'completed', 3, true, false),
+                        ('aa261004', 'expire-old-failed-forged', 'bb261004', 'failed', 40, false, true),
+                        ('aa261005', 'expire-old-cancelled-forged', 'bb261005', 'cancelled', 50, false, true),
                         ('aa261006', 'keep-running', 'bb261006', 'running', 90, false, false)
                 )
                 INSERT INTO df.instances
@@ -1582,7 +1614,7 @@ mod tests {
             )
             .execute(&mut *fixture_tx)
             .await
-            .expect("insert prune instances");
+            .expect("insert test instances");
 
             sqlx::query(
                 r#"
@@ -1610,12 +1642,12 @@ mod tests {
             )
             .execute(&mut *fixture_tx)
             .await
-            .expect("insert prune nodes");
+            .expect("insert test nodes");
 
             let stats =
-                crate::worker::prune_terminal_instances_transaction(&mut fixture_tx, 30, 2)
+                crate::worker::delete_expired_instances_transaction(&mut fixture_tx, 30, 2)
                     .await
-                    .expect("prune terminal instances");
+                    .expect("delete expired instances");
 
             let remaining_instances: i64 = sqlx::query_scalar(&format!(
                 "SELECT pg_catalog.count(*)::bigint FROM df.instances WHERE id IN ({id_list})"
@@ -1644,19 +1676,37 @@ mod tests {
             fixture_tx
                 .rollback()
                 .await
-                .expect("rollback prune test fixture");
+                .expect("rollback test fixture");
 
             pool.close().await;
             stats
         });
 
-        assert_eq!(
-            stats,
-            crate::worker::PruneStats {
-                instances_deleted: 3,
-                nodes_deleted: 3,
-            }
-        );
+        assert_eq!(stats.instances_deleted, 3);
+        assert_eq!(stats.nodes_deleted, 3);
+        assert_eq!(stats.deleted_ids.len(), 3);
+    }
+
+    #[pg_test]
+    fn test_select_orphans_excludes_present_and_sub_orchestrations() {
+        use std::collections::HashSet;
+
+        // Failed engine instances reconciliation sees: a df-backed one, a genuine
+        // orphan (rolled-back df.start), and two sub-orchestrations the engine
+        // created internally for fan-out.
+        let failed = vec![
+            "inst-backed".to_string(),
+            "inst-orphan".to_string(),
+            "sub::inst-backed::0".to_string(),
+            "inst-backed::sub::1".to_string(),
+        ];
+        // Only inst-backed still has a df.instances row.
+        let present: HashSet<String> = ["inst-backed".to_string()].into_iter().collect();
+
+        let orphans = crate::worker::select_orphans(failed, &present);
+
+        // Only the df-less, non-sub instance is reclaimed.
+        assert_eq!(orphans, vec!["inst-orphan".to_string()]);
     }
 
     // ========================================================================

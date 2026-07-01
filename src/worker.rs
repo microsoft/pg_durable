@@ -12,30 +12,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::runtime;
+use duroxide::{Client, InstanceFilter};
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
 use crate::registry::{create_activity_registry, create_orchestration_registry};
 use crate::types::{
     get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
-    postgres_connection_string, resolve_duroxide_schema_pool, worker_provider_config,
+    get_reconcile_interval, get_retention_days, postgres_connection_string,
+    resolve_duroxide_schema_pool, worker_provider_config,
 };
 
-const TERMINAL_INSTANCE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // Retention policy for terminal ('completed'/'failed'/'cancelled') instances.
-// A terminal instance is pruned when it is OUTSIDE the newest
+// A terminal instance is removed when it is OUTSIDE the newest
 // TERMINAL_INSTANCE_MAX_KEEP rows (a hard cap enforced regardless of age) OR
-// older than TERMINAL_INSTANCE_RETENTION_DAYS. Equivalently, an instance is
-// retained only while it is BOTH among the newest TERMINAL_INSTANCE_MAX_KEEP
-// terminal rows AND younger than the retention window. The number of retained
-// terminal instances therefore never exceeds TERMINAL_INSTANCE_MAX_KEEP.
-const TERMINAL_INSTANCE_RETENTION_DAYS: i32 = 30;
+// older than pg_durable.retention_days. Equivalently, an instance is retained
+// only while it is BOTH among the newest TERMINAL_INSTANCE_MAX_KEEP terminal rows
+// AND younger than the retention window. The number of retained terminal
+// instances therefore never exceeds TERMINAL_INSTANCE_MAX_KEEP.
 const TERMINAL_INSTANCE_MAX_KEEP: i64 = 10_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PruneStats {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpiredDeletion {
     pub instances_deleted: i64,
     pub nodes_deleted: i64,
+    /// Ids of the df.instances rows this deletion removed.
+    pub deleted_ids: Vec<String>,
 }
 
 /// Initialize tracing subscriber for duroxide logs.
@@ -211,7 +213,7 @@ async fn run_duroxide_runtime() {
             duroxide_schema
         );
 
-        let Some(duroxide_runtime) = initialize_duroxide_runtime(
+        let Some((duroxide_runtime, duroxide_store)) = initialize_duroxide_runtime(
             &pg_conn_str,
             INIT_RETRY_INTERVAL,
             &mgmt_pool,
@@ -247,6 +249,7 @@ async fn run_duroxide_runtime() {
             &poll_pool,
             &mgmt_pool,
             duroxide_runtime,
+            duroxide_store,
             EXTENSION_DROP_POLL_INTERVAL,
             SHUTDOWN_CHECK_INTERVAL,
             epoch_id.as_deref(),
@@ -470,7 +473,7 @@ async fn initialize_duroxide_runtime(
     retry_interval: Duration,
     mgmt_pool: &sqlx::PgPool,
     schema_name: &str,
-) -> Option<Arc<runtime::Runtime>> {
+) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
 
     // Control duroxide provider pool size via env var (the only mechanism
@@ -553,11 +556,13 @@ async fn initialize_duroxide_runtime(
             create_activity_registry(Arc::new(mgmt_pool.clone()), user_semaphore.clone());
         let orchestrations = create_orchestration_registry();
 
+        let store_for_client = store.clone();
+
         let duroxide_runtime =
             runtime::Runtime::start_with_store(store, activities, orchestrations).await;
 
         log!("pg_durable: duroxide runtime started");
-        return Some(duroxide_runtime);
+        return Some((duroxide_runtime, store_for_client));
     }
 }
 
@@ -645,37 +650,15 @@ async fn check_epoch_sentinel(pool: &sqlx::PgPool, epoch_id: &str) -> bool {
     matches!(result, Ok(Some(_)))
 }
 
-async fn prune_terminal_instances(pool: &sqlx::PgPool) -> Result<PruneStats, sqlx::Error> {
-    prune_terminal_instances_with_limits(
-        pool,
-        TERMINAL_INSTANCE_RETENTION_DAYS,
-        TERMINAL_INSTANCE_MAX_KEEP,
-    )
-    .await
-}
-
-pub(crate) async fn prune_terminal_instances_with_limits(
-    pool: &sqlx::PgPool,
-    retention_days: i32,
-    max_keep: i64,
-) -> Result<PruneStats, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let stats = prune_terminal_instances_transaction(&mut tx, retention_days, max_keep).await?;
-    tx.commit().await?;
-
-    Ok(stats)
-}
-
-pub(crate) async fn prune_terminal_instances_transaction(
+/// Expired terminal instances: those beyond the newest `max_keep` (a hard cap
+/// enforced regardless of age) OR older than `retention_days`. Read-only — the
+/// caller retires the engine records before deleting the df rows.
+async fn select_expired_instance_ids_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     retention_days: i32,
     max_keep: i64,
-) -> Result<PruneStats, sqlx::Error> {
-    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
-        .execute(&mut **tx)
-        .await?;
-
-    let (instances_deleted, nodes_deleted): (i64, i64) = sqlx::query_as(
+) -> Result<Vec<String>, sqlx::Error> {
+    let ids: Option<Vec<String>> = sqlx::query_scalar(
         r#"
         WITH terminal_instances AS (
             SELECT
@@ -691,72 +674,147 @@ pub(crate) async fn prune_terminal_instances_transaction(
                     -- is intentionally excluded: PUBLIC has column-level UPDATE on
                     -- it, and for 'failed'/'cancelled' rows `completed_at` is NULL,
                     -- so including `updated_at` would let a low-privilege user forge
-                    -- the prune ordering/age. `completed_at` (set by the worker on
+                    -- the removal ordering/age. `completed_at` (set by the worker on
                     -- completion) and `created_at` (insert-time default, not
                     -- grantable) are not user-writable.
                     COALESCE(completed_at, created_at) AS terminal_at
                 FROM df.instances
                 WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
             ) ranked
-        ),
-        prune_candidates AS (
-            SELECT id
-            FROM terminal_instances
-            -- Prune when the row is beyond the newest $1 terminal instances (a
-            -- hard cap enforced regardless of age) OR older than the retention
-            -- window ($2 days). Retained rows are thus always within the newest
-            -- $1 AND younger than the retention window, so the retained terminal
-            -- count never exceeds $1.
-            WHERE terminal_rank OPERATOR(pg_catalog.>) $1
-               OR terminal_at OPERATOR(pg_catalog.<)
-                  (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
-        ),
-        deleted_nodes AS (
-            DELETE FROM df.nodes n
-            USING prune_candidates pc
-            WHERE n.instance_id OPERATOR(pg_catalog.=) pc.id
-            RETURNING n.instance_id
-        ),
-        deleted_instances AS (
-            DELETE FROM df.instances i
-            USING prune_candidates pc
-            WHERE i.id OPERATOR(pg_catalog.=) pc.id
-            RETURNING i.id
         )
-        SELECT
-            (SELECT pg_catalog.count(*)::bigint FROM deleted_instances) AS instances_deleted,
-            (SELECT pg_catalog.count(*)::bigint FROM deleted_nodes) AS nodes_deleted
+        -- Expired when the row is beyond the newest $1 terminal instances (a hard
+        -- cap enforced regardless of age) OR older than the retention window ($2
+        -- days). Retained rows are thus always within the newest $1 AND younger than
+        -- the retention window, so the retained terminal count never exceeds $1.
+        SELECT pg_catalog.array_agg(id)
+        FROM terminal_instances
+        WHERE terminal_rank OPERATOR(pg_catalog.>) $1
+           OR terminal_at OPERATOR(pg_catalog.<)
+              (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
         "#,
     )
     .bind(max_keep)
     .bind(retention_days)
     .fetch_one(&mut **tx)
     .await?;
+    Ok(ids.unwrap_or_default())
+}
 
-    Ok(PruneStats {
-        instances_deleted,
+/// Delete the df.nodes and df.instances rows for `ids` (nodes first, with the
+/// circular same-instance FK deferred). Returns the counts deleted.
+async fn delete_expired_instances_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[String],
+) -> Result<ExpiredDeletion, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(ExpiredDeletion {
+            instances_deleted: 0,
+            nodes_deleted: 0,
+            deleted_ids: Vec::new(),
+        });
+    }
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut **tx)
+        .await?;
+
+    let (deleted_ids, nodes_deleted): (Option<Vec<String>>, i64) = sqlx::query_as(
+        r#"
+        WITH deleted_nodes AS (
+            DELETE FROM df.nodes n
+            USING pg_catalog.unnest($1::text[]) AS t(id)
+            WHERE n.instance_id OPERATOR(pg_catalog.=) t.id
+            RETURNING n.instance_id
+        ),
+        deleted_instances AS (
+            DELETE FROM df.instances i
+            USING pg_catalog.unnest($1::text[]) AS t(id)
+            WHERE i.id OPERATOR(pg_catalog.=) t.id
+            RETURNING i.id
+        )
+        SELECT
+            (SELECT pg_catalog.array_agg(id) FROM deleted_instances) AS deleted_ids,
+            (SELECT pg_catalog.count(*)::bigint FROM deleted_nodes) AS nodes_deleted
+        "#,
+    )
+    .bind(ids)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let deleted_ids = deleted_ids.unwrap_or_default();
+    Ok(ExpiredDeletion {
+        instances_deleted: deleted_ids.len() as i64,
         nodes_deleted,
+        deleted_ids,
     })
+}
+
+/// Read the expired terminal instances.
+async fn select_expired_instance_ids(
+    pool: &sqlx::PgPool,
+    retention_days: i32,
+    max_keep: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let ids = select_expired_instance_ids_tx(&mut tx, retention_days, max_keep).await?;
+    tx.commit().await?;
+    Ok(ids)
+}
+
+/// Delete the df rows for the given expired-instance ids.
+async fn delete_expired_instances(
+    pool: &sqlx::PgPool,
+    ids: &[String],
+) -> Result<ExpiredDeletion, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let stats = delete_expired_instances_tx(&mut tx, ids).await?;
+    tx.commit().await?;
+    Ok(stats)
+}
+
+/// Select and delete the eligible terminal instances in a single transaction.
+/// Used by tests; the background worker instead runs the two halves separately so
+/// it can retire the engine records between them (see
+/// `run_until_extension_dropped_or_shutdown`).
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) async fn delete_expired_instances_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    retention_days: i32,
+    max_keep: i64,
+) -> Result<ExpiredDeletion, sqlx::Error> {
+    let ids = select_expired_instance_ids_tx(tx, retention_days, max_keep).await?;
+    delete_expired_instances_tx(tx, &ids).await
 }
 
 async fn run_until_extension_dropped_or_shutdown(
     poll_pool: &sqlx::PgPool,
     maintenance_pool: &sqlx::PgPool,
     duroxide_runtime: Arc<runtime::Runtime>,
+    duroxide_store: Arc<PostgresProvider>,
     drop_poll_interval: Duration,
     shutdown_check_interval: Duration,
     epoch_id: Option<&str>,
 ) {
     log!("pg_durable: processing durable functions...");
 
+    let client = Client::new(duroxide_store.clone());
+
     let mut drop_check = tokio::time::interval(drop_poll_interval);
     drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let mut prune_check = tokio::time::interval_at(
-        tokio::time::Instant::now() + TERMINAL_INSTANCE_PRUNE_INTERVAL,
-        TERMINAL_INSTANCE_PRUNE_INTERVAL,
+    // reconcile_interval=0 disables the sweep; the tick is then gated off, but
+    // interval_at still needs a positive period, so fall back to 1h.
+    let reconcile_interval = get_reconcile_interval();
+    let reconcile_enabled = !reconcile_interval.is_zero();
+    let effective_reconcile_interval = if reconcile_interval.is_zero() {
+        Duration::from_secs(60 * 60)
+    } else {
+        reconcile_interval
+    };
+    let mut reconcile_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + effective_reconcile_interval,
+        effective_reconcile_interval,
     );
-    prune_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    reconcile_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -777,19 +835,51 @@ async fn run_until_extension_dropped_or_shutdown(
                     break;
                 }
             }
-            _ = prune_check.tick() => {
-                match prune_terminal_instances(maintenance_pool).await {
-                    Ok(stats) if stats.instances_deleted > 0 || stats.nodes_deleted > 0 => {
-                        log!(
-                            "pg_durable: pruned {} terminal instance(s) and {} node row(s)",
-                            stats.instances_deleted,
-                            stats.nodes_deleted
-                        );
+            _ = reconcile_check.tick(), if reconcile_enabled => {
+                let retention_days = get_retention_days();
+
+                // Engine-first: retire the engine record before the df row, so a
+                // failed pass only leaves the harmless direction — an engine record
+                // with no df row (invisible to df.list_instances, reclaimed below),
+                // never the reverse. The stores are thus eventually consistent.
+                match select_expired_instance_ids(
+                    maintenance_pool,
+                    retention_days,
+                    TERMINAL_INSTANCE_MAX_KEEP,
+                )
+                .await
+                {
+                    Ok(candidates) if !candidates.is_empty() => {
+                        // Only delete the df rows once the engine records are gone;
+                        // if that fails, leave both in place and retry next pass.
+                        if retire_engine_records(&client, &candidates).await {
+                            match delete_expired_instances(maintenance_pool, &candidates).await {
+                                Ok(stats) => {
+                                    if stats.instances_deleted > 0 || stats.nodes_deleted > 0 {
+                                        log!(
+                                            "pg_durable: removed {} expired instance(s) and {} node row(s)",
+                                            stats.instances_deleted,
+                                            stats.nodes_deleted
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    log!("pg_durable: removing expired instances failed: {e}");
+                                }
+                            }
+                        }
                     }
                     Ok(_) => {}
-                    Err(e) => {
-                        log!("pg_durable: terminal instance pruning failed: {}", e);
+                    Err(e) => log!("pg_durable: selecting expired instances failed: {e}"),
+                }
+
+                let retention = Duration::from_secs(retention_days as u64 * 86_400);
+                match reclaim_orphaned_instances(maintenance_pool, &client, retention).await {
+                    Ok(reclaimed) if reclaimed > 0 => {
+                        log!("pg_durable: reclaimed {reclaimed} orphaned engine record(s)");
                     }
+                    Ok(_) => {}
+                    Err(e) => log!("pg_durable: reclaiming orphaned engine records failed: {e}"),
                 }
             }
         }
@@ -798,4 +888,129 @@ async fn run_until_extension_dropped_or_shutdown(
     log!("pg_durable: initiating duroxide runtime shutdown...");
     duroxide_runtime.shutdown(Some(10_000)).await;
     log!("pg_durable: duroxide runtime shutdown complete");
+}
+
+/// Maximum orphans one reconciliation pass reclaims, bounding a single tick's work.
+const RECLAIM_BATCH: u32 = 1000;
+
+/// True for sub-orchestration instance ids, which the engine creates internally
+/// (JOIN/RACE fan-out) and which legitimately have no df.instances row —
+/// reconciliation must never delete them.
+fn is_sub_orchestration(id: &str) -> bool {
+    id.starts_with("sub::") || id.contains("::sub::")
+}
+
+/// Milliseconds-since-epoch cutoff for "older than `retention`". Used as the
+/// engine's `completed_before` filter so an orphan younger than the retention
+/// window is left alone.
+fn retention_cutoff_ms(retention: Duration) -> u64 {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    since_epoch.saturating_sub(retention).as_millis() as u64
+}
+
+/// From the engine's `Failed` instance ids and the set that still have a
+/// df.instances row, select the orphans to reclaim: those with no df row and that
+/// are not sub-orchestrations (the engine creates sub-orchestrations internally
+/// for JOIN/RACE fan-out; they legitimately have no df row and must be kept).
+pub(crate) fn select_orphans(
+    failed_ids: Vec<String>,
+    present: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    failed_ids
+        .into_iter()
+        .filter(|id| !is_sub_orchestration(id) && !present.contains(id))
+        .collect()
+}
+
+/// Delete engine records the engine still holds but pg_durable no longer has a
+/// df.instances row for, once they age past the `retention` window. Returns the
+/// count reclaimed.
+///
+/// Only `Failed` engine instances are considered: a rolled-back df.start() leaves
+/// its engine instance `Failed` (it can never load its graph), and scanning only
+/// `Failed` keeps this cheap — the (potentially large) `Completed` set is retired
+/// by reconciliation ahead of removing its df rows instead (see the reconcile
+/// branch). Sub-orchestrations are excluded, and the `completed_before` filter
+/// enforces the retention window so an instance whose df commit is merely
+/// in-flight or just-landed is never touched.
+async fn reclaim_orphaned_instances(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    retention: Duration,
+) -> Result<u64, String> {
+    let candidates: Vec<String> = client
+        .list_instances_by_status("Failed")
+        .await
+        .map_err(|e| format!("list failed instances: {e:?}"))?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    // Keep only ids with no df.instances row (orphans). The worker pool bypasses
+    // RLS, so this sees every user's rows.
+    let present: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT id FROM df.instances WHERE id = ANY($1)")
+            .bind(&candidates)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("cross-check df.instances: {e}"))?
+            .into_iter()
+            .collect();
+
+    let mut orphans = select_orphans(candidates, &present);
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    orphans.truncate(RECLAIM_BATCH as usize);
+
+    let result = client
+        .delete_instance_bulk(InstanceFilter {
+            instance_ids: Some(orphans),
+            completed_before: Some(retention_cutoff_ms(retention)),
+            limit: Some(RECLAIM_BATCH),
+        })
+        .await
+        .map_err(|e| format!("delete_instance_bulk: {e:?}"))?;
+    Ok(result.instances_deleted)
+}
+
+/// Best-effort deletion of duroxide engine records by id, ahead of deleting the
+/// matching df rows. Returns `true` when it is safe to delete those df rows —
+/// the engine delete succeeded, or there was nothing to delete. On failure it
+/// returns `false` so the caller leaves the df rows in place and retries the
+/// whole instance next pass rather than orphaning its engine record.
+async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
+    let ids: Vec<String> = ids
+        .iter()
+        .filter(|id| !is_sub_orchestration(id))
+        .cloned()
+        .collect();
+    if ids.is_empty() {
+        return true;
+    }
+    let limit = ids.len().min(u32::MAX as usize) as u32;
+    match client
+        .delete_instance_bulk(InstanceFilter {
+            instance_ids: Some(ids),
+            completed_before: None,
+            limit: Some(limit),
+        })
+        .await
+    {
+        Ok(result) => {
+            if result.instances_deleted > 0 {
+                log!(
+                    "pg_durable: retired {} engine record(s) ahead of removing the df rows",
+                    result.instances_deleted
+                );
+            }
+            true
+        }
+        Err(e) => {
+            log!("pg_durable: failed to retire engine records; deferring df removal: {e:?}");
+            false
+        }
+    }
 }

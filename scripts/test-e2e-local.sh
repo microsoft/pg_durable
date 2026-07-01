@@ -59,6 +59,7 @@ DEFAULT_BUILD_PHASES=(
     "connlimit-backpressure"
     "connlimit-timeout"
     "connlimit-startup"
+    "reconcile"
 )
 
 ALL_PHASES=(
@@ -68,6 +69,7 @@ ALL_PHASES=(
     "connlimit-backpressure"
     "connlimit-timeout"
     "connlimit-startup"
+    "reconcile"
     "http-disabled"
     "http-allow-all"
 )
@@ -141,6 +143,9 @@ phase_label() {
         connlimit-startup)
             echo "connection limit startup validation"
             ;;
+        reconcile)
+            echo "reconcile orphans"
+            ;;
         http-disabled)
             echo "HTTP disabled (no http Cargo feature)"
             ;;
@@ -169,6 +174,9 @@ phase_for_test() {
             ;;
         46_connection_limit_startup_validation)
             echo "connlimit-startup"
+            ;;
+        54_reconcile_orphans)
+            echo "reconcile"
             ;;
         47_http_dsl_disabled)
             echo "http-disabled"
@@ -301,7 +309,7 @@ set_conf_line() {
 }
 
 clear_connlimit_gucs() {
-    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d' "$CONF_FILE"
+    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d' "$CONF_FILE"
 }
 
 ensure_data_dir() {
@@ -479,6 +487,17 @@ configure_phase() {
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_duroxide_connections" "1"
             ;;
+        reconcile)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
+            # Short reconcile cadence and zero retention so a pass acts within the
+            # test window instead of the conservative production defaults
+            # (retention_days=0 makes an aged-out orphan eligible at once).
+            set_conf_line "pg_durable.reconcile_interval" "2"
+            set_conf_line "pg_durable.retention_days" "0"
+            ;;
         http-disabled)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
@@ -506,7 +525,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup)
+        no-preload|standard|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -559,6 +578,9 @@ prepare_phase() {
             wait_for_worker_ready
             ;;
         connlimit-startup)
+            ;;
+        reconcile)
+            wait_for_worker_ready
             ;;
         http-disabled|http-allow-all)
             ensure_e2e_role

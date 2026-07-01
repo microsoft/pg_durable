@@ -57,6 +57,17 @@ pub fn get_execution_acquire_timeout() -> Duration {
     Duration::from_secs(crate::EXECUTION_ACQUIRE_TIMEOUT.get() as u64)
 }
 
+/// Days a terminal instance is retained before reconciliation removes it and its
+/// engine record; also the age bound for reclaiming orphaned engine records.
+pub fn get_retention_days() -> i32 {
+    crate::RETENTION_DAYS.get()
+}
+
+/// Interval between background reconciliation passes. Zero disables reconciliation.
+pub fn get_reconcile_interval() -> Duration {
+    Duration::from_secs(crate::RECONCILE_INTERVAL.get() as u64)
+}
+
 /// Returns `true` when superuser-submitted instances are permitted.
 pub fn superuser_instances_enabled() -> bool {
     crate::ENABLE_SUPERUSER_INSTANCES.get()
