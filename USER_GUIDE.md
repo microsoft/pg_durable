@@ -1466,6 +1466,8 @@ Filters (`status_filter`, `label_filter`) are sticky across pages — keep passi
 
 > **Note:** `next_cursor` advances over `df.instances` independently of the per-row execution-metadata lookup. In a brief start-up window a freshly-submitted instance can appear in `df.instances` before its execution metadata is queryable and is omitted from that page; in the rare case where *every* row of a non-final page is omitted, the page returns zero rows (so `next_cursor` can't be read) — retry shortly.
 
+> **Page-size limit:** `limit_count` is capped by the `pg_durable.list_instances_max_limit` GUC (default `1000`). A request for more rows than the cap raises an error instead of being silently truncated — lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`) for larger result sets. A superuser can raise the cap at runtime (`ALTER SYSTEM SET pg_durable.list_instances_max_limit = …; SELECT pg_reload_conf();`); by default ordinary callers cannot change it. See [docs/api-reference.md](docs/api-reference.md#pg_durablelist_instances_max_limit).
+
 ### Instance Details
 
 ```sql
@@ -1938,6 +1940,8 @@ pg_durable.max_user_connections = 10
 # before failing with an error.
 pg_durable.execution_acquire_timeout = 30
 ```
+
+> **Other GUCs:** `pg_durable.list_instances_max_limit` (SUSET context, default `1000`) caps the per-call page size of `df.list_instances()`. Unlike the connection-limit GUCs above, it is superuser-settable at runtime (no restart) and is not loaded from `postgresql.conf` at startup only. See [docs/api-reference.md](docs/api-reference.md#pg_durablelist_instances_max_limit).
 
 ### Connection Budget Formula
 

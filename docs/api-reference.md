@@ -351,7 +351,7 @@ The two overloads have non-overlapping arities (basic matches 0–2 arguments, p
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `status_filter` | TEXT | `NULL` (basic only) | Only instances with this status (lowercase: `pending`, `running`, `completed`, `failed`, `cancelled`). `NULL` = any. |
-| `limit_count` | INTEGER | `100` (basic only) | Max rows per page (must be ≥ 1; capped at 10000). |
+| `limit_count` | INTEGER | `100` (basic only) | Max rows per page (must be ≥ 1). A request above `pg_durable.list_instances_max_limit` (default 1000) raises an error instead of being silently truncated — lower `limit_count`, or use the paginated overload (`after_cursor`) for larger result sets. |
 | `label_filter` | TEXT | — (required to select the paginated overload) | Only instances whose label equals this value (issue #87). `NULL` = any. |
 | `after_cursor` | TEXT | `NULL` | Opaque keyset cursor from a prior page's `next_cursor`; returns the page that sorts strictly after it (issue #146). `NULL` = first page. |
 
@@ -606,4 +606,32 @@ SHOW pg_durable.enable_superuser_instances;
 ```
 
 **Security note:** Setting this GUC to `on` in a multi-tenant environment allows any role with `BYPASSRLS` to forge `submitted_by` to a superuser OID and execute arbitrary SQL as superuser. Keep `off` unless you have a specific need and understand the risk. See [docs/superuser_guc.md](superuser_guc.md) for the full threat analysis.
+
+---
+
+### pg_durable.list_instances_max_limit
+
+Maximum number of rows `df.list_instances()` returns in a single call. A request for more rows than this raises an error instead of silently truncating the result, so external clients paginate explicitly (via `after_cursor`/`next_cursor`) rather than relying on a silent cap.
+
+| Property | Value |
+|----------|-------|
+| Type | `integer` |
+| Default | `1000` |
+| Range | `1` – `1000000` |
+| Context | `SUSET` (superuser can change at runtime; no restart needed) |
+
+Both `df.list_instances()` overloads (basic and paginated) enforce this cap. By default an ordinary (non-superuser) caller cannot raise it, so the guardrail holds from a user session — a superuser may delegate that ability with `GRANT SET ON PARAMETER pg_durable.list_instances_max_limit TO <role>`, but without that grant it stays superuser-settable only.
+
+> **Sizing note:** `df.list_instances()` materializes up to `limit_count` rows per call, so raise the cap only as high as a single response should reasonably hold. For very large exports, prefer paging with `after_cursor`/`next_cursor` over one huge page rather than setting the cap near its maximum.
+
+```sql
+-- Inspect the current cap
+SHOW pg_durable.list_instances_max_limit;
+
+-- Raise it for an admin reporting workload (requires superuser)
+ALTER SYSTEM SET pg_durable.list_instances_max_limit = 5000;
+SELECT pg_reload_conf();
+```
+
+> **Behavior change (v0.2.4):** prior to v0.2.4, `df.list_instances()` silently truncated `limit_count` to 10000. It now raises an error when `limit_count` exceeds this GUC (default 1000). Callers that previously requested very large pages should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`).
 
