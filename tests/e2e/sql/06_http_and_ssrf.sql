@@ -263,85 +263,84 @@ END $$;
 DROP TABLE _test_http_vars;
 SELECT df.clearvars();
 
--- === Test: 19_github_api ===
+-- === Test: 19_http_json_api_loop ===
 
-DROP TABLE IF EXISTS github_commits;
-CREATE TABLE github_commits (
+DROP TABLE IF EXISTS http_loop_results;
+CREATE TABLE http_loop_results (
     id SERIAL PRIMARY KEY,
-    sha TEXT UNIQUE,
-    author TEXT,
-    message TEXT,
-    committed_at TIMESTAMPTZ,
+    url TEXT UNIQUE,
+    source TEXT,
+    user_agent TEXT,
     fetched_at TIMESTAMPTZ DEFAULT now()
 );
 
 SELECT df.clearvars();
-SELECT df.setvar('github_url', 'https://api.github.com/repos/microsoft/duroxide/commits?per_page=5');
+SELECT df.setvar('api_url', 'https://httpbingo.org/get?source=pg_durable');
 
-CREATE TEMP TABLE _test_github (instance_id TEXT);
+CREATE TEMP TABLE _test_http_loop (instance_id TEXT);
 
-INSERT INTO _test_github SELECT df.start(
+INSERT INTO _test_http_loop SELECT df.start(
     @> (
         (df.http(
-            '{github_url}',
+            '{api_url}',
             'GET',
             NULL,
-            '{"Accept": "application/vnd.github.v3+json", "User-Agent": "pg_durable-test"}'::jsonb
+            '{"Accept": "application/json", "User-Agent": "pg_durable-test"}'::jsonb
         ) |=> 'response')
-        ~> 'INSERT INTO github_commits (sha, author, message, committed_at)
-            SELECT 
-                c->>''sha'',
-                c->''commit''->''author''->>''name'',
-                c->''commit''->>''message'',
-                (c->''commit''->''author''->>''date'')::timestamptz
-            FROM jsonb_array_elements(($response::jsonb->>''body'')::jsonb) AS c
-            ON CONFLICT (sha) DO UPDATE SET
+        ~> 'INSERT INTO http_loop_results (url, source, user_agent)
+            SELECT
+                body->>''url'',
+                body->''args''->>''source'',
+                body->''headers''->>''User-Agent''
+            FROM (SELECT ($response::jsonb->>''body'')::jsonb AS body) s
+            WHERE ($response::jsonb->>''ok'')::boolean
+            ON CONFLICT (url) DO UPDATE SET
                 fetched_at = now()
-            RETURNING sha'
+            RETURNING url'
         ~> df.wait_for_schedule('*/30 * * * *')
     ),
-    'github-commit-sync'
+    'http-json-loop-sync'
 );
 
 DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    commit_count INT;
+    result_count INT;
     attempts INT := 0;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_github;
-    RAISE NOTICE 'Testing GitHub API with vars and loop: %', inst_id;
+    SELECT instance_id INTO inst_id FROM _test_http_loop;
+    RAISE NOTICE 'Testing HTTP JSON API with vars and loop: %', inst_id;
     
     LOOP
         SELECT s INTO status FROM df.status(inst_id) s;
-        SELECT COUNT(*) INTO commit_count FROM github_commits;
-        EXIT WHEN commit_count > 0 OR lower(status) = 'failed' OR attempts > 300;
+        SELECT COUNT(*) INTO result_count FROM http_loop_results;
+        EXIT WHEN result_count > 0 OR lower(status) = 'failed' OR attempts > 300;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
     
     IF lower(status) = 'failed' THEN
-        RAISE EXCEPTION 'TEST FAILED: GitHub API fetch status = %', status;
+        RAISE EXCEPTION 'TEST FAILED: HTTP JSON API fetch status = %', status;
     END IF;
     
-    SELECT COUNT(*) INTO commit_count FROM github_commits;
-    RAISE NOTICE 'Fetched % commits from GitHub', commit_count;
+    SELECT COUNT(*) INTO result_count FROM http_loop_results;
+    RAISE NOTICE 'Fetched % HTTP JSON row(s)', result_count;
     
-    IF commit_count = 0 THEN
-        RAISE EXCEPTION 'TEST FAILED: No commits fetched from GitHub API';
+    IF result_count = 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: No rows fetched from HTTP JSON API';
     END IF;
     
     PERFORM df.cancel(inst_id, 'Test completed - cancelling scheduled loop');
     RAISE NOTICE 'Cancelled scheduled loop after successful first iteration';
     
-    RAISE NOTICE 'TEST PASSED: github_api_with_vars_and_loop';
+    RAISE NOTICE 'TEST PASSED: http_json_api_with_vars_and_loop';
 END $$;
 
-SELECT sha, author, committed_at, LEFT(message, 50) AS message FROM github_commits ORDER BY committed_at DESC;
+SELECT url, source, user_agent FROM http_loop_results ORDER BY fetched_at DESC;
 
-DROP TABLE _test_github;
-DROP TABLE github_commits;
+DROP TABLE _test_http_loop;
+DROP TABLE http_loop_results;
 SELECT df.clearvars();
 
 -- === Test: 36_ssrf_protection ===
