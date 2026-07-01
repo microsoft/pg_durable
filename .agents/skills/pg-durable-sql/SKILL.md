@@ -109,8 +109,24 @@ df.break(value TEXT) → TEXT                          -- Exit with return value
 df.start(
     fut TEXT,                           -- The DSL graph expression
     label TEXT DEFAULT NULL,            -- Optional friendly name
-    database TEXT DEFAULT NULL          -- Optional target database
+    database TEXT DEFAULT NULL,         -- Optional target database
+    transaction_mode TEXT DEFAULT 'caller'  -- 'caller' | 'new'
 ) → TEXT                                -- Returns 8-char instance ID
+
+-- transaction_mode selects which transaction the START runs in; it changes
+-- nothing about the durable function itself.
+--   'caller' (default) -- joins the caller's transaction, rolled back with it
+--   'new'              -- runs in its own transaction on a separate session, so
+--                         it SURVIVES a ROLLBACK of the caller's transaction
+--                         (the same outcome as an Oracle autonomous transaction
+--                         for asynchronously started work). The returned ID
+--                         confirms launch, not completion; execution errors are
+--                         observed through monitoring APIs. That session sees only
+--                         committed rows, so df.setvar() values not yet
+--                         committed are NOT captured. Rejected inside a
+--                         workflow, and an unrecognised value raises. Avoid
+--                         per-row/high-fan-out use and make effects idempotent.
+df.start('INSERT INTO audit ...', 'audit', transaction_mode => 'new');
 
 -- Cancel a running instance
 df.cancel(instance_id TEXT, reason TEXT DEFAULT 'Cancelled by user') → TEXT

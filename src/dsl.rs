@@ -766,16 +766,153 @@ fn pick_id_with_retry(
     ))
 }
 
+/// Capture the effective role identity (after `SET ROLE` / `SECURITY DEFINER`)
+/// as both its OID and its name.
+fn current_user_identity() -> (pgrx::pg_sys::Oid, String) {
+    let oid = unsafe { pgrx::pg_sys::GetUserId() };
+    let name = unsafe {
+        let name_ptr = pgrx::pg_sys::GetUserNameFromId(oid, false);
+        std::ffi::CStr::from_ptr(name_ptr)
+            .to_string_lossy()
+            .into_owned()
+    };
+    (oid, name)
+}
+
+/// Raise unless the submitting role can log in.
+///
+/// Both start paths need this: the background worker connects as this role to
+/// execute SQL nodes, and `transaction_mode => 'new'` additionally connects as
+/// it to persist the graph. Checking here turns a NOLOGIN role into a clear
+/// error instead of an opaque connection failure later.
+fn require_login_privilege(oid: pgrx::pg_sys::Oid, name: &str, caller: &str) {
+    let has_login: bool = match Spi::get_one_with_args(
+        "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE oid = $1",
+        &[oid.into()],
+    ) {
+        Ok(Some(has_login)) => has_login,
+        Ok(None) => pgrx::error!(
+            "failed to check LOGIN privilege for current_user oid {}: query returned NULL",
+            oid
+        ),
+        Err(e) => pgrx::error!(
+            "failed to check LOGIN privilege for current_user oid {}: {}",
+            oid,
+            e
+        ),
+    };
+
+    if !has_login {
+        pgrx::error!(
+            "current_user \"{}\" does not have LOGIN privilege. \
+             The background worker must connect as this role to execute SQL. \
+             Grant LOGIN to this role or call {} as a role with LOGIN.",
+            name,
+            caller
+        );
+    }
+}
+
+/// `transaction_mode`: the start participates in the caller's transaction and
+/// is rolled back with it. This is the default and the historical behaviour.
+const TXN_MODE_CALLER: &str = "caller";
+
+/// `transaction_mode`: the start runs in its own transaction, on a separate
+/// session, and therefore survives a rollback of the caller's transaction.
+const TXN_MODE_NEW: &str = "new";
+
 /// Starts a durable SQL function.
+///
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
 /// Variables from df.vars are captured and passed to the orchestration.
 /// Optional database parameter targets a specific database on the cluster.
-#[pg_extern(schema = "df")]
-pub fn start(
+///
+/// `transaction_mode` selects which transaction the *start itself* runs in. It
+/// changes nothing about the durable function that gets started:
+///
+/// - `'caller'` (default) — the start joins the caller's transaction, so a
+///   `ROLLBACK` discards the durable function along with everything else.
+/// - `'new'` — the start runs in its own transaction on a separate session, so
+///   it commits independently and **survives a rollback of the caller's
+///   transaction**. This provides the same rollback-survival outcome as Oracle
+///   autonomous transactions for asynchronously started work, but it is not a
+///   synchronous autonomous routine: only the launch commits before this call
+///   returns, and execution errors are observed through monitoring APIs.
+///
+/// Because a separate session cannot see the caller's uncommitted rows, under
+/// `'new'` the `df.vars` snapshot captured for the instance reflects only
+/// **committed** variables — anything set with `df.setvar()` earlier in the
+/// caller's open transaction is not visible to it.
+#[pg_extern(name = "start", schema = "df")]
+pub fn start_v2(
     fut: &str,
     label: default!(Option<&str>, "NULL"),
     database: default!(Option<&str>, "NULL"),
+    transaction_mode: default!(&str, "'caller'"),
 ) -> String {
+    // Reject anything we do not recognise. Silently treating a typo as the
+    // default would hand back an instance id for a start the caller believes
+    // survives their rollback, and which quietly does not.
+    if transaction_mode.eq_ignore_ascii_case(TXN_MODE_CALLER) {
+        start_in_caller_transaction(fut, label, database)
+    } else if transaction_mode.eq_ignore_ascii_case(TXN_MODE_NEW) {
+        start_in_new_transaction(fut, label, database)
+    } else {
+        pgrx::error!(
+            "invalid transaction_mode \"{}\" for df.start(): expected '{}' or '{}'",
+            transaction_mode,
+            TXN_MODE_CALLER,
+            TXN_MODE_NEW
+        );
+    }
+}
+
+/// Legacy three-argument `df.start()`, retained for binary compatibility only.
+///
+/// Schemas from before `transaction_mode` existed declare `df.start(text, text,
+/// text)` against this symbol. A customer who swaps in a newer `.so` without
+/// running `ALTER EXTENSION UPDATE` still resolves to it, so it must keep
+/// taking exactly three arguments. `sql = false` keeps the symbol in the binary
+/// while emitting no DDL, so upgraded and fresh installs expose only the
+/// four-argument `df.start()` above and no ambiguous overload exists.
+#[pg_extern(sql = false)]
+pub fn start(fut: &str, label: Option<&str>, database: Option<&str>) -> String {
+    start_in_caller_transaction(fut, label, database)
+}
+
+/// `df.start()` under `transaction_mode => 'new'`.
+fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&str>) -> String {
+    // Inside a workflow this mode is pure cost. A df.sql() node is executed as
+    // a single statement on an autocommit connection, so a plain df.start()
+    // there already commits on its own and cannot be rolled back by the
+    // caller — 'new' would buy nothing and burn an extra backend, which is not
+    // counted against pg_durable.max_user_connections.
+    if is_in_workflow_context() {
+        pgrx::error!(
+            "df.start() with transaction_mode => '{}' cannot be called inside a workflow - \
+             a df.sql() node already runs as a single autocommitted statement, so a plain \
+             df.start() there is already independent of any caller transaction",
+            TXN_MODE_NEW
+        );
+    }
+
+    // Capture the calling role so the separate session runs df.start() with the
+    // same identity (and therefore the same privileges / RLS scope).
+    let (user_oid, user_name) = current_user_identity();
+
+    // That session logs in as this role, so a NOLOGIN role must fail here with
+    // the usual message rather than as a connection error.
+    require_login_privilege(user_oid, &user_name, "df.start()");
+
+    match crate::client::start_in_new_transaction(fut, label, database, &user_name) {
+        Ok(id) => id,
+        Err(e) => pgrx::error!("{}", e),
+    }
+}
+
+/// `df.start()` under `transaction_mode => 'caller'`: build and persist the
+/// graph through SPI, so it lives or dies with the caller's transaction.
+fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<&str>) -> String {
     let durofut = match Durofut::ensure_strict(fut) {
         Ok(d) => d,
         Err(e) => pgrx::error!("Invalid durable function: {}", e),
@@ -806,42 +943,9 @@ pub fn start(
     }
 
     // Capture user identity for privilege isolation
-    let current_user_oid = unsafe { pgrx::pg_sys::GetUserId() };
-    let current_user_name = unsafe {
-        let name_ptr = pgrx::pg_sys::GetUserNameFromId(current_user_oid, false);
-        std::ffi::CStr::from_ptr(name_ptr)
-            .to_string_lossy()
-            .into_owned()
-    };
+    let (current_user_oid, current_user_name) = current_user_identity();
 
-    // Validate current_user has LOGIN privilege
-    let has_login: bool = match Spi::get_one_with_args(
-        "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE oid = $1",
-        &[current_user_oid.into()],
-    ) {
-        Ok(Some(has_login)) => has_login,
-        Ok(None) => {
-            pgrx::error!(
-                "failed to check LOGIN privilege for current_user oid {}: query returned NULL",
-                current_user_oid
-            )
-        }
-        Err(e) => {
-            pgrx::error!(
-                "failed to check LOGIN privilege for current_user oid {}: {}",
-                current_user_oid,
-                e
-            )
-        }
-    };
-    if !has_login {
-        pgrx::error!(
-            "current_user \"{}\" does not have LOGIN privilege. \
-             The background worker must connect as this role to execute SQL. \
-             Grant LOGIN to this role or call df.start() as a role with LOGIN.",
-            current_user_name
-        );
-    }
+    require_login_privilege(current_user_oid, &current_user_name, "df.start()");
 
     // Reject superuser submission identities unless explicitly enabled.
     if !crate::types::superuser_instances_enabled() {

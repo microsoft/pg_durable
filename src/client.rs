@@ -16,7 +16,9 @@ use duroxide::Client;
 use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
+use crate::types::{
+    backend_duroxide_schema, connect_as_user, new_backend_provider, postgres_connection_string,
+};
 
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -217,6 +219,128 @@ pub fn start_durable_function(
                 .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
             Ok(())
         })
+    })
+}
+
+/// Upper bound (milliseconds) on the `transaction_mode => 'new'` `df.start()`
+/// statement.
+///
+/// The caller's transaction is still open while we wait, and it may hold locks
+/// the separate session needs (an explicit `LOCK TABLE` on a `df` table, a
+/// concurrent DDL, ...). PostgreSQL cannot break that cycle: the separate
+/// session waits on a lock, but the caller waits on a socket, which the
+/// deadlock detector does not see. Without a bound the caller would hang
+/// forever, so cap the statement and surface a plain error instead.
+const NEW_TRANSACTION_START_TIMEOUT_MS: u64 = 30_000;
+
+/// Run `df.start()` on an already-established separate session.
+async fn start_on_new_session(
+    conn: &mut sqlx::postgres::PgConnection,
+    fut: &str,
+    label: &Option<String>,
+    database: &Option<String>,
+) -> Result<String, String> {
+    use sqlx::Row;
+
+    // `connect_as_user` marks its connections as workflow-execution sessions
+    // (`df.in_workflow='true'`) because it is normally called from the
+    // background worker. This is user-initiated work, not workflow execution,
+    // so clear the flag: this session must behave exactly as if the caller had
+    // run `df.start()` directly, including under the in-workflow guards.
+    sqlx::query("SET df.in_workflow = 'false'")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("failed to clear df.in_workflow on new-transaction session: {e}"))?;
+
+    // Bound both the lock wait and the statement itself. See
+    // NEW_TRANSACTION_START_TIMEOUT_MS for why this is not optional. Two
+    // statements because sqlx prepares every query, and the extended protocol
+    // rejects multi-statement strings.
+    for stmt in [
+        format!("SET lock_timeout = {NEW_TRANSACTION_START_TIMEOUT_MS}"),
+        format!("SET statement_timeout = {NEW_TRANSACTION_START_TIMEOUT_MS}"),
+    ] {
+        sqlx::query(&stmt)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| format!("failed to set timeouts on new-transaction session: {e}"))?;
+    }
+
+    // Three positional arguments on purpose: this must also resolve on schemas
+    // predating `transaction_mode`, where `df.start` takes exactly three. On
+    // current schemas it resolves to the four-argument `df.start` and defaults
+    // to 'caller', which is what we want — the separate session is already the
+    // new transaction, so it must not recurse.
+    let row = sqlx::query("SELECT df.start($1, $2, $3) AS id")
+        .bind(fut)
+        .bind(label)
+        .bind(database)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| format!("df.start() on new transaction failed: {e}"))?;
+
+    row.try_get("id")
+        .map_err(|e| format!("df.start() on new transaction returned no instance id: {e}"))
+}
+
+/// Start a durable function **in its own transaction**.
+///
+/// The graph is persisted and enqueued on a *separate* PostgreSQL session, so
+/// it commits independently and **survives a rollback of the caller's
+/// transaction**. This provides the rollback-survival outcome of an Oracle
+/// autonomous transaction for asynchronously started work; unlike an Oracle
+/// autonomous routine, the workflow does not complete synchronously and its
+/// execution errors do not propagate through this call.
+///
+/// Mechanism: open a fresh loopback connection authenticated as `user` and run
+/// the ordinary `df.start(...)` there. Because sqlx runs each statement in
+/// autocommit mode, that inner `df.start` commits in its own transaction the
+/// moment it returns — regardless of what the outer caller later does. This is
+/// the same "separate backend" technique `pg_background` uses, but it reuses
+/// pg_durable's existing graph construction and duroxide enqueue path
+/// unchanged.
+///
+/// Returns the new instance id.
+pub fn start_in_new_transaction(
+    fut: &str,
+    label: Option<&str>,
+    database: Option<&str>,
+    user: &str,
+) -> Result<String, String> {
+    use sqlx::Connection;
+
+    let rt = get_client_runtime();
+
+    let fut = fut.to_string();
+    let label = label.map(|s| s.to_string());
+    let database = database.map(|s| s.to_string());
+    let user = user.to_string();
+
+    rt.block_on(async {
+        // The extension lives in exactly one database (see docs/multi-database.md),
+        // so `database=None` resolves to that control database — the same one
+        // holding the `df` tables this backend writes through SPI. The `database`
+        // argument is forwarded to the inner `df.start()`, which records it as an
+        // instance property for the worker to execute against.
+        let mut conn = connect_as_user(&user, None).await?;
+
+        let result = start_on_new_session(&mut conn, &fut, &label, &database).await;
+
+        // Close explicitly so the extra backend exits promptly rather than
+        // lingering until the server notices a dropped socket.
+        if let Err(e) = conn.close().await {
+            log!("pg_durable: closing new-transaction start session failed: {e}");
+        }
+
+        if let Err(ref e) = result {
+            // The inner df.start() runs in autocommit, so a failure before it
+            // returned rolled itself back — nothing to clean up. A failure
+            // *after* it committed (decoding the returned id) would leave a
+            // running instance whose id the caller never learns, so log loudly.
+            log!("pg_durable: start in new transaction failed: {e}");
+        }
+
+        result
     })
 }
 

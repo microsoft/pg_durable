@@ -153,6 +153,75 @@ SELECT 'SELECT 1' ~> 'SELECT 2';
 SELECT df.start('SELECT 1' ~> 'SELECT 2');
 ```
 
+### Transaction Semantics
+
+By default `df.start()` participates in the **caller's transaction**: the
+instance and its graph are written via the caller's session, so if the caller's
+transaction rolls back, the durable function is rolled back with it and never
+runs.
+
+The `transaction_mode` argument selects which transaction the *start itself*
+runs in. It changes nothing about the durable function that gets started:
+
+| `transaction_mode` | Behaviour |
+|---|---|
+| `'caller'` (default) | Joins the caller's transaction; a `ROLLBACK` discards the durable function. |
+| `'new'` | Runs in its own transaction on a separate session; **survives a rollback of the caller's transaction**. |
+
+`'new'` provides the same rollback-survival outcome as Oracle autonomous
+transactions and `REQUIRES_NEW` propagation for **asynchronously started work**.
+It is not a synchronous autonomous routine: only the durable launch has
+committed when `df.start()` returns. The workflow can still fail later, and
+those errors are observed through `df.status()`, `df.result()`, and the
+monitoring APIs rather than propagating through the original call.
+
+Use it when the launch itself must survive a caller rollback and asynchronous
+completion is acceptable. Do not use it for business invariants, per-row
+trigger logging, or work that must complete before the caller can continue.
+
+```sql
+BEGIN;
+    INSERT INTO employees (id, name) VALUES (999, 'Test User');
+
+    -- Persists even though the surrounding transaction rolls back below.
+    SELECT df.start(
+        'INSERT INTO audit_log (message) VALUES (''Inserted employee 999'')',
+        'audit',
+        transaction_mode => 'new'
+    );
+
+    ROLLBACK;  -- employees insert is undone; the audit_log entry remains
+```
+
+An unrecognised `transaction_mode` raises an error rather than falling back to
+the default, so a typo cannot silently produce a start that does not survive the
+rollback you expected it to.
+
+Under `'new'` the start runs under the calling role's identity and privileges,
+just as `'caller'` does. Three consequences follow from the separate session:
+
+- **Variables are the committed snapshot.** The captured `df.vars` snapshot
+  contains only *committed* variables. A `df.setvar()` issued earlier in the
+  caller's still-open transaction is invisible to it. Commit variables before
+  calling, or pass values inline.
+- **It costs an extra backend.** Each call opens (and closes) a PostgreSQL
+  connection, so it counts against `max_connections`. Prefer the default on hot
+    paths where transactional roll-up is acceptable. Avoid row triggers and
+    other high-fan-out call sites.
+- **It is bounded, not unbounded.** The statement runs with a 30 s
+  `lock_timeout`/`statement_timeout`. Without that bound, a caller holding a
+  conflicting lock on a `df` table would wait forever — the separate session
+  would block on the lock while the caller blocks on the socket, a cycle
+  PostgreSQL's deadlock detector cannot see.
+- **A returned ID confirms launch, not completion.** Keep the instance ID and
+    monitor the workflow when delivery matters. Design the target operation to be
+    idempotent because a connection failure can make the launch outcome uncertain.
+
+`transaction_mode => 'new'` is rejected inside a workflow. A `df.sql()` node is
+executed as a single statement on an autocommit connection, so a plain
+`df.start()` there is already independent of any caller transaction; `'new'`
+would buy nothing and consume an extra backend.
+
 ---
 
 ## DSL Reference
@@ -183,6 +252,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
+| `df.start(func, label, database, transaction_mode)` | Start function in its own transaction when `transaction_mode => 'new'` (survives caller rollback) | `df.start('INSERT INTO audit ...', 'audit', transaction_mode => 'new')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status by instance_id (not label) | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result by instance_id (not label) | `df.result('a1b2c3d4')` |

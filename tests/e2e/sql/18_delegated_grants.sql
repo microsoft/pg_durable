@@ -239,7 +239,7 @@ DECLARE
     can_http BOOLEAN;
 BEGIN
     SELECT has_schema_privilege('dg_app', 'df', 'USAGE') INTO has_usage;
-    SELECT has_function_privilege('dg_app', 'df.start(text, text, text)', 'EXECUTE') INTO can_start;
+    SELECT has_function_privilege('dg_app', 'df.start(text, text, text, text)', 'EXECUTE') INTO can_start;
     SELECT has_function_privilege('dg_app', 'df.http(text, text, text, jsonb, integer)', 'EXECUTE') INTO can_http;
 
     IF NOT has_usage THEN

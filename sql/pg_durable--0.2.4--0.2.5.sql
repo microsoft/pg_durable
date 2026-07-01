@@ -240,3 +240,47 @@ $fn$;
 -- default PUBLIC EXECUTE — same treatment as df.http(). df.grant_usage()
 -- re-grants it explicitly to authorized roles (include_http => true).
 REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
+
+-- ============================================================================
+-- Add df.start(transaction_mode): choose which transaction the start runs in.
+--
+-- transaction_mode => 'caller' (the default) is the historical behaviour: the
+-- start joins the caller's transaction and is rolled back with it.
+-- transaction_mode => 'new' persists and enqueues the durable function on a
+-- separate PostgreSQL session, so it commits independently and survives a
+-- rollback of the caller's transaction (the PostgreSQL equivalent of Oracle's
+-- PRAGMA AUTONOMOUS_TRANSACTION). Nothing about the started function changes;
+-- only the commit boundary of the start itself does.
+--
+-- The three-argument df.start() is dropped and replaced by a four-argument
+-- one bound to a new C symbol (start_v2_wrapper). Both cannot coexist: with
+-- defaults on label/database in each, a three-argument call such as
+-- df.start(fut, label, database) matches both and PostgreSQL raises "function
+-- is not unique". Dropping leaves exactly one df.start at every arity.
+--
+-- Scenario B1 (new .so, un-upgraded schema) is preserved without the overload:
+-- src/dsl.rs keeps the three-argument Rust fn start() and therefore the
+-- start_wrapper symbol, marked #[pg_extern(sql = false)] so it contributes no
+-- DDL. Pre-0.2.5 schemas declare df.start(text, text, text) against that
+-- symbol and keep resolving to it, running in 'caller' mode; they simply do
+-- not expose transaction_mode. Because sql = false emits nothing, a fresh
+-- 0.2.5 install has only the four-argument df.start, which is what this script
+-- produces too (Scenario A).
+--
+-- The CREATE FUNCTION block is the pgrx-generated fresh-install DDL for
+-- src/dsl.rs::start_v2 copied verbatim, so the Scenario A snapshot matches a
+-- fresh 0.2.5 install. New df.* functions retain PostgreSQL's default PUBLIC
+-- EXECUTE (gated by USAGE ON SCHEMA df), so no explicit GRANT is needed.
+-- ============================================================================
+DROP FUNCTION IF EXISTS df.start(text, text, text);
+
+-- pg_durable::dsl::start
+CREATE  FUNCTION df."start"(
+    "fut" TEXT, /* &str */
+    "label" TEXT DEFAULT NULL, /* core::option::Option<&str> */
+    "database" TEXT DEFAULT NULL, /* core::option::Option<&str> */
+    "transaction_mode" TEXT DEFAULT 'caller' /* &str */
+) RETURNS TEXT /* alloc::string::String */
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'start_v2_wrapper';

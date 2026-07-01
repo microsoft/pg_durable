@@ -328,7 +328,7 @@ Returns the same envelope as `df.http()`.
 
 ## Control Functions
 
-### df.start(fut [, label])
+### df.start(fut [, label] [, database] [, transaction_mode])
 
 Starts a durable function.
 
@@ -336,12 +336,48 @@ Starts a durable function.
 |-----------|------|-----------|-------------|
 | `fut` | TEXT | ✅ Auto-wrap | Root node of the function |
 | `label` | TEXT | ❌ Literal | (Optional) Human-readable label |
+| `database` | TEXT | ❌ Literal | (Optional) Target database on the cluster |
+| `transaction_mode` | TEXT | ❌ Literal | (Optional) `'caller'` (default) or `'new'` |
 
 ```sql
 df.start('SELECT 1')                      -- auto-wrapped
 df.start(df.sleep(10) ~> 'SELECT 2')      -- explicit nodes
 df.start('SELECT 1', 'my-job')            -- with label
 ```
+
+#### transaction_mode
+
+Selects which transaction the *start itself* runs in. It changes nothing about
+the durable function that gets started.
+
+- `'caller'` (default) — the start joins the caller's transaction, so a
+  `ROLLBACK` discards the durable function along with everything else.
+- `'new'` — the start runs in its own transaction on a separate PostgreSQL
+  session, so it commits independently and **survives a rollback of the
+  caller's transaction**. This provides the same rollback-survival outcome as
+  an Oracle autonomous transaction for asynchronously started work. It is not a
+  synchronous autonomous routine: the returned ID confirms the launch, while
+  completion and execution errors are observed through monitoring APIs.
+
+```sql
+BEGIN;
+  INSERT INTO employees (id, name) VALUES (999, 'Test User');
+  SELECT df.start('INSERT INTO audit_log (message) VALUES (''x'')', 'audit',
+                  transaction_mode => 'new');
+ROLLBACK;  -- the employees insert is undone; the durable function still runs
+```
+
+An unrecognised value raises an error rather than falling back to the default.
+
+> **Note:** under `'new'` the separate session sees only *committed* rows, so
+> the captured `df.vars` snapshot excludes variables set earlier in the caller's
+> open transaction. Each call also opens an extra backend connection, and the
+> statement is bounded by a 30 s `lock_timeout`/`statement_timeout`. `'new'` is
+> rejected inside a workflow, where a plain `df.start()` is already independent
+> of any caller transaction. Avoid per-row triggers and other high-fan-out call
+> sites, and make target operations idempotent because a connection failure can
+> make launch outcome uncertain. See the Transaction Semantics section of
+> `USER_GUIDE.md` for details.
 
 ---
 
