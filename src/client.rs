@@ -16,7 +16,9 @@ use duroxide::Client;
 use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
+use crate::types::{
+    backend_duroxide_schema, connect_as_user, new_backend_provider, postgres_connection_string,
+};
 
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -217,6 +219,72 @@ pub fn start_durable_function(
                 .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
             Ok(())
         })
+    })
+}
+
+/// Start a durable function with **autonomous transaction** semantics.
+///
+/// This provides the Oracle `PRAGMA AUTONOMOUS_TRANSACTION` equivalent: the
+/// durable function's graph is persisted and enqueued on a *separate*
+/// PostgreSQL session, so it commits independently and **survives a rollback of
+/// the caller's transaction**.
+///
+/// Mechanism: open a fresh loopback connection authenticated as `user` and run
+/// the ordinary `df.start(...)` there. Because sqlx runs each statement in
+/// autocommit mode, that inner `df.start` commits in its own transaction the
+/// moment it returns — regardless of what the outer caller later does. This is
+/// the same "separate backend" technique `pg_background` uses to achieve
+/// autonomy, but it reuses pg_durable's existing graph construction and
+/// duroxide enqueue path unchanged.
+///
+/// Returns the new instance id.
+///
+/// FUTURE EXPLORATION (alternative implementation): instead of opening another
+/// client connection just to run `df.start` in a new backend, move the graph
+/// persistence into the parent orchestration itself. With autonomy, the full
+/// function graph would be encoded directly into the `start_orchestration`
+/// input payload (which duroxide already commits out-of-band), and the
+/// orchestration's first activity would become a `store-function-graph`
+/// activity that writes `df.instances` / `df.nodes` from the background worker
+/// — replacing today's `load-function-graph` first activity. That would remove
+/// the extra backend connection entirely and collapse the current dual write
+/// (graph in the caller's txn, enqueue out-of-band) into a single durable
+/// source of truth, eliminating the orphaned-orchestration race for good. See
+/// the PR description for the trade-offs worth evaluating.
+pub fn start_autonomous(
+    fut: &str,
+    label: Option<&str>,
+    database: Option<&str>,
+    user: &str,
+) -> Result<String, String> {
+    use sqlx::Row;
+
+    let rt = get_client_runtime();
+
+    let fut = fut.to_string();
+    let label = label.map(|s| s.to_string());
+    let database = database.map(|s| s.to_string());
+    let user = user.to_string();
+
+    rt.block_on(async {
+        // Connect to the *current* database (database=None resolves to the
+        // control/target database) as the submitting role, so identity and
+        // privilege checks inside the inner df.start run as the caller.
+        let mut conn = connect_as_user(&user, None).await?;
+
+        let row = sqlx::query("SELECT df.start($1, $2, $3) AS id")
+            .bind(&fut)
+            .bind(&label)
+            .bind(&database)
+            .fetch_one(&mut conn)
+            .await
+            .map_err(|e| format!("autonomous df.start failed: {e}"))?;
+
+        let id: String = row
+            .try_get("id")
+            .map_err(|e| format!("autonomous df.start returned no instance id: {e}"))?;
+
+        Ok(id)
     })
 }
 

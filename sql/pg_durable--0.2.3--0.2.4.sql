@@ -391,3 +391,32 @@ CREATE  FUNCTION df."list_instances"(
 
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_instances_paged_wrapper';
+
+-- ============================================================================
+-- Add df.start_autonomous(): Oracle-style autonomous transaction support.
+--
+-- df.start_autonomous() persists and enqueues the durable function on a
+-- separate PostgreSQL session, so it commits independently and survives a
+-- rollback of the caller's transaction (the PostgreSQL equivalent of Oracle's
+-- PRAGMA AUTONOMOUS_TRANSACTION). Ordinary df.start() is unchanged and still
+-- participates in the caller's transaction.
+--
+-- Pure additive change: a brand-new function bound to a new C symbol
+-- (start_autonomous_wrapper). Existing functions and their symbols are
+-- untouched, so the new .so stays backward compatible with all previous
+-- schemas in this provider line (Scenario B1) — an un-upgraded schema simply
+-- does not expose df.start_autonomous yet. The CREATE FUNCTION block is the
+-- pgrx-generated fresh-install DDL for src/dsl.rs::start_autonomous copied
+-- verbatim, so the Scenario A snapshot matches a fresh 0.2.4 install. New df.*
+-- functions retain PostgreSQL's default PUBLIC EXECUTE (gated by USAGE ON
+-- SCHEMA df), so no explicit GRANT is needed.
+-- ============================================================================
+-- pg_durable::dsl::start_autonomous
+CREATE  FUNCTION df."start_autonomous"(
+	"fut" TEXT, /* &str */
+	"label" TEXT DEFAULT NULL, /* core::option::Option<&str> */
+	"database" TEXT DEFAULT NULL /* core::option::Option<&str> */
+) RETURNS TEXT /* alloc::string::String */
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'start_autonomous_wrapper';

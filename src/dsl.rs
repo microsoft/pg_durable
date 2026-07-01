@@ -1084,6 +1084,42 @@ pub fn start(
     instance_id
 }
 
+/// Starts a durable SQL function with **autonomous transaction** semantics.
+///
+/// This is the PostgreSQL equivalent of Oracle's `PRAGMA AUTONOMOUS_TRANSACTION`:
+/// the durable function is persisted and enqueued on a *separate* PostgreSQL
+/// session, so it commits independently and **survives a rollback of the
+/// caller's transaction**. Use it for audit/error logging and other
+/// "must-persist-even-if-the-caller-rolls-back" work.
+///
+/// Ordinary [`start`] participates in the caller's transaction: if the caller
+/// rolls back, the durable function is rolled back with it. `start_autonomous`
+/// is the opposite — it always persists once this call returns.
+///
+/// Accepts the same arguments as [`start`] (`fut`, optional `label`, optional
+/// `database`) and returns the new instance id.
+#[pg_extern(schema = "df")]
+pub fn start_autonomous(
+    fut: &str,
+    label: default!(Option<&str>, "NULL"),
+    database: default!(Option<&str>, "NULL"),
+) -> String {
+    // Capture the calling role so the separate session runs df.start() with the
+    // same identity (and therefore the same privileges / RLS scope).
+    let user = unsafe {
+        let oid = pgrx::pg_sys::GetUserId();
+        let name_ptr = pgrx::pg_sys::GetUserNameFromId(oid, false);
+        std::ffi::CStr::from_ptr(name_ptr)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    match crate::client::start_autonomous(fut, label, database, &user) {
+        Ok(id) => id,
+        Err(e) => pgrx::error!("{}", e),
+    }
+}
+
 /// Cancels a running durable function.
 #[pg_extern(schema = "df")]
 pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) -> String {
