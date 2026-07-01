@@ -276,10 +276,13 @@ CREATE INDEX idx_instances_label ON df.instances(label, created_at DESC, id) WHE
 -- Upgrade ordering (in-flight instances): the worker's orchestration history
 -- changed shape in this release -- update_node_status activity inputs gained an
 -- execution_id field, and JOIN/RACE branch sub-orchestrations now use
--- deterministic composed instance ids instead of auto-generated ones. duroxide
--- replays by exact equality on recorded inputs/ids, so instances in flight across
--- the upgrade cannot resume; drain or recreate them before upgrading (the same
--- constraint documented for issue #129).
+-- deterministic composed instance ids instead of auto-generated ones. Non-root
+-- df.loop() nodes also run as their own child sub-orchestration (with a
+-- deterministic composed instance id) that stamps the loop node directly, instead
+-- of the parent stamping it inline. This adds no new DDL -- status_details already
+-- covers the loop node's stamps. duroxide replays by exact equality on recorded
+-- inputs/ids, so instances in flight across the upgrade cannot resume; drain or
+-- recreate them before upgrading (the same constraint documented for issue #129).
 -- ============================================================================
 ALTER TABLE df.nodes ADD COLUMN status_details JSONB;
 

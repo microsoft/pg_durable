@@ -52,17 +52,48 @@ pub struct Inferred {
     pub from_ancestor_id: Option<String>,
 }
 
-/// Parse the loop generation (the second "::"-token) from a node's
-/// status_details `execution_id` stamp. None when never stamped / unparseable.
-fn gen_of(status_details: Option<&str>) -> Option<i64> {
+/// Parse a node's `execution_id` stamp into `(instance_id, generation)`.
+///
+/// The stamp is `{orchestration_instance_id}::{execution_id}`. The trailing token is the
+/// generation written by the innermost orchestration (a loop advances it via
+/// `continue_as_new`); everything before it is that orchestration's instance id (its
+/// "scope"). Instance ids and node ids are 8-char hex, so splitting on the last "::" is
+/// unambiguous. None when never stamped / unparseable.
+fn stamp_of(status_details: Option<&str>) -> Option<(String, i64)> {
     let sd = status_details?;
     let v: serde_json::Value = serde_json::from_str(sd).ok()?;
-    v.get("execution_id")?
-        .as_str()?
-        .split("::")
-        .nth(1)?
-        .parse::<i64>()
-        .ok()
+    let eid = v.get("execution_id")?.as_str()?;
+    let (instance_id, generation) = eid.rsplit_once("::")?;
+    Some((instance_id.to_string(), generation.parse::<i64>().ok()?))
+}
+
+/// Whether a node stamped `(instance_id, gen)` belongs to a superseded generation.
+///
+/// A node is superseded when a newer generation exists in its own scope, or when any
+/// ancestor scope along its spawn lineage has advanced past the generation that spawned
+/// this scope. A spawned scope's instance id is
+/// `{parent_instance}::{parent_gen}::{child_root_node_id}` (see `subtree_instance_id` in
+/// the orchestration), so the spawning generation is the second-to-last "::"-token and the
+/// parent instance id is everything before it. The recursion makes a non-root loop body
+/// (older inner generation) and a parallel branch spawned by an older loop generation both
+/// read as superseded, while the root case (a single-token instance id) reduces to a plain
+/// per-scope generation compare.
+fn is_superseded(instance_id: &str, gen: i64, scope_max: &HashMap<String, i64>) -> bool {
+    if let Some(&m) = scope_max.get(instance_id) {
+        if gen < m {
+            return true;
+        }
+    }
+    let tokens: Vec<&str> = instance_id.split("::").collect();
+    if tokens.len() < 3 {
+        // Root scope: no parent scope can supersede this one.
+        return false;
+    }
+    let parent_instance = tokens[..tokens.len() - 2].join("::");
+    match tokens[tokens.len() - 2].parse::<i64>() {
+        Ok(parent_gen) => is_superseded(&parent_instance, parent_gen, scope_max),
+        Err(_) => false,
+    }
 }
 
 fn is_terminal(status: Option<&str>) -> bool {
@@ -128,6 +159,20 @@ pub fn infer_statuses<N: NodeFacts>(
     let mut out: HashMap<String, Inferred> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
 
+    // Per-scope current generation: the highest trailing generation stamped for each
+    // orchestration instance id (the stamp with its last "::"-token removed). A node is
+    // superseded when a newer generation exists for its own scope or for any ancestor
+    // scope along its spawn lineage (see `is_superseded`).
+    let mut scope_max: HashMap<String, i64> = HashMap::new();
+    for n in nodes.values() {
+        if let Some((instance_id, generation)) = stamp_of(n.status_details()) {
+            let slot = scope_max.entry(instance_id).or_insert(i64::MIN);
+            if generation > *slot {
+                *slot = generation;
+            }
+        }
+    }
+
     // Top-down walk from the root, carrying the nearest terminal ancestor and
     // highest-generation ancestor seen so far.
     if let Some(root) = root_node {
@@ -141,11 +186,13 @@ pub fn infer_statuses<N: NodeFacts>(
                 None => continue, // dangling reference (should not happen)
             };
 
-            let gen_n = gen_of(n.status_details());
+            let gen_n = stamp_of(n.status_details()).map(|(_, g)| g);
             let terminal = is_terminal(n.status());
-            let superseded = match (gen_n, &max_gen_anc) {
-                (Some(g), Some((ag, _))) => *ag > g,
-                _ => false,
+            let superseded = match stamp_of(n.status_details()) {
+                Some((instance_id, generation)) => {
+                    is_superseded(&instance_id, generation, &scope_max)
+                }
+                None => false,
             };
 
             let (inferred, from_anc): (String, Option<String>) = if terminal {

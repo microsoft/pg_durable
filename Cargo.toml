@@ -34,7 +34,14 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # duroxide integration
-duroxide = "=0.1.29"
+# Using git dependency on pinodeca/continue-parent-link branch which preserves the
+# parent link when a sub-orchestration calls continue_as_new, unblocking the
+# sub-orchestration approach for df.loop.
+# Compatibility: duroxide-pg 0.1.34 has been verified to compile and run correctly
+# against this branch (same public API as 0.1.29 — PR #31 is a runtime-only change).
+# Once the branch is merged and a new duroxide release is published, revert both
+# entries back to crates.io version pins as a compatible pair.
+duroxide = { git = "https://github.com/microsoft/duroxide.git", branch = "pinodeca/continue-parent-link" }
 duroxide-pg = "=0.1.34"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
@@ -60,6 +67,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
+
+# Override the crates.io duroxide with the git branch for both the direct dependency
+# and duroxide-pg's transitive dependency on duroxide.
+[patch.crates-io]
+duroxide = { git = "https://github.com/microsoft/duroxide.git", branch = "pinodeca/continue-parent-link" }
 
 [profile.dev]
 panic = "unwind"
