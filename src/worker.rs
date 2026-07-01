@@ -546,6 +546,15 @@ async fn initialize_duroxide_runtime(
             }
         };
 
+        if let Err(e) = install_canceled_status_normalization(mgmt_pool).await {
+            log!(
+                "pg_durable: failed to install canceled status normalization (will retry): {}",
+                e
+            );
+            tokio::time::sleep(retry_interval).await;
+            continue;
+        }
+
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
         // longer needed — connect_as_user() sets that flag independently.
@@ -559,6 +568,123 @@ async fn initialize_duroxide_runtime(
         log!("pg_durable: duroxide runtime started");
         return Some(duroxide_runtime);
     }
+}
+
+/// Ensure canceled workflows remain distinguishable from failures in duroxide.executions.
+///
+/// Duroxide may record a cancellation terminal state as `Failed` while pg_durable
+/// records `df.instances.status = 'cancelled'`. This hook normalizes that mismatch
+/// at the storage boundary by writing the durable-store terminal value `Canceled`.
+///
+/// The df.instances trigger updates both `Running` and `Failed` execution rows:
+/// - `Running` handles cancellation while the execution row is still in-flight
+/// - `Failed` handles races where the runtime marked failure before normalization
+async fn install_canceled_status_normalization(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION df._pg_durable_mark_execution_canceled_from_instance()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, df, duroxide
+        AS $$
+        BEGIN
+            IF NEW.status = 'cancelled' THEN
+                UPDATE duroxide.executions
+                SET status = 'Canceled'
+                WHERE instance_id = NEW.id
+                  AND status IN ('Running', 'Failed');
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        DROP TRIGGER IF EXISTS trg_pg_durable_mark_execution_canceled_from_instance
+        ON df.instances
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER trg_pg_durable_mark_execution_canceled_from_instance
+        AFTER UPDATE OF status ON df.instances
+        FOR EACH ROW
+        WHEN (NEW.status = 'cancelled' AND OLD.status IS DISTINCT FROM NEW.status)
+        EXECUTE FUNCTION df._pg_durable_mark_execution_canceled_from_instance()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION duroxide._pg_durable_normalize_execution_status()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, df, duroxide
+        AS $$
+        BEGIN
+            IF NEW.status = 'Failed'
+               AND EXISTS (
+                   SELECT 1
+                   FROM df.instances i
+                   WHERE i.id = NEW.instance_id
+                     AND i.status = 'cancelled'
+               ) THEN
+                NEW.status := 'Canceled';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        DROP TRIGGER IF EXISTS trg_pg_durable_normalize_execution_status
+        ON duroxide.executions
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER trg_pg_durable_normalize_execution_status
+        BEFORE INSERT OR UPDATE OF status ON duroxide.executions
+        FOR EACH ROW
+        EXECUTE FUNCTION duroxide._pg_durable_normalize_execution_status()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Backfill rows from before the trigger existed (or from a previous binary).
+    sqlx::query(
+        r#"
+        UPDATE duroxide.executions e
+        SET status = 'Canceled'
+        FROM df.instances i
+        WHERE i.id = e.instance_id
+          AND i.status = 'cancelled'
+          AND e.status = 'Failed'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Write the epoch sentinel after a successful runtime init.
