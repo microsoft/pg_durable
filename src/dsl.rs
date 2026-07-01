@@ -129,6 +129,19 @@ fn legacy_login_role_schema() -> bool {
     !owner_scoped_vars_enabled()
 }
 
+/// Returns true when the installed schema has `df.instances.start_input`
+/// (added in 0.2.4). When true, `df.start()` records the start payload in the
+/// caller's transaction and lets the background worker start the engine from it
+/// (the intent path). When false — a pre-0.2.4 schema reached by a newer `.so`
+/// before `ALTER EXTENSION UPDATE` — `df.start()` falls back to the previous
+/// out-of-band start so the extension keeps working until the upgrade applies.
+fn start_input_supported() -> bool {
+    let extversion = installed_extension_version();
+    parse_semver(&extversion)
+        .map(|v| v >= (0, 2, 4))
+        .unwrap_or(false)
+}
+
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -940,6 +953,37 @@ pub fn start(
 
     let legacy_login_role = legacy_login_role_schema();
 
+    // When the installed schema has df.instances.start_input (>= 0.2.4) we take
+    // the "intent" path: persist the start payload on the instance row in this
+    // (the caller's) transaction and let the background worker start the engine
+    // from it after commit. On an older schema we fall back to the pre-0.2.4
+    // out-of-band start at the end of this function.
+    let persist_start_input = start_input_supported();
+
+    // Capture vars from df.vars using the installed extension version as the
+    // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
+    // owner-scoped vars. Captured before the instance row is inserted so the
+    // snapshot can be persisted as start_input in the same INSERT.
+    let vars_query = if owner_scoped_vars_enabled() {
+        "SELECT name, value FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
+    } else {
+        "SELECT name, value FROM df.vars"
+    };
+
+    let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
+        let mut vars = std::collections::HashMap::new();
+        if let Ok(table) = client.select(vars_query, None, &[]) {
+            for row in table {
+                if let (Ok(Some(name)), Ok(Some(value))) =
+                    (row.get::<String>(1), row.get::<String>(2))
+                {
+                    vars.insert(name, value);
+                }
+            }
+        }
+        vars
+    });
+
     // Pre-generate the root node's ID so the instance row can point at it up
     // front. The same-instance FK on root_node is DEFERRABLE INITIALLY
     // DEFERRED, so the referenced node row need not exist yet — insert_nodes
@@ -982,6 +1026,32 @@ pub fn start(
                         current_user_oid.into(),
                         current_user_oid.into(), // login_role = submitted_by
                         database_arg,
+                    ],
+                )
+            } else if persist_start_input {
+                // Intent path (>= 0.2.4): persist the start payload — the vars
+                // snapshot captured above plus the label — as start_input so the
+                // worker can start the engine for this instance after commit.
+                let input = FunctionInput {
+                    instance_id: candidate.to_string(),
+                    label: label.map(|s| s.to_string()),
+                    vars: vars.clone(),
+                    loop_iteration: 0,
+                };
+                let start_input_json =
+                    serde_json::to_string(&input).unwrap_or_else(|_| candidate.to_string());
+                (
+                    "INSERT INTO df.instances (id, label, root_node, submitted_by, database, start_input)
+                     VALUES ($1, $2, $3, $4::oid::regrole, $5, $6::jsonb)
+                     ON CONFLICT (id) DO NOTHING
+                     RETURNING id",
+                    vec![
+                        candidate.into(),
+                        label_arg,
+                        root_id.as_str().into(),
+                        current_user_oid.into(),
+                        database_arg,
+                        start_input_json.into(),
                     ],
                 )
             } else {
@@ -1028,47 +1098,39 @@ pub fn start(
         &mut node_count,
     );
 
-    // Capture vars from df.vars using the installed extension version as the
-    // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
-    // owner-scoped vars.
-    let vars_query = if owner_scoped_vars_enabled() {
-        "SELECT name, value FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
-    } else {
-        "SELECT name, value FROM df.vars"
-    };
-
-    let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
-        let mut vars = std::collections::HashMap::new();
-        if let Ok(table) = client.select(vars_query, None, &[]) {
-            for row in table {
-                if let (Ok(Some(name)), Ok(Some(value))) =
-                    (row.get::<String>(1), row.get::<String>(2))
-                {
-                    vars.insert(name, value);
-                }
-            }
+    if persist_start_input {
+        // Intent path (>= 0.2.4): the start payload is already committed on the
+        // instance row. Nudge the worker to start the engine immediately via a
+        // transactional NOTIFY — delivered only if this transaction commits, so
+        // a rolled-back df.start() leaves no engine "ghost". If the NOTIFY is
+        // missed (worker not listening, restart), the periodic reconcile sweep
+        // starts the instance from its committed start_input as a backstop.
+        if let Err(e) = Spi::run_with_args(
+            "SELECT pg_notify('pg_durable_start', $1)",
+            &[instance_id.as_str().into()],
+        ) {
+            pgrx::log!("pg_durable: Warning - failed to notify start of {instance_id}: {e}");
         }
-        vars
-    });
+    } else {
+        // Legacy path (< 0.2.4 schema, no start_input column): start the engine
+        // out-of-band on a separate connection, as before. This can leave a
+        // ghost if the caller's transaction rolls back, but it preserves
+        // behavior on a schema that has not yet been upgraded (Scenario B1).
+        let input = FunctionInput {
+            instance_id: instance_id.clone(),
+            label: label.map(|s| s.to_string()),
+            vars,
+            loop_iteration: 0,
+        };
+        let input_json = serde_json::to_string(&input).unwrap_or_else(|_| instance_id.clone());
 
-    // Start the orchestration via duroxide
-    let input = FunctionInput {
-        instance_id: instance_id.clone(),
-        label: label.map(|s| s.to_string()),
-        vars,
-        loop_iteration: 0,
-    };
-    let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
-
-    if let Err(e) = start_durable_function(
-        crate::orchestrations::execute_function_graph::NAME,
-        &instance_id,
-        &input_json,
-    ) {
-        pgrx::log!(
-            "pg_durable: Warning - failed to start durable function: {}",
-            e
-        );
+        if let Err(e) = start_durable_function(
+            crate::orchestrations::execute_function_graph::NAME,
+            &instance_id,
+            &input_json,
+        ) {
+            pgrx::log!("pg_durable: Warning - failed to start durable function: {e}");
+        }
     }
 
     instance_id

@@ -12,13 +12,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::runtime;
+use duroxide::Client;
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
 use crate::registry::{create_activity_registry, create_orchestration_registry};
 use crate::types::{
     get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
-    postgres_connection_string, resolve_duroxide_schema_pool, worker_provider_config,
+    get_reconcile_grace, get_reconcile_interval, postgres_connection_string,
+    resolve_duroxide_schema_pool, worker_provider_config,
 };
 
 const TERMINAL_INSTANCE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -211,7 +213,7 @@ async fn run_duroxide_runtime() {
             duroxide_schema
         );
 
-        let Some(duroxide_runtime) = initialize_duroxide_runtime(
+        let Some((duroxide_runtime, duroxide_store)) = initialize_duroxide_runtime(
             &pg_conn_str,
             INIT_RETRY_INTERVAL,
             &mgmt_pool,
@@ -247,6 +249,7 @@ async fn run_duroxide_runtime() {
             &poll_pool,
             &mgmt_pool,
             duroxide_runtime,
+            duroxide_store,
             EXTENSION_DROP_POLL_INTERVAL,
             SHUTDOWN_CHECK_INTERVAL,
             epoch_id.as_deref(),
@@ -470,7 +473,7 @@ async fn initialize_duroxide_runtime(
     retry_interval: Duration,
     mgmt_pool: &sqlx::PgPool,
     schema_name: &str,
-) -> Option<Arc<runtime::Runtime>> {
+) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
 
     // Control duroxide provider pool size via env var (the only mechanism
@@ -553,11 +556,16 @@ async fn initialize_duroxide_runtime(
             create_activity_registry(Arc::new(mgmt_pool.clone()), user_semaphore.clone());
         let orchestrations = create_orchestration_registry();
 
+        // Keep a clone of the store Arc so the worker can build a duroxide
+        // Client (for start reconciliation) that shares the same provider as
+        // the runtime. Client::new is cheap — it just wraps the Arc.
+        let store_for_client = store.clone();
+
         let duroxide_runtime =
             runtime::Runtime::start_with_store(store, activities, orchestrations).await;
 
         log!("pg_durable: duroxide runtime started");
-        return Some(duroxide_runtime);
+        return Some((duroxide_runtime, store_for_client));
     }
 }
 
@@ -743,6 +751,7 @@ async fn run_until_extension_dropped_or_shutdown(
     poll_pool: &sqlx::PgPool,
     maintenance_pool: &sqlx::PgPool,
     duroxide_runtime: Arc<runtime::Runtime>,
+    duroxide_store: Arc<PostgresProvider>,
     drop_poll_interval: Duration,
     shutdown_check_interval: Duration,
     epoch_id: Option<&str>,
@@ -757,6 +766,64 @@ async fn run_until_extension_dropped_or_shutdown(
         TERMINAL_INSTANCE_PRUNE_INTERVAL,
     );
     prune_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Start reconciliation converges df.instances with the durable engine:
+    // df.start() records the instance (with its start payload) and commits, then
+    // the engine is started separately from that committed intent. This keeps the
+    // two in sync without a shared transaction — a rolled-back df.start() leaves
+    // no engine "ghost", and a committed instance is always eventually started.
+    //
+    // Reconciliation only acts once the schema has df.instances.start_input (>=
+    // 0.2.4). On an older schema df.start() starts the engine inline instead
+    // (Scenario B1), so there is nothing to reconcile. That schema check is made
+    // dynamically (not cached for the epoch) because ALTER EXTENSION UPDATE can
+    // add the column mid-epoch without restarting this worker.
+    let client = Client::new(duroxide_store.clone());
+    let reconcile_interval = get_reconcile_interval();
+    let sweep_configured = !reconcile_interval.is_zero();
+    // Monotonic false->true: once the column appears it never goes away within a
+    // major version, so we stop re-probing after the first positive result.
+    let mut start_input_present = has_start_input_column(maintenance_pool).await;
+
+    // The instant path: a transactional NOTIFY from df.start() (delivered only on
+    // commit) wakes us to start the just-committed instance immediately. LISTEN is
+    // schema-independent, so we always establish it — df.start() only sends the
+    // notification once the column exists, so a notification implies it is safe to
+    // start (this also covers an in-place ALTER EXTENSION UPDATE mid-epoch).
+    let mut start_listener: Option<sqlx::postgres::PgListener> =
+        match sqlx::postgres::PgListener::connect_with(maintenance_pool).await {
+            Ok(mut listener) => {
+                match listener.listen(START_NOTIFY_CHANNEL).await {
+                    Ok(()) => {
+                        log!("pg_durable: listening for start notifications on '{START_NOTIFY_CHANNEL}'");
+                        Some(listener)
+                    }
+                    Err(e) => {
+                        log!("pg_durable: failed to LISTEN {START_NOTIFY_CHANNEL} (sweep still active): {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log!("pg_durable: failed to open start-notification listener (sweep still active): {e}");
+                None
+            }
+        };
+
+    // The backstop path: periodically start any pending instance older than the
+    // grace period that the engine still does not know about (a missed NOTIFY).
+    // The interval must be non-zero even when the sweep is disabled; the branch
+    // precondition gates it off in that case.
+    let effective_interval = if reconcile_interval.is_zero() {
+        TERMINAL_INSTANCE_PRUNE_INTERVAL
+    } else {
+        reconcile_interval
+    };
+    let mut reconcile_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + effective_interval,
+        effective_interval,
+    );
+    reconcile_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -792,10 +859,205 @@ async fn run_until_extension_dropped_or_shutdown(
                     }
                 }
             }
+            notification = recv_start_notification(&mut start_listener), if start_listener.is_some() => {
+                match notification {
+                    Some(instance_id) => {
+                        match try_start_instance(maintenance_pool, &client, &instance_id).await {
+                            Ok(true) => log!("pg_durable: started instance {instance_id} (notify)"),
+                            Ok(false) => {}
+                            Err(e) => log!(
+                                "pg_durable: notify-start of instance {instance_id} failed \
+                                 (sweep will retry): {e}"
+                            ),
+                        }
+                    }
+                    None => {
+                        // recv error: drop the listener and rely on the sweep.
+                        log!("pg_durable: start-notification listener closed; relying on periodic sweep");
+                        start_listener = None;
+                    }
+                }
+            }
+            _ = reconcile_check.tick(), if sweep_configured => {
+                // Re-probe until the column appears so an in-place ALTER EXTENSION
+                // UPDATE mid-epoch enables the sweep without a worker restart.
+                if !start_input_present {
+                    start_input_present = has_start_input_column(maintenance_pool).await;
+                }
+                if start_input_present {
+                    match reconcile_pending_starts(maintenance_pool, &client, get_reconcile_grace()).await {
+                        (started, _) if started > 0 => {
+                            log!("pg_durable: reconcile sweep started {started} pending instance(s)");
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
     log!("pg_durable: initiating duroxide runtime shutdown...");
     duroxide_runtime.shutdown(Some(10_000)).await;
     log!("pg_durable: duroxide runtime shutdown complete");
+}
+
+/// Channel used by `df.start()` (via `pg_notify`) to wake the worker so it can
+/// start a just-committed instance immediately.
+const START_NOTIFY_CHANNEL: &str = "pg_durable_start";
+
+/// Await the next start notification, or park forever when there is no listener.
+///
+/// Returns `Some(payload)` for a notification (the instance id), or `None` when
+/// the listener connection errors — the caller then drops it and falls back to
+/// the periodic sweep. The `None` (no-listener) arm is only reached when the
+/// select! precondition wrongly lets it run; it parks so it never busy-loops.
+async fn recv_start_notification(
+    listener: &mut Option<sqlx::postgres::PgListener>,
+) -> Option<String> {
+    match listener {
+        Some(l) => match l.recv().await {
+            Ok(notification) => Some(notification.payload().to_string()),
+            Err(e) => {
+                log!("pg_durable: start-notification recv error: {e}");
+                None
+            }
+        },
+        None => std::future::pending().await,
+    }
+}
+
+/// Returns true when the installed schema has `df.instances.start_input`
+/// (added in 0.2.4). Start reconciliation is gated on this: an older schema has
+/// no start payload to replay and df.start() starts the engine inline instead.
+async fn has_start_input_column(pool: &sqlx::PgPool) -> bool {
+    match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'df' AND table_name = 'instances'
+           AND column_name = 'start_input')",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(present) => present,
+        Err(e) => {
+            log!("pg_durable: could not probe df.instances.start_input (reconcile disabled): {e}");
+            false
+        }
+    }
+}
+
+/// Periodic backstop: start every pending instance older than `grace` that the
+/// engine still does not know about. Returns `(started, errors)`.
+async fn reconcile_pending_starts(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    grace: Duration,
+) -> (u64, u64) {
+    let grace_secs = grace.as_secs() as f64;
+    let ids: Vec<String> = match sqlx::query_scalar(
+        "SELECT id FROM df.instances
+         WHERE status = 'pending'
+           AND created_at < now() - make_interval(secs => $1)",
+    )
+    .bind(grace_secs)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            log!("pg_durable: reconcile sweep query failed: {e}");
+            return (0, 0);
+        }
+    };
+
+    let mut started = 0u64;
+    let mut errors = 0u64;
+    for id in ids {
+        match try_start_instance(pool, client, &id).await {
+            Ok(true) => started += 1,
+            Ok(false) => {}
+            Err(e) => {
+                errors += 1;
+                log!("pg_durable: reconcile sweep could not start instance {id}: {e}");
+            }
+        }
+    }
+    (started, errors)
+}
+
+/// Start a single pending instance in the durable engine, exactly once.
+///
+/// Returns `Ok(true)` when this call started the engine, `Ok(false)` when there
+/// was nothing to do (the engine already knows the instance, or another
+/// caller/sweep claimed it first), and `Err` on a provider/database error.
+///
+/// Single-start is guaranteed by an atomic claim: the row is flipped
+/// `pending -> running` with `RETURNING`, so only the one caller that observes
+/// it still `pending` proceeds to start the engine. If the engine start then
+/// fails, the claim is rolled back to `pending` so a later sweep can retry.
+async fn try_start_instance(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    instance_id: &str,
+) -> Result<bool, String> {
+    use duroxide::OrchestrationStatus;
+
+    // Does the engine already know this instance? Only start ones it does not
+    // (NotFound) — this also skips instances started via the legacy inline path.
+    match client.get_orchestration_status(instance_id).await {
+        Ok(OrchestrationStatus::NotFound) => {}
+        Ok(_) => return Ok(false),
+        Err(e) => return Err(format!("status probe failed: {e:?}")),
+    }
+
+    // Atomically claim the row so exactly one caller starts the engine.
+    let claimed: Option<Option<serde_json::Value>> = sqlx::query_scalar(
+        "UPDATE df.instances SET status = 'running', updated_at = now()
+         WHERE id = $1 AND status = 'pending'
+         RETURNING start_input",
+    )
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("claim failed: {e}"))?;
+
+    let Some(start_input) = claimed else {
+        // Lost the race, or the row is no longer pending — nothing to do.
+        return Ok(false);
+    };
+
+    // Replay the payload captured at df.start() time. Legacy rows written before
+    // the payload existed start with an empty vars set.
+    let input_json = match start_input {
+        Some(value) => value.to_string(),
+        None => serde_json::json!({ "instance_id": instance_id }).to_string(),
+    };
+
+    match client
+        .start_orchestration(
+            instance_id,
+            crate::orchestrations::execute_function_graph::NAME,
+            input_json,
+        )
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            // Roll the claim back so the next sweep can retry this instance.
+            if let Err(revert) = sqlx::query(
+                "UPDATE df.instances SET status = 'pending', updated_at = now()
+                 WHERE id = $1 AND status = 'running'",
+            )
+            .bind(instance_id)
+            .execute(pool)
+            .await
+            {
+                log!(
+                    "pg_durable: failed to roll back claim for instance {instance_id} \
+                     after a failed start: {revert}"
+                );
+            }
+            Err(format!("start_orchestration failed: {e:?}"))
+        }
+    }
 }

@@ -29,6 +29,16 @@ pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(3
 /// functions are explicitly desired. See docs/superuser_guc.md.
 pub static ENABLE_SUPERUSER_INSTANCES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// How often (seconds) the background worker sweeps for committed `df.instances`
+/// that the durable engine has not started yet, and starts them. `0` disables
+/// the periodic sweep (the instant `NOTIFY`-driven path still runs).
+pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(15);
+
+/// Minimum age (seconds) a pending `df.instances` row must reach before the
+/// periodic sweep will start it. Keeps the sweep from racing the instant
+/// `NOTIFY` path for freshly-committed instances.
+pub static RECONCILE_GRACE: GucSetting<i32> = GucSetting::<i32>::new(300);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -127,6 +137,28 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c"pg_durable.reconcile_interval",
+        c"Seconds between background sweeps that start committed df.instances the engine hasn't started yet (0 disables the sweep)",
+        c"The instant NOTIFY-driven start path always runs; this sweep is the backstop that starts any pending instance whose start notification was missed.",
+        &RECONCILE_INTERVAL,
+        0,
+        86400,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.reconcile_grace",
+        c"Minimum age in seconds a pending df.instances row must reach before the sweep starts it",
+        c"Prevents the periodic sweep from racing the instant NOTIFY start path for freshly-committed instances.",
+        &RECONCILE_GRACE,
+        0,
+        86400,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_bool_guc(
         c"pg_durable.enable_superuser_instances",
         c"Allow pg_durable instances whose submitted_by role is a PostgreSQL superuser",
@@ -220,7 +252,8 @@ CREATE TABLE df.instances (
     database TEXT,
     created_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
     updated_at TIMESTAMPTZ DEFAULT pg_catalog.now(),
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    start_input JSONB
 );
 
 COMMENT ON COLUMN df.instances.submitted_by IS
@@ -451,7 +484,7 @@ BEGIN
     EXECUTE pg_catalog.format('GRANT SELECT ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT SELECT ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
-    EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database, start_input) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
 
@@ -501,7 +534,7 @@ BEGIN
     EXECUTE pg_catalog.format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
-    EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database, start_input) ON df.instances FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
 

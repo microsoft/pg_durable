@@ -23,9 +23,10 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 13. [Monitoring](#monitoring)
 14. [User Isolation & Privileges](#user-isolation--privileges)
 15. [Connection Limits](#connection-limits)
-16. [Troubleshooting](#troubleshooting)
-17. [Quick Reference Card](#quick-reference-card)
-18. [Appendix: Test Data Setup](#appendix-test-data-setup)
+16. [Start Reconciliation](#start-reconciliation)
+17. [Troubleshooting](#troubleshooting)
+18. [Quick Reference Card](#quick-reference-card)
+19. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -2009,6 +2010,59 @@ pg_durable.max_user_connections = 50
 pg_durable.execution_acquire_timeout = 60
 # Budget: 10 + 15 + 50 + backends ≈ 80 connections
 ```
+
+---
+
+## Start Reconciliation
+
+pg_durable keeps its own bookkeeping in the `df` schema, while the workflow
+engine (duroxide) keeps running-workflow state in its own schema. `df.start()`
+writes the `df` rows for a new instance **in your transaction** and then lets the
+background worker start the engine from that committed record. This keeps the two
+schemas in sync without sharing a transaction:
+
+- **If your transaction rolls back**, the `df` rows disappear and the engine was
+  never told to run — so a rolled-back `df.start()` never leaves a "ghost"
+  workflow running with no `df` record.
+- **Once your transaction commits**, the instance is *always* eventually started,
+  even if the worker was briefly down when you called `df.start()`.
+
+Two mechanisms converge the state:
+
+1. **Instant path** — `df.start()` sends a transactional `NOTIFY` (delivered only
+   if the transaction commits). The worker is listening and starts the instance
+   immediately.
+2. **Backstop sweep** — the worker periodically scans for committed-but-unstarted
+   instances (a missed notification) and starts any it finds that the engine does
+   not yet know about.
+
+Under normal operation the instant path starts workflows in milliseconds; the
+sweep exists only to guarantee eventual convergence.
+
+### GUC Reference
+
+Both GUCs are **Postmaster-context** — set them in `postgresql.conf` and restart
+PostgreSQL.
+
+```ini
+# postgresql.conf
+
+# How often (seconds) the worker sweeps for committed-but-unstarted instances.
+# Set to 0 to disable the periodic sweep (the instant NOTIFY path stays on).
+pg_durable.reconcile_interval = 15
+
+# Minimum age (seconds) a pending instance must reach before the sweep starts it.
+# Keeps the sweep from racing the instant NOTIFY path for freshly-committed work.
+pg_durable.reconcile_grace = 300
+```
+
+The defaults suit most deployments. Lower `reconcile_grace` if you want the
+backstop to recover missed starts sooner; raise `reconcile_interval` to reduce
+background query load on very large `df.instances` tables.
+
+> **Note:** Reconciliation activates only on schema version 0.2.4 and later
+> (when `df.instances.start_input` exists). On an older schema `df.start()`
+> starts the engine inline instead, so there is nothing to reconcile.
 
 ---
 

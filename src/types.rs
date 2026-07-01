@@ -57,6 +57,17 @@ pub fn get_execution_acquire_timeout() -> Duration {
     Duration::from_secs(crate::EXECUTION_ACQUIRE_TIMEOUT.get() as u64)
 }
 
+/// Interval between background sweeps that start committed-but-unstarted
+/// instances. Zero disables the periodic sweep (the instant NOTIFY path stays on).
+pub fn get_reconcile_interval() -> Duration {
+    Duration::from_secs(crate::RECONCILE_INTERVAL.get() as u64)
+}
+
+/// Minimum age a pending instance must reach before the periodic sweep starts it.
+pub fn get_reconcile_grace() -> Duration {
+    Duration::from_secs(crate::RECONCILE_GRACE.get() as u64)
+}
+
 /// Returns `true` when superuser-submitted instances are permitted.
 pub fn superuser_instances_enabled() -> bool {
     crate::ENABLE_SUPERUSER_INSTANCES.get()

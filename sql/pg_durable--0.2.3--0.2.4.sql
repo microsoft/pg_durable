@@ -89,7 +89,7 @@ BEGIN
     EXECUTE pg_catalog.format('GRANT SELECT ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT UPDATE (status, updated_at) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT SELECT ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
-    EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+    EXECUTE pg_catalog.format('GRANT INSERT (id, label, root_node, submitted_by, database, start_input) ON df.instances TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     EXECUTE pg_catalog.format('GRANT SELECT, INSERT, UPDATE, DELETE ON df.vars TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
 
@@ -154,7 +154,7 @@ BEGIN
     EXECUTE pg_catalog.format('REVOKE SELECT, INSERT, UPDATE, DELETE ON df.vars FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE INSERT (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) ON df.nodes FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.nodes FROM %I CASCADE', p_role);
-    EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database) ON df.instances FROM %I CASCADE', p_role);
+    EXECUTE pg_catalog.format('REVOKE INSERT (id, label, root_node, submitted_by, database, start_input) ON df.instances FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE UPDATE (status, updated_at) ON df.instances FROM %I CASCADE', p_role);
     EXECUTE pg_catalog.format('REVOKE SELECT ON df.instances FROM %I CASCADE', p_role);
 
@@ -287,6 +287,62 @@ COMMENT ON COLUMN df.nodes.status_details IS
     'Execution metadata written by the worker (never inserted by users). JSON object with key '
     '"execution_id": the orchestration instance_id::execution_id stamp recorded when the node last '
     'transitioned. df.instance_nodes() parses it to derive pending/skipped statuses; see USER_GUIDE.md.';
+
+-- ============================================================================
+-- Persisted start payload: add df.instances.start_input (start-convergence).
+--
+-- df.start() now records the workflow's start input (the vars snapshot captured
+-- at start time, plus label) in the SAME transaction that writes df.instances,
+-- instead of calling the durable engine out-of-band on a separate connection.
+-- The background worker starts the engine from this committed intent, so a
+-- rolled-back df.start() leaves no engine "ghost" and a committed instance is
+-- always eventually started. The column is nullable: rows written before this
+-- upgrade have no snapshot, and the worker best-effort starts those with an
+-- empty vars set.
+--
+-- The column IS added to the user INSERT grant (df.start runs as the caller and
+-- writes it). Backward compatibility (Scenario B1): the new .so gates the intent
+-- path on the presence of this column (installed extension version >= 0.2.4) and
+-- otherwise falls back to the pre-0.2.4 out-of-band start, so an un-upgraded
+-- schema keeps working until this upgrade applies.
+-- ============================================================================
+ALTER TABLE df.instances ADD COLUMN start_input JSONB;
+
+COMMENT ON COLUMN df.instances.start_input IS
+    'FunctionInput JSON captured by df.start() (instance_id, label, vars snapshot, loop_iteration). '
+    'The background worker replays it to start the durable engine for this instance; see USER_GUIDE.md.';
+
+-- Backfill the new column-level INSERT privilege to exactly the roles that
+-- already hold column-level INSERT on df.instances (every df.grant_usage() call
+-- grants INSERT on the id column), so existing df users can keep calling
+-- df.start() after the new .so switches to the intent path -- without re-running
+-- df.grant_usage(). Keying off the id column's attacl (rather than schema USAGE)
+-- targets precisely the df.start() callers and preserves each grant's
+-- grantability.
+DO $$
+DECLARE
+    r RECORD;
+    grant_opt TEXT;
+BEGIN
+    FOR r IN
+        SELECT
+            pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) AS grantee,
+            pg_catalog.bool_or(a.is_grantable) AS with_grant_option
+        FROM pg_catalog.pg_attribute att
+        JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) att.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+        CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) AS a
+        WHERE n.nspname OPERATOR(pg_catalog.=) 'df'
+          AND c.relname OPERATOR(pg_catalog.=) 'instances'
+          AND att.attname OPERATOR(pg_catalog.=) 'id'
+          AND a.privilege_type OPERATOR(pg_catalog.=) 'INSERT'
+          AND a.grantee OPERATOR(pg_catalog.<>) 0  -- skip PUBLIC
+        GROUP BY a.grantee
+    LOOP
+        grant_opt := CASE WHEN r.with_grant_option THEN ' WITH GRANT OPTION' ELSE '' END;
+        EXECUTE pg_catalog.format('GRANT INSERT (start_input) ON df.instances TO %s', r.grantee) OPERATOR(pg_catalog.||) grant_opt;
+    END LOOP;
+END $$;
 
 -- ============================================================================
 -- df.instance_nodes(): one row per node with derived status (PR #263).

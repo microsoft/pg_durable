@@ -923,6 +923,7 @@ echo ""
 B2_PRE_INSTANCE_ID=""
 B2_INFLIGHT_INSTANCE_ID=""
 B2_POST_INSTANCE_ID=""
+B2_BACKFILL_ROLE="durable_b2_backfill_probe"
 
 test_b2_data_survives_upgrade() {
     # Step 1: Install previous version and create test data
@@ -932,6 +933,15 @@ test_b2_data_survives_upgrade() {
 
     assert_sql_equals "SELECT df.clearvars();" "OK" || return 1
     assert_sql_equals "SELECT df.setvar('b2_key', 'b2_value');" "OK" || return 1
+
+    # Create a NON-superuser df role and grant it df usage on the PREVIOUS
+    # schema (which has no start_input column), so the 0.2.4 upgrade's grant
+    # backfill has a pre-existing target. test_b2_start_input_grant_backfill_
+    # after_upgrade verifies this role can still call df.start() after upgrade.
+    run_sql_capture "DROP OWNED BY ${B2_BACKFILL_ROLE};" >/dev/null 2>&1 || true
+    run_sql_capture "DROP ROLE IF EXISTS ${B2_BACKFILL_ROLE};" >/dev/null 2>&1 || true
+    run_sql_capture "CREATE ROLE ${B2_BACKFILL_ROLE} LOGIN;" >/dev/null || return 1
+    run_sql_capture "SELECT df.grant_usage('${B2_BACKFILL_ROLE}');" >/dev/null || return 1
 
     B2_PRE_INSTANCE_ID=$(run_sql_capture "SELECT df.start('INSERT INTO test_upgrade_b2_log (kind, msg) VALUES (''pre'', ''{b2_key}'') RETURNING msg', 'b2-pre-upgrade');") || return 1
     B2_INFLIGHT_INSTANCE_ID=$(run_sql_capture "SELECT df.start(df.sleep(2) ~> 'SELECT ''b2-running'' AS value', 'b2-inflight');") || return 1
@@ -977,6 +987,23 @@ test_b2_new_data_after_upgrade() {
     assert_sql_equals "SELECT msg FROM test_upgrade_b2_log WHERE kind = 'post' ORDER BY id DESC LIMIT 1;" "new_value"
 }
 
+test_b2_start_input_grant_backfill_after_upgrade() {
+    # The 0.2.4 upgrade adds df.instances.start_input and df.start() switches to
+    # the intent path (INSERT ... start_input). A role granted df usage BEFORE the
+    # upgrade only holds INSERT on the old columns, so without the upgrade's grant
+    # backfill its df.start() would fail with "permission denied for column
+    # start_input". B2_BACKFILL_ROLE was created and granted df usage on the
+    # PREVIOUS schema (see test_b2_data_survives_upgrade), so this asserts the
+    # backfill extended its INSERT privilege to the new column.
+    assert_sql_equals \
+        "SELECT has_column_privilege('${B2_BACKFILL_ROLE}', 'df.instances', 'start_input', 'INSERT');" \
+        "t"
+    local rc=$?
+
+    run_sql_capture "DROP OWNED BY ${B2_BACKFILL_ROLE}; DROP ROLE IF EXISTS ${B2_BACKFILL_ROLE};" >/dev/null 2>&1 || true
+    return $rc
+}
+
 test_b2_grant_usage_after_upgrade() {
     # Regression guard for #110: after ALTER EXTENSION UPDATE, df.debug_connection()
     # must be gone from the catalog. Scenario A only compares function name/args/
@@ -1012,6 +1039,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
     run_test "B2: In-flight work completes after upgrade" test_b2_inflight_work_after_upgrade
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
+    run_test "B2: Pre-upgrade df role can df.start() after upgrade (start_input grant backfill)" test_b2_start_input_grant_backfill_after_upgrade
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
 fi
 
