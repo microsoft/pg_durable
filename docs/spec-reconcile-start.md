@@ -56,7 +56,8 @@ Why this fixes both modes:
   row. A rolled-back `df.start()` leaves no row and delivers no notification, so
   nothing is ever started. No ghost is possible.
 - **Stuck:** even if the instant notification is lost, the sweep eventually finds
-  the committed-but-unstarted row and starts it. Convergence is guaranteed.
+  the committed-but-unstarted row and starts it. Convergence is guaranteed,
+  including the case where a worker dies mid-start (see "Exactly-once start").
 
 ### Why go through the Rust API instead of the engine's SQL
 
@@ -73,16 +74,41 @@ the two can share one transaction.
 ### Exactly-once start
 
 The instant path and the sweep can both notice the same instance. Start-once is
-guaranteed by an atomic claim: the worker flips the row `pending -> running` with
-`UPDATE ... WHERE status = 'pending' RETURNING start_input`. Only the one caller
-that observes the row still `pending` proceeds to call the engine. If that engine
-call fails, the claim is rolled back to `pending` so a later sweep retries.
+guaranteed by an atomic claim: the worker flips the row to `running` with
+`UPDATE ... RETURNING start_input`. Only the one caller that wins the claim calls
+the engine. If that engine call fails, the claim is rolled back to `pending` so a
+later sweep retries.
+
+The claim commits before the engine start (two systems, two transactions), so a
+hard worker crash *between* the claim and the engine start would otherwise strand
+the row in `running` forever — a state the `pending`-only sweep could never
+recover, silently violating the convergence guarantee. To close this window the
+sweep also reconciles **stale claims**: a `running` row the engine does not know
+about (`get_orchestration_status == NotFound`) whose claim is older than the grace
+is re-claimed and re-started. The `NotFound` gate ensures a genuinely-running
+instance is never restarted, and the age guard avoids racing a start that is
+merely mid-dispatch.
+
+### Trust boundary: `start_input` is caller-writable
+
+`df.instances.start_input` is written by the caller of `df.start()`, and the
+orchestration selects which graph to load — and which role runs the SQL — from the
+input's instance id. The worker must therefore **never trust the instance id
+embedded in the payload**: it forces the engine input's instance id to the claimed
+row id, and the orchestration independently uses the durable runtime's instance id
+(`ctx.instance_id()`) rather than the payload's. Otherwise a low-privilege user
+could INSERT a crafted `pending` row whose `start_input` points at another user's
+instance and have the superuser worker run the victim's workflow as the victim.
+The persisted vars/label are still replayed (they belong to the caller's own
+instance), only the identity is re-derived from trusted state.
 
 ## Schema changes (0.2.4)
 
 - `df.instances.start_input JSONB` (nullable) — the `FunctionInput` captured at
-  `df.start()` time so the worker can replay the exact start payload. Rows written
-  before this column existed replay with an empty vars set.
+  `df.start()` time so the worker can replay the exact start payload. The worker
+  overrides the payload's instance id with the claimed row id before replaying it
+  (see the trust boundary above). Rows written before this column existed replay
+  with an empty vars set.
 - Added to the `df.grant_usage()` / `df.revoke_usage()` INSERT column list; the
   upgrade script backfills `GRANT INSERT (start_input)` to existing df-usage roles.
 
@@ -111,16 +137,26 @@ call fails, the claim is rolled back to `pending` so a later sweep retries.
 
 ## Scope
 
-This change fixes the **start** direction (df has it, engine does not). The reverse
-directions (`df.cancel()` / `df.signal()` rollback leaks, or engine-has-it /
-df-does-not orphan cleanup) are out of scope and remain on the existing client
-path.
+This change fixes the **start** direction (df has it, engine does not). The
+reverse orphan-cleanup direction (engine-has-it / df-does-not) is out of scope.
+`df.cancel()` / `df.signal()` remain on the existing client path; as a targeted
+exception, the worker re-issues a cancel to the engine if an instance was moved to
+`cancelled` between the claim and the start, so a cancel that races the deferred
+start is not silently ignored.
 
 ## Testing
 
-`tests/e2e/sql/25_reconcile_start.sql` exercises both failure modes end-to-end:
+`tests/e2e/sql/25_reconcile_start.sql` exercises the failure modes end-to-end:
 
 - **Scenario 1 (ghost):** `BEGIN; SELECT df.start(...); ROLLBACK;` then assert the
   duroxide runtime has no residue for that instance. (Verified RED on `main`.)
 - **Scenario 2 (stuck):** commit a backdated `pending` instance directly (no
   notification), then assert the worker's sweep starts and completes it.
+- **Scenario 3 (stale claim):** commit a backdated `running` instance the engine
+  never started (simulating a crash between the claim and the engine start), then
+  assert the sweep recovers and completes it.
+
+`tests/e2e/sql/26_reconcile_security.sql` constructs the cross-tenant attack — a
+low-privilege role INSERTs a crafted `pending` row whose `start_input` points at a
+victim instance and triggers it via `pg_notify` — and asserts the attacker's row
+runs its own graph while the victim's protected table is never written.

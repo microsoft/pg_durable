@@ -112,8 +112,17 @@ struct SubtreeEnvelope {
 /// rather than completing with a control-flow value. Callers should treat the returned
 /// `Err` strictly as a failure and must not add retry/recovery logic for break.
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
-    let input: FunctionInput = serde_json::from_str(&input_json)
+    let mut input: FunctionInput = serde_json::from_str(&input_json)
         .map_err(|e| format!("Invalid orchestration input: {e}"))?;
+
+    // Trust the durable runtime's instance id, never the (caller-writable)
+    // instance id embedded in the input payload. df.instances.start_input is
+    // written by the caller of df.start(), and the background worker replays it
+    // to start this orchestration; a forged instance_id in that payload must not
+    // be able to redirect graph/identity loading to a different instance. For
+    // every legitimate start the two ids are identical, so this is a no-op on the
+    // happy path and replay-safe for in-flight instances.
+    input.instance_id = ctx.instance_id();
 
     let label_info = input
         .label
