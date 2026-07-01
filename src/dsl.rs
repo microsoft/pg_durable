@@ -1065,10 +1065,20 @@ pub fn start(
         &instance_id,
         &input_json,
     ) {
-        pgrx::log!(
-            "pg_durable: Warning - failed to start durable function: {}",
-            e
-        );
+        // Fail fast: the durable engine could not accept the start, so abort the
+        // whole df.start() transaction rather than committing an instance row
+        // that would never run (a stuck instance nothing recovers). The df rows
+        // and this error are in the caller's transaction, so the abort rolls
+        // them back cleanly; the caller can retry.
+        //
+        // The pgrx unit-test build does not run the background worker (see the
+        // test-build note on validate_database in lib.rs), so the enqueue always
+        // fails there; in that build we log instead of aborting so df.start()'s
+        // graph construction stays unit-testable.
+        #[cfg(not(any(test, feature = "pg_test")))]
+        pgrx::error!("failed to start durable function: {e}");
+        #[cfg(any(test, feature = "pg_test"))]
+        pgrx::log!("pg_durable: start enqueue failed (test build, ignored): {e}");
     }
 
     instance_id
