@@ -152,7 +152,36 @@ SELECT 'SELECT 1' ~> 'SELECT 2';
 SELECT df.start('SELECT 1' ~> 'SELECT 2');
 ```
 
+### Transaction Semantics & Autonomous Transactions
+
+`df.start()` participates in the **caller's transaction**: the instance and its
+graph are written via the caller's session, so if the caller's transaction
+rolls back, the durable function is rolled back with it and never runs.
+
+`df.start_autonomous()` provides the opposite guarantee — the PostgreSQL
+equivalent of Oracle's `PRAGMA AUTONOMOUS_TRANSACTION`. It persists and enqueues
+the durable function on a **separate session**, so it commits independently and
+**survives a rollback of the caller's transaction**. Use it for audit trails,
+error logging, and other "must persist even if the caller rolls back" work.
+
+```sql
+BEGIN;
+    INSERT INTO employees (id, name) VALUES (999, 'Test User');
+
+    -- Persists even though the surrounding transaction rolls back below.
+    SELECT df.start_autonomous(
+        'INSERT INTO audit_log (message) VALUES (''Inserted employee 999'')',
+        'audit'
+    );
+
+    ROLLBACK;  -- employees insert is undone; the audit_log entry remains
+```
+
+`df.start_autonomous()` takes the same arguments as `df.start()` and runs under
+the calling role's identity and privileges.
+
 ---
+
 
 ## DSL Reference
 
@@ -182,6 +211,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
+| `df.start_autonomous(func, label, database)` | Start function with autonomous-transaction semantics (survives caller rollback) | `df.start_autonomous('INSERT INTO audit ...', 'audit')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status by instance_id (not label) | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result by instance_id (not label) | `df.result('a1b2c3d4')` |

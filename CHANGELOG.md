@@ -6,6 +6,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.4] - Unreleased
 
+### Added
+
+- **`df.start_autonomous()` — Oracle-style autonomous transactions:** a new function that starts a durable function with autonomous-transaction semantics. It persists and enqueues the work on a separate PostgreSQL session, so it commits independently and **survives a rollback of the caller's transaction** (the PostgreSQL equivalent of Oracle's `PRAGMA AUTONOMOUS_TRANSACTION`). Use it for audit trails, error logging, and other "must persist even if the caller rolls back" work. Ordinary `df.start()` is unchanged and still participates in the caller's transaction. Takes the same arguments as `df.start()` (`fut`, optional `label`, optional `database`) and runs under the calling role's identity. Added additively as a new C symbol, so the new `.so` stays backward compatible with all previous schemas in this provider line (see `docs/upgrade-testing.md`).
+
 ### Changed
 
 - **`df.wait_for_schedule()` cron timing:** the next cron tick is now computed at execution time using duroxide's deterministic clock (`ctx.utc_now()`) inside the `execute_function_graph` orchestration, instead of being pre-computed at `df.start()` time. This makes recurring `@>` schedules and any start-to-execution delay target the correct upcoming tick (#130).
