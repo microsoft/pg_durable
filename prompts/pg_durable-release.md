@@ -196,31 +196,49 @@ gh run watch "$(gh run list --workflow package-release.yml --limit 1 --json data
 ## Step 5: Fill release notes and publish
 
 The Package Release run creates the draft with placeholder notes. Replace them
-with the curated changelog **plus** GitHub's auto-generated **New Contributors**
-section, then publish. The release-body content already lives in the committed
-`CHANGELOG.md`, so extract this version's section on the fly into a throwaway
-temp file — **do not** create or commit a separate `release-notes-*.md`.
+with the curated changelog **plus** an **Acknowledgements** credit and GitHub's
+auto-generated **New Contributors** section, then publish. The release-body
+content already lives in the committed `CHANGELOG.md`, so extract this version's
+section on the fly into a throwaway temp file — **do not** create or commit a
+separate `release-notes-*.md`.
 
 ```bash
 # 1. Extract the "## [X.Y.Z]" block from CHANGELOG.md (stops at the next "## [" heading)
 awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes-X.Y.Z.md
 
-# 2. Fetch GitHub's auto-generated notes via the API, then keep ONLY the
-#    "New Contributors" + "Full Changelog" parts. `gh release edit` has NO
+# 2. Fetch GitHub's auto-generated notes ONCE. `gh release edit` has NO
 #    --generate-notes flag (only `gh release create` does), so we generate the
-#    block separately. We deliberately DROP the auto "## What's Changed" PR dump:
-#    it just re-lists the PRs the curated CHANGELOG already covers (redundant
-#    noise). The awk skips from the "What's Changed" heading until the next
-#    "## " heading or the "**Full Changelog**" line.
+#    block separately and reuse it for both the trimmed notes and the
+#    Contributors credit below.
 gh api repos/microsoft/pg_durable/releases/generate-notes \
-  -f tag_name=vX.Y.Z --jq '.body' \
-  | awk '/^## What.s Changed/{skip=1; next} /^## /{skip=0} /^\*\*Full Changelog\*\*/{skip=0} !skip' \
-  > /tmp/auto-notes-X.Y.Z.md
+  -f tag_name=vX.Y.Z --jq '.body' > /tmp/gen-notes-X.Y.Z.md
 
-# 3. Combine curated changelog + trimmed auto notes (separated by a rule),
+# 3. Keep ONLY the "New Contributors" + "Full Changelog" parts. We deliberately
+#    DROP the auto "## What's Changed" PR dump: it just re-lists the PRs the
+#    curated CHANGELOG already covers (redundant noise). The awk skips from the
+#    "What's Changed" heading until the next "## " heading or the
+#    "**Full Changelog**" line.
+awk '/^## What.s Changed/{skip=1; next} /^## /{skip=0} /^\*\*Full Changelog\*\*/{skip=0} !skip' \
+  /tmp/gen-notes-X.Y.Z.md > /tmp/auto-notes-X.Y.Z.md
+
+# 4. Build an "Acknowledgements" thank-you from EVERY "by @handle" in the
+#    generated notes — the "## What's Changed" dump we just dropped is the ONLY
+#    place with per-PR authorship. "New Contributors" alone lists only
+#    *first-time* contributors, so without this step returning contributors get
+#    no credit. Dedupe and strip bots (@dependabot, @github-actions).
+#    NOTE: use the heading "Acknowledgements", NOT "Contributors" — GitHub
+#    auto-renders its own "Contributors" avatar widget on the release page, so a
+#    body heading named "Contributors" produces a confusing duplicate section.
+contributors=$(grep -oE 'by @[A-Za-z0-9-]+' /tmp/gen-notes-X.Y.Z.md \
+  | sed 's/by //' | sort -u | grep -viE '@(dependabot|github-actions)' | paste -sd ' ' -)
+
+# 5. Assemble: curated changelog + Acknowledgements credit + trimmed auto notes,
 #    then set the release body
-printf '%s\n\n---\n\n' "$(cat /tmp/notes-X.Y.Z.md)" > /tmp/release-body-X.Y.Z.md
-cat /tmp/auto-notes-X.Y.Z.md >> /tmp/release-body-X.Y.Z.md
+{
+  cat /tmp/notes-X.Y.Z.md
+  printf '\n---\n\n## Acknowledgements\n\nThanks to everyone who contributed to this release: %s.\n\n' "$contributors"
+  cat /tmp/auto-notes-X.Y.Z.md
+} > /tmp/release-body-X.Y.Z.md
 gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
 ```
 
@@ -231,13 +249,26 @@ gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
   `CHANGELOG.md`. The curated text comes from the changelog you already merged.
 - The `releases/generate-notes` API returns a "## What's Changed" PR dump, a
   "## New Contributors" section, and a "Full Changelog" link. We **drop**
-  "What's Changed" (it re-lists the same PRs the curated changelog already
-  describes, just ungrouped) and keep only **New Contributors** + the
+  "What's Changed" from the body (it re-lists the same PRs the curated changelog
+  already describes, just ungrouped) but first **mine it for contributor
+  handles** to build the **Acknowledgements** credit — it is the only section
+  with per-PR authorship. Name that section **Acknowledgements**, not
+  **Contributors**: GitHub auto-renders a native "Contributors" avatar widget on
+  the release page, and a body heading of the same name creates a duplicate,
+  confusing section. We keep **New Contributors** (first-timers) and the
   **Full Changelog** compare link in the **Release** (not in `CHANGELOG.md` —
   Keep a Changelog groups by change type, not by people). Anyone wanting the
   exhaustive per-PR list with attribution can follow the Full Changelog link.
   If the tag isn't pushed yet, the API can't compute the block — run this after
   Step 4.
+- **Acknowledgements credit:** the `## Acknowledgements` line thanks *every*
+  human who landed a PR in the release, not just first-timers. It is derived
+  from the `by @handle` mentions in the generated notes with bots removed.
+  Skipping it (as an earlier version of this prompt did) leaves only "New
+  Contributors", which silently drops credit for returning contributors — the
+  common case. Do **not** title it "Contributors": GitHub renders its own
+  native "Contributors" avatar strip on the release page, so that heading would
+  duplicate it.
 
 Review the draft in the GitHub UI, confirm the `.deb`/source assets are attached
 and ordered sensibly, then **Publish** (ask the user before publishing). For a
