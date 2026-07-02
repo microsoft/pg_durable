@@ -4,7 +4,14 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.4] - Unreleased
+## [0.2.4] - 2026-07-02
+
+Provider-line note: v0.2.4 stays in the `duroxide-pg` provider compatibility line, so the upgrade source is v0.2.3 (`sql/pg_durable--0.2.3--0.2.4.sql`).
+
+### Added
+
+- **Instance retention/pruning (#265):** terminal instances are now pruned by a hard cap and a retention window, bounding unbounded growth of `df.instances`.
+- **`df.list_instances()` pagination & filtering (#278):** added a `label_filter`, keyset pagination (`after_cursor`/`next_cursor`), and `created_at`/`updated_at` timestamps to the result set.
 
 ### Changed
 
@@ -16,10 +23,33 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   - **Breaking for in-flight work:** the new activity-input shape changes the string duroxide records in orchestration history, and duroxide validates activity inputs by exact equality on replay, so any instance left **in flight across the 0.2.3 → 0.2.4 binary upgrade** cannot complete. Drain or cancel in-flight instances before deploying 0.2.4. The in-place `df.nodes` key restructure also takes an `ACCESS EXCLUSIVE` lock whose duration scales with table size — run the upgrade in a maintenance window. See the #129 section of `docs/upgrade-testing.md` for the full drain-before-upgrade contract.
 - **`df.grant_usage()` / `df.revoke_usage()`:** dropped the explicit per-function `EXECUTE` allowlist. Schema `USAGE` on `df` is the real access gate for ordinary `df.*` functions, so the helpers now grant/revoke schema `USAGE`, the table privileges, and `EXECUTE` only on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`). Function signatures are unchanged and existing privileges are unaffected (#242).
 - **`df.list_instances()` page-size cap is now a loud error (#146):** `df.list_instances()` previously truncated `limit_count` silently to a fixed ceiling of 10000. It now raises an error when `limit_count` exceeds the new `pg_durable.list_instances_max_limit` GUC (`SUSET` context, default `1000`, range `1`–`1000000`), so an over-cap request fails fast instead of returning a silently short page that is indistinguishable from "no more rows". Both the basic and paginated overloads enforce the cap; clients needing more rows should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`). A superuser can change the cap at runtime without a restart; by default an ordinary caller cannot.
+- **Renamed `df.wait_for_completion()` (#164):** the function was renamed and hardened against unsafe use. **Breaking:** callers of the old name must update to the new name.
+- **Node statuses derived from execution lineage (#263, #283):** node status is now derived from the durable engine's execution lineage, reconciling the `df` control-plane with the engine so reported statuses match actual execution.
+- **`df.start()` fails fast on engine hand-off failure (#282):** if the hand-off to the durable engine fails, `df.start()` now returns an error immediately instead of leaving a stuck instance behind.
+- **Dependencies:** bumped `reqwest` to 0.13.4 (#260) and `uuid` to 1.23.4 (#273).
+
+### Fixed
+
+- **`explain` race branches (#276):** race (`|`) branches now render correctly in `df.explain()` output.
+- **Loop safety (#254):** `df.loop()` now enforces a max-iteration guard and detects malformed loop configuration instead of looping unboundedly or misbehaving.
+- **`$name.*` expansion cap (#255):** a row-count limit (10,000) is now enforced when expanding `$name.*`, preventing unbounded expansion.
+- **`df.http()` User-Agent (#270):** requests now send a default `User-Agent` header.
+- **Connection reliability (#251, #252):** the client is now recoverable after a connection failure, and epoch/extension polling is isolated onto a dedicated connection pool so it can no longer contend with execution work.
+- **`df.list_instances()` N+1 (#275):** instance-info lookups are now batched, removing an N+1 query pattern.
+- **Indexes (#271):** added a `created_at` index and a composite status index on `df.instances` to speed up listing and status queries.
+
+### Security
+
+- **SSRF CGNAT range (#253):** the `100.64.0.0/10` CGNAT range is now blocked by SSRF protection in `df.http()`.
+- **`df.metrics()` access (#184):** `df.metrics()` is now gated behind an explicit `EXECUTE` grant rather than being callable by default.
 
 ### Removed
 
 - **`df.debug_connection()`:** removed from the SQL surface as non-security, surface-reduction cleanup (#110). The function returned the worker connection string (`postgres://role@host:port/db`) with no password or credential, and the worker role is already visible through native PostgreSQL channels (the world-readable `pg_durable.worker_role` GUC and `pg_stat_activity.usename`) — so issue #110 is reclassified from a security finding to cleanup. Fresh installs no longer create the function and the `0.2.3 → 0.2.4` upgrade drops it; a binary-compatibility shim retains the underlying C symbol so pre-0.2.4 schemas keep resolving the function until `ALTER EXTENSION pg_durable UPDATE` runs.
+
+### Documentation
+
+- Documented `SECURITY DEFINER df.start()` behavior (#185), corrected documentation examples (#257), and clarified that `df.status()`/`df.result()` take an `instance_id` rather than a label (#167).
 
 ## [0.2.3] - 2026-06-17
 
