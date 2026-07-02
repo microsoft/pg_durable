@@ -294,10 +294,12 @@ if [ -f "$DATA_DIR/postgresql.conf" ]; then
         sed -i.bak '/^#*port = /d' "$DATA_DIR/postgresql.conf"
         echo "port = $PG_PORT" >> "$DATA_DIR/postgresql.conf"
     fi
-    # Clear any connection-limit GUCs that E2E test phases (connlimit-*) may have
-    # left behind. Without this, max_duroxide_connections=1 causes the BGW to
-    # refuse to start, breaking the B1 wait-for-readiness check.
-    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d' "$DATA_DIR/postgresql.conf"
+    # Clear any per-phase GUCs that E2E test phases may have left in the shared
+    # postgresql.conf. Without this, the connlimit-* phases' max_duroxide_connections=1
+    # causes the BGW to refuse to start (breaking the B1 wait-for-readiness check),
+    # and the reconcile phase's aggressive reconcile_interval/retention_days would
+    # remove terminal instances mid-test and make df.result() flaky.
+    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d' "$DATA_DIR/postgresql.conf"
 fi
 
 # If the server is already running, restart it so both the freshly installed
