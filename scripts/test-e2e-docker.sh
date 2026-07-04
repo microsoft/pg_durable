@@ -35,6 +35,11 @@ SKIP_TESTS=(
     "46_connection_limit_startup_validation"
     "47_http_dsl_disabled"
     "48_http_allow_all"
+    # Needs the "reconcile" phase GUCs (reconcile_interval=2, retention_days=0)
+    # so a pass acts within the 30s test window. The single fixed-config Docker
+    # container keeps the production defaults (reconcile_interval=3600,
+    # retention_days=30), under which the orphan is never reclaimed in time.
+    "54_reconcile_orphans"
 )
 
 # Defaults
