@@ -7,6 +7,7 @@ use pgrx::{pg_extern, Spi};
 
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ffi::CString;
@@ -146,7 +147,21 @@ pub fn postgres_connection_string() -> String {
     let user = get_worker_role();
     let database = get_database();
 
-    format!("postgres://{user}@{host}:{port}/{database}")
+    build_connection_url(&user, &host, port, &database)
+}
+
+/// Build the worker's `postgres://` connection URL.
+///
+/// A Unix-socket `host` (one starting with `/`) is percent-encoded so the URL
+/// parser keeps the whole path as the host; sqlx percent-decodes it and
+/// connects over the socket. TCP addresses and hostnames are used verbatim.
+fn build_connection_url(user: &str, host: &str, port: i32, database: &str) -> String {
+    if host.starts_with('/') {
+        let encoded = utf8_percent_encode(host, NON_ALPHANUMERIC).to_string();
+        format!("postgres://{user}@{encoded}:{port}/{database}")
+    } else {
+        format!("postgres://{user}@{host}:{port}/{database}")
+    }
 }
 
 /// Get the PostgreSQL host for connections
@@ -1402,6 +1417,93 @@ mod tests {
     fn normalize_role_name_rejects_malformed_quoted_identifier() {
         let err = normalize_role_name_for_connection("\"bad\"name\"").unwrap_err();
         assert!(err.contains("Invalid quoted role name"));
+    }
+
+    #[test]
+    fn build_connection_url_tcp_host_unchanged() {
+        assert_eq!(
+            build_connection_url("postgres", "127.0.0.1", 5432, "postgres"),
+            "postgres://postgres@127.0.0.1:5432/postgres"
+        );
+    }
+
+    #[test]
+    fn build_connection_url_hostname_unchanged() {
+        assert_eq!(
+            build_connection_url("worker", "db.internal.example.com", 6432, "app"),
+            "postgres://worker@db.internal.example.com:6432/app"
+        );
+    }
+
+    #[test]
+    fn build_connection_url_unix_socket_percent_encoded() {
+        assert_eq!(
+            build_connection_url("postgres", "/controller/run", 5432, "postgres"),
+            "postgres://postgres@%2Fcontroller%2Frun:5432/postgres"
+        );
+    }
+
+    #[test]
+    fn build_connection_url_unix_socket_standard_dir() {
+        assert_eq!(
+            build_connection_url("postgres", "/var/run/postgresql", 5432, "postgres"),
+            "postgres://postgres@%2Fvar%2Frun%2Fpostgresql:5432/postgres"
+        );
+    }
+
+    #[test]
+    fn build_connection_url_socket_parses_to_socket() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let url = build_connection_url("postgres", "/controller/run", 5432, "postgres");
+        let opts = PgConnectOptions::from_str(&url).expect("socket URL should parse");
+        assert_eq!(
+            opts.get_socket().map(|p| p.to_string_lossy().into_owned()),
+            Some("/controller/run".to_string()),
+        );
+    }
+
+    #[test]
+    fn build_connection_url_tcp_parses_to_host() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let url = build_connection_url("postgres", "127.0.0.1", 5432, "postgres");
+        let opts = PgConnectOptions::from_str(&url).expect("TCP URL should parse");
+        assert_eq!(opts.get_host(), "127.0.0.1");
+        assert!(opts.get_socket().is_none());
+    }
+
+    #[test]
+    fn build_connection_url_socket_with_special_chars_parses_to_socket() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let path = "/var/run/pg data";
+        let url = build_connection_url("postgres", path, 5432, "postgres");
+        let opts = PgConnectOptions::from_str(&url).expect("socket URL should parse");
+        assert_eq!(
+            opts.get_socket().map(|p| p.to_string_lossy().into_owned()),
+            Some(path.to_string()),
+        );
+    }
+
+    #[test]
+    fn build_connection_url_socket_path_is_opaque_no_tcp_injection() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        // A leading-`/` host with URL metacharacters must remain a single opaque
+        // socket path (no TCP host or query-parameter interpretation).
+        let path = "/@evil.com?sslmode=disable";
+        let url = build_connection_url("postgres", path, 5432, "postgres");
+        let opts = PgConnectOptions::from_str(&url).expect("socket URL should parse");
+        assert_eq!(
+            opts.get_socket().map(|p| p.to_string_lossy().into_owned()),
+            Some(path.to_string()),
+        );
+        assert_ne!(opts.get_host(), "evil.com");
     }
 
     // ============================================================================
