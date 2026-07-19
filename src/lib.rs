@@ -367,7 +367,7 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_right_node_format_chk
         CHECK (right_node IS NULL OR right_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_node_type_chk
-        CHECK (node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL'])) NOT VALID,
+        CHECK (node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL'])) NOT VALID,
     ADD CONSTRAINT nodes_result_name_chk
         CHECK (result_name IS NULL OR result_name OPERATOR(pg_catalog.~) '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
     ADD CONSTRAINT nodes_status_chk
@@ -377,7 +377,7 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_structure_chk
         CHECK (
             CASE
-                WHEN node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'SLEEP', 'WAIT_SCHEDULE', 'BREAK', 'HTTP', 'SIGNAL'])
+                WHEN node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'SLEEP', 'WAIT_SCHEDULE', 'BREAK', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL'])
                     THEN left_node IS NULL AND right_node IS NULL AND query IS NOT NULL
                 WHEN node_type OPERATOR(pg_catalog.=) 'THEN'
                     THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NULL
@@ -495,6 +495,8 @@ BEGIN
     -- df.http() — opt-in because it makes outbound network requests.
     IF include_http THEN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        -- df.http_multipart() shares the same opt-in (HTTP egress is one privilege).
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- Admin helpers and system-wide metrics — with_grant => true marks a
@@ -541,6 +543,11 @@ BEGIN
     END;
     BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.metrics() FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -600,11 +607,17 @@ END $$;
 -- with_grant => true admins or by a direct administrator GRANT.
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.metrics() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
     name = "rls_and_grants",
-    requires = ["create_tables", dsl::http, monitoring::metrics]
+    requires = [
+        "create_tables",
+        dsl::http,
+        dsl::http_multipart,
+        monitoring::metrics
+    ]
 );
 
 // ============================================================================
@@ -759,8 +772,8 @@ BEGIN
         node_type_val := (val::jsonb)->>'node_type';
         IF node_type_val IS NOT NULL THEN
             -- Has a node_type - validate it
-            IF node_type_val NOT IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'SIGNAL') THEN
-                RAISE EXCEPTION 'Unknown node_type ''%''. Valid types: SQL, THEN, IF, JOIN, LOOP, BREAK, RACE, SLEEP, WAIT_SCHEDULE, HTTP, SIGNAL', node_type_val;
+            IF node_type_val NOT IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL') THEN
+                RAISE EXCEPTION 'Unknown node_type ''%''. Valid types: SQL, THEN, IF, JOIN, LOOP, BREAK, RACE, SLEEP, WAIT_SCHEDULE, HTTP, HTTP_MULTIPART, SIGNAL', node_type_val;
             END IF;
             RETURN val;
         END IF;

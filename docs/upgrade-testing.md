@@ -203,6 +203,13 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.4 → v0.2.5
+
+#### Add `df.http_multipart()` for multipart/form-data uploads
+- **DDL change (df schema):** Adds a new node type `HTTP_MULTIPART` and a new `#[pg_extern(schema = "df")]` function `df.http_multipart(text, text, jsonb, jsonb, integer)`. The upgrade script `sql/pg_durable--0.2.4--0.2.5.sql` hand-writes the `CREATE FUNCTION ... LANGUAGE c AS 'MODULE_PATHNAME', 'http_multipart_wrapper'` (pgrx emits it for fresh installs from `src/dsl.rs`), re-adds the `nodes_node_type_chk` / `nodes_structure_chk` constraints and `df.ensure_durofut()` validator with `HTTP_MULTIPART` admitted, and re-emits `df.grant_usage()` / `df.revoke_usage()` so they GRANT/REVOKE `df.http_multipart()` alongside `df.http()`. The signature `df.grant_usage(text, boolean, boolean)` is unchanged.
+- **Grant gating:** `df.http_multipart()` rides on the existing `include_http => true` flag (HTTP egress is treated as one privilege). `REVOKE EXECUTE ... FROM PUBLIC` is added for `df.http_multipart()` at install/upgrade time, matching `df.http()`.
+- **Scenario B1 considerations:** The new `.so` adds the `http_multipart_wrapper` C symbol and a new activity `execute_multipart`. Pre-0.2.5 schemas have no catalog entry for `df.http_multipart` and no `HTTP_MULTIPART` rows, so a binary-only swap (no `ALTER EXTENSION UPDATE`) changes nothing for existing workflows — the new function and node type are simply absent until the customer upgrades. No existing symbol is removed or renamed.
+
 ### v0.2.3 → v0.2.4
 
 #### Simplify `df.grant_usage()` — drop the explicit function allowlist

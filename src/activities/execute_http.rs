@@ -57,7 +57,7 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 /// could host a 302 redirecting to `http://169.254.169.254/...`, and reqwest
 /// would follow it without calling our DNS resolver (since the target is an IP
 /// literal).
-fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(concat!("pg_durable/", env!("CARGO_PKG_VERSION")))

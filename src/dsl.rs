@@ -544,6 +544,95 @@ pub fn http(
     .to_json()
 }
 
+/// Creates a multipart/form-data HTTP request node (file uploads / form fields).
+///
+/// Each part in `parts` is a JSON object: `{"name": "...", "filename": "...",
+/// "content_type": "...", "data_b64": "..."}`. Only `name` and `data_b64`
+/// (base64-encoded payload) are required; `filename` and `content_type` are
+/// optional. The response shape and security model match `df.http`.
+///
+/// # Arguments
+/// * `url` - The URL to request. Supports $variable substitution
+/// * `method` - HTTP method (POST, PUT, PATCH). Default: POST
+/// * `parts` - JSONB array of part objects (see above)
+/// * `headers` - JSONB object of headers. Content-Type is ignored (multipart
+///   owns the boundary). Example: '{"Authorization": "Bearer token"}'
+/// * `timeout_seconds` - Request timeout in seconds. Default: 30
+///
+/// # Returns
+/// JSON object with: status, body, headers, ok (boolean), duration_ms
+#[pg_extern(schema = "df")]
+pub fn http_multipart(
+    url: &str,
+    method: default!(&str, "'POST'"),
+    // parts defaults to NULL solely to satisfy PostgreSQL's rule that every
+    // parameter after a defaulted one (method) must also have a default. A NULL
+    // parts list is rejected below — at least one part is required.
+    parts: default!(Option<pgrx::JsonB>, "NULL"),
+    headers: default!(Option<pgrx::JsonB>, "NULL"),
+    timeout_seconds: default!(i32, "30"),
+) -> String {
+    // Fail early when no http feature is compiled in — same guard as df.http.
+    if !crate::ssrf::http_enabled() {
+        pgrx::error!(
+            "df.http_multipart() is disabled. Rebuild with the 'http-allow-azure-domains' \
+             Cargo feature to enable outbound HTTP requests."
+        );
+    }
+
+    // Validate URL scheme at DSL time (skip when URL contains variable
+    // placeholders — substitution happens at execution time). Mirrors df.http.
+    if !url.contains('{') {
+        if let Err(e) = crate::ssrf::validate_url_scheme(url) {
+            pgrx::error!("{}", e);
+        }
+    }
+
+    // Validate method — multipart only makes sense for body-carrying methods.
+    let method_upper = method.to_uppercase();
+    if !["POST", "PUT", "PATCH"].contains(&method_upper.as_str()) {
+        pgrx::error!(
+            "Invalid HTTP method for multipart: {}. Must be POST, PUT, or PATCH",
+            method
+        );
+    }
+
+    if timeout_seconds <= 0 {
+        pgrx::error!("Timeout must be positive");
+    }
+
+    // parts is required — the NULL default is only there to keep the SQL
+    // signature valid (see the signature comment).
+    let parts_value = match &parts {
+        Some(p) => &p.0,
+        None => pgrx::error!("parts is required and cannot be NULL"),
+    };
+
+    // Validate parts is a non-empty array. Per-part shape is checked when the
+    // activity deserializes MultipartConfig.
+    let parts_arr = match parts_value.as_array() {
+        None => pgrx::error!("parts must be a JSON array of part objects"),
+        Some(arr) if arr.is_empty() => pgrx::error!("parts must contain at least one part"),
+        Some(arr) => arr,
+    };
+    let _ = parts_arr; // shape validated; activity re-parses from the JSON below
+
+    let config = serde_json::json!({
+        "url": url,
+        "method": method_upper,
+        "parts": parts_value,
+        "headers": headers.as_ref().map(|h| &h.0),
+        "timeout_seconds": timeout_seconds
+    });
+
+    Durofut {
+        node_type: "HTTP_MULTIPART".to_string(),
+        query: Some(config.to_string()),
+        ..Default::default()
+    }
+    .to_json()
+}
+
 // ============================================================================
 // Signals
 // ============================================================================

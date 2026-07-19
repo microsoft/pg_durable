@@ -423,6 +423,9 @@ async fn execute_node_inner(
         "join" => execute_join_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "race" => execute_race_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "http" => execute_http_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
+        "http_multipart" => {
+            execute_http_multipart_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await
+        }
         "signal" => execute_signal_node(ctx, node, node_id, results).await,
         "break" => execute_break_node(ctx, node, node_id).await,
         other => Err(NodeError::Failure(format!("Unknown node type: {other}"))),
@@ -1185,6 +1188,83 @@ async fn execute_http_node(
     // Store result if named
     if let Some(name) = &node.result_name {
         ctx.trace_info(format!("Storing HTTP result as ${name}"));
+        results.insert(name.clone(), result.clone());
+    }
+
+    Ok(result)
+}
+
+async fn execute_http_multipart_node(
+    ctx: &OrchestrationContext,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+    sys_vars: &SystemVars,
+) -> NodeResult {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("HTTP_MULTIPART node {node_id} has no config"))?;
+
+    let mut config: serde_json::Value = serde_json::from_str(config_str)
+        .map_err(|e| format!("Invalid multipart HTTP config: {e}"))?;
+
+    // Substitute variables in URL.
+    if let Some(url) = config.get("url").and_then(|u| u.as_str()) {
+        let substituted_url = substitute_all_raw(url, results, &exec_ctx.vars, sys_vars)?;
+        config["url"] = serde_json::Value::String(substituted_url);
+    }
+
+    // Substitute variables in headers (same pattern as execute_http_node).
+    if let Some(headers) = config.get("headers").and_then(|h| h.as_object()) {
+        let mut new_headers = serde_json::Map::new();
+        let mut sorted_keys: Vec<_> = headers.keys().collect();
+        sorted_keys.sort();
+        for key in sorted_keys {
+            if let Some(value) = headers.get(key) {
+                if let Some(v) = value.as_str() {
+                    let substituted = substitute_all_raw(v, results, &exec_ctx.vars, sys_vars)?;
+                    new_headers.insert(key.clone(), serde_json::Value::String(substituted));
+                } else {
+                    new_headers.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        config["headers"] = serde_json::Value::Object(new_headers);
+    }
+
+    // Substitute variables in each part's text metadata (name, filename), but
+    // NEVER in data_b64 — it is base64-encoded binary; substituting into it is
+    // meaningless and could corrupt the payload.
+    if let Some(parts) = config.get_mut("parts").and_then(|p| p.as_array_mut()) {
+        for part in parts.iter_mut() {
+            if let Some(name) = part.get("name").and_then(|n| n.as_str()) {
+                let substituted = substitute_all_raw(name, results, &exec_ctx.vars, sys_vars)?;
+                part["name"] = serde_json::Value::String(substituted);
+            }
+            if let Some(filename) = part.get("filename").and_then(|f| f.as_str()) {
+                let substituted = substitute_all_raw(filename, results, &exec_ctx.vars, sys_vars)?;
+                part["filename"] = serde_json::Value::String(substituted);
+            }
+        }
+    }
+
+    // Inject audit context from the function node.
+    config["submitted_by"] = serde_json::Value::String(node.submitted_by.clone());
+
+    let final_config = config.to_string();
+    let url = config["url"].as_str().unwrap_or("?");
+    let method = config["method"].as_str().unwrap_or("POST");
+    ctx.trace_info(format!("Executing HTTP_MULTIPART {method} {url}"));
+
+    let result = ctx
+        .schedule_activity(activities::execute_multipart::NAME, final_config)
+        .await?;
+
+    // Store result if named
+    if let Some(name) = &node.result_name {
+        ctx.trace_info(format!("Storing HTTP_MULTIPART result as ${name}"));
         results.insert(name.clone(), result.clone());
     }
 

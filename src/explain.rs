@@ -476,6 +476,7 @@ fn build_tree_recursive(
                     && seq_node.node_type != "SLEEP"
                     && seq_node.node_type != "WAIT_SCHEDULE"
                     && seq_node.node_type != "HTTP"
+                    && seq_node.node_type != "HTTP_MULTIPART"
                 {
                     let child_prefix = format!("{prefix}    ");
                     render_children(seq_node, nodes, &child_prefix, output, show_status);
@@ -695,7 +696,7 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .unwrap_or_else(|| "?".to_string());
             format!("WAIT '{cron}'{name_suffix}")
         }
-        "HTTP" => {
+        "HTTP" | "HTTP_MULTIPART" => {
             // Parse config to get method and URL
             let (method, url) = node
                 .query
@@ -713,7 +714,7 @@ fn format_node_display(node: &ExplainNode) -> String {
                     (method.to_string(), display_url)
                 })
                 .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
-            format!("HTTP {method} {url}{name_suffix}")
+            format!("{} {method} {url}{name_suffix}", node.node_type)
         }
         "SIGNAL" => {
             // Parse config to get signal name and timeout

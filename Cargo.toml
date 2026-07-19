@@ -54,7 +54,10 @@ chrono = "0.4"
 # tokio-native-tls). duroxide-pg also selects native-tls on the same resolved
 # reqwest version; Cargo feature unification merges them, so the whole graph
 # stays on native-tls with no rustls/ring/aws-lc in the tree.
-reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart"] }
+
+# For df.http_multipart() — base64-decodes part payloads carried in the config JSON.
+base64 = "0.22"
 
 # For duroxide tracing integration
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

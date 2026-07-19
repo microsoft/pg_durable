@@ -963,6 +963,36 @@ fn default_http_timeout() -> u64 {
     30
 }
 
+/// One part of a multipart/form-data body (df.http_multipart).
+///
+/// `data_b64` is the base64-encoded part payload. The config is serialized to
+/// JSON and durably checkpointed as a string, so raw bytes cannot ride inline;
+/// base64 keeps it text-safe. Decoded by the execute_multipart activity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultipartPart {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    pub data_b64: String,
+}
+
+/// Configuration for multipart/form-data HTTP requests (df.http_multipart).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultipartConfig {
+    pub url: String,
+    pub method: String,
+    pub parts: Vec<MultipartPart>,
+    #[serde(default)]
+    pub headers: Option<serde_json::Value>,
+    #[serde(default = "default_http_timeout")]
+    pub timeout_seconds: u64,
+    /// Role that called df.start() (audit trail)
+    #[serde(default)]
+    pub submitted_by: Option<String>,
+}
+
 // ============================================================================
 // Durofut Type - Represents a function node reference
 // ============================================================================
@@ -979,6 +1009,7 @@ pub const VALID_NODE_TYPES: &[&str] = &[
     "SLEEP",
     "WAIT_SCHEDULE",
     "HTTP",
+    "HTTP_MULTIPART",
     "SIGNAL",
 ];
 const NON_FUTURE_HELPER_GUC: &str = "df.non_future_helper";
