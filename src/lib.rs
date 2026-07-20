@@ -791,7 +791,7 @@ BEGIN
     -- It's plain SQL, wrap it
     RETURN df.sql(val);
 END;
-$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp;
 
 CREATE OPERATOR ?> (
     FUNCTION = df.if_then_op,

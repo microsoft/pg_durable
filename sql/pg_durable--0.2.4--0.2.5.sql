@@ -72,6 +72,12 @@ ALTER TABLE df.nodes
 -- Rejects JSON with unknown node_type values.
 -- NOTE: The valid node type list here must be kept in sync with
 -- VALID_NODE_TYPES in src/types.rs (the Rust constant is the canonical source).
+-- search_path omits df on purpose: the body only touches pg_catalog builtins
+-- (jsonb, ->>, <>) and the schema-qualified df.sql(), so df is not needed.
+-- Including df here makes pgspot deem the path insecure (an upgrade script has
+-- no CREATE SCHEMA df, so df is not provably extension-owned), which re-enables
+-- CVE-2018-1058-style search_path hijack warnings (PS005/PS001/PS017). The
+-- fresh-install DDL in src/lib.rs matches for upgrade parity (Scenario A).
 CREATE OR REPLACE FUNCTION df.ensure_durofut(val text) RETURNS text AS $$
 DECLARE
     node_type_val text;
@@ -100,7 +106,7 @@ BEGIN
     -- It's plain SQL, wrap it
     RETURN df.sql(val);
 END;
-$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp;
 
 -- ============================================================================
 -- Grant/revoke plumbing for df.http_multipart().
