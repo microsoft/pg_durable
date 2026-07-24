@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [0.2.5] - Unreleased
+
 ## [0.2.4] - 2026-07-02
 
 Provider-line note: v0.2.4 stays in the `duroxide-pg` provider compatibility line, so the upgrade source is v0.2.3 (`sql/pg_durable--0.2.3--0.2.4.sql`).
@@ -11,7 +13,7 @@ Provider-line note: v0.2.4 stays in the `duroxide-pg` provider compatibility lin
 ### Added
 
 - **Instance retention/pruning (#265):** terminal instances are now pruned by a hard cap and a retention window, bounding unbounded growth of `df.instances`.
-- **`df.list_instances()` pagination & filtering (#278):** added a `label_filter`, keyset pagination (`after_cursor`/`next_cursor`), and `created_at`/`updated_at` timestamps to the result set.
+- **`df.list_instances()` pagination & filtering (#278):** added a `label_filter` and a paginated overload with keyset pagination (`after_cursor`/`next_cursor`) that also returns `created_at`/`completed_at` timestamps and a `next_cursor` column.
 
 ### Changed
 
