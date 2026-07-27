@@ -1556,6 +1556,54 @@ is what a previous iteration's stored `completed`/`failed` (or an in-flight
 `running`) *looks like* once a newer iteration supersedes it and has not yet
 re-reached the node.
 
+### Detecting What an Instance is Waiting On
+
+An instance with status `'running'` may be actively processing or blocked waiting for an external event (signal, schedule, or timer). Use `df.instance_nodes()` to inspect what an instance is waiting on.
+
+#### Waiting on Signals
+
+To check if an instance has active signal waits:
+
+```sql
+SELECT n.node_id,
+       n.query::jsonb->>'signal_name' AS signal_name,
+       n.inferred_status
+FROM df.instance_nodes('a1b2c3d4') AS n
+WHERE n.node_type = 'SIGNAL'
+  AND n.inferred_status = 'running';
+```
+
+**Key points:**
+- An instance can wait on **multiple signals simultaneously** (e.g., in parallel branches via `&` or `|`)
+- Each row represents one active signal wait
+- `inferred_status = 'running'` means the node is currently waiting (not completed or failed)
+- No rows means the instance is not currently blocked on any signals (it may still be `running` if other nodes are executing)
+
+#### Waiting on Schedules and Timers
+
+Similarly, detect timer and schedule waits:
+
+```sql
+-- Waiting on cron schedule
+SELECT n.node_id,
+       n.query::jsonb->>'cron_expr' AS cron_schedule,
+       n.inferred_status
+FROM df.instance_nodes('a1b2c3d4') AS n
+WHERE n.node_type = 'WAIT_SCHEDULE'
+  AND n.inferred_status = 'running';
+
+-- Waiting on timer (sleep)
+SELECT n.node_id,
+       n.query::text AS duration_seconds,
+       n.inferred_status
+FROM df.instance_nodes('a1b2c3d4') AS n
+WHERE n.node_type = 'SLEEP'
+  AND n.inferred_status = 'running';
+```
+
+This is useful for dashboards and operational queries that need to understand why a running instance is not making progress.
+
+---
 
 ### System Metrics (Explicit Grant Required)
 
