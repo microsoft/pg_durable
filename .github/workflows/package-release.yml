@@ -108,7 +108,7 @@ jobs:
             -v "$PWD:/work" \
             -w /work \
             --user root \
-            rustlang/rust:nightly-bookworm \
+            rust:bookworm \
             bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update

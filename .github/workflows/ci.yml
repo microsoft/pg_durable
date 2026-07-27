@@ -50,10 +50,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
+      - name: Install Rust stable
         run: |
-          rustup toolchain install nightly --profile minimal --component rustfmt
-          rustup default nightly
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
 
       - name: Check formatting
         run: cargo fmt --package pg_durable -- --check
@@ -102,10 +102,10 @@ jobs:
           echo "Disk usage after cleanup"
           df -h
 
-      - name: Install Rust nightly
+      - name: Install Rust stable
         run: |
-          rustup toolchain install nightly --profile minimal --component clippy
-          rustup default nightly
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
 
       - name: Install system dependencies
         run: |

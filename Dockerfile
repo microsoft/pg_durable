@@ -3,7 +3,7 @@
 
 # Multi-stage build for pg_durable extension
 # Stage 1: Build the extension
-FROM rustlang/rust:nightly-bookworm AS builder
+FROM rust:bookworm AS builder
 
 # Install PostgreSQL 17 dev packages and build dependencies
 RUN apt-get update && apt-get install -y \

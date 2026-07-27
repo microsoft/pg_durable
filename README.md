@@ -146,7 +146,7 @@ Each release also publishes source archives for building from source and a `SHA2
 ### Prerequisites
 
 - PostgreSQL 17 or 18
-- Rust (nightly)
+- Rust (stable)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
 
 ### GitHub Codespace
