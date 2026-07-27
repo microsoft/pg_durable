@@ -416,11 +416,14 @@ Return columns:
 | `left_node` | TEXT | First child node id, or `NULL` |
 | `right_node` | TEXT | Second child node id, or `NULL` |
 | `status` | TEXT | **Physical** stored status: `pending`, `running`, `completed`, `failed` |
-| `result` | JSONB | Result/error payload for `completed`/`failed` nodes, else `NULL` |
-| `status_details` | JSONB | Worker-written node metadata (see below), or `NULL` if never transitioned |
+| `result` | TEXT | JSON text payload for `completed`/`failed` nodes, else `NULL` |
+| `status_details` | TEXT | JSON text metadata (see below), or `NULL` if never transitioned |
 | `inferred_status` | TEXT | **Derived** status: physical status plus `skipped`, and loop re-entry surfaced as `pending` |
 | `inferred_status_from_ancestor_id` | TEXT | Ancestor node id that drove a derived `skipped`/`pending`, or `NULL` |
 | `updated_at` | TIMESTAMPTZ | Last physical status change |
+
+`result` and `status_details` are returned as TEXT for compatibility. Cast to
+`jsonb` when you need JSON operators (for example, `status_details::jsonb->>'execution_id'`).
 
 **`status_details` JSON contract.** Written by the worker through the
 `update-node-status` activity and stored verbatim in `df.nodes.status_details`:
@@ -450,7 +453,7 @@ always agree.
 
 ```sql
 SELECT node_id, node_type, status AS physical, inferred_status,
-       status_details->>'execution_id' AS execution_id
+  status_details::jsonb->>'execution_id' AS execution_id
 FROM df.instance_nodes('a1b2c3d4')
 ORDER BY node_id;
 ```

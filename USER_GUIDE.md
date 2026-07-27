@@ -1503,9 +1503,12 @@ SELECT * FROM df.instance_nodes('a1b2c3d4');
 
 - **`status`** — the status physically stored on the node: `pending`, `running`,
   `completed`, or `failed`.
+- **`result`** — JSON payload returned as text for compatibility. Cast when
+    using JSON operators: `result::jsonb->...`.
 - **`status_details`** — JSON execution metadata written by the worker (the
-  `execution_id` generation stamp). You normally do not read this directly; it is
-  what `inferred_status` is derived from.
+    `execution_id` generation stamp), returned as text for compatibility. Cast when
+    using JSON operators: `status_details::jsonb->...`. You normally do not read
+    this directly; it is what `inferred_status` is derived from.
 - **`inferred_status`** — the stored status reinterpreted top-down from the root
   node. It adds one derived value, **`skipped`**, and reconciles loop re-entry:
   - `skipped` — a node on a branch that was decided against and will not (further)
