@@ -644,7 +644,21 @@ fn extract_column_value(
     let val = match fields.get(col) {
         Some(v) => v,
         None => {
-            // Missing field — leave the pattern as-is so PostgreSQL reports the error
+            // Missing field.
+            //
+            // In a SQL context the pattern is left as-is so PostgreSQL reports
+            // the error with its own diagnostics. A raw context — a URL, a
+            // header, a multipart field — has no such parser, so a leftover
+            // `$name.col` would be sent over the wire verbatim and the request
+            // would fail somewhere far less obvious. Fail loudly instead.
+            if !for_sql && !null_safe {
+                let mut available: Vec<&str> = fields.keys().map(String::as_str).collect();
+                available.sort_unstable();
+                return Err(format!(
+                    "${name}.{col}: result has no field '{col}' (available: {})",
+                    available.join(", ")
+                ));
+            }
             let suffix = if null_safe { "?" } else { "" };
             return Ok(format!("${name}.{col}{suffix}"));
         }
@@ -1776,13 +1790,21 @@ mod tests {
     }
 
     #[test]
-    fn envelope_missing_field_is_left_as_a_literal_pattern() {
+    fn envelope_missing_field_fails_raw_but_stays_literal_in_sql() {
         let results = make_results(&[("resp", r#"{"status":200,"ok":true}"#)]);
-        // Same convention as a missing column on a row set: leave it for
-        // PostgreSQL to complain about rather than silently substituting.
+        // A raw context — URL, header, multipart field — has no parser to catch a
+        // leftover pattern, so a missing field must fail rather than travel over
+        // the wire verbatim.
+        let err = substitute_all_raw("$resp.nope", &results, &empty_vars(), &sys_vars())
+            .expect_err("a missing field must fail loudly in a raw context");
+        assert!(
+            err.contains("no field 'nope'") && err.contains("available: ok, status"),
+            "unexpected error: {err}"
+        );
+        // In SQL the pattern is still left for PostgreSQL to complain about.
         assert_eq!(
-            substitute_all_raw("$resp.nope", &results, &empty_vars(), &sys_vars()).unwrap(),
-            "$resp.nope"
+            substitute_all("SELECT $resp.nope", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "SELECT $resp.nope"
         );
     }
 
@@ -1820,9 +1842,11 @@ mod tests {
         // `row_count` exists at the top level, but a row set must resolve
         // against the first row — and report the field as missing there.
         let results = make_results(&[("doc", r#"{"rows":[{"id":7}],"row_count":1}"#)]);
-        assert_eq!(
-            substitute_all_raw("$doc.row_count", &results, &empty_vars(), &sys_vars()).unwrap(),
-            "$doc.row_count"
+        let err = substitute_all_raw("$doc.row_count", &results, &empty_vars(), &sys_vars())
+            .expect_err("row_count must resolve against the row, not the top level");
+        assert!(
+            err.contains("no field 'row_count'") && err.contains("available: id"),
+            "unexpected error: {err}"
         );
         assert_eq!(
             substitute_all_raw("$doc.id", &results, &empty_vars(), &sys_vars()).unwrap(),
