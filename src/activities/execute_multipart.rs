@@ -52,6 +52,30 @@ async fn check_multipart_privilege(pool: &PgPool, submitted_by: &str) -> Result<
     }
 }
 
+/// Decode a part's `data_b64` payload, tolerating ASCII whitespace.
+///
+/// PostgreSQL's `encode(bytea, 'base64')` follows RFC 2045 §6.8 and breaks its
+/// output into 76-character lines separated by newlines. The `STANDARD` engine
+/// rejects any character outside the base64 alphabet, so unwrapped decoding
+/// fails for every payload larger than 57 source bytes — which is to say, for
+/// the canonical way a PostgreSQL user produces base64. Whitespace is not part
+/// of the alphabet, so stripping it loosens nothing that was ever meaningful.
+///
+/// The strip allocates only when whitespace is actually present; the common
+/// case of a single unwrapped line decodes without a copy.
+fn decode_part_data(data_b64: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    if data_b64.bytes().any(|b| b.is_ascii_whitespace()) {
+        let stripped: String = data_b64
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        engine.decode(&stripped)
+    } else {
+        engine.decode(data_b64)
+    }
+}
+
 /// Execute a multipart/form-data HTTP request and return the response as JSON
 pub async fn execute(
     ctx: ActivityContext,
@@ -146,8 +170,7 @@ pub async fn execute(
     // Build the multipart form from base64-encoded parts.
     let mut form = reqwest::multipart::Form::new();
     for part in &config.parts {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&part.data_b64)
+        let bytes = decode_part_data(&part.data_b64)
             .map_err(|e| format!("Invalid base64 in part '{}': {e}", part.name))?;
         let mut req_part = reqwest::multipart::Part::bytes(bytes);
         if let Some(ct) = &part.content_type {
@@ -240,4 +263,64 @@ pub async fn execute(
 
     // Return response for all other cases (including 4xx)
     Ok(result.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirror of PostgreSQL's `encode(bytea, 'base64')`: RFC 2045 §6.8 line
+    /// breaking at 76 characters.
+    fn pg_style_encode(data: &[u8]) -> String {
+        let flat = base64::engine::general_purpose::STANDARD.encode(data);
+        flat.as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn decodes_unwrapped_base64() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        assert_eq!(decode_part_data(&encoded).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn decodes_pg_wrapped_base64() {
+        // 200 bytes -> 268 base64 chars -> wrapped across 4 lines.
+        let payload: Vec<u8> = (0u8..200).collect();
+        let encoded = pg_style_encode(&payload);
+        assert!(
+            encoded.contains('\n'),
+            "fixture must exercise line wrapping"
+        );
+        assert_eq!(decode_part_data(&encoded).unwrap(), payload);
+    }
+
+    #[test]
+    fn decodes_with_surrounding_whitespace() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let padded = format!("  \n{encoded}\n  ");
+        assert_eq!(decode_part_data(&padded).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn decodes_with_crlf_line_endings() {
+        let payload: Vec<u8> = (0u8..200).collect();
+        let encoded = pg_style_encode(&payload).replace('\n', "\r\n");
+        assert_eq!(decode_part_data(&encoded).unwrap(), payload);
+    }
+
+    #[test]
+    fn decodes_empty_payload() {
+        assert_eq!(decode_part_data("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn rejects_malformed_base64() {
+        assert!(decode_part_data("!!!!").is_err());
+        // Whitespace stripping must not rescue genuinely invalid input.
+        assert!(decode_part_data("!!\n!!").is_err());
+    }
 }

@@ -15,17 +15,18 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 5. [Condition Evaluation](#condition-evaluation)
 6. [Function Examples](#function-examples)
 7. [HTTP Requests](#http-requests)
-8. [Durable Function Variables](#durable-function-variables)
-9. [Loops & Cron Jobs](#loops--cron-jobs)
-10. [Signals](#signals)
-11. [Multi-Database Support](#multi-database-support)
-12. [Visualizing Functions](#visualizing-functions)
-13. [Monitoring](#monitoring)
-14. [User Isolation & Privileges](#user-isolation--privileges)
-15. [Connection Limits](#connection-limits)
-16. [Troubleshooting](#troubleshooting)
-17. [Quick Reference Card](#quick-reference-card)
-18. [Appendix: Test Data Setup](#appendix-test-data-setup)
+8. [Multipart Uploads](#multipart-uploads)
+9. [Durable Function Variables](#durable-function-variables)
+10. [Loops & Cron Jobs](#loops--cron-jobs)
+11. [Signals](#signals)
+12. [Multi-Database Support](#multi-database-support)
+13. [Visualizing Functions](#visualizing-functions)
+14. [Monitoring](#monitoring)
+15. [User Isolation & Privileges](#user-isolation--privileges)
+16. [Connection Limits](#connection-limits)
+17. [Troubleshooting](#troubleshooting)
+18. [Quick Reference Card](#quick-reference-card)
+19. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -321,7 +322,7 @@ SELECT df.result('a1b2c3d4')::jsonb->'rows'->0->>'answer';
 - A SQL query returning no rows produces: `{"rows": [], "row_count": 0}`
 - `df.sleep()` returns a top-level JSON object like `{"slept": true, "seconds": 60}`
 - `df.wait_for_schedule()` returns a top-level JSON object: `{"scheduled": true}`
-- `df.http()` returns a top-level JSON object with `status`, `body`, `headers`, `ok`, and `duration_ms` fields
+- `df.http()` and `df.http_multipart()` return a top-level JSON object with `status`, `body`, `headers`, `ok`, and `duration_ms` fields
 - `df.break('value')` stores the literal value as the loop result (not wrapped in `rows`)
 
 
@@ -813,6 +814,63 @@ This demonstrates:
 - Parsing nested JSON (extracting `commit.author.name` and `commit.message`)
 - Upserting with ON CONFLICT
 - Creating a scheduled loop that runs every 30 minutes
+
+---
+
+## Multipart Uploads
+
+`df.http_multipart()` sends a `multipart/form-data` request — the format file uploads use.
+It needs the same `include_http => true` grant as `df.http()`.
+
+```sql
+df.http_multipart(
+    url TEXT,                     -- Required: endpoint URL
+    method TEXT DEFAULT 'POST',
+    parts JSONB DEFAULT '[]',     -- Array of part objects
+    headers JSONB DEFAULT '{}',
+    timeout_seconds INT DEFAULT 30
+) RETURNS TEXT                    -- Same JSON envelope as df.http()
+```
+
+Each part is an object with `name` and `data_b64`, optionally `filename` (which makes it a
+file upload) and `content_type`:
+
+```sql
+SELECT df.start(
+    'SELECT id, doc FROM invoices WHERE id = 1' |=> 'inv'
+    ~> df.http_multipart(
+        'https://api.example.com/upload', 'POST',
+        jsonb_build_array(
+            jsonb_build_object(
+                'name', 'file',
+                'filename', 'invoice.pdf',
+                'content_type', 'application/pdf',
+                'data_b64', (SELECT encode(doc, 'base64') FROM invoices WHERE id = 1))),
+        '{"Authorization": "Bearer token"}'::jsonb
+    ) |=> 'upload'
+    ~> 'UPDATE invoices SET uploaded = ($upload::jsonb->>''ok'')::boolean WHERE id = $inv.id',
+    'upload-invoice'
+);
+```
+
+`encode(bytea, 'base64')` wraps its output at 76 columns. That is accepted as-is — no
+`replace(..., E'\n', '')` needed.
+
+### data_b64 Is Whole-Value Only
+
+A part's `data_b64` can reference an earlier result, which lets one step produce a payload
+and the next upload it without an intermediate table. The reference must be the *entire*
+value:
+
+```sql
+'data_b64', '$payload.b64'        -- ✅
+'data_b64', '{my_payload}'        -- ✅
+'data_b64', 'prefix$payload.b64'  -- ❌ node fails
+```
+
+Splicing a value into the middle of a base64 string cannot produce valid base64, so
+pg_durable fails the node with a clear message instead of uploading a corrupt part. Every
+other field — `url`, `name`, `filename`, headers — interpolates normally.
 
 ---
 

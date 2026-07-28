@@ -1234,9 +1234,16 @@ async fn execute_http_multipart_node(
         config["headers"] = serde_json::Value::Object(new_headers);
     }
 
-    // Substitute variables in each part's text metadata (name, filename), but
-    // NEVER in data_b64 — it is base64-encoded binary; substituting into it is
-    // meaningless and could corrupt the payload.
+    // Substitute variables in each part's text metadata (name, filename) with
+    // the usual inline rules.
+    //
+    // `data_b64` follows a stricter rule: it is substituted only when its entire
+    // value is a single reference (e.g. `$payload.b64` or `{payload}`). That is
+    // what lets one step's output become the next step's upload. Splicing a
+    // substitution into the *middle* of a base64 string, by contrast, can only
+    // corrupt the payload, so partial interpolation is rejected outright rather
+    // than silently producing garbage. The base64 alphabet contains neither `$`
+    // nor `{`, so their presence is unambiguously an attempted reference.
     if let Some(parts) = config.get_mut("parts").and_then(|p| p.as_array_mut()) {
         for part in parts.iter_mut() {
             if let Some(name) = part.get("name").and_then(|n| n.as_str()) {
@@ -1246,6 +1253,21 @@ async fn execute_http_multipart_node(
             if let Some(filename) = part.get("filename").and_then(|f| f.as_str()) {
                 let substituted = substitute_all_raw(filename, results, &exec_ctx.vars, sys_vars)?;
                 part["filename"] = serde_json::Value::String(substituted);
+            }
+            if let Some(data_b64) = part.get("data_b64").and_then(|d| d.as_str()) {
+                if crate::types::is_whole_value_reference(data_b64) {
+                    let substituted =
+                        substitute_all_raw(data_b64, results, &exec_ctx.vars, sys_vars)?;
+                    part["data_b64"] = serde_json::Value::String(substituted);
+                } else if data_b64.contains('$') || data_b64.contains('{') {
+                    let part_name = part.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                    return Err(NodeError::Failure(format!(
+                        "HTTP_MULTIPART node {node_id}: data_b64 for part '{part_name}' mixes a \
+                         variable reference with other text. Only a whole-value reference is \
+                         supported (e.g. data_b64 => '$result' or '{{myvar}}'), because splicing \
+                         into base64 would corrupt the payload."
+                    )));
+                }
             }
         }
     }

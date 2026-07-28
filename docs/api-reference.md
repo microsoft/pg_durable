@@ -262,6 +262,57 @@ df.http(url, 'GET', NULL, '{"Auth": "Bearer token"}'::jsonb, 60)
 
 ---
 
+### df.http_multipart(url [, method, parts, headers, timeout])
+
+Makes an HTTP request with a `multipart/form-data` body. Requires the same
+`include_http => true` grant as `df.http()`.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `url` | TEXT | ❌ Literal | Request URL (supports `$var` substitution) |
+| `method` | TEXT | ❌ Literal | HTTP method (default: POST) |
+| `parts` | JSONB | ❌ Literal | Array of part objects (see below) |
+| `headers` | JSONB | ❌ Literal | Request headers |
+| `timeout` | INTEGER | ❌ Literal | Timeout in seconds (default: 30) |
+
+Each element of `parts` is an object:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `name` | ✅ | Form field name (supports `$var`) |
+| `data_b64` | ✅ | Part content, base64-encoded |
+| `filename` | ❌ | Sets the part's filename, making it a file upload (supports `$var`) |
+| `content_type` | ❌ | Part `Content-Type` |
+
+`data_b64` accepts base64 with embedded whitespace, so PostgreSQL's
+`encode(bytea, 'base64')` output — which wraps at 76 columns — can be used directly.
+
+```sql
+df.http_multipart(
+    'https://api.example.com/upload', 'POST',
+    jsonb_build_array(
+        jsonb_build_object(
+            'name', 'file', 'filename', 'report.pdf',
+            'content_type', 'application/pdf',
+            'data_b64', encode(pg_read_binary_file('report.pdf'), 'base64'))),
+    '{"Authorization": "Bearer token"}'::jsonb, 60)
+```
+
+**`data_b64` substitution is whole-value only.** A reference must be the entire value:
+
+```sql
+'data_b64', '$payload.b64'    -- ✅ substituted
+'data_b64', 'prefix$payload'  -- ❌ error: mixes a reference with other text
+```
+
+This is deliberate. Splicing a variable into the middle of a base64 string cannot produce
+valid base64, so pg_durable reports it as a node failure rather than sending a corrupt
+part. Other fields (`url`, `name`, `filename`, headers) interpolate normally.
+
+Returns the same envelope as `df.http()`.
+
+---
+
 ## Control Functions
 
 ### df.start(fut [, label])

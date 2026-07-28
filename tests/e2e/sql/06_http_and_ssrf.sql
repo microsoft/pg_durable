@@ -142,6 +142,126 @@ END $$;
 
 DROP TABLE _test_http_multipart;
 
+-- Test 2c: a part payload produced by an earlier node.
+--
+-- Exercises two things that a literal, short payload cannot:
+--   1. `data_b64` whole-value substitution — the bytes come from `$payload.b64`,
+--      not from the DSL call site.
+--   2. Whitespace-tolerant base64 decoding — PostgreSQL's encode(bytea,'base64')
+--      breaks output at 76 characters per RFC 2045 §6.8, so the payload below is
+--      deliberately long enough to be wrapped across multiple lines.
+CREATE TEMP TABLE _test_multipart_produced (instance_id TEXT);
+
+INSERT INTO _test_multipart_produced SELECT df.start(
+    df.sql('SELECT encode(repeat(''pg_durable produced payload. '', 5)::bytea, ''base64'') AS b64') |=> 'payload'
+    ~> df.http_multipart(
+        'https://httpbingo.org/post',
+        'POST',
+        jsonb_build_array(
+            jsonb_build_object(
+                'name', 'blob',
+                'data_b64', '$payload.b64'
+            )
+        )
+    ) |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as ok',
+    'test-multipart-produced'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_result TEXT;
+    encoded TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_multipart_produced;
+    RAISE NOTICE 'Testing multipart with produced payload: %', inst_id;
+
+    -- Guard the premise: if encode() ever stops wrapping, this test silently
+    -- stops covering the whitespace-tolerance path.
+    SELECT encode(repeat('pg_durable produced payload. ', 5)::bytea, 'base64') INTO encoded;
+    IF position(E'\n' IN encoded) = 0 THEN
+        RAISE EXCEPTION 'TEST SETUP INVALID: fixture base64 is not line-wrapped';
+    END IF;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes WHERE instance_id = inst_id AND node_type = 'HTTP_MULTIPART';
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: produced-payload multipart status = %, result = %', status, node_result;
+    END IF;
+
+    IF node_result IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: no HTTP_MULTIPART node result for %', inst_id;
+    END IF;
+
+    -- Same upstream-flakiness allowance as Test 2b: only assert on the echoed
+    -- body when httpbingo actually returned 200.
+    IF (node_result::jsonb->>'ok')::boolean THEN
+        IF node_result NOT ILIKE '%pg_durable produced payload.%' THEN
+            RAISE EXCEPTION 'TEST FAILED: produced payload did not round-trip, got: %', node_result;
+        END IF;
+        RAISE NOTICE 'TEST PASSED: http_multipart_produced_payload (content verified)';
+    ELSE
+        RAISE NOTICE 'TEST PASSED: http_multipart_produced_payload (completed; httpbingo non-200, body checks skipped): %', node_result;
+    END IF;
+END $$;
+
+DROP TABLE _test_multipart_produced;
+
+-- Test 2d: partial interpolation into data_b64 is rejected.
+--
+-- Splicing a substitution into the middle of a base64 string can only corrupt
+-- the payload, so the orchestration must fail the node rather than upload
+-- garbage. This fails before any network call is made.
+CREATE TEMP TABLE _test_multipart_partial (instance_id TEXT);
+
+INSERT INTO _test_multipart_partial SELECT df.start(
+    df.sql('SELECT ''aGVsbG8='' AS b64') |=> 'payload'
+    ~> df.http_multipart(
+        'https://httpbingo.org/post',
+        'POST',
+        jsonb_build_array(
+            jsonb_build_object(
+                'name', 'blob',
+                'data_b64', 'prefix$payload.b64'
+            )
+        )
+    ),
+    'test-multipart-partial'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_multipart_partial;
+    RAISE NOTICE 'Testing multipart partial interpolation rejection: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected partial interpolation to fail, status = %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP_MULTIPART';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%whole-value reference%' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected whole-value reference error, got: %', node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_multipart_partial_interpolation_rejected';
+END $$;
+
+DROP TABLE _test_multipart_partial;
+
 -- Test 3: HTTP with custom headers
 CREATE TEMP TABLE _test_http_headers (instance_id TEXT);
 

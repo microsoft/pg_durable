@@ -6,6 +6,15 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.5] - Unreleased
 
+### Added
+
+- **`df.http_multipart()` (#302):** send `multipart/form-data` requests. Parts are described as a JSONB array of objects with `name` and `data_b64`, optionally `filename` and `content_type`. Gated by the same `include_http => true` grant as `df.http()`.
+- **Variable substitution in multipart `data_b64`:** a part's `data_b64` can now reference an earlier result, e.g. `'data_b64', '$payload.b64'`, letting a payload produced by one step be uploaded by the next with no intermediate table. The reference must be the *whole* value; mixing it with surrounding text fails the node rather than sending a corrupt part, because splicing into base64 cannot produce a valid encoding.
+
+### Fixed
+
+- **Multipart parts larger than 57 bytes (#302):** `data_b64` was decoded with a strict base64 decoder that rejects embedded whitespace, but PostgreSQL's `encode(bytea, 'base64')` wraps its output at 76 columns. Any part whose source data exceeded 57 bytes therefore failed to decode. Whitespace in `data_b64` is now ignored, so `encode()` output can be used directly.
+
 ## [0.2.4] - 2026-07-02
 
 Provider-line note: v0.2.4 stays in the `duroxide-pg` provider compatibility line, so the upgrade source is v0.2.3 (`sql/pg_durable--0.2.3--0.2.4.sql`).

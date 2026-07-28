@@ -551,6 +551,12 @@ pub fn http(
 /// (base64-encoded payload) are required; `filename` and `content_type` are
 /// optional. The response shape and security model match `df.http`.
 ///
+/// `data_b64` may contain whitespace, so `encode(bytea, 'base64')` output —
+/// which PostgreSQL wraps at 76 columns — can be passed straight through. It
+/// also supports $variable substitution, but only as a whole value (e.g.
+/// `"$payload.b64"`); mixing a reference with surrounding text fails the node,
+/// since splicing into a base64 string cannot yield a valid encoding.
+///
 /// # Arguments
 /// * `url` - The URL to request. Supports $variable substitution
 /// * `method` - HTTP method (POST, PUT, PATCH). Default: POST

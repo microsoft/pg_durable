@@ -884,6 +884,55 @@ pub fn substitute_all_raw(
     substitute_all_with_options(query, results, vars, sys_vars, false)
 }
 
+/// Report whether `value` consists of exactly one variable reference and nothing
+/// else, ignoring surrounding whitespace.
+///
+/// Accepted forms:
+/// - `$name`, `$name?`
+/// - `$name.col`, `$name.col?`
+/// - `{name}` — covers user variables and `{sys_*}` alike
+///
+/// Deliberately rejected:
+/// - `$name.*` — a row-set expansion is never a single opaque value
+/// - anything with surrounding literal text, or more than one reference
+///
+/// This exists for contexts where a value must be replaced wholesale or not at
+/// all — notably a multipart part's `data_b64`, where splicing a substitution
+/// into the middle of a base64 string can only corrupt the payload.
+pub fn is_whole_value_reference(value: &str) -> bool {
+    let value = value.trim();
+
+    if let Some(rest) = value.strip_prefix('$') {
+        let name = parse_identifier(rest);
+        if name.is_empty() {
+            return false;
+        }
+        let rest = &rest[name.len()..];
+
+        // Dot notation, but never the `.*` row-set form.
+        let rest = match rest.strip_prefix('.') {
+            Some(after_dot) => {
+                let col = parse_identifier(after_dot);
+                if col.is_empty() {
+                    return false;
+                }
+                &after_dot[col.len()..]
+            }
+            None => rest,
+        };
+
+        // An optional null-safe marker may follow, and nothing else.
+        return rest.is_empty() || rest == "?";
+    }
+
+    if let Some(rest) = value.strip_prefix('{') {
+        let name = parse_identifier(rest);
+        return !name.is_empty() && &rest[name.len()..] == "}";
+    }
+
+    false
+}
+
 /// Legacy function for backward compatibility - only substitutes $name results
 pub fn substitute_variables(
     query: &str,
@@ -1335,6 +1384,74 @@ fn summarize_json_type(v: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn whole_value_reference_accepts_single_references() {
+        for value in [
+            "$payload",
+            "$payload?",
+            "$resp.body",
+            "$resp.body?",
+            "$_leading_underscore",
+            "{myvar}",
+            "{sys_instance_id}",
+        ] {
+            assert!(
+                is_whole_value_reference(value),
+                "expected `{value}` to be a whole-value reference"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_value_reference_tolerates_surrounding_whitespace() {
+        assert!(is_whole_value_reference("  $payload  "));
+        assert!(is_whole_value_reference("\n{myvar}\t"));
+    }
+
+    #[test]
+    fn whole_value_reference_rejects_partial_interpolation() {
+        for value in [
+            "prefix$payload",
+            "$payload suffix",
+            "$a$b",
+            "{a}{b}",
+            "{a}tail",
+            "head{a}",
+            "$resp.body extra",
+        ] {
+            assert!(
+                !is_whole_value_reference(value),
+                "expected `{value}` to be rejected as partial interpolation"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_value_reference_rejects_row_set_expansion() {
+        // A row-set expansion is never a single opaque value.
+        assert!(!is_whole_value_reference("$rows.*"));
+    }
+
+    #[test]
+    fn whole_value_reference_rejects_malformed_and_plain_text() {
+        for value in [
+            "",
+            "   ",
+            "$",
+            "$1abc",
+            "$resp.",
+            "{",
+            "{}",
+            "{unclosed",
+            "aGVsbG8=", // ordinary base64
+        ] {
+            assert!(
+                !is_whole_value_reference(value),
+                "expected `{value}` to be rejected"
+            );
+        }
+    }
 
     #[test]
     fn is_truthy_all_types() {
