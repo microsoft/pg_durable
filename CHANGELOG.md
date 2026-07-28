@@ -9,11 +9,17 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 ### Added
 
 - **`df.http_multipart()` (#302):** send `multipart/form-data` requests. Parts are described as a JSONB array of objects with `name` and `data_b64`, optionally `filename` and `content_type`. Gated by the same `include_http => true` grant as `df.http()`.
-- **Variable substitution in multipart `data_b64`:** a part's `data_b64` can now reference an earlier result, e.g. `'data_b64', '$payload.b64'`, letting a payload produced by one step be uploaded by the next with no intermediate table. The reference must be the *whole* value; mixing it with surrounding text fails the node rather than sending a corrupt part, because splicing into base64 cannot produce a valid encoding.
+- **Binary HTTP response bodies:** `df.http()` and `df.http_multipart()` now capture non-textual responses instead of losing them to lossy UTF-8 conversion. The response envelope gained an `encoding` field — `text` when the body is the response as-is, `base64` when it holds the base64 of the raw bytes. A body is treated as text when the `Content-Type` is absent, `text/*`, a `+json`/`+xml`/`+yaml` suffix type, or a common textual `application/*` type; everything else is base64.
+- **Variable substitution in multipart `data_b64`:** a part's `data_b64` can now reference an earlier result, e.g. `'data_b64', '$pdf.body'`, letting a payload produced by one HTTP step be uploaded by the next with no intermediate table. The reference must be the *whole* value; mixing it with surrounding text fails the node rather than sending a corrupt part, because splicing into base64 cannot produce a valid encoding.
+- **`examples/audio-roundtrip/`:** a self-verifying example that sends text to Azure OpenAI text-to-speech and pipes the returned MP3 straight into a Whisper transcription upload, then checks the transcript against the original phrase.
 
 ### Fixed
 
 - **Multipart parts larger than 57 bytes (#302):** `data_b64` was decoded with a strict base64 decoder that rejects embedded whitespace, but PostgreSQL's `encode(bytea, 'base64')` wraps its output at 76 columns. Any part whose source data exceeded 57 bytes therefore failed to decode. Whitespace in `data_b64` is now ignored, so `encode()` output can be used directly.
+
+### Changed
+
+- **HTTP envelope fields are addressable with dot notation:** `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` now resolve against an HTTP result. Previously dot notation only worked on SQL results (which carry a `rows` array), so reading an HTTP envelope required an intervening SQL node such as `SELECT ($resp::jsonb->>'ok')::boolean`. `rows` still takes precedence, so SQL results are unaffected.
 
 ## [0.2.4] - 2026-07-02
 

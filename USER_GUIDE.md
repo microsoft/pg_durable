@@ -322,7 +322,7 @@ SELECT df.result('a1b2c3d4')::jsonb->'rows'->0->>'answer';
 - A SQL query returning no rows produces: `{"rows": [], "row_count": 0}`
 - `df.sleep()` returns a top-level JSON object like `{"slept": true, "seconds": 60}`
 - `df.wait_for_schedule()` returns a top-level JSON object: `{"scheduled": true}`
-- `df.http()` and `df.http_multipart()` return a top-level JSON object with `status`, `body`, `headers`, `ok`, and `duration_ms` fields
+- `df.http()` and `df.http_multipart()` return a top-level JSON object with `status`, `body`, `encoding`, `headers`, `ok`, and `duration_ms` fields
 - `df.break('value')` stores the literal value as the loop result (not wrapped in `rows`)
 
 
@@ -616,6 +616,7 @@ HTTP calls return a JSON object with full response details:
 {
   "status": 200,
   "body": "{\"result\": \"success\"}",
+  "encoding": "text",
   "headers": {"content-type": "application/json"},
   "ok": true,
   "duration_ms": 245
@@ -625,10 +626,51 @@ HTTP calls return a JSON object with full response details:
 | Field | Description |
 |-------|-------------|
 | `status` | HTTP status code (200, 404, 500, etc.) |
-| `body` | Response body as string |
+| `body` | Response body (see `encoding`) |
+| `encoding` | `text` if the body is the response as-is, `base64` if it is binary |
 | `headers` | Response headers object |
 | `ok` | `true` for 2xx status codes |
 | `duration_ms` | Request duration in milliseconds |
+
+### Reading Response Fields
+
+Address envelope fields directly with dot notation:
+
+```sql
+df.http('https://api.example.com/users/123', 'GET') |=> 'user'
+~> 'INSERT INTO users_cache (data) VALUES (($user.body)::jsonb)'
+```
+
+`$user.body`, `$user.status`, `$user.ok`, and `$user.encoding` all resolve. Inside a SQL
+node the value is quoted and escaped appropriately for its type, so `$user.ok` becomes a
+bare `true`/`false` and `$user.body` becomes a properly quoted string literal.
+
+Use `$user.field?` for a null-safe read that yields `NULL` instead of failing when the
+field is absent.
+
+### Binary Responses
+
+When a response is not textual — an image, a PDF, an audio file — the body cannot be stored
+verbatim in a JSON envelope. pg_durable base64-encodes it and sets `"encoding": "base64"`:
+
+```json
+{"status": 200, "body": "SUQzBAAAAAAA…", "encoding": "base64", "ok": true}
+```
+
+A body is treated as text when the `Content-Type` is missing, `text/*`, a `+json` / `+xml`
+/ `+yaml` type, or one of the common application types (`application/json`,
+`application/xml`, `application/yaml`, `application/x-www-form-urlencoded`, and friends).
+Everything else is base64.
+
+To store the raw bytes, decode on the way in:
+
+```sql
+df.http('https://api.example.com/report.pdf', 'GET') |=> 'pdf'
+~> 'INSERT INTO documents (body) VALUES (decode($pdf.body, ''base64''))'
+```
+
+Because the body is *already* base64, it can be handed straight to a multipart upload with
+no round trip through a table — see [Multipart Uploads](#multipart-uploads).
 
 ### Error Handling
 
@@ -644,7 +686,7 @@ HTTP calls return a JSON object with full response details:
 ```sql
 SELECT df.start(
     df.http('https://api.example.com/users/123', 'GET') |=> 'user'
-    ~> 'INSERT INTO users_cache (data) VALUES (($user::jsonb->>''body'')::jsonb)',
+    ~> 'INSERT INTO users_cache (data) VALUES (($user.body)::jsonb)',
     'fetch-user'
 );
 ```
@@ -659,7 +701,7 @@ SELECT df.start(
         '{"product_id": 42, "quantity": 2}'
     ) |=> 'response'
     ~> df.if(
-        'SELECT ($response::jsonb->>''ok'')::boolean',
+        'SELECT $response.ok',
         'INSERT INTO playground.logs (msg) VALUES (''Order created'')',
         'INSERT INTO playground.logs (msg, level) VALUES (''Order failed'', ''error'')'
     ),
@@ -705,7 +747,7 @@ SELECT df.start(
         'POST',
         '{"user_id": "$user.id", "message": "Welcome!"}'
     ) |=> 'notification'
-    ~> 'UPDATE playground.users SET notified = true WHERE id = ($user::jsonb->>''id'')::int',
+    ~> 'UPDATE playground.users SET notified = true WHERE id = $user.id',
     'send-notification'
 );
 ```
@@ -716,10 +758,10 @@ SELECT df.start(
 SELECT df.start(
     df.http('https://api.example.com/users/999', 'GET') |=> 'response'
     ~> df.if(
-        'SELECT ($response::jsonb->>''status'')::int = 404',
+        'SELECT $response.status = 404',
         'INSERT INTO playground.logs (msg) VALUES (''User not found - creating new'')'
             ~> df.http('https://api.example.com/users', 'POST', '{"name": "New User"}'),
-        'SELECT ($response::jsonb->>''body'')::jsonb'
+        'SELECT ($response.body)::jsonb'
     ),
     'fetch-or-create-user'
 );
@@ -736,7 +778,7 @@ SELECT df.start(
         '{"order_id": "$order.order_id", "status": "$order.status", "total": "$order.total"}',
         '{"X-Webhook-Secret": "shared-secret-123"}'::jsonb
     ) |=> 'webhook_response'
-    ~> 'INSERT INTO playground.logs (msg) VALUES (''Webhook sent: '' || ($webhook_response::jsonb->>''status''))',
+    ~> 'INSERT INTO playground.logs (msg) VALUES (''Webhook sent: '' || $webhook_response.status)',
     'send-order-webhook'
 );
 ```
@@ -848,7 +890,7 @@ SELECT df.start(
                 'data_b64', (SELECT encode(doc, 'base64') FROM invoices WHERE id = 1))),
         '{"Authorization": "Bearer token"}'::jsonb
     ) |=> 'upload'
-    ~> 'UPDATE invoices SET uploaded = ($upload::jsonb->>''ok'')::boolean WHERE id = $inv.id',
+    ~> 'UPDATE invoices SET uploaded = $upload.ok WHERE id = $inv.id',
     'upload-invoice'
 );
 ```
@@ -856,21 +898,44 @@ SELECT df.start(
 `encode(bytea, 'base64')` wraps its output at 76 columns. That is accepted as-is — no
 `replace(..., E'\n', '')` needed.
 
-### data_b64 Is Whole-Value Only
+### Chaining a Download into an Upload
 
-A part's `data_b64` can reference an earlier result, which lets one step produce a payload
-and the next upload it without an intermediate table. The reference must be the *entire*
-value:
+Because a binary response body is already base64, it can be passed straight into a part.
+No table, no temporary storage:
 
 ```sql
-'data_b64', '$payload.b64'        -- ✅
-'data_b64', '{my_payload}'        -- ✅
-'data_b64', 'prefix$payload.b64'  -- ❌ node fails
+SELECT df.start(
+    df.http('https://api.example.com/render.pdf', 'GET') |=> 'pdf'
+    ~> df.http_multipart(
+        'https://api.example.com/archive', 'POST',
+        jsonb_build_array(
+            jsonb_build_object(
+                'name', 'file', 'filename', 'render.pdf',
+                'content_type', 'application/pdf',
+                'data_b64', '$pdf.body'))
+    ) |=> 'archived'
+    ~> 'INSERT INTO archive_log (ok) VALUES ($archived.ok)',
+    'fetch-and-archive'
+);
+```
+
+### data_b64 Is Whole-Value Only
+
+A variable reference in `data_b64` must be the *entire* value:
+
+```sql
+'data_b64', '$pdf.body'        -- ✅
+'data_b64', '{my_payload}'     -- ✅
+'data_b64', 'prefix$pdf.body'  -- ❌ node fails
 ```
 
 Splicing a value into the middle of a base64 string cannot produce valid base64, so
 pg_durable fails the node with a clear message instead of uploading a corrupt part. Every
 other field — `url`, `name`, `filename`, headers — interpolates normally.
+
+For a complete worked example, see
+[examples/audio-roundtrip/](examples/audio-roundtrip/), which sends text to a
+text-to-speech API and pipes the returned MP3 directly into a transcription upload.
 
 ---
 

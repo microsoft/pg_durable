@@ -605,8 +605,14 @@ fn extract_first_column_value(
     }
 }
 
-/// Extract a specific column from the first row (`$name.col` / `$name.col?`).
-/// Returns the original pattern when the column does not exist in the result.
+/// Extract a named field from a node result (`$name.col` / `$name.col?`).
+///
+/// SQL node results carry a `rows` array, so the field is read from the first
+/// row. HTTP and HTTP_MULTIPART results are flat response envelopes with no
+/// `rows` array, so the field is read from the envelope itself — this is what
+/// makes `$response.body`, `$response.status` and `$response.ok` work.
+///
+/// Returns the original pattern when the field does not exist in the result.
 fn extract_column_value(
     name: &str,
     json_str: &str,
@@ -617,27 +623,28 @@ fn extract_column_value(
     let json: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|_| format!("${name}.{col}: result is not valid JSON"))?;
 
-    let rows = json
-        .get("rows")
-        .and_then(|r| r.as_array())
-        .ok_or_else(|| format!("${name}.{col}: result has no rows array"))?;
+    let fields = match json.get("rows").and_then(|r| r.as_array()) {
+        Some(rows) => {
+            if rows.is_empty() {
+                return if null_safe {
+                    Ok("NULL".to_string())
+                } else {
+                    Err(format!("${name} has no rows — query returned zero results"))
+                };
+            }
+            rows[0]
+                .as_object()
+                .ok_or_else(|| format!("${name}.{col}: first row is not an object"))?
+        }
+        None => json.as_object().ok_or_else(|| {
+            format!("${name}.{col}: result is neither a row set nor a JSON object")
+        })?,
+    };
 
-    if rows.is_empty() {
-        return if null_safe {
-            Ok("NULL".to_string())
-        } else {
-            Err(format!("${name} has no rows — query returned zero results"))
-        };
-    }
-
-    let first_row = rows[0]
-        .as_object()
-        .ok_or_else(|| format!("${name}.{col}: first row is not an object"))?;
-
-    let val = match first_row.get(col) {
+    let val = match fields.get(col) {
         Some(v) => v,
         None => {
-            // Missing column — leave the pattern as-is so PostgreSQL reports the error
+            // Missing field — leave the pattern as-is so PostgreSQL reports the error
             let suffix = if null_safe { "?" } else { "" };
             return Ok(format!("${name}.{col}{suffix}"));
         }
@@ -1692,6 +1699,86 @@ mod tests {
         )]);
         let out = substitute_all("SELECT $doc.id", &results, &empty_vars(), &sys_vars()).unwrap();
         assert_eq!(out, "SELECT 42");
+    }
+
+    #[test]
+    fn envelope_fields_resolve_without_a_rows_array() {
+        // HTTP / HTTP_MULTIPART results are flat response envelopes.
+        let results = make_results(&[(
+            "resp",
+            r#"{"status":200,"body":"aGVsbG8=","encoding":"base64","ok":true,"duration_ms":12}"#,
+        )]);
+        assert_eq!(
+            substitute_all_raw("$resp.body", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "aGVsbG8="
+        );
+        assert_eq!(
+            substitute_all_raw("$resp.encoding", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "base64"
+        );
+        assert_eq!(
+            substitute_all("SELECT $resp.status", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "SELECT 200"
+        );
+        assert_eq!(
+            substitute_all("SELECT $resp.ok", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "SELECT true"
+        );
+    }
+
+    #[test]
+    fn envelope_missing_field_is_left_as_a_literal_pattern() {
+        let results = make_results(&[("resp", r#"{"status":200,"ok":true}"#)]);
+        // Same convention as a missing column on a row set: leave it for
+        // PostgreSQL to complain about rather than silently substituting.
+        assert_eq!(
+            substitute_all_raw("$resp.nope", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "$resp.nope"
+        );
+    }
+
+    #[test]
+    fn envelope_null_field_honours_null_safe_suffix() {
+        let results = make_results(&[("resp", r#"{"status":200,"body":null}"#)]);
+        assert_eq!(
+            substitute_all("SELECT $resp.body?", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "SELECT NULL"
+        );
+        let err = substitute_all("SELECT $resp.body", &results, &empty_vars(), &sys_vars())
+            .expect_err("a NULL field without `?` must fail loudly");
+        assert!(
+            err.contains("$resp.body is NULL"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn dot_notation_on_a_non_object_result_still_fails() {
+        // A JSON scalar or array is neither a row set nor an envelope.
+        for body in [r#"[1,2,3]"#, r#""just a string""#, "42"] {
+            let results = make_results(&[("resp", body)]);
+            let err = substitute_all("SELECT $resp.body", &results, &empty_vars(), &sys_vars())
+                .expect_err("expected dot notation to fail on a non-object result");
+            assert!(
+                err.contains("neither a row set nor a JSON object"),
+                "unexpected error for `{body}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rows_array_still_takes_precedence_over_top_level_fields() {
+        // `row_count` exists at the top level, but a row set must resolve
+        // against the first row — and report the field as missing there.
+        let results = make_results(&[("doc", r#"{"rows":[{"id":7}],"row_count":1}"#)]);
+        assert_eq!(
+            substitute_all_raw("$doc.row_count", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "$doc.row_count"
+        );
+        assert_eq!(
+            substitute_all_raw("$doc.id", &results, &empty_vars(), &sys_vars()).unwrap(),
+            "7"
+        );
     }
 
     #[test]

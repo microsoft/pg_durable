@@ -35,6 +35,7 @@ That keeps the CI contract clear:
 
 ## Current Examples
 
+- `audio-roundtrip/` — Pass binary audio between two HTTP steps (Azure OpenAI TTS → Whisper)
 - `azure-functions/` — Call an Azure Function from `df.http()`
 - `azure-http-domains/` — Validate Azure allowlisted HTTP domains
 - `invoice-approval/` — Human approval workflow with an Azure Function

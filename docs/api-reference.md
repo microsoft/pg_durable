@@ -260,6 +260,19 @@ df.http('https://api.example.com', 'POST', '{"key": "$value"}')
 df.http(url, 'GET', NULL, '{"Auth": "Bearer token"}'::jsonb, 60)
 ```
 
+Returns a JSON envelope: `status`, `body`, `encoding`, `headers`, `ok`, `duration_ms`.
+Address its fields directly with dot notation:
+
+```sql
+df.http('https://api.example.com/thing', 'GET') |=> 'resp'
+~> df.if('SELECT $resp.ok', 'SELECT ''hooray''', 'SELECT ''oh no''')
+```
+
+`encoding` is `text` when the response `Content-Type` is textual, and `base64` when it is
+not — in which case `body` holds the base64 of the raw bytes. See
+[df.http_multipart](#dfhttp_multiparturl--method-parts-headers-timeout) for feeding those
+bytes into a subsequent upload.
+
 ---
 
 ### df.http_multipart(url [, method, parts, headers, timeout])
@@ -301,8 +314,8 @@ df.http_multipart(
 **`data_b64` substitution is whole-value only.** A reference must be the entire value:
 
 ```sql
-'data_b64', '$payload.b64'    -- ✅ substituted
-'data_b64', 'prefix$payload'  -- ❌ error: mixes a reference with other text
+'data_b64', '$speech.body'     -- ✅ substituted
+'data_b64', 'prefix$speech'    -- ❌ error: mixes a reference with other text
 ```
 
 This is deliberate. Splicing a variable into the middle of a base64 string cannot produce

@@ -262,6 +262,184 @@ END $$;
 
 DROP TABLE _test_multipart_partial;
 
+-- Test 2e: a binary response is captured losslessly and re-uploaded.
+--
+-- httpbingo.org/bytes/N returns N random bytes as application/octet-stream.
+-- Decoding that as UTF-8 (the behaviour before Content-Type-aware bodies) is
+-- lossy — invalid sequences become U+FFFD — so a byte-count assertion is enough
+-- to prove the response survived intact. Feeding it straight back into a
+-- multipart part then proves binary responses compose with binary requests.
+--
+-- $blob.body reads the field directly off the HTTP response envelope: no
+-- intermediate SQL node, so the payload is never copied through an extra
+-- history entry.
+CREATE TEMP TABLE _test_http_binary (instance_id TEXT);
+
+INSERT INTO _test_http_binary SELECT df.start(
+    df.http('https://httpbingo.org/bytes/256', 'GET') |=> 'blob'
+    ~> df.http_multipart(
+        'https://httpbingo.org/post',
+        'POST',
+        jsonb_build_array(
+            jsonb_build_object(
+                'name', 'payload',
+                'filename', 'blob.bin',
+                'content_type', 'application/octet-stream',
+                'data_b64', '$blob.body'
+            )
+        )
+    ) |=> 'echo'
+    ~> 'SELECT ($echo::jsonb->>''ok'')::boolean AS ok',
+    'test-http-binary'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    blob_result JSONB;
+    echo_result JSONB;
+    failed_node TEXT;
+    decoded_bytes INT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_binary;
+    RAISE NOTICE 'Testing binary HTTP response capture: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        SELECT format('%s (%s): %s', n.node_id, n.node_type, n.result)
+        INTO failed_node
+        FROM df.nodes n
+        WHERE n.instance_id = inst_id AND n.status = 'failed'
+        LIMIT 1;
+        RAISE EXCEPTION 'TEST FAILED: binary response status = %, failed node = %', status, failed_node;
+    END IF;
+
+    SELECT result::jsonb INTO blob_result
+    FROM df.nodes WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF blob_result IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: no HTTP node result for %', inst_id;
+    END IF;
+
+    -- Only assert on the payload when httpbingo actually returned 200; the rest
+    -- of this file makes the same allowance for upstream flakiness.
+    IF (blob_result->>'ok')::boolean THEN
+        IF blob_result->>'encoding' IS DISTINCT FROM 'base64' THEN
+            RAISE EXCEPTION 'TEST FAILED: expected base64 encoding for application/octet-stream, got: %',
+                blob_result->>'encoding';
+        END IF;
+
+        decoded_bytes := octet_length(decode(blob_result->>'body', 'base64'));
+        IF decoded_bytes != 256 THEN
+            RAISE EXCEPTION 'TEST FAILED: expected 256 bytes to survive the round trip, got %', decoded_bytes;
+        END IF;
+
+        SELECT result::jsonb INTO echo_result
+        FROM df.nodes WHERE instance_id = inst_id AND node_type = 'HTTP_MULTIPART';
+
+        IF echo_result IS NULL OR NOT (echo_result->>'ok')::boolean THEN
+            RAISE EXCEPTION 'TEST FAILED: re-uploading the binary body did not succeed: %', echo_result;
+        END IF;
+
+        RAISE NOTICE 'TEST PASSED: http_binary_response (256 bytes captured and re-uploaded)';
+    ELSE
+        RAISE NOTICE 'TEST PASSED: http_binary_response (completed; httpbingo non-200, body checks skipped): %', blob_result;
+    END IF;
+END $$;
+
+DROP TABLE _test_http_binary;
+
+-- Test 2f: a textual response still reports encoding = 'text'.
+-- Guards the backward-compatibility promise that only non-text bodies changed.
+CREATE TEMP TABLE _test_http_text_encoding (instance_id TEXT);
+
+INSERT INTO _test_http_text_encoding SELECT df.start(
+    df.http('https://httpbingo.org/get', 'GET') |=> 'response'
+    ~> 'SELECT ($response::jsonb->>''ok'')::boolean as ok',
+    'test-http-text-encoding'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_result JSONB;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_text_encoding;
+    RAISE NOTICE 'Testing textual response encoding: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: textual response status = %', status;
+    END IF;
+
+    SELECT result::jsonb INTO node_result
+    FROM df.nodes WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result->>'encoding' IS DISTINCT FROM 'text' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected text encoding for application/json, got: %',
+            node_result->>'encoding';
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_text_encoding';
+END $$;
+
+DROP TABLE _test_http_text_encoding;
+
+-- Test 2g: envelope fields are addressable with dot notation from a SQL node.
+-- The envelope has no `rows` array, so this exercises the flat-object path of
+-- the substitution engine in SQL (quoting) mode.
+CREATE TEMP TABLE _test_http_envelope_fields (instance_id TEXT);
+
+INSERT INTO _test_http_envelope_fields SELECT df.start(
+    df.http('https://httpbingo.org/get', 'GET') |=> 'resp'
+    ~> 'SELECT $resp.status AS status, $resp.ok AS ok, $resp.encoding AS encoding',
+    'test-http-envelope-fields'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    sql_result JSONB;
+    row_json JSONB;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_envelope_fields;
+    RAISE NOTICE 'Testing envelope field access: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: envelope field access status = %, result = %',
+            status,
+            (SELECT n.result FROM df.nodes n WHERE n.instance_id = inst_id AND n.status = 'failed' LIMIT 1);
+    END IF;
+
+    SELECT result::jsonb INTO sql_result
+    FROM df.nodes WHERE instance_id = inst_id AND node_type = 'SQL';
+
+    row_json := sql_result->'rows'->0;
+
+    IF row_json->>'encoding' IS DISTINCT FROM 'text' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected $resp.encoding = text, got: %', row_json;
+    END IF;
+
+    -- Only assert the success-path values when httpbingo actually returned 200.
+    IF (row_json->>'ok')::boolean THEN
+        IF (row_json->>'status')::int != 200 THEN
+            RAISE EXCEPTION 'TEST FAILED: expected $resp.status = 200, got: %', row_json;
+        END IF;
+        RAISE NOTICE 'TEST PASSED: http_envelope_fields';
+    ELSE
+        RAISE NOTICE 'TEST PASSED: http_envelope_fields (completed; httpbingo non-200): %', row_json;
+    END IF;
+END $$;
+
+DROP TABLE _test_http_envelope_fields;
+
 -- Test 3: HTTP with custom headers
 CREATE TEMP TABLE _test_http_headers (instance_id TEXT);
 

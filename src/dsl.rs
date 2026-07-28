@@ -485,7 +485,9 @@ pub fn race(a: &str, b: &str) -> String {
 /// * `timeout_seconds` - Request timeout in seconds. Default: 30
 ///
 /// # Returns
-/// JSON object with: status, body, headers, ok (boolean), duration_ms
+/// JSON object with: status, body, encoding, headers, ok (boolean), duration_ms.
+/// `encoding` is "text" when the body is the response as-is, or "base64" when
+/// the response was not textual and `body` holds the base64 of the raw bytes.
 #[pg_extern(schema = "df")]
 pub fn http(
     url: &str,
@@ -554,7 +556,7 @@ pub fn http(
 /// `data_b64` may contain whitespace, so `encode(bytea, 'base64')` output —
 /// which PostgreSQL wraps at 76 columns — can be passed straight through. It
 /// also supports $variable substitution, but only as a whole value (e.g.
-/// `"$payload.b64"`); mixing a reference with surrounding text fails the node,
+/// `"$resp.body"`); mixing a reference with surrounding text fails the node,
 /// since splicing into a base64 string cannot yield a valid encoding.
 ///
 /// # Arguments
@@ -566,7 +568,9 @@ pub fn http(
 /// * `timeout_seconds` - Request timeout in seconds. Default: 30
 ///
 /// # Returns
-/// JSON object with: status, body, headers, ok (boolean), duration_ms
+/// JSON object with: status, body, encoding, headers, ok (boolean), duration_ms.
+/// `encoding` is "text" when the body is the response as-is, or "base64" when
+/// the response was not textual and `body` holds the base64 of the raw bytes.
 #[pg_extern(schema = "df")]
 pub fn http_multipart(
     url: &str,

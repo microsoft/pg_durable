@@ -221,43 +221,36 @@ pub async fn execute(
     let status_code = status.as_u16();
 
     // Collect response headers
-    let response_headers: serde_json::Map<String, serde_json::Value> = response
-        .headers()
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|s| (k.to_string(), serde_json::Value::String(s.to_string())))
-        })
-        .collect();
+    let response_headers = crate::activities::http_response::collect_headers(&response);
 
-    let response_body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+    // Text or base64 depending on Content-Type — see activities::http_response.
+    let response_body = crate::activities::http_response::read_body(response).await?;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_ok = status.is_success();
 
     // Build response object — same envelope as execute_http.
-    let result = serde_json::json!({
-        "status": status_code,
-        "body": response_body,
-        "headers": response_headers,
-        "ok": is_ok,
-        "duration_ms": duration_ms
-    });
+    let result = crate::activities::http_response::build_envelope(
+        status_code,
+        &response_body,
+        response_headers,
+        is_ok,
+        duration_ms,
+    );
 
     ctx.trace_info(format!(
-        "HTTP_MULTIPART {} completed: status={}, ok={}, duration={}ms",
-        config.method, status_code, is_ok, duration_ms
+        "HTTP_MULTIPART {} completed: status={}, ok={}, encoding={}, duration={}ms",
+        config.method, status_code, is_ok, response_body.encoding, duration_ms
     ));
 
     // Fail on 5xx server errors (transient, should retry)
     if status.is_server_error() {
         return Err(format!(
             "HTTP_MULTIPART {} {} returned {}: {}",
-            config.method, config.url, status_code, response_body
+            config.method,
+            config.url,
+            status_code,
+            response_body.error_preview()
         ));
     }
 

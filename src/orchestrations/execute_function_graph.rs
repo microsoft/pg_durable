@@ -1238,7 +1238,7 @@ async fn execute_http_multipart_node(
     // the usual inline rules.
     //
     // `data_b64` follows a stricter rule: it is substituted only when its entire
-    // value is a single reference (e.g. `$payload.b64` or `{payload}`). That is
+    // value is a single reference (e.g. `$speech.body` or `{payload}`). That is
     // what lets one step's output become the next step's upload. Splicing a
     // substitution into the *middle* of a base64 string, by contrast, can only
     // corrupt the payload, so partial interpolation is rejected outright rather
