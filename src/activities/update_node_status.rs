@@ -4,7 +4,7 @@
 //! UpdateNodeStatus activity - updates df.nodes status, result, and status_details
 
 use duroxide::ActivityContext;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -134,9 +134,9 @@ fn push_status_update<'a>(
             .push(", result = ")
             .push_bind(json_result)
             .push("::jsonb");
-    } else if status == "running" {
-        // When marking as running, clear any stale result from a previous loop
-        // iteration to satisfy nodes_result_status_chk
+    } else if !matches!(status, "completed" | "failed") {
+        // When marking as non-terminal, clear any stale result from a previous
+        // transition to satisfy nodes_result_status_chk
         // (result IS NULL OR status IN ('completed', 'failed')).
         update.push(", result = NULL");
     }
@@ -148,6 +148,15 @@ fn push_status_update<'a>(
             .push_bind(details)
             .push("::jsonb");
     }
+}
+
+pub(crate) async fn finish_fenced_status_update(
+    tx: Transaction<'_, Postgres>,
+) -> Result<String, String> {
+    tx.rollback()
+        .await
+        .map_err(|e| format!("Failed to roll back fenced node status update: {e}"))?;
+    Ok("Node status write fenced (superseded by newer generation)".to_string())
 }
 
 /// Update the status and optionally the result of a node in df.nodes.
@@ -224,7 +233,7 @@ pub async fn execute(
 
         let existing_execution_id = execution_id_from_details(existing_details.as_ref());
         if incoming_stamp_is_superseded(execution_id.unwrap_or_default(), existing_execution_id) {
-            return Ok("Node status write fenced (superseded by newer generation)".to_string());
+            return finish_fenced_status_update(tx).await;
         }
 
         update
@@ -288,6 +297,24 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_update_sql(status: &str, result: Option<&str>) -> String {
+        let mut update = QueryBuilder::<Postgres>::new("");
+        push_status_update(&mut update, status, result, None, false);
+        update.sql().to_string()
+    }
+
+    #[test]
+    fn clears_result_for_every_non_terminal_status() {
+        assert!(status_update_sql("pending", None).contains("result = NULL"));
+        assert!(status_update_sql("running", None).contains("result = NULL"));
+    }
+
+    #[test]
+    fn preserves_result_for_terminal_status_without_replacement() {
+        assert!(!status_update_sql("completed", None).contains("result = NULL"));
+        assert!(!status_update_sql("failed", None).contains("result = NULL"));
+    }
 
     #[test]
     fn accepts_terminal_write_in_same_generation() {
@@ -363,5 +390,82 @@ mod tests {
             "root::1::inner::2::left::1",
             Some("root::1::inner::2::right::9")
         ));
+    }
+
+    #[test]
+    fn sibling_scopes_never_fence_each_other_in_either_direction() {
+        assert!(!incoming_stamp_is_superseded(
+            "root::0::left::9",
+            Some("root::0::right::0")
+        ));
+        assert!(!incoming_stamp_is_superseded(
+            "root::0::right::0",
+            Some("root::0::left::9")
+        ));
+    }
+
+    #[test]
+    fn unequal_depth_scopes_have_no_ordering_in_either_direction() {
+        assert!(!incoming_stamp_is_superseded(
+            "root::0",
+            Some("root::0::loop::7")
+        ));
+        assert!(!incoming_stamp_is_superseded(
+            "root::0::loop::7",
+            Some("root::0")
+        ));
+    }
+
+    #[test]
+    fn compares_generations_within_same_loop_child() {
+        assert!(incoming_stamp_is_superseded(
+            "root::0::loop::7",
+            Some("root::0::loop::8")
+        ));
+        assert!(!incoming_stamp_is_superseded(
+            "root::0::loop::8",
+            Some("root::0::loop::7")
+        ));
+    }
+
+    #[test]
+    fn rejects_join_branch_spawned_by_older_loop_generation() {
+        assert!(incoming_stamp_is_superseded(
+            "root::0::loop::3::branch::0",
+            Some("root::0::loop::4")
+        ));
+    }
+
+    #[test]
+    fn odd_token_count_disables_fence() {
+        assert!(stamp_lineage("root::0::loop").is_none());
+        assert!(!incoming_stamp_is_superseded(
+            "root::0::loop",
+            Some("root::0::loop::8")
+        ));
+    }
+
+    #[test]
+    fn nonnumeric_generation_disables_fence() {
+        assert!(stamp_lineage("root::generation").is_none());
+        assert!(!incoming_stamp_is_superseded(
+            "root::generation",
+            Some("root::8")
+        ));
+    }
+
+    #[test]
+    fn unparseable_existing_stamp_does_not_fence_valid_incoming_write() {
+        assert!(!incoming_stamp_is_superseded(
+            "root::8",
+            Some("root::generation")
+        ));
+    }
+
+    #[test]
+    fn numeric_node_id_remains_in_node_slot() {
+        let (generations, nodes) = stamp_lineage("root::1::12345678::2").unwrap();
+        assert_eq!(generations, vec![1, 2]);
+        assert_eq!(nodes, vec!["12345678"]);
     }
 }

@@ -47,7 +47,7 @@ BEGIN
     SELECT instance_id INTO v_id FROM _t1;
     RAISE NOTICE 'Test 1 - non-root loop prefix: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [nonroot-prefix]: expected completed, got %', v_status;
@@ -114,7 +114,7 @@ BEGIN
     SELECT instance_id INTO v_id FROM _t2;
     RAISE NOTICE 'Test 2 - non-root loop prefix+suffix: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [nonroot-suffix]: expected completed, got %', v_status;
@@ -151,22 +151,27 @@ DROP TABLE test_nonroot2_suffix;
 -- sub-orchestration's input).
 
 DROP TABLE IF EXISTS test_nonroot3_log;
+DROP TABLE IF EXISTS test_nonroot3_suffix;
 CREATE TABLE test_nonroot3_log (id SERIAL, val TEXT, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+CREATE TABLE test_nonroot3_suffix (val TEXT);
 
 CREATE TEMP TABLE _t3 AS
 SELECT df.start(
     df.seq(
         ('SELECT ''hello'' AS greeting' |=> 'prefix_result'),
-        df.loop(
-            ($$INSERT INTO test_nonroot3_log (val)
-               VALUES ($prefix_result)
-               RETURNING val$$
-            |=> 'last_val')
-            ~> (
-                'SELECT COUNT(*) >= 2 FROM test_nonroot3_log'
-                    ?> df.break()
-                    !> df.sleep(1)
-            )
+        df.seq(
+            df.loop(
+                ($$INSERT INTO test_nonroot3_log (val)
+                   VALUES ($prefix_result)
+                   RETURNING val$$
+                |=> 'last_val')
+                ~> (
+                    'SELECT COUNT(*) >= 2 FROM test_nonroot3_log'
+                        ?> df.break()
+                        !> df.sleep(1)
+                )
+            ),
+            $$INSERT INTO test_nonroot3_suffix (val) VALUES ($last_val.val)$$
         )
     ),
     'test-nonroot-loop-named-result'
@@ -178,11 +183,12 @@ DECLARE
     v_status TEXT;
     v_cnt    INT;
     v_val    TEXT;
+    v_suffix TEXT;
 BEGIN
     SELECT instance_id INTO v_id FROM _t3;
     RAISE NOTICE 'Test 3 - non-root loop uses prefix named result: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [nonroot-named]: expected completed, got %', v_status;
@@ -198,11 +204,17 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED [nonroot-named]: expected ''hello'', got ''%''', v_val;
     END IF;
 
+    SELECT val INTO v_suffix FROM test_nonroot3_suffix;
+    IF v_suffix IS DISTINCT FROM 'hello' THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-named]: loop child named result did not reach suffix, got ''%''', v_suffix;
+    END IF;
+
     RAISE NOTICE 'PASSED: non-root loop uses prefix named result across iterations';
 END $$;
 
 DROP TABLE _t3;
 DROP TABLE test_nonroot3_log;
+DROP TABLE test_nonroot3_suffix;
 
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

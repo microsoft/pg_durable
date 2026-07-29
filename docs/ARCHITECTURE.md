@@ -468,6 +468,10 @@ pub fn register_orchestrations(registry: &mut OrchestrationRegistry) {
         execute_function_graph::SUBTREE_NAME,
         execute_function_graph::execute_subtree,
     );
+    registry.register(
+        execute_function_graph::LOOP_NAME,
+        execute_function_graph::execute_loop,
+    );
 }
 
 pub fn register_activities(registry: &mut ActivityRegistry<PgPool>) {
@@ -781,55 +785,14 @@ For RACE, duroxide's `select` is used to return the first completed result.
 
 ### Loops and Continue-As-New
 
-Loops use duroxide's `continue_as_new` to avoid unbounded history growth:
+Loops use duroxide's `continue_as_new` to avoid unbounded history growth. Their execution context is determined by graph position:
 
-```rust
-async fn execute_loop_node(
-    ctx: &OrchestrationContext,
-    graph: &FunctionGraph,
-    node: &FunctionNode,
-    results: &mut HashMap<String, String>,
-    exec_ctx: &ExecutionContext,
-) -> NodeResult {
-    let body_id = node.left_node.as_ref().ok_or("LOOP missing body")?;
-    
-    // Execute loop body. A df.break() anywhere in the body (including inside nested
-    // IF/JOIN/RACE) surfaces here as Err(NodeError::Break); the loop is the only node
-    // that catches it. NodeError::Failure keeps propagating out via `?`.
-    let body_result = match execute_function_node_with_vars(
-        ctx, graph, body_id, results, exec_ctx
-    ).await {
-        Ok(v) => v,
-        Err(NodeError::Break(break_value)) => return Ok(break_value), // exit the loop
-        Err(e @ NodeError::Failure(_)) => return Err(e),
-    };
-    
-    // Check while-condition if present (conditions are SQL and cannot break)
-    if let Some(condition_node_id) = get_condition_node(node) {
-        let condition_result = execute_function_node_with_vars(
-            ctx, graph, &condition_node_id, results, exec_ctx
-        ).await?;
-        
-        let should_continue = evaluate_condition(&condition_result)?;
-        if !should_continue {
-            return Ok(body_result);  // Exit loop
-        }
-    }
-    
-    // Continue as new for next iteration (avoids unbounded history)
-    let new_input = FunctionInput {
-        instance_id: graph.instance_id.clone(),
-        label: exec_ctx.label.clone(),
-        vars: exec_ctx.vars.clone(),
-    };
-    
-    return ctx
-        .continue_as_new(serde_json::to_string(&new_input)?)
-        .await
-        .map(|_| body_result)
-        .map_err(|e| NodeError::Failure(format!("continue_as_new failed: {:?}", e)));
-}
-```
+- A loop that is the function graph's root runs inline in `execute_function_graph`. Its `continue_as_new` starts the next root orchestration generation.
+- Every non-root loop runs in a dedicated `execute_loop` child orchestration. Its `continue_as_new` advances only that child, preserving prefix and suffix work in the waiting parent. A loop used directly as a JOIN or RACE branch is also spawned as an `execute_loop` child rather than wrapped in `execute_subtree`.
+
+Both paths call `run_loop_iteration`, which executes the body, catches `NodeError::Break`, evaluates the optional post-body condition, and propagates `NodeError::Failure`. The root and child paths differ only in who owns `continue_as_new` and status stamping. The child stamps its LOOP node `running` on each generation and `completed` or `failed` on exit. If a live loop loses a RACE, the parent records the loop node as terminal `failed` with a cancellation reason because duroxide cancellation stops the child before it can run its own terminal stamp.
+
+Node status stamps contain the full composed orchestration lineage: `{root_instance}::{generation}::{child_node}::{generation}...`. Read-time inference and the write fence walk that lineage so stale writes and superseded nested branches are evaluated at every ancestor generation.
 
 ---
 

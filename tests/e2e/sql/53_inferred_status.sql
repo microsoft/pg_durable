@@ -193,24 +193,25 @@ DO $$
 DECLARE
     inst_id TEXT;
     status TEXT;
-    skipped_count INT;
+    skipped_status TEXT;
     running_count INT;
     loop_inferred TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_state;
-    SELECT df.wait_for_completion(inst_id, 90) INTO status;
+    SELECT df.await_instance(inst_id, 90) INTO status;
 
     IF lower(status) != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: status = %', status;
     END IF;
 
-    -- The untaken ELSE arm ('SELECT 999') never runs in any generation → skipped.
-    SELECT count(*) INTO skipped_count
+    -- Assert the specific untaken ELSE arm. A count of all skipped nodes is vacuous here
+    -- because the break-IF also has an untaken sleep branch.
+    SELECT inferred_status INTO skipped_status
     FROM df.instance_nodes(inst_id)
-    WHERE inferred_status = 'skipped';
+    WHERE query = 'SELECT 999';
 
-    IF skipped_count < 1 THEN
-        RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: expected >= 1 skipped node, got %', skipped_count;
+    IF skipped_status IS DISTINCT FROM 'skipped' THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: SELECT 999 inferred_status = % (expected skipped)', skipped_status;
     END IF;
 
     -- After completion nothing may be reported as still running (superseded older-generation

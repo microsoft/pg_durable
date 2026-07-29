@@ -1701,6 +1701,86 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_fenced_node_status_update_releases_row_lock_before_return() {
+        let conn = test_database_connection_string();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&conn)
+                .await
+                .expect("connect to test database");
+
+            delete_expired_test_rows(&pool, "'aa265001'").await;
+            let mut fixture_tx = pool.begin().await.expect("begin fixture transaction");
+            sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+                .execute(&mut *fixture_tx)
+                .await
+                .expect("defer fixture constraints");
+            sqlx::query(
+                "INSERT INTO df.instances (id, root_node, status, submitted_by) \
+                 VALUES ('aa265001', 'bb265001', 'running', current_user::regrole)",
+            )
+            .execute(&mut *fixture_tx)
+            .await
+            .expect("insert test instance");
+            sqlx::query(
+                "INSERT INTO df.nodes \
+                 (id, instance_id, node_type, query, status, submitted_by, status_details) \
+                 VALUES ('bb265001', 'aa265001', 'SQL', 'SELECT 1', 'running', \
+                         current_user::regrole, '{\"execution_id\":\"aa265001::2\"}'::jsonb)",
+            )
+            .execute(&mut *fixture_tx)
+            .await
+            .expect("insert test node");
+            fixture_tx.commit().await.expect("commit test fixture");
+
+            let mut tx = pool.begin().await.expect("begin locking transaction");
+            sqlx::query(
+                "SELECT status_details FROM df.nodes \
+                 WHERE id = 'bb265001' AND instance_id = 'aa265001' FOR UPDATE",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .expect("lock test node");
+
+            let writer_pool = pool.clone();
+            let writer = tokio::spawn(async move {
+                sqlx::query(
+                    "UPDATE df.nodes SET updated_at = pg_catalog.now() \
+                     WHERE id = 'bb265001' AND instance_id = 'aa265001'",
+                )
+                .execute(&writer_pool)
+                .await
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                !writer.is_finished(),
+                "second writer should wait on row lock"
+            );
+
+            let result = crate::activities::update_node_status::finish_fenced_status_update(tx)
+                .await
+                .expect("fenced rollback");
+            assert!(result.contains("fenced"));
+
+            let rows = tokio::time::timeout(std::time::Duration::from_secs(1), writer)
+                .await
+                .expect("second writer remained blocked after fenced return")
+                .expect("second writer task")
+                .expect("second writer update")
+                .rows_affected();
+            assert_eq!(rows, 1);
+
+            delete_expired_test_rows(&pool, "'aa265001'").await;
+        });
+    }
+
+    #[pg_test]
     fn test_select_orphans_excludes_present_and_sub_orchestrations() {
         use std::collections::HashSet;
 

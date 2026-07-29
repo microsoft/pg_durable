@@ -1192,7 +1192,7 @@ SELECT df.start(
 
 Each loop iteration advances via *continue-as-new*, which restarts the loop with fresh state while preserving durability. Where that restart happens depends on whether the loop is the **root** of the function:
 
-- A **root loop** (the outermost node, e.g. `df.start(df.loop(...))` or the `@>` prefix) runs inline on the function's own orchestration. There is no surrounding work to preserve, so each iteration simply restarts the function.
+- A **root loop** (the function graph's outermost node, e.g. `df.start(df.loop(...))` or `df.start(@> 'SELECT work()')`) runs inline on the function's own orchestration. There is no surrounding work to preserve, so each iteration simply restarts the function. The `@>` operator does not make a loop root by itself: `df.seq('SELECT setup()', @> 'SELECT work()')` is non-root because the sequence is the graph root.
 - A **non-root loop** (a loop with prefix/suffix nodes, or one nested inside a `df.if()`, JOIN (`&`), or RACE (`|`) branch) runs as its own **child sub-orchestration**. Only the loop body restarts on each iteration — any work *before* the loop runs exactly once and is never re-executed, and a loop nested in a parallel branch gets its own durable instance.
 
 This is transparent to your workflow; it only affects observability. The child sub-orchestration is an internal durable instance: it does **not** appear in `df.list_instances()` (which lists only the instances you started with `df.start()`). Instead, the loop node's status in `df.instance_nodes()` / `df.explain()` reflects the child's progress, so you observe the loop through its parent instance as usual.
@@ -1208,6 +1208,8 @@ SELECT instance_id FROM df.list_instances() WHERE label = 'every-minute-tick';
 -- Then cancel with the found ID
 SELECT df.cancel('found_id', 'Stopping cron job');
 ```
+
+Cancellation cascades from the parent instance to active loop children. A loop cancelled because it lost a `df.race()` is shown as a terminal `failed` node with a cancellation reason in `df.instance_nodes()` / `df.explain()`; the parent instance can still complete through the winning branch. Cancelling the whole workflow with `df.cancel()` reports the parent instance as `cancelled`.
 
 ---
 

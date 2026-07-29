@@ -48,7 +48,7 @@ BEGIN
     SELECT instance_id INTO v_id FROM _t1;
     RAISE NOTICE 'Test 1 - loop inside JOIN branch: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [join-loop]: expected completed, got %', v_status;
@@ -106,7 +106,7 @@ BEGIN
     SELECT instance_id INTO v_id FROM _t2;
     RAISE NOTICE 'Test 2 - loop inside RACE branch: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [race-loop]: expected completed, got %', v_status;
@@ -136,7 +136,7 @@ DROP TABLE test_raceloop_body;
 -- The loop branch must NOT be double-wrapped (execute-subtree -> execute-loop): doing so
 -- would create a third sub-orchestration for the single loop branch.  We verify the loop's
 -- own node is stamped by an orchestration instance that is a *direct* child of the parent,
--- i.e. `{parent}::1::{loop_node_id}` — not `{parent}::1::{loop_node_id}::1::{loop_node_id}`.
+-- i.e. `{parent}::{parent_generation}::{loop_node_id}`, with no subtree wrapper in between.
 --
 -- The stamp recorded in df.nodes.status_details->>'execution_id' has the shape
 -- `{orchestration_instance_id}::{execution_id}`, and an orchestration instance id is itself
@@ -168,13 +168,14 @@ DECLARE
     v_loop_node     TEXT;
     v_loop_scope    TEXT;
     v_body_scope    TEXT;
-    v_expected      TEXT;
+    v_loop_tokens   TEXT[];
+    v_loop_parent   TEXT;
     v_distinct_orch INT;
 BEGIN
     SELECT instance_id INTO v_id FROM _t3;
     RAISE NOTICE 'Test 3 - race(loop, sleep) topology: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [topo]: expected completed, got %', v_status;
     END IF;
@@ -186,21 +187,26 @@ BEGIN
 
     -- Strip the trailing ::<generation> token from the loop node's stamp to recover the
     -- loop sub-orchestration's instance id.
-    SELECT substring(status_details->>'execution_id' FROM '^(.*)::[0-9]+$')
+    SELECT array_to_string(
+               (string_to_array(status_details->>'execution_id', '::'))[1:array_length(string_to_array(status_details->>'execution_id', '::'), 1) - 1],
+               '::'
+           )
       INTO v_loop_scope
       FROM df.nodes
      WHERE instance_id = v_id AND id = v_loop_node;
 
-    -- A directly-spawned loop child runs in `{parent}::1::{loop_node_id}`.  A double-wrapped
-    -- loop (subtree -> loop) would instead read `{parent}::1::{loop_node_id}::1::{loop_node_id}`.
-    v_expected := v_id || '::1::' || v_loop_node;
-    IF v_loop_scope IS DISTINCT FROM v_expected THEN
-        RAISE EXCEPTION 'TEST FAILED [topo]: loop sub-orchestration id = % (expected %); loop was double-wrapped',
-            v_loop_scope, v_expected;
+    v_loop_tokens := string_to_array(v_loop_scope, '::');
+    v_loop_parent := array_to_string(v_loop_tokens[1:array_length(v_loop_tokens, 1) - 2], '::');
+    IF v_loop_parent IS DISTINCT FROM v_id OR v_loop_tokens[array_length(v_loop_tokens, 1)] IS DISTINCT FROM v_loop_node THEN
+        RAISE EXCEPTION 'TEST FAILED [topo]: loop scope % is not a direct child of parent % rooted at node %',
+            v_loop_scope, v_id, v_loop_node;
     END IF;
 
     -- The loop body (the INSERT SQL node) must run inside the SAME loop sub-orchestration.
-    SELECT substring(status_details->>'execution_id' FROM '^(.*)::[0-9]+$')
+    SELECT array_to_string(
+               (string_to_array(status_details->>'execution_id', '::'))[1:array_length(string_to_array(status_details->>'execution_id', '::'), 1) - 1],
+               '::'
+           )
       INTO v_body_scope
       FROM df.nodes
      WHERE instance_id = v_id
@@ -212,22 +218,20 @@ BEGIN
     END IF;
 
     -- Count distinct orchestration instances that stamped any node of this instance.
-    -- Correct topology = 3 (parent RACE + loop sub + right-branch subtree).  A double-wrapped
-    -- loop would add a fourth (the redundant subtree wrapper around the loop), so <= 3 is the
-    -- regression guard.  (The abandoned right branch reliably stamps its node 'running' before
-    -- the race is decided, so 3 is what we observe.)
-    SELECT count(DISTINCT substring(status_details->>'execution_id' FROM '^(.*)::[0-9]+$'))
+    -- Correct topology is exactly three scopes: parent RACE, loop child, and right-branch
+    -- subtree. A double-wrapped loop adds a fourth. The abandoned right branch reliably stamps
+    -- its node running before the race is decided, so all three expected scopes are observable.
+    SELECT count(DISTINCT array_to_string(
+               (string_to_array(status_details->>'execution_id', '::'))[1:array_length(string_to_array(status_details->>'execution_id', '::'), 1) - 1],
+               '::'
+           ))
       INTO v_distinct_orch
       FROM df.nodes
      WHERE instance_id = v_id
        AND status_details->>'execution_id' IS NOT NULL;
 
-    IF v_distinct_orch > 3 THEN
-        RAISE EXCEPTION 'TEST FAILED [topo]: % distinct orchestration scopes (> 3 means the loop branch was double-wrapped)', v_distinct_orch;
-    END IF;
-
-    IF v_distinct_orch < 2 THEN
-        RAISE EXCEPTION 'TEST FAILED [topo]: % distinct orchestration scopes (expected parent + loop sub at minimum)', v_distinct_orch;
+    IF v_distinct_orch != 3 THEN
+        RAISE EXCEPTION 'TEST FAILED [topo]: % distinct orchestration scopes (expected exactly parent + loop child + sibling child)', v_distinct_orch;
     END IF;
 
     RAISE NOTICE 'PASSED: race(loop, sleep) = 1 parent + 2 subs; loop spawned directly (% distinct scopes)', v_distinct_orch;

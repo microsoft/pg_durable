@@ -54,7 +54,7 @@ BEGIN
     SELECT instance_id INTO v_id FROM _t1;
     RAISE NOTICE 'Test 1 - JOIN inside loop body: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [loop-join]: expected completed, got %', v_status;
@@ -124,7 +124,7 @@ BEGIN
     SELECT instance_id INTO v_id FROM _t2;
     RAISE NOTICE 'Test 2 - RACE inside loop body: instance %', v_id;
 
-    SELECT df.wait_for_completion(v_id, 90) INTO v_status;
+    SELECT df.await_instance(v_id, 90) INTO v_status;
 
     IF v_status != 'completed' THEN
         RAISE EXCEPTION 'TEST FAILED [loop-race]: expected completed, got %', v_status;

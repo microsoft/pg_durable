@@ -319,7 +319,7 @@ mod tests {
             self.query = Some(q.to_string());
             self
         }
-        /// Stamp the node with an `execution_id` whose second "::"-token is `gen`.
+        /// Stamp the node with the complete `execution_id` string.
         fn gen(mut self, exec_id: &str) -> Self {
             self.status_details = Some(format!(r#"{{"execution_id":"{exec_id}"}}"#));
             self
@@ -558,5 +558,27 @@ mod tests {
             out.get("else").unwrap().from_ancestor_id.as_deref(),
             Some("if")
         );
+    }
+
+    #[test]
+    fn nested_scope_is_superseded_when_ancestor_advanced() {
+        let scope_max = HashMap::from([
+            ("root".to_string(), 2),
+            ("root::1::loop".to_string(), 4),
+            ("root::1::loop::3::branch".to_string(), 8),
+        ]);
+
+        assert!(is_superseded("root::1::loop::3::branch", 8, &scope_max));
+    }
+
+    #[test]
+    fn nested_scope_is_current_when_no_ancestor_advanced() {
+        let scope_max = HashMap::from([
+            ("root".to_string(), 1),
+            ("root::1::loop".to_string(), 3),
+            ("root::1::loop::3::branch".to_string(), 8),
+        ]);
+
+        assert!(!is_superseded("root::1::loop::3::branch", 8, &scope_max));
     }
 }
