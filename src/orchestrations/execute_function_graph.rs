@@ -18,8 +18,8 @@ use duroxide::OrchestrationContext;
 
 use crate::activities;
 use crate::types::{
-    evaluate_condition, substitute_all, substitute_all_raw, FunctionGraph, FunctionInput,
-    FunctionNode, SystemVars,
+    evaluate_condition, string_map_to_json, substitute_all, substitute_all_raw, FunctionGraph,
+    FunctionInput, FunctionNode, SystemVars,
 };
 
 /// Orchestration name for ExecuteFunctionGraph
@@ -97,6 +97,7 @@ struct SubtreeEnvelope {
     #[serde(default)]
     control: Option<SubtreeControl>,
     result: String,
+    #[serde(serialize_with = "crate::types::serialize_string_map")]
     results: HashMap<String, String>,
 }
 
@@ -627,10 +628,9 @@ pub const LOOP_NAME: &str = "pg_durable::orchestration::execute-loop";
 
 /// Build the `SubtreeEnvelope` a loop returns to its parent on exit.
 ///
-/// A loop always exits with a *normal* result: a `df.break()` inside the body is the loop's
-/// own terminator (caught here as `NodeError::Break`), not a break that should unwind past
-/// the loop, so the envelope is always tagged `Normal`. `execute_loop_node` merges `results`
-/// back into the parent map via `parse_subtree_envelope`.
+/// A loop always exits with a *normal* result: `run_loop_iteration` catches `df.break()` as
+/// the loop's own terminator, so it must not unwind past the loop. The envelope is therefore
+/// always tagged `Normal`; `execute_loop_suborchestration` merges its results into the parent.
 fn loop_exit_envelope(result: String, results: HashMap<String, String>) -> Result<String, String> {
     let envelope = SubtreeEnvelope {
         control: Some(SubtreeControl::Normal),
@@ -920,7 +920,7 @@ pub async fn execute_loop(ctx: OrchestrationContext, input_json: String) -> Resu
     ctx.trace_info(format!(
         "Loop continuing with continue_as_new at node {loop_node_id}"
     ));
-    let new_results_json = serde_json::to_string(&results)
+    let new_results_json = string_map_to_json(&results)
         .map_err(|e| format!("Failed to serialize updated results: {e}"))?;
     let mut new_input = input.clone();
     new_input["results"] = serde_json::Value::String(new_results_json);
@@ -952,6 +952,11 @@ async fn execute_loop_node(
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
 ) -> NodeResult {
+    debug_assert_eq!(
+        node_id, graph.root_node_id,
+        "inline loop must be graph root"
+    );
+
     let body_id = node
         .left_node
         .as_ref()
@@ -964,61 +969,13 @@ async fn execute_loop_node(
 
     ctx.trace_info("Executing loop iteration");
 
-    // The loop is the only place that catches `NodeError::Break`: a break unwinds through
-    // every compound node in the body via `?` and is converted here into a normal loop exit.
-    // A `Failure` still propagates out of the loop unchanged.
-    let body_result = match Box::pin(execute_function_node_with_vars(
-        ctx, graph, body_id, results, exec_ctx,
+    if let Some(final_result) = Box::pin(run_loop_iteration(
+        ctx, graph, node, node_id, body_id, results, exec_ctx,
     ))
     .await
+    .map_err(NodeError::Failure)?
     {
-        Ok(v) => v,
-        Err(NodeError::Break(break_value)) => {
-            ctx.trace_info(format!(
-                "Loop terminated by break with value: {break_value}"
-            ));
-            store_named_result(ctx, node, &break_value, results, "LOOP");
-            return Ok(break_value);
-        }
-        Err(e @ NodeError::Failure(_)) => return Err(e),
-    };
-
-    // Check while-condition if present
-    if let Some(ref config_str) = node.query {
-        match serde_json::from_str::<serde_json::Value>(config_str) {
-            Ok(config) => {
-                if let Some(condition_node_id) = config["condition_node"].as_str() {
-                    ctx.trace_info("Evaluating loop condition");
-                    let condition_result = Box::pin(execute_function_node_with_vars(
-                        ctx,
-                        graph,
-                        condition_node_id,
-                        results,
-                        exec_ctx,
-                    ))
-                    .await?;
-
-                    // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
-                    let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
-                    ctx.trace_info(format!(
-                        "Loop condition evaluated to: {condition_result} (continue={should_continue})"
-                    ));
-
-                    if !should_continue {
-                        ctx.trace_info("Loop condition false, exiting loop");
-                        store_named_result(ctx, node, &body_result, results, "LOOP");
-                        return Ok(body_result);
-                    }
-                }
-            }
-            Err(e) => {
-                // M8: Malformed condition config should fail the loop rather than
-                // silently creating an infinite loop without exit condition.
-                return Err(NodeError::Failure(format!(
-                    "LOOP node {node_id}: failed to parse condition config: {e}"
-                )));
-            }
-        }
+        return Ok(final_result);
     }
 
     ctx.trace_info("Continuing as new for next loop iteration");
@@ -1062,7 +1019,7 @@ async fn execute_loop_node(
     // duroxide: continue_as_new returns an awaitable future - return it directly
     ctx.continue_as_new(serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()))
         .await
-        .map(|_| body_result)
+        .map(|_| String::new())
         .map_err(|e| NodeError::Failure(format!("continue_as_new failed: {e:?}")))
 }
 
@@ -1095,8 +1052,8 @@ async fn execute_loop_suborchestration(
 
     let results_json =
         serde_json::to_string(results).map_err(|e| format!("Failed to serialize results: {e}"))?;
-    let vars_json = serde_json::to_string(&exec_ctx.vars)
-        .map_err(|e| format!("Failed to serialize vars: {e}"))?;
+    let vars_json =
+        string_map_to_json(&exec_ctx.vars).map_err(|e| format!("Failed to serialize vars: {e}"))?;
 
     let loop_input = serde_json::json!({
         "instance_id": graph.instance_id,
@@ -1376,9 +1333,9 @@ async fn execute_join_node(
     let graph_json =
         serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
     let results_json =
-        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
-    let vars_json = serde_json::to_string(&exec_ctx.vars)
-        .map_err(|e| format!("Failed to serialize vars: {e}"))?;
+        string_map_to_json(results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+    let vars_json =
+        string_map_to_json(&exec_ctx.vars).map_err(|e| format!("Failed to serialize vars: {e}"))?;
 
     // Collect the branch root node ids (left, right, and any join3 extras). Each branch is
     // spawned as its own child sub-orchestration with a deterministic, generation-stamped
@@ -1487,9 +1444,9 @@ async fn execute_race_node(
     let graph_json =
         serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
     let results_json =
-        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize results: {e}"))?;
-    let vars_json = serde_json::to_string(&exec_ctx.vars)
-        .map_err(|e| format!("Failed to serialize vars: {e}"))?;
+        string_map_to_json(results).map_err(|e| format!("Failed to serialize results: {e}"))?;
+    let vars_json =
+        string_map_to_json(&exec_ctx.vars).map_err(|e| format!("Failed to serialize vars: {e}"))?;
 
     // Schedule each branch with a deterministic, generation-stamped instance id so its node
     // stamps carry the root loop generation (see `subtree_instance_id`). A branch whose root

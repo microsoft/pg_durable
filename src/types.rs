@@ -991,12 +991,32 @@ pub struct FunctionInput {
     pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_string_map")]
     pub vars: std::collections::HashMap<String, String>,
     /// Loop iteration counter, incremented on each `continue_as_new`.
     /// Used to enforce a maximum iteration safeguard.
     #[serde(default)]
     pub loop_iteration: u64,
+}
+
+pub(crate) fn serialize_string_map<S>(
+    map: &std::collections::HashMap<String, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize;
+
+    map.iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
+pub(crate) fn string_map_to_json(
+    map: &std::collections::HashMap<String, String>,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&map.iter().collect::<std::collections::BTreeMap<_, _>>())
 }
 
 /// Configuration for HTTP requests
@@ -1674,6 +1694,35 @@ mod tests {
 
     fn empty_vars() -> std::collections::HashMap<String, String> {
         std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn replay_maps_serialize_canonically() {
+        let forward = make_results(&[("alpha", "1"), ("beta", "2"), ("gamma", "3")]);
+        let reverse = make_results(&[("gamma", "3"), ("beta", "2"), ("alpha", "1")]);
+
+        let forward_json = string_map_to_json(&forward).unwrap();
+        let reverse_json = string_map_to_json(&reverse).unwrap();
+
+        assert_eq!(forward_json, r#"{"alpha":"1","beta":"2","gamma":"3"}"#);
+        assert_eq!(forward_json, reverse_json);
+
+        let forward_input = FunctionInput {
+            instance_id: "instance".to_string(),
+            label: None,
+            vars: forward,
+            loop_iteration: 0,
+        };
+        let reverse_input = FunctionInput {
+            instance_id: "instance".to_string(),
+            label: None,
+            vars: reverse,
+            loop_iteration: 0,
+        };
+        assert_eq!(
+            serde_json::to_string(&forward_input).unwrap(),
+            serde_json::to_string(&reverse_input).unwrap()
+        );
     }
 
     fn sys_vars() -> SystemVars {

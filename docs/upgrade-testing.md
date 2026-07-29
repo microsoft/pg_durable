@@ -205,6 +205,49 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.4 → v0.2.5
 
+#### Loop replay contract and drain runbook
+- **Runtime change (no DDL):** Non-root `df.loop()` nodes run as child
+    sub-orchestrations, replay-recorded result/variable maps serialize in canonical key order,
+    and root/non-root loops share body/condition policy. `status_details` already covers the
+    loop node stamps, so the upgrade script adds no schema object for this change.
+- **Replay compatibility:** duroxide matches recorded inputs, explicit child instance ids,
+    and orchestration scheduling by exact equality. The combined changes affect root loops,
+    non-root loops, and JOIN/RACE workflows carrying named results. Shape-specific detection
+    is therefore unsafe: drain **all** in-flight work before loading the 0.2.5 binary.
+- **Required role:** Run the inventory as a PostgreSQL administrator that can see every row
+    in `df.instances` despite row-level security. A tenant role can see only its own instances;
+    zero rows under such a role does not prove a system-wide drain.
+- **Runbook:**
+    1. Quiesce every producer of new `df.start()` calls while allowing status/cancel traffic.
+    2. Inventory non-terminal work as the administrative role:
+
+         ```sql
+         SELECT id, submitted_by, label, status, created_at, updated_at
+         FROM df.instances
+         WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running'])
+         ORDER BY created_at, id;
+         ```
+
+      3. Wait for the result to become empty within the maintenance window. For work that cannot
+          finish, either defer the upgrade or cancel each concrete instance as an administrator
+          with the required table/function privileges, for example:
+
+          ```sql
+          SELECT df.cancel('INSTANCE_ID', 'Cancelled for pg_durable 0.2.5 upgrade');
+          ```
+    4. Repeat the administrative query and require zero rows. Keep submissions quiesced.
+    5. Install/load the 0.2.5 `.so`, run `ALTER EXTENSION pg_durable UPDATE`, and restart the
+         PostgreSQL process if the packaging/deployment method does not do so already.
+    6. Verify the background worker is ready, `df.status()` resolves for a new smoke instance,
+         and new submissions schedule normally before reopening producers.
+- **Rollback/recovery:** If the upgrade fails before the new binary is loaded, fix the error
+    and retry while submissions remain quiesced. After the new binary has processed work, do
+    not swap back to 0.2.4 with instances in flight; drain again before binary rollback.
+- **Scenario B1:** The 0.2.5 `.so` still runs against schemas without `status_details`; the
+    writer detects the absent column and uses the legacy unfenced write. Existing SQL remains
+    valid, but loop-node status is best-effort until the schema upgrade because the writer set
+    is wider.
+
 #### Add `df.http_multipart()` for multipart/form-data uploads
 - **DDL change (df schema):** Adds a new node type `HTTP_MULTIPART` and a new `#[pg_extern(schema = "df")]` function `df.http_multipart(text, text, jsonb, jsonb, integer)`. The upgrade script `sql/pg_durable--0.2.4--0.2.5.sql` hand-writes the `CREATE FUNCTION ... LANGUAGE c AS 'MODULE_PATHNAME', 'http_multipart_wrapper'` (pgrx emits it for fresh installs from `src/dsl.rs`), re-adds the `nodes_node_type_chk` / `nodes_structure_chk` constraints and `df.ensure_durofut()` validator with `HTTP_MULTIPART` admitted, and re-emits `df.grant_usage()` / `df.revoke_usage()` so they GRANT/REVOKE `df.http_multipart()` alongside `df.http()`. The signature `df.grant_usage(text, boolean, boolean)` is unchanged.
 - **Grant gating:** `df.http_multipart()` rides on the existing `include_http => true` flag (HTTP egress is treated as one privilege). `REVOKE EXECUTE ... FROM PUBLIC` is added for `df.http_multipart()` at install/upgrade time, matching `df.http()`.

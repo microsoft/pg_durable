@@ -3,6 +3,15 @@
 
 -- pg_durable upgrade: 0.2.4 → 0.2.5
 --
+-- UPGRADE ORDERING: this release changes duroxide-recorded orchestration history.
+-- Non-root df.loop() nodes run as child sub-orchestrations; replay-recorded result
+-- and variable maps use canonical key ordering; and root/non-root loops share one
+-- body/condition policy. duroxide replays by exact input and scheduling equality,
+-- so a workflow started under 0.2.4 may not resume under this binary. Before loading
+-- the new .so, stop new df.start() calls and drain or cancel ALL pending/running
+-- instances. See docs/upgrade-testing.md, "Loop replay contract and drain runbook".
+-- No DDL is required for these runtime changes: status_details already exists.
+--
 -- Adds df.http_multipart() for multipart/form-data requests (file uploads,
 -- form posts). It builds an HTTP_MULTIPART node whose payload is a JSON array
 -- of parts (name / filename / content_type / data_b64); the execute_multipart

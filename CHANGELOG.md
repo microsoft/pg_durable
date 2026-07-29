@@ -19,6 +19,20 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Changed
 
+- **Loop execution and replay determinism (#228):** non-root `df.loop()` nodes now run as
+  dedicated child sub-orchestrations, replay-recorded result/variable maps serialize in
+  canonical key order, and root/non-root loops share the same body and while-condition
+  policy. This fixes non-root loop restarts and makes `df.break()` in a while-condition
+  behave identically at either graph position.
+
+  > ⚠️ **Potentially replay-breaking for in-flight instances.** These changes alter recorded
+  > orchestration inputs and scheduling order. duroxide validates both by exact equality on
+  > replay. Affected workflow shapes cannot be classified safely from extension state, so
+  > workflows started under 0.2.4 may not resume under 0.2.5. Before deploying
+  > the new `.so`, quiesce new `df.start()` calls and drain or cancel every `pending` or
+  > `running` instance. The administrative, all-tenant runbook is in
+  > `docs/upgrade-testing.md` under "Loop replay contract and drain runbook".
+
 - **HTTP envelope fields are addressable with dot notation:** `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` now resolve against an HTTP result. Previously dot notation only worked on SQL results (which carry a `rows` array), so reading an HTTP envelope required an intervening SQL node such as `SELECT ($resp::jsonb->>'ok')::boolean`. `rows` still takes precedence, so SQL results are unaffected.
 
 ## [0.2.4] - 2026-07-02
