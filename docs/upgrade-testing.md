@@ -211,50 +211,15 @@ what the upgrade script handles, and any backward compatibility considerations.
     and root/non-root loops share body/condition policy. `status_details` already covers the
     loop node stamps, so the upgrade script adds no schema object for this change.
 - **Replay compatibility:** duroxide matches recorded inputs, explicit child instance ids,
-    and orchestration scheduling by exact equality. An incompatible history fails closed with
-    duroxide nondeterminism rather than continuing with a changed schedule. The pg_durable row
-    may nevertheless remain `pending` or `running` because replay can abort before the normal
-    status-update activity is scheduled.
-- **Potentially affected work:** The changed boundaries are root loops carrying multiple
-    variables across `continue_as_new`, non-root loops that reached their loop node, and
-    JOIN/RACE workflows carrying multiple variables or named results. Empty or single-entry
-    maps are stable, and a multi-entry map is affected only when its previously recorded order
-    differs from canonical key order. Extension state cannot identify that history detail
-    reliably.
-- **Upgrade choice:** Operators that accept affected instances failing and being recreated can
-    upgrade directly, then inspect and cancel any stale `pending` or `running` pg_durable rows.
-    Operators that require all in-flight work to survive the binary change should use the
-    continuity procedure below.
-- **Continuity procedure:** Run the inventory as a PostgreSQL administrator that can see every
-    row in `df.instances` despite row-level security. A tenant role can see only its own rows.
-    1. Quiesce every producer of new `df.start()` calls while allowing status/cancel traffic.
-    2. Inventory non-terminal work as the administrative role:
-
-         ```sql
-         SELECT id, submitted_by, label, status, created_at, updated_at
-         FROM df.instances
-         WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['pending', 'running'])
-         ORDER BY created_at, id;
-         ```
-
-      3. Wait for the result to become empty within the maintenance window. For work that cannot
-          finish, either defer the upgrade or cancel each concrete instance as an administrator
-          with the required table/function privileges, for example:
-
-          ```sql
-          SELECT df.cancel('INSTANCE_ID', 'Cancelled for pg_durable 0.2.5 upgrade');
-          ```
-    4. Repeat the administrative query and require zero rows. Keep submissions quiesced.
-    5. Install/load the 0.2.5 `.so`, run `ALTER EXTENSION pg_durable UPDATE`, and restart the
-         PostgreSQL process if the packaging/deployment method does not do so already.
-    6. Verify the background worker is ready, `df.status()` resolves for a new smoke instance,
-         and new submissions schedule normally before reopening producers.
-- **Direct-upgrade recovery:** After upgrading, inspect non-terminal pg_durable rows and worker
-    logs for replay nondeterminism. Recreate affected workflows as appropriate and cancel stale
-    rows with `df.cancel()`. Unaffected histories resume normally.
-- **Rollback:** After the new binary has processed work, swapping back to 0.2.4 can create the
-    same replay incompatibility in reverse. Operators that require continuity across rollback
-    should quiesce and drain first.
+    and orchestration scheduling by exact equality. In-flight root loops, non-root loops, and
+    JOIN/RACE workflows carrying multiple variables or named results may therefore fail with
+    nondeterminism after the binary upgrade. Unaffected histories resume normally.
+- **Failure handling:** duroxide fails closed rather than continuing with a changed schedule.
+    The corresponding `df.instances` row may remain `pending` or `running` because replay can
+    abort before pg_durable records its normal failure status.
+- **Upgrade choice:** Operators that require in-flight continuity should quiesce and drain
+    before upgrading. Operators that accept recreating affected work can upgrade directly,
+    then inspect and cancel any stale instances.
 - **Scenario B1:** The 0.2.5 `.so` still runs against schemas without `status_details`; the
     writer detects the absent column and uses the legacy unfenced write. Existing SQL remains
     valid, but loop-node status is best-effort until the schema upgrade because the writer set
