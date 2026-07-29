@@ -157,4 +157,85 @@ END $$;
 
 DROP TABLE _test_state;
 
+-- === Test 4: non-root loop — untaken IF arm in the body is skipped, nothing stuck running ===
+--
+-- A non-root loop runs as a child sub-orchestration that re-stamps its body nodes every
+-- generation under a scope whose trailing `::`-token is the loop's inner generation. The
+-- derived status must be SCOPE-AWARE: after the loop completes, the untaken ELSE arm inside
+-- the body reads 'skipped', the loop node reads 'completed', and no node is left inferred as
+-- 'running' (older-generation body stamps are superseded, not surfaced as in-flight).
+
+DROP TABLE IF EXISTS test_inferred_loop_body;
+CREATE TABLE test_inferred_loop_body (id SERIAL, ts TIMESTAMPTZ DEFAULT clock_timestamp());
+
+CREATE TEMP TABLE _test_state (instance_id TEXT);
+
+INSERT INTO _test_state SELECT df.start(
+    df.seq(
+        'SELECT 1',
+        df.loop(
+            df.if(
+                'SELECT true',
+                'INSERT INTO test_inferred_loop_body DEFAULT VALUES',
+                'SELECT 999'
+            )
+            ~> (
+                'SELECT COUNT(*) >= 2 FROM test_inferred_loop_body'
+                    ?> df.break()
+                    !> df.sleep(1)
+            )
+        )
+    ),
+    'test-inferred-nonroot-loop'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    skipped_count INT;
+    running_count INT;
+    loop_inferred TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_state;
+    SELECT df.wait_for_completion(inst_id, 90) INTO status;
+
+    IF lower(status) != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: status = %', status;
+    END IF;
+
+    -- The untaken ELSE arm ('SELECT 999') never runs in any generation → skipped.
+    SELECT count(*) INTO skipped_count
+    FROM df.instance_nodes(inst_id)
+    WHERE inferred_status = 'skipped';
+
+    IF skipped_count < 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: expected >= 1 skipped node, got %', skipped_count;
+    END IF;
+
+    -- After completion nothing may be reported as still running (superseded older-generation
+    -- body stamps must not surface as in-flight).
+    SELECT count(*) INTO running_count
+    FROM df.instance_nodes(inst_id)
+    WHERE inferred_status = 'running';
+
+    IF running_count != 0 THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: % node(s) still inferred running after completion', running_count;
+    END IF;
+
+    -- The loop node itself is stamped completed by its child sub-orchestration on exit.
+    SELECT n.inferred_status INTO loop_inferred
+    FROM df.instance_nodes(inst_id) n
+    WHERE lower(n.node_type) = 'loop';
+
+    IF loop_inferred != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED [nonroot-loop-inferred]: loop node inferred_status = % (expected completed)', loop_inferred;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: inferred_status non-root-loop-scope-aware';
+END $$;
+
+DROP TABLE _test_state;
+DROP TABLE test_inferred_loop_body;
+
 SELECT 'TEST PASSED' AS result;

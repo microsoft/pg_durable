@@ -36,6 +36,120 @@ async fn status_details_present(pool: &PgPool) -> bool {
     present
 }
 
+fn execution_id_from_details(status_details: Option<&serde_json::Value>) -> Option<&str> {
+    status_details?.get("execution_id")?.as_str()
+}
+
+/// Decompose a node stamp into its generation lineage and the branch node ids
+/// spawned at each level.
+///
+/// A stamp is `{root_instance}::{g0}::{node1}::{g1}::...::{nodeN}::{gN}`: the
+/// root df instance id, then the root orchestration generation `g0`, then for
+/// every spawned sub-orchestration the child root node id and that child's own
+/// `continue_as_new` generation. `subtree_instance_id` composes exactly this
+/// shape, so the returned `gens` reads root→innermost (`g0..gN`) and `nodes`
+/// holds the branch node id taken to descend from each level to the next.
+///
+/// Returns `None` for a malformed stamp (no generation, or an odd trailing
+/// token count that is not `gen (node gen)*`), so a legacy/unparseable stamp
+/// degrades to an unfenced write rather than silently dropping it.
+fn stamp_lineage(execution_id: &str) -> Option<(Vec<i64>, Vec<&str>)> {
+    let tokens: Vec<&str> = execution_id.split("::").collect();
+    // token[0] is the root df instance id; the remainder must be
+    // `gen (node gen)*`, i.e. an even total token count (>= 2).
+    if tokens.len() < 2 || !tokens.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut gens = Vec::new();
+    let mut nodes = Vec::new();
+    let mut i = 1;
+    while i < tokens.len() {
+        gens.push(tokens[i].parse::<i64>().ok()?);
+        i += 1;
+        if i < tokens.len() {
+            nodes.push(tokens[i]);
+            i += 1;
+        }
+    }
+    Some((gens, nodes))
+}
+
+/// Whether the `incoming` write belongs to a superseded generation relative to
+/// the `existing` stamp already on the row.
+///
+/// Both stamps transition the SAME node, so they share a node lineage but may
+/// carry different generations at each nesting level. Walk both lineages from
+/// the root: the first level whose incoming generation is OLDER means the write
+/// comes from a superseded ancestor (or its own older) generation and must be
+/// fenced. If the generations tie at a level, the branch node id spawned next
+/// decides — a different id is an independent sibling scope (one loop iteration's
+/// parallel branch must never fence another's), an equal id descends, and a
+/// lineage that ends is the same-or-deeper scope in the same generation and is
+/// accepted. A newer incoming generation at any level is accepted. This is the
+/// write-side mirror of the read-time inference in `node_status::is_superseded`,
+/// but compares two stamps directly because the activity sees only one row.
+fn incoming_stamp_is_superseded(incoming: &str, existing: Option<&str>) -> bool {
+    let Some(existing) = existing else {
+        return false;
+    };
+    let (Some((inc_gens, inc_nodes)), Some((ex_gens, ex_nodes))) =
+        (stamp_lineage(incoming), stamp_lineage(existing))
+    else {
+        return false;
+    };
+
+    let depth = inc_gens.len().min(ex_gens.len());
+    for level in 0..depth {
+        if inc_gens[level] < ex_gens[level] {
+            return true;
+        }
+        if inc_gens[level] > ex_gens[level] {
+            return false;
+        }
+        // Generations tie at this level: an independent sibling scope (a
+        // different branch node id spawned next) is never fenced.
+        if let (Some(a), Some(b)) = (inc_nodes.get(level), ex_nodes.get(level)) {
+            if a != b {
+                return false;
+            }
+        }
+    }
+    false
+}
+fn push_status_update<'a>(
+    update: &mut QueryBuilder<'a, Postgres>,
+    status: &'a str,
+    result: Option<&'a str>,
+    execution_id: Option<&'a str>,
+    write_details: bool,
+) {
+    update
+        .push("UPDATE df.nodes SET status = ")
+        .push_bind(status);
+
+    if let Some(res) = result {
+        let json_result = serde_json::from_str::<serde_json::Value>(res)
+            .unwrap_or_else(|_| serde_json::Value::String(res.to_string()));
+        update
+            .push(", result = ")
+            .push_bind(json_result)
+            .push("::jsonb");
+    } else if status == "running" {
+        // When marking as running, clear any stale result from a previous loop
+        // iteration to satisfy nodes_result_status_chk
+        // (result IS NULL OR status IN ('completed', 'failed')).
+        update.push(", result = NULL");
+    }
+
+    if write_details {
+        let details = serde_json::json!({ "execution_id": execution_id });
+        update
+            .push(", status_details = ")
+            .push_bind(details)
+            .push("::jsonb");
+    }
+}
+
 /// Update the status and optionally the result of a node in df.nodes.
 pub async fn execute(
     ctx: ActivityContext,
@@ -76,86 +190,81 @@ pub async fn execute(
     // pre-0.2.4 schema lacking it -- degrade to the plain status/result write).
     let write_details = execution_id.is_some() && status_details_present(pool.as_ref()).await;
 
-    // Fence value: the incoming root generation (second "::"-token of the stamp).
-    // When the stamp can't be parsed we pass i64::MAX so the fence always
-    // accepts (i.e. behaves as no fence) rather than silently dropping writes.
-    let incoming_gen: i64 = execution_id
-        .and_then(|s| s.split("::").nth(1))
-        .and_then(|tok| tok.parse::<i64>().ok())
-        .unwrap_or(i64::MAX);
+    let mut update = QueryBuilder::<Postgres>::new("");
+    push_status_update(&mut update, status, result, execution_id, write_details);
 
-    let mut update = QueryBuilder::<Postgres>::new("UPDATE df.nodes SET status = ");
-    update.push_bind(status);
-
-    if let Some(res) = result {
-        let json_result = serde_json::from_str::<serde_json::Value>(res)
-            .unwrap_or_else(|_| serde_json::Value::String(res.to_string()));
-        update
-            .push(", result = ")
-            .push_bind(json_result)
-            .push("::jsonb");
-    } else if status == "running" {
-        // When marking as running, clear any stale result from a previous loop
-        // iteration to satisfy nodes_result_status_chk
-        // (result IS NULL OR status IN ('completed', 'failed')).
-        update.push(", result = NULL");
-    }
-
+    // Monotonic write fence: when status_details exists, first lock the row and compare the
+    // incoming stamp against the existing stamp using the same scope-lineage semantics as
+    // read-time status inference. A stale write is one whose own scope generation is older,
+    // or whose parent scope was spawned by an older ancestor generation. Equal-or-newer
+    // generations (including running -> terminal within the same generation) are accepted.
     if write_details {
-        let details = serde_json::json!({ "execution_id": execution_id });
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to begin node status update transaction: {e}"))?;
+
+        let existing_details = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT status_details FROM df.nodes WHERE id = $1 AND instance_id = $2 FOR UPDATE",
+        )
+        .bind(node_id)
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to lock node status row: {e}"))?;
+
+        let Some(existing_details) = existing_details else {
+            let err_msg = format!(
+                "update_node_status affected 0 rows: node {node_id} \
+                 not found in instance {instance_id}"
+            );
+            ctx.trace_info(&err_msg);
+            return Err(err_msg);
+        };
+
+        let existing_execution_id = execution_id_from_details(existing_details.as_ref());
+        if incoming_stamp_is_superseded(execution_id.unwrap_or_default(), existing_execution_id) {
+            return Ok("Node status write fenced (superseded by newer generation)".to_string());
+        }
+
         update
-            .push(", status_details = ")
-            .push_bind(details)
-            .push("::jsonb");
+            .push(", updated_at = now() WHERE id = ")
+            .push_bind(node_id)
+            .push(" AND instance_id = ")
+            .push_bind(instance_id);
+
+        let done = update
+            .build()
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to update node status: {e}"))?;
+        let rows = done.rows_affected();
+        if rows != 1 {
+            let err_msg = format!(
+                "update_node_status affected {rows} row(s) for node {node_id} \
+                 in instance {instance_id} (expected exactly 1)"
+            );
+            ctx.trace_info(&err_msg);
+            return Err(err_msg);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit node status update transaction: {e}"))?;
+        return Ok("Node status updated".to_string());
     }
 
-    // Monotonic write fence: reject a write carrying an OLDER root generation than
-    // the one already stamped on the row, so a stale loser/iteration drain can't
-    // clobber a newer generation's status. Equal-or-newer generations (including
-    // running -> terminal within the same generation) are accepted.
     update
         .push(", updated_at = now() WHERE id = ")
         .push_bind(node_id)
         .push(" AND instance_id = ")
         .push_bind(instance_id);
-    if write_details {
-        update
-            .push(
-                " AND (status_details IS NULL OR \
-                 COALESCE(NULLIF(split_part(status_details->>'execution_id', '::', 2), '')::bigint, 0) <= ",
-            )
-            .push_bind(incoming_gen)
-            .push(")");
-    }
 
     match update.build().execute(pool.as_ref()).await {
         Ok(done) => {
             let rows = done.rows_affected();
             if rows == 1 {
                 Ok("Node status updated".to_string())
-            } else if write_details {
-                // Zero rows under an active fence is ambiguous: the row may exist
-                // but carry a NEWER generation (a legitimate fenced-out stale
-                // write), or the node may genuinely be missing. Distinguish the
-                // two so a fence rejection is not surfaced as a correctness error.
-                let exists = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM df.nodes WHERE id = $1 AND instance_id = $2)",
-                )
-                .bind(node_id)
-                .bind(instance_id)
-                .fetch_one(pool.as_ref())
-                .await
-                .unwrap_or(false);
-                if exists {
-                    Ok("Node status write fenced (superseded by newer generation)".to_string())
-                } else {
-                    let err_msg = format!(
-                        "update_node_status affected 0 rows: node {node_id} \
-                         not found in instance {instance_id}"
-                    );
-                    ctx.trace_info(&err_msg);
-                    Err(err_msg)
-                }
             } else {
                 // No fence in play: exactly one row must match (instance_id, id).
                 // Anything else (typically zero rows: a missing node or a
@@ -173,5 +282,86 @@ pub async fn execute(
             ctx.trace_info(&err_msg);
             Err(err_msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_terminal_write_in_same_generation() {
+        assert!(!incoming_stamp_is_superseded(
+            "root::1::loop::2",
+            Some("root::1::loop::2")
+        ));
+    }
+
+    #[test]
+    fn rejects_older_child_loop_generation() {
+        assert!(incoming_stamp_is_superseded(
+            "root::1::loop::1",
+            Some("root::1::loop::2")
+        ));
+    }
+
+    #[test]
+    fn rejects_child_spawned_by_older_root_generation() {
+        assert!(incoming_stamp_is_superseded(
+            "root::1::loop::5",
+            Some("root::2")
+        ));
+    }
+
+    #[test]
+    fn accepts_sibling_scope_in_same_parent_generation() {
+        assert!(!incoming_stamp_is_superseded(
+            "root::1::left::1",
+            Some("root::1::right::2")
+        ));
+    }
+
+    #[test]
+    fn accepts_unparseable_stamp_as_unfenced_for_backward_compatibility() {
+        assert!(!incoming_stamp_is_superseded(
+            "legacy",
+            Some("root::1::loop::2")
+        ));
+    }
+
+    #[test]
+    fn rejects_inner_loop_write_from_older_outer_generation() {
+        // Nested loops: an inner (non-root) loop whose outer loop advanced from
+        // generation 1 -> 2 is re-spawned under scope root::2::inner. A stale late
+        // write from the previous outer generation (root::1::inner::5) must be fenced
+        // out even though its own child generation (5) is numerically higher than the
+        // current row's child generation (1) -- the deciding factor is that its parent
+        // scope was spawned by the older outer generation.
+        assert!(incoming_stamp_is_superseded(
+            "root::1::inner::5",
+            Some("root::2::inner::1")
+        ));
+    }
+
+    #[test]
+    fn accepts_newer_inner_loop_write_from_same_outer_generation() {
+        // Same nested shape, but the outer generation matches and the inner
+        // generation advanced: this is the current in-flight write and must be
+        // accepted, not fenced.
+        assert!(!incoming_stamp_is_superseded(
+            "root::2::inner::5",
+            Some("root::2::inner::1")
+        ));
+    }
+
+    #[test]
+    fn accepts_sibling_branch_nested_under_same_generations() {
+        // Two parallel branches (left/right) spawned inside the same inner-loop
+        // iteration are independent scopes: neither may fence the other even
+        // though their trailing generations differ.
+        assert!(!incoming_stamp_is_superseded(
+            "root::1::inner::2::left::1",
+            Some("root::1::inner::2::right::9")
+        ));
     }
 }
