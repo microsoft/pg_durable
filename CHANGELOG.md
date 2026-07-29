@@ -27,11 +27,12 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
   > ⚠️ **Potentially replay-breaking for in-flight instances.** These changes alter recorded
   > orchestration inputs and scheduling order. duroxide validates both by exact equality on
-  > replay. Affected workflow shapes cannot be classified safely from extension state, so
-  > workflows started under 0.2.4 may not resume under 0.2.5. Before deploying
-  > the new `.so`, quiesce new `df.start()` calls and drain or cancel every `pending` or
-  > `running` instance. The administrative, all-tenant runbook is in
-  > `docs/upgrade-testing.md` under "Loop replay contract and drain runbook".
+  > replay, so affected workflows started under 0.2.4 may fail after upgrading to 0.2.5.
+  > The engine fails closed on a mismatch, but `df.instances` may remain `pending` or `running`
+  > because the replay aborts before pg_durable can record its normal failure status. Operators
+  > that require in-flight continuity should quiesce and drain before upgrading; operators that
+  > accept failed/recreated work can upgrade directly and inspect or cancel stale instances
+  > afterward. See `docs/upgrade-testing.md` under "Loop replay compatibility".
 
 - **HTTP envelope fields are addressable with dot notation:** `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` now resolve against an HTTP result. Previously dot notation only worked on SQL results (which carry a `rows` array), so reading an HTTP envelope required an intervening SQL node such as `SELECT ($resp::jsonb->>'ok')::boolean`. `rows` still takes precedence, so SQL results are unaffected.
 

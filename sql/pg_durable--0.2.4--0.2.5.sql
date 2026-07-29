@@ -7,9 +7,11 @@
 -- Non-root df.loop() nodes run as child sub-orchestrations; replay-recorded result
 -- and variable maps use canonical key ordering; and root/non-root loops share one
 -- body/condition policy. duroxide replays by exact input and scheduling equality,
--- so a workflow started under 0.2.4 may not resume under this binary. Before loading
--- the new .so, stop new df.start() calls and drain or cancel ALL pending/running
--- instances. See docs/upgrade-testing.md, "Loop replay contract and drain runbook".
+-- so an affected workflow started under 0.2.4 may fail under this binary. The engine
+-- fails closed, but its df.instances row may remain pending/running. Operators that
+-- require in-flight continuity should quiesce and drain before upgrading; operators
+-- that accept failed/recreated work can upgrade directly and clean up stale instances
+-- afterward. See docs/upgrade-testing.md, "Loop replay compatibility".
 -- No DDL is required for these runtime changes: status_details already exists.
 --
 -- Adds df.http_multipart() for multipart/form-data requests (file uploads,
