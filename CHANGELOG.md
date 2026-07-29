@@ -19,20 +19,9 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Changed
 
-- **Loop execution and replay determinism (#228):** non-root `df.loop()` nodes now run as
-  dedicated child sub-orchestrations, replay-recorded result/variable maps serialize in
-  canonical key order, and root/non-root loops share the same body and while-condition
-  policy. This fixes non-root loop restarts and makes `df.break()` in a while-condition
-  behave identically at either graph position.
+- **Loop execution and replay determinism (#228):** non-root `df.loop()` nodes now run as dedicated child sub-orchestrations, replay-recorded result/variable maps serialize in canonical key order, and root/non-root loops share the same body and while-condition policy. This fixes non-root loop restarts and makes `df.break()` in a while-condition behave identically at either graph position.
 
-  > ⚠️ **Potentially replay-breaking for in-flight instances.** These changes alter recorded
-  > orchestration inputs and scheduling order. duroxide validates both by exact equality on
-  > replay, so affected workflows started under 0.2.4 may fail after upgrading to 0.2.5.
-  > The engine fails closed on a mismatch, but `df.instances` may remain `pending` or `running`
-  > because the replay aborts before pg_durable can record its normal failure status. Operators
-  > that require in-flight continuity should quiesce and drain before upgrading; operators that
-  > accept failed/recreated work can upgrade directly and inspect or cancel stale instances
-  > afterward. See `docs/upgrade-testing.md` under "Loop replay compatibility".
+  > ⚠️ **Potentially replay-breaking for in-flight instances.** These changes alter recorded orchestration inputs and scheduling order. duroxide validates both by exact equality on replay, so affected workflows started under 0.2.4 may fail after upgrading to 0.2.5. The engine fails closed on a mismatch, but `df.instances` may remain `pending` or `running` because the replay aborts before pg_durable can record its normal failure status. Operators that require in-flight continuity should quiesce and drain before upgrading; operators that accept failed/recreated work can upgrade directly and inspect or cancel stale instances afterward. See `docs/upgrade-testing.md` under "Loop replay compatibility".
 
 - **HTTP envelope fields are addressable with dot notation:** `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` now resolve against an HTTP result. Previously dot notation only worked on SQL results (which carry a `rows` array), so reading an HTTP envelope required an intervening SQL node such as `SELECT ($resp::jsonb->>'ok')::boolean`. `rows` still takes precedence, so SQL results are unaffected.
 

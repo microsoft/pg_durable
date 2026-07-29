@@ -206,24 +206,11 @@ what the upgrade script handles, and any backward compatibility considerations.
 ### v0.2.4 → v0.2.5
 
 #### Loop replay compatibility
-- **Runtime change (no DDL):** Non-root `df.loop()` nodes run as child
-    sub-orchestrations, replay-recorded result/variable maps serialize in canonical key order,
-    and root/non-root loops share body/condition policy. `status_details` already covers the
-    loop node stamps, so the upgrade script adds no schema object for this change.
-- **Replay compatibility:** duroxide matches recorded inputs, explicit child instance ids,
-    and orchestration scheduling by exact equality. In-flight root loops, non-root loops, and
-    JOIN/RACE workflows carrying multiple variables or named results may therefore fail with
-    nondeterminism after the binary upgrade. Unaffected histories resume normally.
-- **Failure handling:** duroxide fails closed rather than continuing with a changed schedule.
-    The corresponding `df.instances` row may remain `pending` or `running` because replay can
-    abort before pg_durable records its normal failure status.
-- **Upgrade choice:** Operators that require in-flight continuity should quiesce and drain
-    before upgrading. Operators that accept recreating affected work can upgrade directly,
-    then inspect and cancel any stale instances.
-- **Scenario B1:** The 0.2.5 `.so` still runs against schemas without `status_details`; the
-    writer detects the absent column and uses the legacy unfenced write. Existing SQL remains
-    valid, but loop-node status is best-effort until the schema upgrade because the writer set
-    is wider.
+- **Runtime change (no DDL):** Non-root `df.loop()` nodes run as child sub-orchestrations, replay-recorded result/variable maps serialize in canonical key order, and root/non-root loops share body/condition policy. `status_details` already covers the loop node stamps, so the upgrade script adds no schema object for this change.
+- **Replay compatibility:** duroxide matches recorded inputs, explicit child instance ids, and orchestration scheduling by exact equality. In-flight root loops, non-root loops, and JOIN/RACE workflows carrying multiple variables or named results may therefore fail with nondeterminism after the binary upgrade. Unaffected histories resume normally.
+- **Failure handling:** duroxide fails closed rather than continuing with a changed schedule. The corresponding `df.instances` row may remain `pending` or `running` because replay can abort before pg_durable records its normal failure status.
+- **Upgrade choice:** Operators that require in-flight continuity should quiesce and drain before upgrading. Operators that accept recreating affected work can upgrade directly, then inspect and cancel any stale instances.
+- **Scenario B1:** The 0.2.5 `.so` still runs against schemas without `status_details`; the writer detects the absent column and uses the legacy unfenced write. Existing SQL remains valid, but loop-node status is best-effort until the schema upgrade because the writer set is wider.
 
 #### Add `df.http_multipart()` for multipart/form-data uploads
 - **DDL change (df schema):** Adds a new node type `HTTP_MULTIPART` and a new `#[pg_extern(schema = "df")]` function `df.http_multipart(text, text, jsonb, jsonb, integer)`. The upgrade script `sql/pg_durable--0.2.4--0.2.5.sql` hand-writes the `CREATE FUNCTION ... LANGUAGE c AS 'MODULE_PATHNAME', 'http_multipart_wrapper'` (pgrx emits it for fresh installs from `src/dsl.rs`), re-adds the `nodes_node_type_chk` / `nodes_structure_chk` constraints and `df.ensure_durofut()` validator with `HTTP_MULTIPART` admitted, and re-emits `df.grant_usage()` / `df.revoke_usage()` so they GRANT/REVOKE `df.http_multipart()` alongside `df.http()`. The signature `df.grant_usage(text, boolean, boolean)` is unchanged.
