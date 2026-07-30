@@ -997,6 +997,13 @@ pub struct FunctionInput {
     /// Used to enforce a maximum iteration safeguard.
     #[serde(default)]
     pub loop_iteration: u64,
+    /// Serialized `FunctionGraph`, carried across `continue_as_new` generations.
+    ///
+    /// `df.start()` leaves this `None`, so generation 0 loads the graph from the database.
+    /// A root loop re-emits the loaded graph here, so an instance reads `df.nodes` exactly
+    /// once no matter how many iterations it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
 }
 
 pub(crate) fn serialize_string_map<S>(
@@ -1712,12 +1719,14 @@ mod tests {
             label: None,
             vars: forward,
             loop_iteration: 0,
+            graph: None,
         };
         let reverse_input = FunctionInput {
             instance_id: "instance".to_string(),
             label: None,
             vars: reverse,
             loop_iteration: 0,
+            graph: None,
         };
         assert_eq!(
             serde_json::to_string(&forward_input).unwrap(),

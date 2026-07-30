@@ -1156,6 +1156,9 @@ pub fn start(
         label: label.map(|s| s.to_string()),
         vars,
         loop_iteration: 0,
+        // Generation 0 loads the graph from df.nodes; only a root loop continuing as new
+        // carries it inline.
+        graph: None,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 

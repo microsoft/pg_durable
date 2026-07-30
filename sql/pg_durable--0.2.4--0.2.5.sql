@@ -5,13 +5,20 @@
 --
 -- UPGRADE ORDERING: this release changes duroxide-recorded orchestration history.
 -- Non-root df.loop() nodes run as child sub-orchestrations; replay-recorded result
--- and variable maps use canonical key ordering; and root/non-root loops share one
--- body/condition policy. duroxide replays by exact input and scheduling equality,
--- so an affected workflow started under 0.2.4 may fail under this binary. The engine
--- fails closed, but its df.instances row may remain pending/running. Operators that
--- require in-flight continuity should quiesce and drain before upgrading; operators
--- that accept failed/recreated work can upgrade directly and clean up stale instances
--- afterward. See docs/upgrade-testing.md, "Loop replay compatibility".
+-- and variable maps use canonical key ordering; root/non-root loops share one
+-- body/condition policy; and the execute-subtree orchestration that runs parallel
+-- branches now hosts loops too, with a wider input envelope. duroxide replays by
+-- exact input and scheduling equality, so:
+--   * EVERY in-flight JOIN (&) or RACE (|) branch fails under this binary, because
+--     its recorded execute-subtree input uses the pre-0.2.5 shape. This is not
+--     limited to workflows carrying multiple variables or named results.
+--   * In-flight root and non-root df.loop() instances may fail with a
+--     nondeterminism error.
+-- The engine fails closed, but the df.instances row may remain pending/running.
+-- Operators that require in-flight continuity should quiesce and drain before
+-- upgrading; operators that accept failed/recreated work can upgrade directly and
+-- clean up stale instances afterward. See docs/upgrade-testing.md,
+-- "Loop and sub-orchestration replay compatibility".
 -- No DDL is required for these runtime changes: status_details already exists.
 --
 -- Adds df.http_multipart() for multipart/form-data requests (file uploads,

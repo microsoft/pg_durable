@@ -4,17 +4,23 @@
 //! ExecuteSQL activity - runs SQL queries against PostgreSQL
 //!
 //! Connects as the submitting user (submitted_by) for proper privilege isolation.
-//! The submitted_by value comes from the in-memory FunctionGraph cached by
-//! duroxide after load_function_graph runs.  Within a single orchestration
-//! generation that cache is immutable: post-load tampering of df.nodes cannot
-//! change the identity used by execute_sql.
+//! The submitted_by value comes from the in-memory FunctionGraph that
+//! load_function_graph produced at instance start.  That snapshot is loaded once
+//! per instance and then carried inline — into every child sub-orchestration
+//! input and across every continue_as_new generation — so it is immutable for
+//! the instance's whole lifetime.  Post-start tampering of df.nodes therefore
+//! cannot change the identity used by execute_sql: the tampered value is simply
+//! never read.
 //!
-//! ⚠️  Loop functions use continue_as_new, which discards duroxide history and
-//! starts a fresh orchestration generation.  load_function_graph is therefore
-//! called again at the start of every loop iteration, re-reading submitted_by
-//! from df.instances and df.nodes.  A tamper applied between iterations is
-//! caught by load_function_graph's superuser check on the next re-read, which
-//! fails the instance rather than executing SQL under a forged identity.
+//! Role deletion and privilege changes are still enforced at execution time
+//! rather than by re-reading: connect_as_user() opens a connection *as*
+//! submitted_by (there is no SET ROLE indirection), so a dropped role or one
+//! that has lost LOGIN fails the node.  The HTTP activities re-check EXECUTE
+//! privilege on df.http()/df.http_multipart() per request.
+//!
+//! Not covered: pg_durable.enable_superuser_instances is evaluated once, when
+//! the instance is admitted.  Turning it off does not stop already-running
+//! superuser instances.
 //!
 //! Connection count is gated by a semaphore sized from the
 //! pg_durable.max_user_connections GUC.

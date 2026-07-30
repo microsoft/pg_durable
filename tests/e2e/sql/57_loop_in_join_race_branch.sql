@@ -129,14 +129,15 @@ DROP TABLE test_raceloop_body;
 -- Same shape as Test 2 (a RACE at the root; left = df.loop(sleep), right = a sleep) but this
 -- time we assert the *orchestration topology* rather than the behaviour:
 --   * parent           : the function-graph orchestration (RACE is its root node)
---   * loop sub         : spawned DIRECTLY as an execute-loop child, because the loop is
---                        already the root of its own branch orchestration
+--   * loop sub         : an execute-subtree child rooted AT the loop node, which runs the
+--                        loop inline and drives its own continue_as_new
 --   * right-branch sub : an execute-subtree wrapping the sleep
 --
--- The loop branch must NOT be double-wrapped (execute-subtree -> execute-loop): doing so
--- would create a third sub-orchestration for the single loop branch.  We verify the loop's
--- own node is stamped by an orchestration instance that is a *direct* child of the parent,
--- i.e. `{parent}::{parent_generation}::{loop_node_id}`, with no subtree wrapper in between.
+-- The loop branch must NOT be double-wrapped (an outer subtree that itself spawns a second
+-- child for the loop): doing so would create a third sub-orchestration for the single loop
+-- branch.  We verify the loop's own node is stamped by an orchestration instance that is a
+-- *direct* child of the parent, i.e. `{parent}::{parent_generation}::{loop_node_id}`, with no
+-- extra wrapper in between.
 --
 -- The stamp recorded in df.nodes.status_details->>'execution_id' has the shape
 -- `{orchestration_instance_id}::{execution_id}`, and an orchestration instance id is itself

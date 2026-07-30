@@ -35,6 +35,55 @@ struct ExecutionContext {
     label: Option<String>,
     /// Loop iteration counter (persisted across continue_as_new generations).
     loop_iteration: u64,
+    /// Node id at the root of the *current* orchestration's node tree: `graph.root_node_id`
+    /// for `execute`, the branch/loop node id for `execute_subtree`. A loop sitting on this
+    /// node runs inline and drives this orchestration's own `continue_as_new`; any deeper
+    /// loop is spawned as a child so its `continue_as_new` cannot re-execute an upstream
+    /// prefix (#227).
+    subtree_root: String,
+    /// Shape of the input this orchestration re-enters itself with on loop `continue_as_new`.
+    continuation: Continuation,
+}
+
+/// Which input envelope an inline loop must rebuild when it calls `continue_as_new`.
+///
+/// Both orchestrations that can host an inline loop re-enter themselves, but they are
+/// registered with different input shapes, so the loop node handler picks the right one.
+#[derive(Clone, Copy)]
+enum Continuation {
+    /// The root `execute` orchestration, whose input is a `FunctionInput`.
+    Root,
+    /// An `execute_subtree` child, whose input is a `SubtreeInput`.
+    Subtree,
+}
+
+/// Input envelope for `execute_subtree`.
+///
+/// Carries the serialized graph inline. A subtree therefore runs against the same immutable
+/// snapshot its parent already validated, and an inline loop re-emits that snapshot across
+/// `continue_as_new` — so `df.nodes` is read exactly once per instance and a post-start
+/// tamper cannot change the identity a node executes under. Role deletion and privilege
+/// revocation are still enforced on every node execution (`execute_sql` connects *as*
+/// `submitted_by`; the HTTP activities re-check `EXECUTE` privilege per request).
+///
+/// `instance_id` is retained alongside the graph so a startup failure can still stamp the
+/// subtree root even when the graph itself fails to parse. `iteration` is threaded across
+/// `continue_as_new` when the subtree root is a loop.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SubtreeInput {
+    instance_id: String,
+    node_id: String,
+    /// Serialized `FunctionGraph` snapshot inherited from the parent.
+    graph: String,
+    /// JSON-encoded named-results map inherited from the parent.
+    results: String,
+    /// JSON-encoded workflow vars map.
+    #[serde(default)]
+    vars: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    iteration: u64,
 }
 
 /// Control-flow-aware error type returned by every node handler.
@@ -133,29 +182,38 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         ctx.trace_info(format!("Workflow vars: {keys:?}"));
     }
 
-    let graph_json = match ctx
-        .schedule_activity(
-            activities::load_function_graph::NAME,
-            input.instance_id.clone(),
-        )
-        .await
-    {
-        Ok(json) => json,
-        Err(e) => {
-            // load_function_graph failed (e.g., superuser blocked).
-            // Mark the instance as failed before propagating.
-            let status_input = serde_json::json!({
-                "instance_id": input.instance_id,
-                "status": "failed"
-            });
-            let _ = ctx
-                .schedule_activity(
-                    activities::update_instance_status::NAME,
-                    status_input.to_string(),
-                )
-                .await;
-            return Err(e);
-        }
+    // Generation 0 loads the graph from the database; a root loop continuing as new carries
+    // it inline, so an instance reads `df.nodes` exactly once however many iterations it runs.
+    // That load is also the admission check (`submitted_by` resolution plus the superuser
+    // guard), which belongs at instance start rather than on every iteration — re-reading
+    // mid-flight would make a post-start tamper of `df.nodes.submitted_by` take effect
+    // instead of being ignored.
+    let graph_json = match input.graph.clone() {
+        Some(json) => json,
+        None => match ctx
+            .schedule_activity(
+                activities::load_function_graph::NAME,
+                input.instance_id.clone(),
+            )
+            .await
+        {
+            Ok(json) => json,
+            Err(e) => {
+                // load_function_graph failed (e.g., superuser blocked).
+                // Mark the instance as failed before propagating.
+                let status_input = serde_json::json!({
+                    "instance_id": input.instance_id,
+                    "status": "failed"
+                });
+                let _ = ctx
+                    .schedule_activity(
+                        activities::update_instance_status::NAME,
+                        status_input.to_string(),
+                    )
+                    .await;
+                return Err(e);
+            }
+        },
     };
 
     let graph: FunctionGraph = serde_json::from_str(&graph_json)
@@ -188,6 +246,8 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         vars: input.vars.clone(),
         label: input.label.clone(),
         loop_iteration: input.loop_iteration,
+        subtree_root: graph.root_node_id.clone(),
+        continuation: Continuation::Root,
     };
 
     let function_outcome =
@@ -239,75 +299,147 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     function_result
 }
 
-/// Execute a subtree of a function graph (used for parallel JOIN/RACE)
+/// Execute a subtree of a function graph rooted at `node_id`.
+///
+/// Used for JOIN/RACE branches and for any non-root `df.loop()`. Structurally this mirrors
+/// `execute`: it roots an `ExecutionContext` at its own node and — when that node is a loop —
+/// lets the loop drive `continue_as_new` on *this* orchestration. Because the subtree has no
+/// upstream prefix, re-entering from its root lands back on the same loop node each
+/// generation, exactly as it does for a root loop in `execute`.
+///
+/// Unlike `execute`, this never loads the graph (the parent passes it inline) and never
+/// touches instance-level status: the parent owns that.
 pub async fn execute_subtree(
     ctx: OrchestrationContext,
     input_json: String,
 ) -> Result<String, String> {
-    let input: serde_json::Value = serde_json::from_str(&input_json)
+    let input: SubtreeInput = serde_json::from_str(&input_json)
         .map_err(|e| format!("Failed to parse ExecuteSubtree input: {e}"))?;
 
-    let graph_json = input["graph"]
-        .as_str()
-        .ok_or("Missing graph in ExecuteSubtree input")?;
-    let node_id = input["node_id"]
-        .as_str()
-        .ok_or("Missing node_id in ExecuteSubtree input")?;
-    let results_json = input["results"]
-        .as_str()
-        .ok_or("Missing results in ExecuteSubtree input")?;
-
-    let graph: FunctionGraph = serde_json::from_str(graph_json)
-        .map_err(|e| format!("Failed to parse graph in ExecuteSubtree: {e}"))?;
-    let mut results: HashMap<String, String> = serde_json::from_str(results_json)
-        .map_err(|e| format!("Failed to parse results in ExecuteSubtree: {e}"))?;
-
-    let vars: HashMap<String, String> = if let Some(vars_json) = input["vars"].as_str() {
-        serde_json::from_str(vars_json)
-            .map_err(|e| format!("Failed to parse vars in ExecuteSubtree: {e}"))?
-    } else {
-        HashMap::new()
+    // The subtree root is owned by this child instance, so stamp it failed on any startup
+    // error. Without this a child that dies before `execute_function_node_with_vars` runs
+    // would leave its root node stuck in a non-terminal state (the parent does not stamp
+    // branch roots).
+    let fail = |ctx: &OrchestrationContext, e: String| {
+        let stamp = format!("{}::{}", ctx.instance_id(), ctx.execution_id());
+        let status_input = serde_json::json!({
+            "node_id": input.node_id,
+            "instance_id": input.instance_id,
+            "status": "failed",
+            "result": e,
+            "execution_id": stamp,
+        });
+        (status_input.to_string(), e)
     };
-    let label: Option<String> = input["label"].as_str().map(|s| s.to_string());
 
-    ctx.trace_info(format!("ExecuteSubtree: executing node {node_id}"));
+    ctx.trace_info(format!(
+        "ExecuteSubtree: executing node {} (iteration {})",
+        input.node_id, input.iteration
+    ));
+
+    // The graph arrives inline from the parent — no database read here. The subtree runs
+    // against the snapshot the parent already validated, and an inline loop re-emits it on
+    // `continue_as_new`, so nothing re-reads `df.nodes` mid-flight.
+    let parsed = serde_json::from_str::<FunctionGraph>(&input.graph)
+        .map_err(|e| format!("Failed to parse graph in ExecuteSubtree: {e}"))
+        .and_then(|graph| {
+            let results: HashMap<String, String> = serde_json::from_str(&input.results)
+                .map_err(|e| format!("Failed to parse results in ExecuteSubtree: {e}"))?;
+            let vars: HashMap<String, String> = match input.vars.as_deref() {
+                Some(vars_json) => serde_json::from_str(vars_json)
+                    .map_err(|e| format!("Failed to parse vars in ExecuteSubtree: {e}"))?,
+                None => HashMap::new(),
+            };
+            Ok((graph, results, vars))
+        });
+
+    let (graph, mut results, vars) = match parsed {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let (status_input, e) = fail(&ctx, e);
+            let _ = ctx
+                .schedule_activity(activities::update_node_status::NAME, status_input)
+                .await;
+            return Err(e);
+        }
+    };
 
     let exec_ctx = ExecutionContext {
         vars,
-        label,
-        loop_iteration: 0,
+        label: input.label.clone(),
+        loop_iteration: input.iteration,
+        subtree_root: input.node_id.clone(),
+        continuation: Continuation::Subtree,
     };
 
     // Build the envelope carrying the result, the updated named-results map, and a typed
     // control signal. A `Break` inside the subtree is re-encoded as `control: Break` (not a
     // sentinel smuggled inside `result`) so the parent can re-raise it as `NodeError::Break`.
     // A genuine `Failure` propagates as `Err` across the sub-orchestration boundary.
-    let envelope =
-        match execute_function_node_with_vars(&ctx, &graph, node_id, &mut results, &exec_ctx).await
-        {
-            Ok(result) => {
-                ctx.trace_info(format!("ExecuteSubtree: node {node_id} completed"));
-                SubtreeEnvelope {
-                    control: Some(SubtreeControl::Normal),
-                    result,
-                    results,
-                }
+    //
+    // When the root node is a loop that needs another iteration it calls `continue_as_new`,
+    // whose future never resolves — so none of the arms below run for a continuing
+    // generation, and no envelope is produced until the loop actually exits.
+    let envelope = match execute_function_node_with_vars(
+        &ctx,
+        &graph,
+        &input.node_id,
+        &mut results,
+        &exec_ctx,
+    )
+    .await
+    {
+        Ok(result) => {
+            ctx.trace_info(format!("ExecuteSubtree: node {} completed", input.node_id));
+            SubtreeEnvelope {
+                control: Some(SubtreeControl::Normal),
+                result,
+                results,
             }
-            Err(NodeError::Break(value)) => {
-                ctx.trace_info(format!(
-                    "ExecuteSubtree: node {node_id} broke (propagating)"
-                ));
-                SubtreeEnvelope {
-                    control: Some(SubtreeControl::Break),
-                    result: value,
-                    results,
-                }
+        }
+        Err(NodeError::Break(value)) => {
+            ctx.trace_info(format!(
+                "ExecuteSubtree: node {} broke (propagating)",
+                input.node_id
+            ));
+            SubtreeEnvelope {
+                control: Some(SubtreeControl::Break),
+                result: value,
+                results,
             }
-            Err(NodeError::Failure(e)) => return Err(e),
-        };
+        }
+        Err(NodeError::Failure(e)) => return Err(e),
+    };
 
     serde_json::to_string(&envelope)
         .map_err(|e| format!("Failed to serialize subtree envelope: {e}"))
+}
+
+/// Build the `execute_subtree` input for a child rooted at `node_id`.
+///
+/// Shared by JOIN/RACE branch scheduling and by non-root loop spawning — all three are the
+/// same operation now: run this node in its own durable instance.
+fn build_subtree_input(
+    graph: &FunctionGraph,
+    node_id: &str,
+    results: &HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<String, String> {
+    let input = SubtreeInput {
+        instance_id: graph.instance_id.clone(),
+        node_id: node_id.to_string(),
+        graph: serde_json::to_string(graph)
+            .map_err(|e| format!("Failed to serialize graph: {e}"))?,
+        results: string_map_to_json(results)
+            .map_err(|e| format!("Failed to serialize results: {e}"))?,
+        vars: Some(
+            string_map_to_json(&exec_ctx.vars)
+                .map_err(|e| format!("Failed to serialize vars: {e}"))?,
+        ),
+        label: exec_ctx.label.clone(),
+        iteration: 0,
+    };
+    serde_json::to_string(&input).map_err(|e| format!("Failed to serialize subtree input: {e}"))
 }
 
 /// Compose the deterministic instance id for a JOIN/RACE branch sub-orchestration.
@@ -344,13 +476,19 @@ async fn execute_function_node_with_vars(
         node_id, node.node_type
     ));
 
-    // A *non-root* loop runs as a child sub-orchestration so its `continue_as_new` restarts
-    // only the loop body (not the upstream prefix; #227) and a loop nested in a parallel
-    // branch gets its own durable instance (#233). The parent does NOT stamp the loop node
-    // running/terminal: the child sub-orchestration owns the node as its root and stamps it
-    // (see `execute_loop`). Intercept here, before any status stamping. A *root* loop falls
-    // through and runs inline via `execute_loop_node`.
-    if node.node_type.eq_ignore_ascii_case("loop") && node_id != graph.root_node_id {
+    // A loop that is NOT the root of the current orchestration's node tree runs as a child
+    // sub-orchestration, so its `continue_as_new` restarts only the loop body rather than
+    // re-executing the upstream prefix (#227), and a loop nested in a parallel branch gets
+    // its own durable instance (#233). The parent does NOT stamp such a loop node
+    // running/terminal: the child owns the node as its root and stamps it there. Intercept
+    // here, before any status stamping.
+    //
+    // A loop that IS this orchestration's root falls through and runs inline via
+    // `execute_loop_node`, driving `continue_as_new` on this orchestration. That is safe
+    // precisely because there is no upstream prefix to re-execute: re-entering from the root
+    // lands back on this same loop node. This holds identically for the root `execute`
+    // orchestration and for an `execute_subtree` child rooted at a loop.
+    if node.node_type.eq_ignore_ascii_case("loop") && node_id != exec_ctx.subtree_root {
         return execute_loop_suborchestration(ctx, graph, node, node_id, results, exec_ctx).await;
     }
 
@@ -614,37 +752,13 @@ const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
 /// At the minimum 1-second rate limit, this allows ~27 hours of looping.
 const MAX_LOOP_ITERATIONS: u64 = 100_000;
 
-/// Orchestration name for the loop sub-orchestration.
+/// Stamp a loop node's status from its *parent* orchestration.
 ///
-/// Each `df.loop()` node spawns a child orchestration under this name.  The
-/// child handles all iterations via `continue_as_new`; when the loop exits it
-/// returns a `SubtreeEnvelope` to the parent.  The parent link is preserved
-/// across `continue_as_new` generations by duroxide, so
-/// the parent orchestration is notified when the loop finally completes.
-pub const LOOP_NAME: &str = "pg_durable::orchestration::execute-loop";
-
-/// Build the `SubtreeEnvelope` a loop returns to its parent on exit.
-///
-/// A loop always exits with a *normal* result: `run_loop_iteration` catches `df.break()` as
-/// the loop's own terminator, so it must not unwind past the loop. The envelope is therefore
-/// always tagged `Normal`; `execute_loop_suborchestration` merges its results into the parent.
-fn loop_exit_envelope(result: String, results: HashMap<String, String>) -> Result<String, String> {
-    let envelope = SubtreeEnvelope {
-        control: Some(SubtreeControl::Normal),
-        result,
-        results,
-    };
-    serde_json::to_string(&envelope).map_err(|e| format!("Failed to serialize loop envelope: {e}"))
-}
-
-/// Stamp the loop node's status from inside its own (`execute_loop`) sub-orchestration.
-///
-/// The loop node is the *root* of this child instance, so the child owns its status
-/// transitions: `running` at the start of every generation, then `completed`/`failed` on
-/// exit. `stamp` is `{child_instance_id}::{execution_id}` — the same `execution_stamp`
-/// scheme `execute_function_node_with_vars` uses — whose trailing `::`-token is this child's
-/// `continue_as_new` generation. df.instance_nodes()/df.explain() and the write fence read
-/// that token to fence stale writes and infer pending/skipped.
+/// A non-root loop node is the root of its own child instance, so the child normally owns
+/// its status transitions (via `execute_function_node_with_vars`). This helper covers the
+/// cases where the child never got far enough to stamp itself — spawn failure, a failed
+/// branch future, or a losing RACE branch — and the parent must record a terminal state so
+/// the node does not linger as running.
 async fn stamp_loop_node(
     ctx: &OrchestrationContext,
     instance_id: &str,
@@ -665,25 +779,6 @@ async fn stamp_loop_node(
     let _ = ctx
         .schedule_activity(activities::update_node_status::NAME, input.to_string())
         .await;
-}
-
-async fn fail_loop_node(
-    ctx: &OrchestrationContext,
-    instance_id: &str,
-    loop_node_id: &str,
-    stamp: &str,
-    error: String,
-) -> Result<String, String> {
-    stamp_loop_node(
-        ctx,
-        instance_id,
-        loop_node_id,
-        "failed",
-        Some(&error),
-        stamp,
-    )
-    .await;
-    Err(error)
 }
 
 async fn fail_loop_before_start(
@@ -724,13 +819,14 @@ async fn fail_loop_child_future(
     Err(NodeError::Failure(error))
 }
 
-/// Run one iteration of a loop body (and its optional while-condition) for the
-/// `execute_loop` sub-orchestration.
+/// Run one iteration of a loop body (and its optional while-condition).
+///
+/// Shared by both inline loop paths: a loop at the root of the root orchestration and a
+/// loop at the root of an `execute_subtree` child.
 ///
 /// Returns `Ok(Some(final_result))` when the loop should exit (a `df.break()` in the body,
 /// or the while-condition evaluating false), `Ok(None)` when another iteration is needed,
-/// and `Err` when the body or condition fails. Named results are stored on exit, mirroring
-/// the inline root-loop path in `execute_loop_node`.
+/// and `Err` when the body or condition fails.
 async fn run_loop_iteration(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -799,293 +895,20 @@ async fn run_loop_iteration(
     Ok(None)
 }
 
-/// Sub-orchestration that runs a single loop iteration and either returns or
-/// calls `continue_as_new` for the next iteration.
+/// Execute a loop node inline, driving the *current* orchestration's `continue_as_new`.
 ///
-/// Input JSON:
-/// ```json
-/// { "instance_id": "...", "loop_node_id": "...",
-///   "results": "<results_json>", "vars": "<vars_json>", "label": "...",
-///   "iteration": 0 }
-/// ```
+/// Only a loop sitting at `exec_ctx.subtree_root` reaches this function; a deeper loop is
+/// intercepted in `execute_function_node_with_vars` and delegated to a child. Running the
+/// root loop inline is safe because there is no upstream prefix to re-execute: re-entering
+/// this orchestration from its root lands back on this same loop node each generation.
 ///
-/// `load_function_graph` is called at the start of **every** generation
-/// (including after `continue_as_new`) so that cross-iteration security
-/// tampering is caught and the instance is failed — the same guarantee the
-/// main `execute()` orchestration provides at its generation boundary.
+/// Both hosts are handled: the root `execute` orchestration and an `execute_subtree` child
+/// rooted at the loop node. They differ only in the input envelope they re-enter with, which
+/// `exec_ctx.continuation` selects.
 ///
-/// On loop exit the function returns a `SubtreeEnvelope` containing the final
-/// result and any named results accumulated during the loop.
-pub async fn execute_loop(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
-    let input: serde_json::Value = serde_json::from_str(&input_json)
-        .map_err(|e| format!("Failed to parse ExecuteLoop input: {e}"))?;
-
-    let instance_id = input["instance_id"]
-        .as_str()
-        .ok_or("Missing instance_id in ExecuteLoop input")?
-        .to_string();
-    let loop_node_id = input["loop_node_id"]
-        .as_str()
-        .ok_or("Missing loop_node_id in ExecuteLoop input")?
-        .to_string();
-    let execution_stamp = format!("{}::{}", ctx.instance_id(), ctx.execution_id());
-    let Some(results_json) = input["results"].as_str() else {
-        return fail_loop_node(
-            &ctx,
-            &instance_id,
-            &loop_node_id,
-            &execution_stamp,
-            "Missing results in ExecuteLoop input".to_string(),
-        )
-        .await;
-    };
-
-    // Iteration counter threaded across continue_as_new generations (M7).
-    // Absent on the first generation (spawned by execute_loop_node), so default to 0.
-    let iteration = input["iteration"].as_u64().unwrap_or(0);
-
-    // re-load the graph from the database on every generation — this re-validates
-    // submitted_by and catches cross-iteration security tampering.
-    let graph_json = match ctx
-        .schedule_activity(activities::load_function_graph::NAME, instance_id.clone())
-        .await
-    {
-        Ok(graph_json) => graph_json,
-        Err(e) => {
-            return fail_loop_node(&ctx, &instance_id, &loop_node_id, &execution_stamp, e).await;
-        }
-    };
-    let graph: FunctionGraph = match serde_json::from_str(&graph_json) {
-        Ok(graph) => graph,
-        Err(e) => {
-            return fail_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                &execution_stamp,
-                format!("Failed to parse graph in ExecuteLoop: {e}"),
-            )
-            .await;
-        }
-    };
-
-    let mut results: HashMap<String, String> = match serde_json::from_str(results_json) {
-        Ok(results) => results,
-        Err(e) => {
-            return fail_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                &execution_stamp,
-                format!("Failed to parse results in ExecuteLoop: {e}"),
-            )
-            .await;
-        }
-    };
-
-    let vars: HashMap<String, String> = if let Some(vars_str) = input["vars"].as_str() {
-        match serde_json::from_str(vars_str) {
-            Ok(vars) => vars,
-            Err(e) => {
-                return fail_loop_node(
-                    &ctx,
-                    &instance_id,
-                    &loop_node_id,
-                    &execution_stamp,
-                    format!("Failed to parse vars in ExecuteLoop: {e}"),
-                )
-                .await;
-            }
-        }
-    } else {
-        HashMap::new()
-    };
-    let label: Option<String> = input["label"].as_str().map(|s| s.to_string());
-
-    let exec_ctx = ExecutionContext {
-        vars,
-        label,
-        loop_iteration: iteration,
-    };
-
-    let Some(node) = graph.nodes.get(&loop_node_id) else {
-        return fail_loop_node(
-            &ctx,
-            &instance_id,
-            &loop_node_id,
-            &execution_stamp,
-            format!("Loop node not found: {loop_node_id}"),
-        )
-        .await;
-    };
-
-    let Some(body_id) = node.left_node.clone() else {
-        return fail_loop_node(
-            &ctx,
-            &instance_id,
-            &loop_node_id,
-            &execution_stamp,
-            format!("LOOP node {loop_node_id} has no body"),
-        )
-        .await;
-    };
-
-    // Capture iteration start time for rate-limiting continue_as_new.
-    let iter_started = ctx.utc_now().await.ok();
-
-    // Stamp this loop node as running for the current generation. The loop node is the ROOT
-    // of this sub-orchestration, so it is owned and stamped here (not by the parent):
-    // running on each generation, completed/failed on exit. The stamp's instance id carries
-    // the composed lineage (subtree_instance_id), so the trailing `::`-token is this child's
-    // continue_as_new generation — what df.instance_nodes()/df.explain() and the write fence
-    // read to infer pending/skipped and to fence stale writes.
-    stamp_loop_node(
-        &ctx,
-        &instance_id,
-        &loop_node_id,
-        "running",
-        None,
-        &execution_stamp,
-    )
-    .await;
-
-    ctx.trace_info("Executing loop iteration");
-
-    match run_loop_iteration(
-        &ctx,
-        &graph,
-        node,
-        &loop_node_id,
-        &body_id,
-        &mut results,
-        &exec_ctx,
-    )
-    .await
-    {
-        Ok(Some(final_result)) => {
-            stamp_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                "completed",
-                Some(&final_result),
-                &execution_stamp,
-            )
-            .await;
-            return loop_exit_envelope(final_result, results);
-        }
-        Ok(None) => {}
-        Err(e) => {
-            stamp_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                "failed",
-                Some(&e),
-                &execution_stamp,
-            )
-            .await;
-            return Err(e);
-        }
-    }
-
-    ctx.trace_info("Continuing as new for next loop iteration");
-
-    // M7: Enforce maximum iteration count to prevent runaway infinite loops
-    let next_iteration = exec_ctx.loop_iteration + 1;
-    if next_iteration >= MAX_LOOP_ITERATIONS {
-        let e = format!(
-            "Loop exceeded maximum iteration count of {MAX_LOOP_ITERATIONS}. \
-             Use df.break() to exit the loop or restructure the workflow."
-        );
-        stamp_loop_node(
-            &ctx,
-            &instance_id,
-            &loop_node_id,
-            "failed",
-            Some(&e),
-            &execution_stamp,
-        )
-        .await;
-        return Err(e);
-    }
-
-    // Enforce a minimum per-iteration wall-clock duration to prevent busy-looping.
-    if let Some(started) = iter_started {
-        if let Ok(now) = ctx.utc_now().await {
-            let elapsed = now.duration_since(started).unwrap_or(Duration::ZERO);
-            if elapsed < LOOP_MIN_ITER_DURATION {
-                let deficit = LOOP_MIN_ITER_DURATION - elapsed;
-                ctx.trace_info(format!(
-                    "Loop iteration took {elapsed:?} (< {LOOP_MIN_ITER_DURATION:?}); \
-                     adding {deficit:?} rate-limit delay"
-                ));
-                ctx.schedule_timer(deficit).await;
-            }
-        }
-    }
-
-    // Another iteration needed: continue_as_new within this sub-orchestration.
-    // The parent orchestration keeps its awaiting handle because duroxide preserves
-    // the parent link across continue_as_new.
-    ctx.trace_info(format!(
-        "Loop continuing with continue_as_new at node {loop_node_id}"
-    ));
-    let new_results_json = match string_map_to_json(&results) {
-        Ok(results) => results,
-        Err(e) => {
-            return fail_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                &execution_stamp,
-                format!("Failed to serialize updated results: {e}"),
-            )
-            .await;
-        }
-    };
-    let mut new_input = input.clone();
-    new_input["results"] = serde_json::Value::String(new_results_json);
-    // Persist the incremented iteration counter for the next generation (M7).
-    new_input["iteration"] = serde_json::Value::Number(next_iteration.into());
-    let new_input_json = match serde_json::to_string(&new_input) {
-        Ok(input) => input,
-        Err(e) => {
-            return fail_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                &execution_stamp,
-                format!("Failed to serialize loop input: {e}"),
-            )
-            .await;
-        }
-    };
-    match ctx.continue_as_new(new_input_json).await {
-        Ok(_) => Ok(String::new()),
-        Err(e) => {
-            fail_loop_node(
-                &ctx,
-                &instance_id,
-                &loop_node_id,
-                &execution_stamp,
-                format!("continue_as_new failed: {e:?}"),
-            )
-            .await
-        }
-    }
-}
-
-/// Execute a loop node.
-///
-/// Only a *root* loop reaches this function: a non-root loop is intercepted in
-/// `execute_function_node_with_vars` and delegated to a child sub-orchestration
-/// (`execute_loop`) before any status stamping. A root loop runs inline because its
-/// `continue_as_new` restarts the root orchestration, and with no upstream prefix to
-/// re-execute, re-entering from the root lands back on this same loop node each
-/// generation. Running inline also keeps the body's node stamps under the root df
-/// instance id; df.instance_nodes()/df.explain() and the write fence compare the
-/// trailing generation and any composed ancestor generations.
+/// Note that `ctx.continue_as_new()` returns a future that never resolves, so on a
+/// continuing generation this function does not return and the caller's terminal node
+/// stamping never runs — the loop node stays `running` until it actually exits.
 async fn execute_loop_node(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -1095,8 +918,8 @@ async fn execute_loop_node(
     exec_ctx: &ExecutionContext,
 ) -> NodeResult {
     debug_assert_eq!(
-        node_id, graph.root_node_id,
-        "inline loop must be graph root"
+        node_id, exec_ctx.subtree_root,
+        "inline loop must be the current orchestration's root"
     );
 
     let body_id = node
@@ -1150,27 +973,62 @@ async fn execute_loop_node(
         }
     }
 
-    // Preserve vars in continue_as_new input
-    let new_input = FunctionInput {
-        instance_id: graph.instance_id.clone(),
-        label: exec_ctx.label.clone(),
-        vars: exec_ctx.vars.clone(),
-        loop_iteration: next_iteration,
+    // Rebuild this orchestration's own input for the next generation. The root
+    // orchestration re-enters with a `FunctionInput` (named results are rebuilt from
+    // scratch, as they always have been); an `execute_subtree` child re-enters with a
+    // `SubtreeInput` that threads the accumulated named results forward.
+    // Rebuild this orchestration's own input for the next generation. The root
+    // orchestration re-enters with a `FunctionInput` (named results are rebuilt from
+    // scratch, as they always have been); an `execute_subtree` child re-enters with a
+    // `SubtreeInput` that threads the accumulated named results forward. Both carry the
+    // graph snapshot forward so no generation re-reads `df.nodes`.
+    let graph_json =
+        serde_json::to_string(graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
+    let new_input_json = match exec_ctx.continuation {
+        Continuation::Root => {
+            let new_input = FunctionInput {
+                instance_id: graph.instance_id.clone(),
+                label: exec_ctx.label.clone(),
+                vars: exec_ctx.vars.clone(),
+                loop_iteration: next_iteration,
+                graph: Some(graph_json),
+            };
+            serde_json::to_string(&new_input)
+                .map_err(|e| format!("Failed to serialize loop input: {e}"))?
+        }
+        Continuation::Subtree => {
+            let new_input = SubtreeInput {
+                instance_id: graph.instance_id.clone(),
+                node_id: node_id.to_string(),
+                graph: graph_json,
+                results: string_map_to_json(results)
+                    .map_err(|e| format!("Failed to serialize updated results: {e}"))?,
+                vars: Some(
+                    string_map_to_json(&exec_ctx.vars)
+                        .map_err(|e| format!("Failed to serialize vars: {e}"))?,
+                ),
+                label: exec_ctx.label.clone(),
+                iteration: next_iteration,
+            };
+            serde_json::to_string(&new_input)
+                .map_err(|e| format!("Failed to serialize loop input: {e}"))?
+        }
     };
 
     // duroxide: continue_as_new returns an awaitable future - return it directly
-    ctx.continue_as_new(serde_json::to_string(&new_input).unwrap_or(graph.instance_id.clone()))
+    ctx.continue_as_new(new_input_json)
         .await
         .map(|_| String::new())
         .map_err(|e| NodeError::Failure(format!("continue_as_new failed: {e:?}")))
 }
 
-/// Run a *non-root* loop as a child sub-orchestration.
+/// Run a loop that is *not* the current orchestration's root as a child sub-orchestration.
 ///
-/// A non-root loop must not run inline: its `continue_as_new` would restart the parent
+/// Such a loop must not run inline: its `continue_as_new` would restart the parent
 /// orchestration and re-execute the upstream prefix (#227), and a loop nested inside a
-/// parallel branch needs its own durable instance (#233). The child (`execute_loop`)
-/// advances iterations via its own `continue_as_new`, so the parent's prefix is preserved.
+/// parallel branch needs its own durable instance (#233). The child is an ordinary
+/// `execute_subtree` rooted at the loop node, which then runs the loop inline and advances
+/// iterations via its own `continue_as_new` — so the parent's prefix is preserved.
 ///
 /// The child instance id is built with `subtree_instance_id`, preserving every ancestor
 /// scope and generation for node-status inference and the write fence. It is unique per
@@ -1198,40 +1056,12 @@ async fn execute_loop_suborchestration(
         .await;
     }
 
-    let results_json = match string_map_to_json(results) {
-        Ok(results) => results,
+    let loop_input = match build_subtree_input(graph, node_id, results, exec_ctx) {
+        Ok(input) => input,
         Err(e) => {
-            return fail_loop_before_start(
-                ctx,
-                graph,
-                node_id,
-                format!("Failed to serialize results: {e}"),
-            )
-            .await;
+            return fail_loop_before_start(ctx, graph, node_id, e).await;
         }
     };
-    let vars_json = match string_map_to_json(&exec_ctx.vars) {
-        Ok(vars) => vars,
-        Err(e) => {
-            return fail_loop_before_start(
-                ctx,
-                graph,
-                node_id,
-                format!("Failed to serialize vars: {e}"),
-            )
-            .await;
-        }
-    };
-
-    let loop_input = serde_json::json!({
-        "instance_id": graph.instance_id,
-        "loop_node_id": node_id,
-        "results": results_json,
-        "vars": vars_json,
-        "label": exec_ctx.label,
-        "iteration": 0,
-    })
-    .to_string();
 
     ctx.trace_info(format!(
         "Spawning loop sub-orchestration for node {node_id}"
@@ -1239,7 +1069,7 @@ async fn execute_loop_suborchestration(
 
     let raw = match ctx
         .schedule_sub_orchestration_with_id(
-            LOOP_NAME,
+            SUBTREE_NAME,
             subtree_instance_id(ctx, node_id),
             loop_input,
         )
@@ -1443,53 +1273,6 @@ fn parse_subtree_envelope(
     }
 }
 
-/// Choose the child orchestration (name + input JSON) used to run a JOIN/RACE branch.
-///
-/// A branch whose root node is a loop is spawned *directly* as an `execute_loop` child: the
-/// loop is already the root of its own orchestration and advances via its own
-/// `continue_as_new`, so wrapping it in an extra `execute_subtree` layer (which would then
-/// itself spawn the loop child) is both redundant and wrong — it would create a third
-/// sub-orchestration where only two are expected. Every other branch runs as an
-/// `execute_subtree` child. Both children return a `SubtreeEnvelope`, so `parse_subtree_envelope`
-/// handles the result identically regardless of which was chosen.
-fn branch_child_orchestration(
-    graph: &FunctionGraph,
-    branch_node_id: &str,
-    graph_json: &str,
-    results_json: &str,
-    vars_json: &str,
-    label: &Option<String>,
-) -> (&'static str, String) {
-    let is_loop = graph
-        .nodes
-        .get(branch_node_id)
-        .map(|n| n.node_type.eq_ignore_ascii_case("loop"))
-        .unwrap_or(false);
-
-    if is_loop {
-        let input = serde_json::json!({
-            "instance_id": graph.instance_id,
-            "loop_node_id": branch_node_id,
-            "results": results_json,
-            "vars": vars_json,
-            "label": label,
-            "iteration": 0,
-        })
-        .to_string();
-        (LOOP_NAME, input)
-    } else {
-        let input = serde_json::json!({
-            "graph": graph_json,
-            "node_id": branch_node_id,
-            "results": results_json,
-            "vars": vars_json,
-            "label": label,
-        })
-        .to_string();
-        (SUBTREE_NAME, input)
-    }
-}
-
 async fn cancel_losing_loop_branch(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -1536,13 +1319,6 @@ async fn execute_join_node(
 
     ctx.trace_info("Executing JOIN branches in parallel");
 
-    let graph_json =
-        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
-    let results_json =
-        string_map_to_json(results).map_err(|e| format!("Failed to serialize results: {e}"))?;
-    let vars_json =
-        string_map_to_json(&exec_ctx.vars).map_err(|e| format!("Failed to serialize vars: {e}"))?;
-
     // Collect the branch root node ids (left, right, and any join3 extras). Each branch is
     // spawned as its own child sub-orchestration with a deterministic, generation-stamped
     // instance id (see `subtree_instance_id`) so its node stamps carry the root loop
@@ -1562,22 +1338,15 @@ async fn execute_join_node(
         }
     }
 
-    // Schedule each branch. A branch whose root is a loop is spawned directly as an
-    // `execute_loop` child (it is already the root of its own orchestration, so it must not
-    // be wrapped in an extra `execute_subtree` layer); every other branch runs as an
-    // `execute_subtree` child. Both return a `SubtreeEnvelope`.
+    // Schedule each branch as an `execute_subtree` child rooted at the branch node. A branch
+    // whose root is a loop needs no special case: `execute_subtree` runs a root loop inline
+    // and drives its own `continue_as_new`, so exactly one child instance is created either
+    // way, and every branch returns a `SubtreeEnvelope`.
     let mut durable_futures = Vec::new();
     for child_root in &branch_ids {
-        let (name, input) = branch_child_orchestration(
-            graph,
-            child_root,
-            &graph_json,
-            &results_json,
-            &vars_json,
-            &exec_ctx.label,
-        );
+        let input = build_subtree_input(graph, child_root, results, exec_ctx)?;
         let fut = ctx.schedule_sub_orchestration_with_id(
-            name,
+            SUBTREE_NAME,
             subtree_instance_id(ctx, child_root),
             input,
         );
@@ -1661,41 +1430,19 @@ async fn execute_race_node(
 
     ctx.trace_info("Executing RACE branches in parallel (first wins)");
 
-    let graph_json =
-        serde_json::to_string(&graph).map_err(|e| format!("Failed to serialize graph: {e}"))?;
-    let results_json =
-        string_map_to_json(results).map_err(|e| format!("Failed to serialize results: {e}"))?;
-    let vars_json =
-        string_map_to_json(&exec_ctx.vars).map_err(|e| format!("Failed to serialize vars: {e}"))?;
-
-    // Schedule each branch with a deterministic, generation-stamped instance id so its node
-    // stamps carry the root loop generation (see `subtree_instance_id`). A branch whose root
-    // is a loop is spawned directly as an `execute_loop` child (it is already the root of its
-    // own orchestration, so it must not be wrapped in an extra `execute_subtree` layer);
-    // every other branch runs as an `execute_subtree` child.
-    let (left_name, left_input) = branch_child_orchestration(
-        graph,
-        left_id,
-        &graph_json,
-        &results_json,
-        &vars_json,
-        &exec_ctx.label,
-    );
-    let (right_name, right_input) = branch_child_orchestration(
-        graph,
-        right_id,
-        &graph_json,
-        &results_json,
-        &vars_json,
-        &exec_ctx.label,
-    );
+    // Schedule each branch as an `execute_subtree` child with a deterministic,
+    // generation-stamped instance id so its node stamps carry the root loop generation (see
+    // `subtree_instance_id`). A branch whose root is a loop needs no special case:
+    // `execute_subtree` runs a root loop inline and drives its own `continue_as_new`.
+    let left_input = build_subtree_input(graph, left_id, results, exec_ctx)?;
+    let right_input = build_subtree_input(graph, right_id, results, exec_ctx)?;
     let left_fut = ctx.schedule_sub_orchestration_with_id(
-        left_name,
+        SUBTREE_NAME,
         subtree_instance_id(ctx, left_id),
         left_input,
     );
     let right_fut = ctx.schedule_sub_orchestration_with_id(
-        right_name,
+        SUBTREE_NAME,
         subtree_instance_id(ctx, right_id),
         right_input,
     );

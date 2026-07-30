@@ -468,10 +468,6 @@ pub fn register_orchestrations(registry: &mut OrchestrationRegistry) {
         execute_function_graph::SUBTREE_NAME,
         execute_function_graph::execute_subtree,
     );
-    registry.register(
-        execute_function_graph::LOOP_NAME,
-        execute_function_graph::execute_loop,
-    );
 }
 
 pub fn register_activities(registry: &mut ActivityRegistry<PgPool>) {
@@ -785,12 +781,14 @@ For RACE, duroxide's `select` is used to return the first completed result.
 
 ### Loops and Continue-As-New
 
-Loops use duroxide's `continue_as_new` to avoid unbounded history growth. Their execution context is determined by graph position:
+Loops use duroxide's `continue_as_new` to avoid unbounded history growth. Their execution context is determined by graph position, but only one rule is needed:
 
-- A loop that is the function graph's root runs inline in `execute_function_graph`. Its `continue_as_new` starts the next root orchestration generation.
-- Every non-root loop runs in a dedicated `execute_loop` child orchestration. Its `continue_as_new` advances only that child, preserving prefix and suffix work in the waiting parent. A loop used directly as a JOIN or RACE branch is also spawned as an `execute_loop` child rather than wrapped in `execute_subtree`.
+- A loop that is the root of the *current* orchestration's node tree runs **inline**, and its `continue_as_new` starts that orchestration's next generation. This applies both to a loop at the function graph's root (hosted by `execute_function_graph`) and to a loop at the root of a subtree (hosted by `execute_subtree`). It is safe because there is no upstream prefix to re-execute: re-entering from the root lands back on the same loop node.
+- Any deeper loop is spawned as an `execute_subtree` child rooted at the loop node, which then runs it inline per the rule above. Its `continue_as_new` advances only that child, preserving prefix and suffix work in the waiting parent. A loop used directly as a JOIN or RACE branch needs no special case — every branch is an `execute_subtree` child.
 
-Both paths call `run_loop_iteration`, which executes the body, catches `NodeError::Break`, evaluates the optional post-body condition, and propagates `NodeError::Failure`. The root and child paths differ only in who owns `continue_as_new` and status stamping. The child stamps its LOOP node `running` on each generation and `completed` or `failed` on exit. If a live loop loses a RACE, the parent records the loop node as terminal `failed` with a cancellation reason because duroxide cancellation stops the child before it can run its own terminal stamp.
+`execute_subtree` is therefore structurally identical to `execute_function_graph`: both root an execution context at their own node and host an inline root loop. They differ only in the input envelope they re-enter with on `continue_as_new` (`FunctionInput` vs `SubtreeInput`), in the fact that only the root orchestration touches instance-level status, and in where their graph comes from — `execute_function_graph` loads it from `df.nodes` on its first generation, while `execute_subtree` receives it inline from its parent. The graph is loaded exactly once per instance and then carried inline through every child input and every `continue_as_new` generation, so `submitted_by` is fixed for the instance's lifetime and a post-start `df.nodes` tamper is never read. Role deletion and privilege revocation are still enforced per node execution, by connecting *as* `submitted_by` for SQL and by re-checking `EXECUTE` privilege per HTTP request.
+
+Both paths call `run_loop_iteration`, which executes the body, catches `NodeError::Break`, evaluates the optional post-body condition, and propagates `NodeError::Failure`. A child stamps its LOOP node `running` on each generation and `completed` or `failed` on exit; because `continue_as_new` returns a future that never resolves, a continuing generation never stamps a terminal status. If a live loop loses a RACE, the parent records the loop node as terminal `failed` with a cancellation reason because duroxide cancellation stops the child before it can run its own terminal stamp.
 
 Node status stamps contain the full composed orchestration lineage: `{root_instance}::{generation}::{child_node}::{generation}...`. Read-time inference and the write fence walk that lineage so stale writes and superseded nested branches are evaluated at every ancestor generation.
 

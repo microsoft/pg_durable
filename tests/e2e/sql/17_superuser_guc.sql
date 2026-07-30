@@ -13,6 +13,7 @@
 --   2. Non-superuser unaffected: df_e2e_user can submit with GUC off.
 --   3. Forgery caught by load_function_graph (instance-level rejection).
 --   4. Forgery caught by execute_sql (node-level rejection, post-cache tamper).
+--   5. Cross-iteration forgery neutralized by the frozen graph snapshot.
 --
 -- "GUC on + superuser succeeds" is implicitly covered by every other E2E test
 -- (standard phase runs as postgres with enable_superuser_instances = on).
@@ -223,19 +224,28 @@ END $$;
 DROP TABLE _su_guc_t4;
 
 -- ============================================================
--- Test 5: Cross-iteration tamper caught on continue_as_new re-load
+-- Test 5: Cross-iteration tamper has no effect (frozen graph snapshot)
 --
 -- Loop functions call continue_as_new on each iteration, which discards
--- duroxide history and starts a fresh orchestration generation.
--- load_function_graph is therefore called again at the top of every
--- new generation, re-reading submitted_by from the database.
+-- duroxide history and starts a fresh orchestration generation.  The graph
+-- is NOT re-read on those generations: it is loaded once when the instance
+-- starts and then carried inline through every child sub-orchestration input
+-- and every continue_as_new envelope.
 --
--- Attack: tamper submitted_by between iterations (or during restart between
--- iterations) → load_function_graph reads tampered data → superuser detected
--- → instance is failed, NOT executed as superuser.
+-- Attack: tamper submitted_by between iterations.  Because no generation
+-- re-reads df.instances or df.nodes, the tampered value is never loaded --
+-- the loop keeps running under the identity captured at instance start.
+-- The forgery is neutralized by construction rather than detected after the
+-- fact, which is strictly stronger: a re-read would make the tamper take
+-- effect and then rely on the superuser check to catch it, and that check
+-- only rejects escalation *to* a superuser (a redirect to a different
+-- non-superuser role would pass).
+--
+-- Expected: the loop completes normally, runs both iterations, and every
+-- statement executes as df_e2e_user -- never as the forged superuser.
 -- ============================================================
 DROP TABLE IF EXISTS su_guc_loop_sentinel;
-CREATE TABLE su_guc_loop_sentinel (iteration INT);
+CREATE TABLE su_guc_loop_sentinel (iteration INT, executed_by TEXT);
 GRANT ALL ON su_guc_loop_sentinel TO df_e2e_user;
 
 DROP TABLE IF EXISTS _su_guc_t5;
@@ -243,19 +253,20 @@ CREATE TABLE _su_guc_t5 (instance_id TEXT);
 GRANT ALL ON _su_guc_t5 TO df_e2e_user, su_guc_forger;
 
 -- Start a loop that runs through continue_as_new at least once.
--- Iteration 1 records iteration=1 and continues (count < 2).
--- We tamper AFTER iteration 1 completes. load_function_graph for
--- iteration 2 sees the tampered superuser identity and blocks the instance.
--- The df.sleep(2) at the top of the loop body ensures that after
--- continue_as_new fires, the new generation pauses long enough for the
--- tamper to land before load_function_graph returns and SQL executes.
+-- Each iteration records its number and the role it actually executed as.
+-- Iteration 1 records iteration=1 and continues (count < 2); iteration 2
+-- records iteration=2 and breaks.  We tamper AFTER iteration 1 completes,
+-- so the tamper lands squarely on the continue_as_new boundary.  The
+-- df.sleep(2) at the top of the loop body gives the tamper time to land
+-- before iteration 2's SQL runs.
 SET SESSION AUTHORIZATION df_e2e_user;
 INSERT INTO _su_guc_t5
 SELECT df.start(
     @> (
         df.sleep(2)
         ~> 'INSERT INTO su_guc_loop_sentinel VALUES (
-            (SELECT COALESCE(MAX(iteration), 0) + 1 FROM su_guc_loop_sentinel)
+            (SELECT COALESCE(MAX(iteration), 0) + 1 FROM su_guc_loop_sentinel),
+            current_user
         ) RETURNING iteration'
         ~> df.if(
             'SELECT (SELECT COUNT(*) FROM su_guc_loop_sentinel) >= 2',
@@ -279,8 +290,8 @@ BEGIN
     END LOOP;
 END $$;
 
--- Iteration 1 completed.  The loop would continue_as_new for iteration 2.
--- Tamper now — load_function_graph for iteration 2 will see the superuser.
+-- Iteration 1 completed.  The loop is about to continue_as_new for
+-- iteration 2.  Tamper now -- it must have no observable effect.
 SET SESSION AUTHORIZATION su_guc_forger;
 DO $$
 DECLARE
@@ -297,23 +308,35 @@ DECLARE
     inst_id TEXT;
     status  TEXT;
     iter_count INT;
+    forged_count INT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _su_guc_t5;
     SELECT df.await_instance(inst_id, 30) INTO status;
 
-    -- load_function_graph for iteration 2 must have blocked the tampered identity.
-    IF lower(status) != 'failed' THEN
-        RAISE EXCEPTION 'TEST 5 FAILED: expected failed after cross-iteration tamper, got: %', status;
+    -- The tamper is never read, so the loop runs to normal completion.
+    IF lower(status) != 'completed' THEN
+        RAISE EXCEPTION 'TEST 5 FAILED: expected completed after cross-iteration tamper, got: %', status;
     END IF;
 
-    -- Only iteration 1 should have written a row; the forged SQL for
-    -- iteration 2 must never have run.
+    -- Both iterations must have run: the tamper must not have stalled the loop.
     SELECT COUNT(*) INTO iter_count FROM su_guc_loop_sentinel;
-    IF iter_count != 1 THEN
-        RAISE EXCEPTION 'TEST 5 FAILED: expected 1 iteration row, found %', iter_count;
+    IF iter_count != 2 THEN
+        RAISE EXCEPTION 'TEST 5 FAILED: expected 2 iteration rows, found %', iter_count;
     END IF;
 
-    RAISE NOTICE 'TEST 5 PASSED: cross-iteration tamper caught by load_function_graph re-validation (iterations=%, status=%)', iter_count, status;
+    -- The critical assertion: no statement ran under the forged superuser
+    -- identity.  Every iteration, including the one after the tamper, must
+    -- have executed as the role that submitted the instance.
+    SELECT COUNT(*) INTO forged_count
+      FROM su_guc_loop_sentinel
+     WHERE executed_by IS DISTINCT FROM 'df_e2e_user';
+    IF forged_count != 0 THEN
+        RAISE EXCEPTION 'TEST 5 FAILED: % iteration(s) executed under a forged identity: %',
+            forged_count,
+            (SELECT string_agg(DISTINCT executed_by, ', ') FROM su_guc_loop_sentinel);
+    END IF;
+
+    RAISE NOTICE 'TEST 5 PASSED: cross-iteration tamper neutralized by frozen graph snapshot (iterations=%, all executed as df_e2e_user, status=%)', iter_count, status;
 END $$;
 
 DROP TABLE _su_guc_t5;
