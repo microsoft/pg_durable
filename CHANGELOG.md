@@ -10,29 +10,22 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
-- **`df.http_multipart()` (#302):** send `multipart/form-data` requests. Parts are described as a JSONB array of objects with `name` and `data_b64`, optionally `filename` and `content_type`. Gated by the same `include_http => true` grant as `df.http()`.
-- **Binary HTTP response bodies:** `df.http()` and `df.http_multipart()` now capture non-textual responses instead of losing them to lossy UTF-8 conversion. The response envelope gained an `encoding` field — `text` when the body is the response as-is, `base64` when it holds the base64 of the raw bytes. A body is treated as text when the `Content-Type` is absent, `text/*`, a `+json`/`+xml`/`+yaml` suffix type, or a common textual `application/*` type; everything else is base64.
-- **Variable substitution in multipart `data_b64`:** a part's `data_b64` can now reference an earlier result, e.g. `'data_b64', '$pdf.body'`, letting a payload produced by one HTTP step be uploaded by the next with no intermediate table. The reference must be the *whole* value; mixing it with surrounding text fails the node rather than sending a corrupt part, because splicing into base64 cannot produce a valid encoding.
-- **`examples/audio-roundtrip/`:** a self-verifying example that sends text to Azure OpenAI text-to-speech and pipes the returned MP3 straight into a Whisper transcription upload, then checks the transcript against the original phrase.
-- **`transaction_mode` argument for `df.start()`:** selects which transaction the *start itself* runs in. `'caller'` (the default) is the historical behaviour — the start joins the caller's transaction and is rolled back with it. `'new'` persists and enqueues the work on a separate PostgreSQL session, so it commits independently and **survives a rollback of the caller's transaction**. This provides the same rollback-survival outcome as Oracle autonomous transactions or `REQUIRES_NEW` for asynchronously started work; it is not a synchronous autonomous routine. The returned ID confirms launch, while completion and execution errors are observed through monitoring APIs. Nothing about the started function changes; only the commit boundary of the start does. An unrecognised value raises rather than falling back to the default, and `'new'` is rejected inside a workflow, where a `df.sql()` node's single autocommitted statement already makes a plain `df.start()` independent of any caller transaction. Because the separate session sees only committed rows, the captured `df.vars` snapshot excludes variables set earlier in the caller's open transaction. Each call uses an extra backend, so per-row and other high-fan-out call sites should avoid this mode; target effects should be idempotent because a connection failure can make launch outcome uncertain. The three-argument `df.start()` is dropped in favour of the four-argument one, but its C symbol is retained, so the new `.so` stays backward compatible with all previous schemas in this provider line (see `docs/upgrade-testing.md`).
+- **`df.http_multipart()` (#302):** send `multipart/form-data` requests, gated by the same `include_http => true` grant as `df.http()`.
+- **Binary HTTP response bodies:** `df.http()` and `df.http_multipart()` preserve non-text responses as base64 and identify the body format in the response envelope's `encoding` field.
+- **Audio round-trip example:** demonstrates piping Azure OpenAI text-to-speech output directly into a Whisper transcription upload.
+- **Independent starts (#285):** `df.start(..., transaction_mode => 'new')` commits the start on a separate session, allowing asynchronously started work to survive a caller rollback. The default `'caller'` mode retains the existing transaction behavior.
 
 ### Fixed
 
-- **Multipart parts larger than 57 bytes (#302):** `data_b64` was decoded with a strict base64 decoder that rejects embedded whitespace, but PostgreSQL's `encode(bytea, 'base64')` wraps its output at 76 columns. Any part whose source data exceeded 57 bytes therefore failed to decode. Whitespace in `data_b64` is now ignored, so `encode()` output can be used directly.
-- **Unix-socket worker connections (#292):** a Unix-socket `PGHOST` is now percent-encoded when pg_durable builds the worker's PostgreSQL connection URL, allowing sqlx to connect through socket directories. TCP addresses and hostnames are unchanged.
+- **Unix-socket worker connections (#292):** workers can now connect when `PGHOST` names a Unix-socket directory.
 
 ### Changed
 
-- **Loop execution and replay determinism (#228):** non-root `df.loop()` nodes now run as dedicated child sub-orchestrations, replay-recorded result/variable maps serialize in canonical key order, and root/non-root loops share the same body and while-condition policy. This fixes non-root loop restarts and makes `df.break()` in a while-condition behave identically at either graph position. A loop is now hosted by the same `execute-subtree` orchestration that runs parallel branches, rather than a separate loop orchestration.
+- **Loop execution (#228):** root and nested loops now share consistent execution, restart, and `df.break()` behavior.
 
-  > ⚠️ **Replay-breaking for in-flight instances.** These changes alter recorded orchestration inputs and scheduling order, and duroxide validates both by exact equality on replay.
-  >
-  > - **Every in-flight JOIN (`&`) or RACE (`|`) branch fails**, unconditionally. The `execute-subtree` input envelope gained `instance_id`, `vars`, `label`, and `iteration` fields, so a branch scheduled under 0.2.4 replays with an input shape the 0.2.5 binary rejects. This is *not* limited to workflows carrying multiple variables or named results.
-  > - **In-flight root and non-root `df.loop()` instances may fail** with a nondeterminism error, because loop scheduling and recorded inputs both changed.
-  >
-  > The engine fails closed on a mismatch, but `df.instances` may remain `pending` or `running` because the replay aborts before pg_durable can record its normal failure status. Operators that require in-flight continuity should quiesce and drain before upgrading; operators that accept failed/recreated work can upgrade directly and inspect or cancel stale instances afterward. See `docs/upgrade-testing.md` under "Loop and sub-orchestration replay compatibility".
+  > **Upgrade warning:** in-flight JOIN/RACE branches will fail on replay after upgrading, and in-flight loops may fail. Drain in-flight work before upgrading when continuity is required; see `docs/upgrade-testing.md` for details.
 
-- **HTTP envelope fields are addressable with dot notation:** `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` now resolve against an HTTP result. Previously dot notation only worked on SQL results (which carry a `rows` array), so reading an HTTP envelope required an intervening SQL node such as `SELECT ($resp::jsonb->>'ok')::boolean`. `rows` still takes precedence, so SQL results are unaffected.
+- **HTTP result substitution:** HTTP response fields such as `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` are now directly addressable with dot notation.
 - **Dependencies:** bumped `duroxide` to 0.1.30 (#305), `uuid` to 1.24.0 (#293), `serde_json` to 1.0.151, and `tokio` to 1.53.1 (#298).
 
 ### Documentation
