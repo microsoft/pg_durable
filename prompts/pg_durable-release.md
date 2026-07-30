@@ -95,18 +95,24 @@ here (by the agent or human) and lands via a PR — it is **not** automated.
    version, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
    (grouped Added / Changed / Fixed / Security / Documentation, plus a Breaking
    Changes callout when relevant).
-3. **If the section is missing or empty**, draft it:
+3. Review the section as user-facing release history, even if it is already
+   complete. Propose edits when entries are wordy, implementation-focused, or
+   more detailed than users need. Remove pure CI/infrastructure work, expected
+   behavior of a newly added feature, and bugs introduced and fixed within the
+   same unreleased cycle. Keep operationally important compatibility, migration,
+   and security guidance, but link to detailed docs instead of reproducing them.
+4. **If the section is missing, empty, or needs the editorial fixes above**,
+   draft or revise it:
    ```bash
    # Merged, user-facing changes since the previous tag
    git log --oneline --no-merges vX.Y.<prev>..main
    # Resolve a squashed commit to its PR when the number isn't in the subject
    gh api repos/microsoft/pg_durable/commits/<sha>/pulls --jq '.[].number'
    ```
-   Curate into user-facing entries with PR references. **Exclude** pure CI/infra
-   noise (e.g. adding a linter, Dependabot config) — that lives in git history,
-   not the changelog. Verify dependency lines against `Cargo.toml` (don't claim a
-   `duroxide`/`duroxide-pg` bump that didn't happen).
-4. Open a PR with the changelog (and any docs sweep from Step 2), get it merged
+    Curate into user-facing entries with PR references. Verify dependency lines
+    against `Cargo.toml` (don't claim a `duroxide`/`duroxide-pg` bump that didn't
+    happen).
+5. Open a PR with the changelog (and any docs sweep from Step 2), get it merged
    to `main`. **Do not tag until the changelog for the release is on `main`.**
 
 > **Update the tracking issue:** link the changelog PR and tick **Changelog
@@ -195,16 +201,33 @@ gh run watch "$(gh run list --workflow package-release.yml --limit 1 --json data
 
 ## Step 5: Fill release notes and publish
 
-The Package Release run creates the draft with placeholder notes. Replace them
-with the curated changelog **plus** an **Acknowledgements** credit and GitHub's
-auto-generated **New Contributors** section, then publish. The release-body
-content already lives in the committed `CHANGELOG.md`, so extract this version's
-section on the fly into a throwaway temp file — **do not** create or commit a
-separate `release-notes-*.md`.
+The Package Release run creates the draft with placeholder notes. Write a brief,
+punchy release summary as a **separate editorial exercise** from the changelog,
+then add an **Acknowledgements** credit and GitHub's auto-generated **New
+Contributors** section. The changelog is the complete user-facing history; the
+GitHub Release should help readers scan the release's value and upgrade impact.
+
+Use the committed changelog as source material, but do not copy it verbatim:
+
+- Prefer one short sentence per item and combine closely related changes.
+- Lead with headline capabilities and meaningful behavior changes.
+- Keep breaking, migration, security, and operational warnings concise but
+  prominent; link to detailed documentation.
+- Omit routine dependencies, documentation-only changes, internal refactors,
+  and CI/infrastructure work unless they materially affect users.
+- Omit expected details of a newly introduced feature and bugs introduced and
+  fixed within the same release cycle.
+- Aim for substantially fewer words than the corresponding changelog section.
+
+Draft the summary in a throwaway temp file. Do **not** create or commit a
+separate `release-notes-*.md`; the durable detailed record remains
+`CHANGELOG.md`.
 
 ```bash
-# 1. Extract the "## [X.Y.Z]" block from CHANGELOG.md (stops at the next "## [" heading)
-awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes-X.Y.Z.md
+# 1. Extract the changelog section as source material and seed a separate draft.
+#    Rewrite the draft editorially before continuing; do not leave it as a copy.
+awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/changelog-X.Y.Z.md
+cp /tmp/changelog-X.Y.Z.md /tmp/release-summary-X.Y.Z.md
 
 # 2. Fetch GitHub's auto-generated notes ONCE. `gh release edit` has NO
 #    --generate-notes flag (only `gh release create` does), so we generate the
@@ -232,10 +255,10 @@ awk '/^## What.s Changed/{skip=1; next} /^## /{skip=0} /^\*\*Full Changelog\*\*/
 contributors=$(grep -oE 'by @[A-Za-z0-9-]+' /tmp/gen-notes-X.Y.Z.md \
   | sed 's/by //' | sort -u | grep -viE '@(dependabot|github-actions)' | paste -sd ' ' -)
 
-# 5. Assemble: curated changelog + Acknowledgements credit + trimmed auto notes,
+# 5. Assemble: concise release summary + Acknowledgements + trimmed auto notes,
 #    then set the release body
 {
-  cat /tmp/notes-X.Y.Z.md
+  cat /tmp/release-summary-X.Y.Z.md
   printf '\n---\n\n## Acknowledgements\n\nThanks to everyone who contributed to this release: %s.\n\n' "$contributors"
   cat /tmp/auto-notes-X.Y.Z.md
 } > /tmp/release-body-X.Y.Z.md
@@ -243,10 +266,11 @@ gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
 ```
 
 - The temp files are transient (e.g. under `/tmp`); they are **not** part of any
-  PR and the Package Release workflow never reads them. The single source of
-  truth for curated content is the committed `CHANGELOG.md`.
+  PR and the Package Release workflow never reads them. `CHANGELOG.md` remains
+  the durable detailed record; the GitHub Release is its concise editorial
+  companion.
 - `--notes-file` sets **only the GitHub Release body** — it does not touch
-  `CHANGELOG.md`. The curated text comes from the changelog you already merged.
+  `CHANGELOG.md`.
 - The `releases/generate-notes` API returns a "## What's Changed" PR dump, a
   "## New Contributors" section, and a "Full Changelog" link. We **drop**
   "What's Changed" from the body (it re-lists the same PRs the curated changelog
