@@ -235,7 +235,10 @@ echo ""
 
 stop_server() {
     if "$PG_ISREADY" -h localhost -p "$PG_PORT" -U postgres &>/dev/null; then
-        "$PG_CTL" -D "$DATA_DIR" stop -m fast 2>/dev/null || true
+        if ! "$PG_CTL" -D "$DATA_DIR" stop -m fast -t 30 2>/dev/null; then
+            echo -e "${RED}Fast stop timed out; falling back to immediate stop${NC}"
+            "$PG_CTL" -D "$DATA_DIR" stop -m immediate 2>/dev/null || true
+        fi
     fi
 }
 

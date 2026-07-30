@@ -277,7 +277,13 @@ PG_CONFIG="$PGRX_BIN/pg_config"
 stop_server() {
     if [ -d "$DATA_DIR" ] && "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
         echo -e "${YELLOW}Stopping PostgreSQL...${NC}"
-        "$PG_CTL" -D "$DATA_DIR" stop -m fast >/dev/null 2>&1 || true
+        # Attempt a graceful fast stop (30 s timeout). If it does not complete
+        # in time (e.g. a stuck pg_durable_worker), fall back to immediate mode
+        # so the next start is not blocked by a stale postmaster.pid.
+        if ! "$PG_CTL" -D "$DATA_DIR" stop -m fast -t 30 >/dev/null 2>&1; then
+            echo -e "${RED}Fast stop timed out; falling back to immediate stop${NC}"
+            "$PG_CTL" -D "$DATA_DIR" stop -m immediate >/dev/null 2>&1 || true
+        fi
         sleep 1
     fi
 }

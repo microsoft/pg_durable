@@ -72,6 +72,20 @@ fn is_shutdown_requested() -> bool {
     }
 }
 
+/// Returns a future that resolves once PostgreSQL signals a shutdown.
+///
+/// Polls `is_shutdown_requested()` at 100 ms intervals; suitable for use in
+/// `tokio::select!` branches where we want to break out of a sleep early when
+/// a shutdown arrives.
+async fn wait_for_shutdown() {
+    loop {
+        if is_shutdown_requested() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Main duroxide background worker
 #[pg_guard]
 #[no_mangle]
@@ -98,7 +112,13 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
         run_duroxide_runtime().await;
     });
 
-    rt.shutdown_timeout(Duration::from_secs(5));
+    // All async cleanup (pool closes, runtime shutdown) is performed inside
+    // run_duroxide_runtime() above before it returns.  Use shutdown_background()
+    // so we do not block waiting for any remaining Tokio blocking-pool threads
+    // that were spawned by SQLx during initialization (e.g. pgpass file reads).
+    // The BGW process is about to exit via proc_exit() anyway, so those threads
+    // will be terminated by the OS regardless.
+    rt.shutdown_background();
     log!("pg_durable: duroxide background worker terminated cleanly");
 }
 
@@ -147,6 +167,9 @@ async fn run_duroxide_runtime() {
     // Used for graph loading and status updates. Sized by the max_management_connections GUC.
     // Retry in a loop so the worker survives the target database not yet existing
     // (e.g. pg_regress creates `contrib_regression` after PostgreSQL starts).
+    //
+    // The connect() call uses acquire_timeout so a slow or shutting-down
+    // PostgreSQL does not block indefinitely on the first attempt.
     let mgmt_pool = loop {
         if is_shutdown_requested() {
             log!("pg_durable: shutdown requested before management pool created, exiting");
@@ -154,6 +177,7 @@ async fn run_duroxide_runtime() {
         }
         match sqlx::postgres::PgPoolOptions::new()
             .max_connections(mgmt_conns)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&pg_conn_str)
             .await
         {
@@ -163,7 +187,14 @@ async fn run_duroxide_runtime() {
                     "pg_durable: failed to create management pool (will retry in 5s): {}",
                     e
                 );
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                // Sleep interruptibly so shutdown does not wait a full 5s.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = wait_for_shutdown() => {
+                        log!("pg_durable: shutdown requested during management pool retry, exiting");
+                        return;
+                    }
+                }
             }
         }
     };
@@ -179,6 +210,7 @@ async fn run_duroxide_runtime() {
         }
         match sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&pg_conn_str)
             .await
         {
@@ -188,7 +220,14 @@ async fn run_duroxide_runtime() {
                     "pg_durable: failed to create poll pool (will retry in 5s): {}",
                     e
                 );
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                // Sleep interruptibly so shutdown does not wait a full 5s.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = wait_for_shutdown() => {
+                        log!("pg_durable: shutdown requested during poll pool retry, exiting");
+                        return;
+                    }
+                }
             }
         }
     };
@@ -257,8 +296,24 @@ async fn run_duroxide_runtime() {
         .await;
     }
 
-    mgmt_pool.close().await;
-    poll_pool.close().await;
+    // Close shared pools explicitly with a bounded timeout so that a
+    // shutting-down or already-gone PostgreSQL server cannot cause
+    // pool.close().await to block indefinitely (e.g. while waiting for
+    // in-flight queries to return their connections or for the TCP handshake
+    // to complete).
+    const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+    if tokio::time::timeout(POOL_CLOSE_TIMEOUT, mgmt_pool.close())
+        .await
+        .is_err()
+    {
+        log!("pg_durable: management pool close timed out — forcing shutdown");
+    }
+    if tokio::time::timeout(POOL_CLOSE_TIMEOUT, poll_pool.close())
+        .await
+        .is_err()
+    {
+        log!("pg_durable: poll pool close timed out — forcing shutdown");
+    }
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
@@ -275,7 +330,14 @@ async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Du
             return true;
         }
 
-        tokio::time::sleep(poll_interval).await;
+        // Sleep interruptibly so shutdown does not wait the full poll_interval.
+        tokio::select! {
+            _ = tokio::time::sleep(poll_interval) => {}
+            _ = wait_for_shutdown() => {
+                log!("pg_durable: shutdown requested while waiting for extension");
+                return false;
+            }
+        }
     }
 }
 
@@ -511,7 +573,10 @@ async fn initialize_duroxide_runtime(
                 "pg_durable: duroxide schema missing or not extension-owned \
                  (CREATE EXTENSION may still be in progress) — will retry"
             );
-            tokio::time::sleep(retry_interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(retry_interval) => {}
+                _ = wait_for_shutdown() => { return None; }
+            }
             continue;
         }
 
@@ -527,7 +592,10 @@ async fn initialize_duroxide_runtime(
                     "pg_durable: failed to release extension-owned duroxide objects (will retry): {}",
                     e
                 );
-                tokio::time::sleep(retry_interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_interval) => {}
+                    _ = wait_for_shutdown() => { return None; }
+                }
                 continue;
             }
         }
@@ -544,7 +612,10 @@ async fn initialize_duroxide_runtime(
                     "pg_durable: failed to create PostgreSQL store (will retry): {}",
                     e
                 );
-                tokio::time::sleep(retry_interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_interval) => {}
+                    _ = wait_for_shutdown() => { return None; }
+                }
                 continue;
             }
         };
@@ -886,8 +957,30 @@ async fn run_until_extension_dropped_or_shutdown(
     }
 
     log!("pg_durable: initiating duroxide runtime shutdown...");
-    duroxide_runtime.shutdown(Some(10_000)).await;
+    // Give duroxide workers 2 seconds to finish their current turn before
+    // aborting.  Any task that has not completed by then is force-cancelled.
+    // We use a short timeout because PostgreSQL is already shutting down its
+    // backends: long-running work will error out anyway, and blocking the BGW
+    // here prevents the postmaster from completing its graceful stop.
+    duroxide_runtime.shutdown(Some(2_000)).await;
     log!("pg_durable: duroxide runtime shutdown complete");
+
+    // Explicitly close the duroxide store's connection pool.  Without this
+    // the pool is only closed on Drop (when the Arc refcount hits zero), which
+    // spawns async cleanup tasks that can outlive the runtime-shutdown window.
+    //
+    // The duroxide-pg pool is configured with min_connections=1, so its
+    // maintenance task would otherwise try to re-open a connection to the
+    // shutting-down PostgreSQL, potentially blocking in the Tokio blocking
+    // thread pool.  Closing the pool explicitly here — with a bounded timeout
+    // — drains those tasks inside our controlled async context.
+    const DUROXIDE_POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+    if tokio::time::timeout(DUROXIDE_POOL_CLOSE_TIMEOUT, duroxide_store.pool().close())
+        .await
+        .is_err()
+    {
+        log!("pg_durable: duroxide store pool close timed out — forcing shutdown");
+    }
 }
 
 /// Maximum orphans one reconciliation pass reclaims, bounding a single tick's work.

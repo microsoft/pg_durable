@@ -53,6 +53,7 @@ fi
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 # Stop local pgrx PostgreSQL
@@ -60,11 +61,20 @@ if [ "$STOP_LOCAL" = true ]; then
     PGRX_HOME="$HOME/.pgrx"
     PG_CTL=$(ls $PGRX_HOME/$PG_MAJOR.*/pgrx-install/bin/pg_ctl 2>/dev/null | head -1)
     DATA_DIR="$PGRX_HOME/data-$PG_MAJOR"
-    
+
     if [ -n "$PG_CTL" ] && [ -d "$DATA_DIR" ]; then
         if "$PG_CTL" status -D "$DATA_DIR" &>/dev/null; then
             echo -e "${YELLOW}Stopping local PostgreSQL...${NC}"
-            "$PG_CTL" -D "$DATA_DIR" stop -m fast 2>/dev/null || true
+            # Attempt a graceful fast stop first (sends SIGTERM, waits up to
+            # the default pg_ctl timeout for all backends to exit cleanly).
+            if ! "$PG_CTL" -D "$DATA_DIR" stop -m fast -t 30 2>/dev/null; then
+                # Graceful stop timed out.  Fall back to immediate mode to clear
+                # any stuck processes (e.g. a pg_durable_worker that did not
+                # exit in time).  This triggers crash recovery on the next start
+                # but is preferable to leaving a stale postmaster.pid behind.
+                echo -e "${RED}Fast stop timed out; falling back to immediate stop${NC}"
+                "$PG_CTL" -D "$DATA_DIR" stop -m immediate 2>/dev/null || true
+            fi
             echo -e "${GREEN}Local PostgreSQL stopped${NC}"
         else
             echo "Local PostgreSQL is not running"
