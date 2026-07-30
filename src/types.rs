@@ -845,6 +845,44 @@ fn substitute_results(
     Ok(out)
 }
 
+/// Substitute `{name}` placeholders in a single left-to-right pass over the template.
+/// Inserted values are appended as opaque text and are never scanned for more placeholders.
+fn substitute_braced_variables(
+    template: &str,
+    vars: &std::collections::HashMap<String, String>,
+    sys_vars: &SystemVars,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut remaining = template;
+
+    while let Some(open) = remaining.find('{') {
+        out.push_str(&remaining[..open]);
+        let after_open = &remaining[open + 1..];
+        let Some(close) = after_open.find('}') else {
+            out.push_str(&remaining[open..]);
+            return out;
+        };
+
+        let name = &after_open[..close];
+        let replacement = match name {
+            "sys_instance_id" => Some(sys_vars.instance_id.as_str()),
+            "sys_label" => Some(sys_vars.label.as_deref().unwrap_or("")),
+            _ if parse_identifier(name).len() == name.len() => vars.get(name).map(String::as_str),
+            _ => None,
+        };
+
+        if let Some(value) = replacement {
+            out.push_str(value);
+        } else {
+            out.push_str(&remaining[open..open + close + 2]);
+        }
+        remaining = &after_open[close + 1..];
+    }
+
+    out.push_str(remaining);
+    out
+}
+
 /// Substitute all variable types in a query:
 /// - {name} for user vars (from FunctionInput.vars) - values are inserted as-is
 /// - {sys_instance_id}, {sys_label} for system vars - inserted as-is
@@ -862,24 +900,13 @@ pub fn substitute_all_with_options(
     sys_vars: &SystemVars,
     quote_results_for_sql: bool,
 ) -> Result<String, String> {
-    let mut result = query.to_string();
-
-    // 1. Substitute system vars: {sys_*} (inserted as-is)
-    result = result.replace("{sys_instance_id}", &sys_vars.instance_id);
-    result = result.replace("{sys_label}", sys_vars.label.as_deref().unwrap_or(""));
-
     // SECURITY: Raw substitution of user vars is by design — variables are
     // intended for SQL fragments (table names, expressions), not just values.
     // The user controls both the variable content and the query template, and
     // SQL executes under their own role via connect_as_user().
     // See docs/spec-security-model.md §4.3, T10.
-    // 2. Substitute user vars: {name} (inserted as-is, no quoting)
-    for (name, value) in vars {
-        let pattern = format!("{{{name}}}");
-        if result.contains(&pattern) {
-            result = result.replace(&pattern, value);
-        }
-    }
+    // 1/2. Substitute system and user vars in one pass (inserted as-is, no quoting).
+    let result = substitute_braced_variables(query, vars, sys_vars);
 
     // 3. Substitute results: $name with dot-notation, null-safe, and row-set support
     substitute_results(&result, results, quote_results_for_sql)
@@ -1753,6 +1780,48 @@ mod tests {
             instance_id: "test-id".to_string(),
             label: None,
         }
+    }
+
+    #[test]
+    fn user_variable_substitution_does_not_rescan_inserted_values() {
+        let vars = make_results(&[("a", "{b}"), ("b", "value")]);
+
+        let out = substitute_all_raw("{a} / {b}", &empty_vars(), &vars, &sys_vars()).unwrap();
+
+        assert_eq!(out, "{b} / value");
+    }
+
+    #[test]
+    fn user_variable_substitution_is_independent_of_map_insertion_order() {
+        let forward = make_results(&[("a", "{b}"), ("b", "value")]);
+        let reverse = make_results(&[("b", "value"), ("a", "{b}")]);
+
+        let forward_out =
+            substitute_all_raw("{a} / {b}", &empty_vars(), &forward, &sys_vars()).unwrap();
+        let reverse_out =
+            substitute_all_raw("{a} / {b}", &empty_vars(), &reverse, &sys_vars()).unwrap();
+
+        assert_eq!(forward_out, reverse_out);
+        assert_eq!(forward_out, "{b} / value");
+    }
+
+    #[test]
+    fn braced_substitution_preserves_unknowns_and_resolves_system_vars_once() {
+        let vars = make_results(&[("name", "{sys_instance_id}")]);
+        let system = SystemVars {
+            instance_id: "instance-42".to_string(),
+            label: Some("billing".to_string()),
+        };
+
+        let out = substitute_all_raw(
+            "{sys_instance_id}/{sys_label}/{name}/{unknown}",
+            &empty_vars(),
+            &vars,
+            &system,
+        )
+        .unwrap();
+
+        assert_eq!(out, "instance-42/billing/{sys_instance_id}/{unknown}");
     }
 
     #[test]

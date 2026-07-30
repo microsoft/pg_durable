@@ -60,7 +60,17 @@ tail -f ~/.pgrx/17.log
 ## Critical Patterns
 
 ### Orchestrations Must Be Deterministic
-Files in `src/orchestrations/` must be 100% deterministic—no I/O, no `Utc::now()`, no random numbers. All side effects go through activities.
+Files in `src/orchestrations/` must be 100% deterministic. This requirement also applies to every helper they call, even when that helper lives outside `src/orchestrations/`.
+
+For the same orchestration input and recorded history, code must produce the same ordered durable operations, operation inputs, `continue_as_new` input, and return value on every replay.
+
+- Do not perform I/O directly. Put side effects in activities.
+- Do not use wall-clock time, random values, environment/process state, or mutable global state. Use duroxide context APIs such as `ctx.utc_now()` when a value must be recorded in history.
+- Do not let `HashMap`/`HashSet` iteration order affect control flow, mutation order, generated strings, durable operation order, or outputs. Exact-key lookup is safe; observable traversal must use a naturally ordered source, sort explicitly, or use `BTreeMap`/`BTreeSet`.
+- Do not serialize unordered maps directly into activity, sub-orchestration, `continue_as_new`, or orchestration output payloads. Canonicalize map keys first; use `serialize_string_map` or `string_map_to_json` for string maps.
+- Do not select a "first" or "last" item from an unordered collection. Define the ordering explicitly.
+- When changing an orchestration or a transitive helper, consider replay of histories created by the previous binary. Treat changes to durable operation names, order, inputs, timers, branching, and returned output as in-flight compatibility changes.
+- Add determinism regression tests for order-sensitive logic. Construct logically identical maps in different insertion orders and assert byte-identical outputs; for substitution/transformation code, include values containing placeholder-like text to catch accidental rescanning.
 
 ### Activity Naming Convention
 Each activity has a co-located `NAME` constant for IDE navigation:
