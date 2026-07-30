@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.5] - Unreleased
+## [0.2.5] - 2026-07-30
 
 ### Added
 
@@ -17,6 +17,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 ### Fixed
 
 - **Multipart parts larger than 57 bytes (#302):** `data_b64` was decoded with a strict base64 decoder that rejects embedded whitespace, but PostgreSQL's `encode(bytea, 'base64')` wraps its output at 76 columns. Any part whose source data exceeded 57 bytes therefore failed to decode. Whitespace in `data_b64` is now ignored, so `encode()` output can be used directly.
+- **Unix-socket worker connections (#292):** a Unix-socket `PGHOST` is now percent-encoded when pg_durable builds the worker's PostgreSQL connection URL, allowing sqlx to connect through socket directories. TCP addresses and hostnames are unchanged.
 
 ### Changed
 
@@ -30,6 +31,11 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   > The engine fails closed on a mismatch, but `df.instances` may remain `pending` or `running` because the replay aborts before pg_durable can record its normal failure status. Operators that require in-flight continuity should quiesce and drain before upgrading; operators that accept failed/recreated work can upgrade directly and inspect or cancel stale instances afterward. See `docs/upgrade-testing.md` under "Loop and sub-orchestration replay compatibility".
 
 - **HTTP envelope fields are addressable with dot notation:** `$resp.body`, `$resp.status`, `$resp.ok`, and `$resp.encoding` now resolve against an HTTP result. Previously dot notation only worked on SQL results (which carry a `rows` array), so reading an HTTP envelope required an intervening SQL node such as `SELECT ($resp::jsonb->>'ok')::boolean`. `rows` still takes precedence, so SQL results are unaffected.
+- **Dependencies:** bumped `duroxide` to 0.1.30 (#305), `uuid` to 1.24.0 (#293), `serde_json` to 1.0.151, and `tokio` to 1.53.1 (#298).
+
+### Documentation
+
+- Documented how to detect signal, schedule, and timer waits with `df.instance_nodes()` (#300), and corrected the documented `result` and `status_details` column types and JSON-cast examples (#301).
 
 ## [0.2.4] - 2026-07-02
 
