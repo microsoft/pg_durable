@@ -589,6 +589,16 @@ prepare_phase() {
             ensure_e2e_role
             wait_for_worker_ready
             ;;
+        new-start-limit)
+            if [ "$SETUP_PLAYGROUND_APPLIED" = false ]; then
+                "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -f "$SQL_DIR/$SETUP_TEST.sql" >/dev/null
+                SETUP_PLAYGROUND_APPLIED=true
+                E2E_ROLE_ENSURED=true
+            else
+                ensure_e2e_role
+                wait_for_worker_ready
+            fi
+            ;;
         superuser-guc-off)
             ensure_e2e_role
             wait_for_worker_ready

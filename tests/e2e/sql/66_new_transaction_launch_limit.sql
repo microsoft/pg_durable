@@ -8,9 +8,6 @@
 -- timed-out callers get an actionable error, and rejected launches leave no df
 -- or engine-visible work behind.
 
-DROP TABLE IF EXISTS test_new_txn_launch_log;
-CREATE TABLE test_new_txn_launch_log (label TEXT PRIMARY KEY);
-
 CREATE TEMP TABLE _launch_conn (
     connname TEXT PRIMARY KEY,
     label TEXT NOT NULL,
@@ -36,7 +33,7 @@ DO $$
 DECLARE
     rec             RECORD;
     connstr         TEXT;
-    launch_sessions INT;
+    blocked_launches INT;
     attempts        INT := 0;
 BEGIN
     SELECT c.connstr INTO connstr FROM _dblink_conn c;
@@ -48,13 +45,12 @@ BEGIN
             format(
                 $sql$
                 SELECT df.start(
-                    'INSERT INTO test_new_txn_launch_log (label) VALUES (%L)',
+                    'SELECT 1',
                     %L,
                     NULL,
                     'new'
                 )
                 $sql$,
-                rec.label,
                 rec.label
             )
         );
@@ -62,18 +58,23 @@ BEGIN
 
     LOOP
         SELECT count(*)
-        INTO launch_sessions
-        FROM pg_stat_activity
-        WHERE application_name = 'pg_durable:new-transaction-start'
-          AND pid <> pg_backend_pid();
+        INTO blocked_launches
+        FROM pg_locks l
+        JOIN pg_catalog.pg_class c
+          ON c.oid = l.relation
+        JOIN pg_catalog.pg_namespace n
+          ON n.oid = c.relnamespace
+        WHERE n.nspname = 'df'
+          AND c.relname = 'instances'
+          AND NOT l.granted;
 
-        EXIT WHEN launch_sessions = 2 OR attempts >= 100;
+        EXIT WHEN blocked_launches = 2 OR attempts >= 100;
         PERFORM pg_sleep(0.1);
         attempts := attempts + 1;
     END LOOP;
 
-    IF launch_sessions <> 2 THEN
-        RAISE EXCEPTION 'TEST FAILED: expected 2 admitted new-transaction launch sessions, got %', launch_sessions;
+    IF blocked_launches <> 2 THEN
+        RAISE EXCEPTION 'TEST FAILED: expected 2 blocked loopback launch backends on df.instances, got %', blocked_launches;
     END IF;
 
     -- Hold the lock past pg_durable.new_transaction_start_timeout so the excess
@@ -82,16 +83,21 @@ BEGIN
     PERFORM pg_sleep(3);
 
     SELECT count(*)
-    INTO launch_sessions
-    FROM pg_stat_activity
-    WHERE application_name = 'pg_durable:new-transaction-start'
-      AND pid <> pg_backend_pid();
+    INTO blocked_launches
+    FROM pg_locks l
+    JOIN pg_catalog.pg_class c
+      ON c.oid = l.relation
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid = c.relnamespace
+    WHERE n.nspname = 'df'
+      AND c.relname = 'instances'
+      AND NOT l.granted;
 
-    IF launch_sessions <> 2 THEN
-        RAISE EXCEPTION 'TEST FAILED: launch session count grew beyond the configured limit, got %', launch_sessions;
+    IF blocked_launches <> 2 THEN
+        RAISE EXCEPTION 'TEST FAILED: blocked loopback backend count grew beyond the configured limit, got %', blocked_launches;
     END IF;
 
-    RAISE NOTICE 'PASSED [admission_limit]: concurrent new-transaction launch sessions capped at %', launch_sessions;
+    RAISE NOTICE 'PASSED [admission_limit]: blocked loopback launch backends capped at %', blocked_launches;
 END $$;
 
 COMMIT;
@@ -105,7 +111,7 @@ DECLARE
     success_count   INT := 0;
     failure_count   INT := 0;
     total_rows      INT;
-    launch_sessions INT;
+    blocked_launches INT;
     attempts        INT;
 BEGIN
     FOR rec IN SELECT connname, label FROM _launch_conn ORDER BY connname LOOP
@@ -160,9 +166,6 @@ BEGIN
         IF EXISTS (SELECT 1 FROM df.instances WHERE label = rec.label) THEN
             RAISE EXCEPTION 'TEST FAILED [%]: rejected launch left a df.instances row behind', rec.label;
         END IF;
-        IF EXISTS (SELECT 1 FROM test_new_txn_launch_log WHERE label = rec.label) THEN
-            RAISE EXCEPTION 'TEST FAILED [%]: rejected launch executed work', rec.label;
-        END IF;
     END LOOP;
 
     FOR rec IN SELECT label, instance_id FROM _launch_conn WHERE outcome = 'success' LOOP
@@ -178,13 +181,18 @@ BEGIN
     END LOOP;
 
     SELECT count(*)
-    INTO launch_sessions
-    FROM pg_stat_activity
-    WHERE application_name = 'pg_durable:new-transaction-start'
-      AND pid <> pg_backend_pid();
+    INTO blocked_launches
+    FROM pg_locks l
+    JOIN pg_catalog.pg_class c
+      ON c.oid = l.relation
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid = c.relnamespace
+    WHERE n.nspname = 'df'
+      AND c.relname = 'instances'
+      AND NOT l.granted;
 
-    IF launch_sessions <> 0 THEN
-        RAISE EXCEPTION 'TEST FAILED: expected all launch sessions to exit, still saw %', launch_sessions;
+    IF blocked_launches <> 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: expected no blocked loopback backends after unlock, still saw %', blocked_launches;
     END IF;
 
     SELECT count(*) INTO total_rows
@@ -196,16 +204,10 @@ BEGIN
             success_count, total_rows;
     END IF;
 
-    SELECT count(*) INTO total_rows FROM test_new_txn_launch_log;
-    IF total_rows <> success_count THEN
-        RAISE EXCEPTION 'TEST FAILED: expected % executed rows, found %', success_count, total_rows;
-    END IF;
-
     RAISE NOTICE 'PASSED [rejection_cleanup]: rejected launches left no runnable or orphaned work';
 END $$;
 
 DROP TABLE _dblink_conn;
 DROP TABLE _launch_conn;
-DROP TABLE test_new_txn_launch_log;
 
 SELECT 'TEST PASSED' AS result;

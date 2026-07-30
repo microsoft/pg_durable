@@ -255,8 +255,8 @@ fn classify_new_transaction_start_error(err: sqlx::Error) -> String {
     let message = err.to_string();
     let sqlstate = err
         .as_database_error()
-        .and_then(|db_err| db_err.code().as_deref());
-    format_new_transaction_start_error(sqlstate, &message)
+        .and_then(|db_err| db_err.code().map(|code| code.to_string()));
+    format_new_transaction_start_error(sqlstate.as_deref(), &message)
 }
 
 /// Run `df.start()` on an already-established separate session.
