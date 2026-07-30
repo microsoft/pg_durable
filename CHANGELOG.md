@@ -17,6 +17,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Fixed
 
+- **Cancellation/failure history event identifiers (#169):** terminal `OrchestrationFailed` events now carry the correct `instance_id`/`execution_id` in their history payload. Fixed upstream in duroxide (microsoft/duroxide#35) via the `duroxide` 0.1.30 bump (#305).
 - **Unix-socket worker connections (#292):** workers can now connect when `PGHOST` names a Unix-socket directory.
 
 ### Changed
