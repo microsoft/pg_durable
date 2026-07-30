@@ -58,6 +58,7 @@ DEFAULT_BUILD_PHASES=(
     "superuser-guc-off"
     "connlimit-backpressure"
     "connlimit-timeout"
+    "new-start-limit"
     "connlimit-startup"
     "reconcile"
 )
@@ -68,6 +69,7 @@ ALL_PHASES=(
     "superuser-guc-off"
     "connlimit-backpressure"
     "connlimit-timeout"
+    "new-start-limit"
     "connlimit-startup"
     "reconcile"
     "http-disabled"
@@ -140,6 +142,9 @@ phase_label() {
         connlimit-timeout)
             echo "connection limit timeout"
             ;;
+        new-start-limit)
+            echo "new-transaction launch admission control"
+            ;;
         connlimit-startup)
             echo "connection limit startup validation"
             ;;
@@ -171,6 +176,9 @@ phase_for_test() {
             ;;
         45_connection_limit_timeout)
             echo "connlimit-timeout"
+            ;;
+        66_new_transaction_launch_limit)
+            echo "new-start-limit"
             ;;
         46_connection_limit_startup_validation)
             echo "connlimit-startup"
@@ -309,7 +317,7 @@ set_conf_line() {
 }
 
 clear_connlimit_gucs() {
-    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d' "$CONF_FILE"
+    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.new_transaction_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d' "$CONF_FILE"
 }
 
 ensure_data_dir() {
@@ -479,6 +487,14 @@ configure_phase() {
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "1"
             set_conf_line "pg_durable.execution_acquire_timeout" "2"
+            ;;
+        new-start-limit)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "pg_durable.max_new_transaction_starts" "2"
+            set_conf_line "pg_durable.new_transaction_start_timeout" "2"
             ;;
         connlimit-startup)
             set_conf_line "shared_preload_libraries" "'pg_durable'"

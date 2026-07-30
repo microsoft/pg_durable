@@ -371,13 +371,17 @@ An unrecognised value raises an error rather than falling back to the default.
 
 > **Note:** under `'new'` the separate session sees only *committed* rows, so
 > the captured `df.vars` snapshot excludes variables set earlier in the caller's
-> open transaction. Each call also opens an extra backend connection, and the
-> statement is bounded by a 30 s `lock_timeout`/`statement_timeout`. `'new'` is
-> rejected inside a workflow, where a plain `df.start()` is already independent
-> of any caller transaction. Avoid per-row triggers and other high-fan-out call
-> sites, and make target operations idempotent because a connection failure can
-> make launch outcome uncertain. See the Transaction Semantics section of
-> `USER_GUIDE.md` for details.
+> open transaction. Each admitted call also opens an extra backend connection,
+> capped cluster-wide by `pg_durable.max_new_transaction_starts` (default `2`);
+> extra callers wait up to `pg_durable.new_transaction_start_timeout` seconds
+> (default `5`) before failing without opening the loopback session. The inner
+> `df.start()` statement itself is still bounded by a 30 s
+> `lock_timeout`/`statement_timeout`. `'new'` is rejected inside a workflow,
+> where a plain `df.start()` is already independent of any caller transaction.
+> Avoid per-row triggers and other high-fan-out call sites unless you have
+> validated them against that admission cap, and make target operations
+> idempotent because a connection failure can make launch outcome uncertain. See
+> the Transaction Semantics section of `USER_GUIDE.md` for details.
 
 ---
 
@@ -745,4 +749,3 @@ SELECT pg_reload_conf();
 ```
 
 > **Behavior change (v0.2.4):** prior to v0.2.4, `df.list_instances()` silently truncated `limit_count` to 10000. It now raises an error when `limit_count` exceeds this GUC (default 1000). Callers that previously requested very large pages should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`).
-

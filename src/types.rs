@@ -53,9 +53,19 @@ pub fn get_max_user_connections() -> u32 {
     crate::MAX_USER_CONNECTIONS.get() as u32
 }
 
+/// Get the maximum number of concurrent transaction_mode => 'new' launch sessions.
+pub fn get_max_new_transaction_starts() -> u32 {
+    crate::MAX_NEW_TRANSACTION_STARTS.get() as u32
+}
+
 /// Get the execution acquire timeout as a Duration.
 pub fn get_execution_acquire_timeout() -> Duration {
     Duration::from_secs(crate::EXECUTION_ACQUIRE_TIMEOUT.get() as u64)
+}
+
+/// Get the transaction_mode => 'new' launch-slot timeout as a Duration.
+pub fn get_new_transaction_start_timeout() -> Duration {
+    Duration::from_secs(crate::NEW_TRANSACTION_START_TIMEOUT.get() as u64)
 }
 
 /// Days a terminal instance is retained before reconciliation removes it and its

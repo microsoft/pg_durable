@@ -205,9 +205,14 @@ just as `'caller'` does. Three consequences follow from the separate session:
   caller's still-open transaction is invisible to it. Commit variables before
   calling, or pass values inline.
 - **It costs an extra backend.** Each call opens (and closes) a PostgreSQL
-  connection, so it counts against `max_connections`. Prefer the default on hot
-    paths where transactional roll-up is acceptable. Avoid row triggers and
-    other high-fan-out call sites.
+  connection, so it counts against `max_connections`. pg_durable caps these
+  extra loopback sessions cluster-wide with
+  `pg_durable.max_new_transaction_starts` (default `2`); additional callers
+  wait up to `pg_durable.new_transaction_start_timeout` seconds (default `5`)
+  before failing without opening a second backend. Prefer the default on hot
+  paths where transactional roll-up is acceptable. Avoid row triggers and other
+  high-fan-out call sites unless you have explicitly validated the workload
+  against that cap.
 - **It is bounded, not unbounded.** The statement runs with a 30 s
   `lock_timeout`/`statement_timeout`. Without that bound, a caller holding a
   conflicting lock on a `df` table would wait forever — the separate session
@@ -2191,13 +2196,16 @@ pg_durable uses multiple PostgreSQL connections for different purposes. Four GUC
 
 ### Connection Architecture
 
-The background worker maintains three categories of connections:
+The background worker maintains three categories of connections, and
+`transaction_mode => 'new'` can transiently add a fourth category while starts
+are being launched:
 
 | Category | Purpose | GUC | Default |
 |----------|---------|-----|---------|
 | **Management pool** | Extension lifecycle checks, graph loading, status updates | `pg_durable.max_management_connections` | 6 |
 | **Duroxide pool** | Orchestration state, LISTEN/NOTIFY for work dispatch | `pg_durable.max_duroxide_connections` | 10 |
 | **User-execution** | Per-SQL-node connections authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
+| **New-start loopback** | Extra sessions that persist `df.start(..., transaction_mode => 'new')` outside the caller's transaction | `pg_durable.max_new_transaction_starts` | 2 |
 
 Each PG backend session (user calling `df.start()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
 
@@ -2223,6 +2231,14 @@ pg_durable.max_user_connections = 10
 # How long (seconds) a SQL node waits for a user-execution slot
 # before failing with an error.
 pg_durable.execution_acquire_timeout = 30
+
+# Maximum concurrent transaction_mode => 'new' loopback launch sessions.
+# Additional callers wait for a slot instead of opening more backends.
+pg_durable.max_new_transaction_starts = 2
+
+# How long (seconds) df.start(..., transaction_mode => 'new') waits for a
+# launch slot before failing without opening the loopback session.
+pg_durable.new_transaction_start_timeout = 5
 ```
 
 > **Other GUCs:** `pg_durable.list_instances_max_limit` (SUSET context, default `1000`) caps the per-call page size of `df.list_instances()`. Unlike the connection-limit GUCs above, it is superuser-settable at runtime (no restart) and is not loaded from `postgresql.conf` at startup only. See [docs/api-reference.md](docs/api-reference.md#pg_durablelist_instances_max_limit).
@@ -2235,10 +2251,11 @@ To calculate the total connections pg_durable will use:
 Total = max_management_connections
       + max_duroxide_connections
       + max_user_connections
+      + max_new_transaction_starts
       + (active_backend_sessions × 1)
 ```
 
-With defaults and 5 connected users: `6 + 10 + 10 + 5 = 31 connections`.
+With defaults and 5 connected users: `6 + 10 + 10 + 2 + 5 = 33 connections`.
 
 > **Tip**: Ensure PostgreSQL's `max_connections` is large enough to accommodate pg_durable's budget plus your application's direct connections.
 
@@ -2254,6 +2271,21 @@ When all user-execution slots are occupied, additional SQL node executions **que
   ```
 - The failed node causes the workflow to enter `failed` status
 - Other nodes in the same workflow that have already acquired slots continue normally
+
+For `df.start(..., transaction_mode => 'new')`, admission control applies
+*before* the loopback session is opened:
+
+- At most `pg_durable.max_new_transaction_starts` loopback launch sessions exist
+  at once (default `2`)
+- Extra callers wait up to `pg_durable.new_transaction_start_timeout` seconds
+  (default `5`) for a slot
+- If the wait expires, `df.start()` raises:
+  ```
+  pg_durable: transaction_mode => 'new' launch limit reached (max_new_transaction_starts=2).
+  Timed out after 5s waiting for a launch slot before opening the loopback session.
+  ```
+- Because the rejection happens before the extra session is opened, a timed-out
+  launch leaves no partial `df.instances`, `df.nodes`, or engine state behind
 
 ### Startup Validation
 

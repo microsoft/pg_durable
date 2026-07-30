@@ -23,7 +23,9 @@ pub static DATABASE: GucSetting<Option<CString>> =
 pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
+pub static MAX_NEW_TRANSACTION_STARTS: GucSetting<i32> = GucSetting::<i32>::new(2);
 pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
+pub static NEW_TRANSACTION_START_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(5);
 /// When `false` (default), pg_durable rejects any instance whose `submitted_by`
 /// role is a PostgreSQL superuser. Set to `true` only when superuser durable
 /// functions are explicitly desired. See docs/superuser_guc.md.
@@ -137,10 +139,32 @@ pub extern "C-unwind" fn _PG_init() {
     );
 
     GucRegistry::define_int_guc(
+        c"pg_durable.max_new_transaction_starts",
+        c"Maximum number of concurrent transaction_mode => 'new' df.start() loopback launch sessions",
+        c"",
+        &MAX_NEW_TRANSACTION_STARTS,
+        1,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_durable.execution_acquire_timeout",
         c"Seconds to wait for an available execution slot before failing a SQL node",
         c"",
         &EXECUTION_ACQUIRE_TIMEOUT,
+        1,
+        3600,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.new_transaction_start_timeout",
+        c"Seconds to wait for a transaction_mode => 'new' launch slot before failing df.start()",
+        c"",
+        &NEW_TRANSACTION_START_TIMEOUT,
         1,
         3600,
         GucContext::Postmaster,
@@ -2847,15 +2871,21 @@ mod tests {
     fn test_connection_limit_guc_defaults() {
         use crate::types::{
             get_execution_acquire_timeout, get_max_duroxide_connections,
-            get_max_management_connections, get_max_user_connections,
+            get_max_management_connections, get_max_new_transaction_starts,
+            get_max_user_connections, get_new_transaction_start_timeout,
         };
 
         assert_eq!(get_max_management_connections(), 6);
         assert_eq!(get_max_duroxide_connections(), 10);
         assert_eq!(get_max_user_connections(), 10);
+        assert_eq!(get_max_new_transaction_starts(), 2);
         assert_eq!(
             get_execution_acquire_timeout(),
             std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            get_new_transaction_start_timeout(),
+            std::time::Duration::from_secs(5)
         );
     }
 

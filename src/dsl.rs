@@ -9,11 +9,12 @@ use pgrx::prelude::*;
 use std::str::FromStr;
 
 use std::cell::RefCell;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::client::start_durable_function;
 use crate::types::{
-    mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
+    get_max_new_transaction_starts, get_new_transaction_start_timeout, mark_non_future_helper_call,
+    short_id, validate_result_name, Durofut, FunctionInput,
 };
 
 /// Check if we're running inside a workflow context (background worker connection).
@@ -821,6 +822,75 @@ const TXN_MODE_CALLER: &str = "caller";
 /// session, and therefore survives a rollback of the caller's transaction.
 const TXN_MODE_NEW: &str = "new";
 
+/// Advisory-lock namespace for admission control on `transaction_mode => 'new'`
+/// launches. Each slot is a separate session-level advisory lock object under
+/// this class ID.
+const NEW_TRANSACTION_START_LOCK_CLASS_ID: i32 = 0x5047_4446;
+
+struct NewTransactionStartAdmissionGuard {
+    slot: i32,
+}
+
+impl Drop for NewTransactionStartAdmissionGuard {
+    fn drop(&mut self) {
+        let _ = Spi::run_with_args(
+            "SELECT pg_catalog.pg_advisory_unlock($1::int4, $2::int4)",
+            &[NEW_TRANSACTION_START_LOCK_CLASS_ID.into(), self.slot.into()],
+        );
+    }
+}
+
+fn try_acquire_new_transaction_start_slot(limit: u32) -> Result<Option<i32>, String> {
+    for slot in 0..limit {
+        match Spi::get_one_with_args::<bool>(
+            "SELECT pg_catalog.pg_try_advisory_lock($1::int4, $2::int4)",
+            &[
+                NEW_TRANSACTION_START_LOCK_CLASS_ID.into(),
+                (slot as i32).into(),
+            ],
+        ) {
+            Ok(Some(true)) => return Ok(Some(slot as i32)),
+            Ok(Some(false)) => {}
+            Ok(None) => {
+                return Err(
+                    "failed to acquire transaction_mode => 'new' launch slot: pg_try_advisory_lock returned NULL"
+                        .to_string(),
+                )
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to acquire transaction_mode => 'new' launch slot: {e}"
+                ))
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn acquire_new_transaction_start_slot() -> Result<NewTransactionStartAdmissionGuard, String> {
+    let limit = get_max_new_transaction_starts();
+    let timeout = get_new_transaction_start_timeout();
+    let started = Instant::now();
+
+    loop {
+        if let Some(slot) = try_acquire_new_transaction_start_slot(limit)? {
+            return Ok(NewTransactionStartAdmissionGuard { slot });
+        }
+
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "pg_durable: transaction_mode => '{TXN_MODE_NEW}' launch limit reached \
+                 (max_new_transaction_starts={limit}). Timed out after {}s waiting for a \
+                 launch slot before opening the loopback session.",
+                timeout.as_secs()
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Starts a durable SQL function.
 ///
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
@@ -903,6 +973,14 @@ fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&st
     // That session logs in as this role, so a NOLOGIN role must fail here with
     // the usual message rather than as a connection error.
     require_login_privilege(user_oid, &user_name, "df.start()");
+
+    // Admission control is cross-session, not process-local: each PostgreSQL
+    // client backend is its own process. Hold a session-level advisory-lock slot
+    // while the loopback session is being opened and running df.start().
+    let _admission_guard = match acquire_new_transaction_start_slot() {
+        Ok(guard) => guard,
+        Err(e) => pgrx::error!("{e}"),
+    };
 
     match crate::client::start_in_new_transaction(fut, label, database, &user_name) {
         Ok(id) => id,

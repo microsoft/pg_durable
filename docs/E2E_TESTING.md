@@ -80,6 +80,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `44_connection_limit_backpressure.sql` | `connlimit-backpressure` | Backpressure: 4 workflows complete when `max_user_connections=2` |
 | `45_connection_limit_timeout.sql` | `connlimit-timeout` | Timeout error after `execution_acquire_timeout` expires |
 | `46_connection_limit_startup_validation.sql` | `connlimit-startup` | BGW refuses to start with invalid GUC value |
+| `66_new_transaction_launch_limit.sql` | `new-start-limit` | `transaction_mode => 'new'` launch admission cap, timeout, and cleanup |
 | `47_http_dsl_disabled.sql` | `http-disabled` | `df.http()` unavailable when built without `--features http` |
 | `48_http_allow_all.sql` | `http-allow-all` | All HTTP destinations allowed when built with `--features http-allow-all` |
 
@@ -237,4 +238,3 @@ tail -f ~/.pgrx/17.log
 Error: cargo pgrx install failed
 ```
 → Run `cargo build --features pg17` and then retry the test runner
-

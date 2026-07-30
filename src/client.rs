@@ -231,7 +231,33 @@ pub fn start_durable_function(
 /// session waits on a lock, but the caller waits on a socket, which the
 /// deadlock detector does not see. Without a bound the caller would hang
 /// forever, so cap the statement and surface a plain error instead.
-const NEW_TRANSACTION_START_TIMEOUT_MS: u64 = 30_000;
+const NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS: u64 = 30_000;
+
+fn format_new_transaction_start_error(sqlstate: Option<&str>, message: &str) -> String {
+    let lower = message.to_lowercase();
+
+    match sqlstate {
+        Some("55P03") if lower.contains("lock timeout") => format!(
+            "pg_durable: transaction_mode => 'new' launch hit lock_timeout after \
+             {NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS}ms while waiting on a lock in the \
+             loopback session: {message}"
+        ),
+        Some("57014") if lower.contains("statement timeout") => format!(
+            "pg_durable: transaction_mode => 'new' launch hit statement_timeout after \
+             {NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS}ms while running df.start() in the \
+             loopback session: {message}"
+        ),
+        _ => format!("df.start() on new transaction failed: {message}"),
+    }
+}
+
+fn classify_new_transaction_start_error(err: sqlx::Error) -> String {
+    let message = err.to_string();
+    let sqlstate = err
+        .as_database_error()
+        .and_then(|db_err| db_err.code().as_deref());
+    format_new_transaction_start_error(sqlstate, &message)
+}
 
 /// Run `df.start()` on an already-established separate session.
 async fn start_on_new_session(
@@ -252,13 +278,18 @@ async fn start_on_new_session(
         .await
         .map_err(|e| format!("failed to clear df.in_workflow on new-transaction session: {e}"))?;
 
+    sqlx::query("SET application_name = 'pg_durable:new-transaction-start'")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("failed to tag new-transaction start session: {e}"))?;
+
     // Bound both the lock wait and the statement itself. See
-    // NEW_TRANSACTION_START_TIMEOUT_MS for why this is not optional. Two
+    // NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS for why this is not optional. Two
     // statements because sqlx prepares every query, and the extended protocol
     // rejects multi-statement strings.
     for stmt in [
-        format!("SET lock_timeout = {NEW_TRANSACTION_START_TIMEOUT_MS}"),
-        format!("SET statement_timeout = {NEW_TRANSACTION_START_TIMEOUT_MS}"),
+        format!("SET lock_timeout = {NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS}"),
+        format!("SET statement_timeout = {NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS}"),
     ] {
         sqlx::query(&stmt)
             .execute(&mut *conn)
@@ -277,7 +308,7 @@ async fn start_on_new_session(
         .bind(database)
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| format!("df.start() on new transaction failed: {e}"))?;
+        .map_err(classify_new_transaction_start_error)?;
 
     row.try_get("id")
         .map_err(|e| format!("df.start() on new transaction returned no instance id: {e}"))
@@ -394,7 +425,7 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::is_connection_error;
+    use super::{format_new_transaction_start_error, is_connection_error};
 
     #[test]
     fn detects_connection_refused() {
@@ -433,5 +464,37 @@ mod tests {
         assert!(!is_connection_error(
             "Orchestration already exists for instance abc123"
         ));
+    }
+
+    #[test]
+    fn classifies_new_transaction_lock_timeout() {
+        let formatted = format_new_transaction_start_error(
+            Some("55P03"),
+            "canceling statement due to lock timeout",
+        );
+
+        assert!(formatted.contains("lock_timeout"));
+        assert!(formatted.contains("30000ms"));
+    }
+
+    #[test]
+    fn classifies_new_transaction_statement_timeout() {
+        let formatted = format_new_transaction_start_error(
+            Some("57014"),
+            "canceling statement due to statement timeout",
+        );
+
+        assert!(formatted.contains("statement_timeout"));
+        assert!(formatted.contains("30000ms"));
+    }
+
+    #[test]
+    fn preserves_other_new_transaction_errors() {
+        let formatted = format_new_transaction_start_error(Some("42501"), "permission denied");
+
+        assert_eq!(
+            formatted,
+            "df.start() on new transaction failed: permission denied"
+        );
     }
 }
