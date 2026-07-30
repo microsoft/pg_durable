@@ -308,7 +308,7 @@ BEGIN
     SELECT df.await_instance(inst_id) INTO status;
 
     IF status != 'completed' THEN
-        SELECT format('%s (%s): %s', n.node_id, n.node_type, n.result)
+        SELECT format('%s (%s): %s', n.id, n.node_type, n.result)
         INTO failed_node
         FROM df.nodes n
         WHERE n.instance_id = inst_id AND n.status = 'failed'
