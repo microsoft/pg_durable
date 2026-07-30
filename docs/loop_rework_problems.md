@@ -1,19 +1,13 @@
 # Open Problems in the Loop Rework
 
 Findings from the review of the `df.loop()` child-sub-orchestration rework in
-PR #228 (`1320f65`) that are **still unresolved** on `main` as of `560a639`,
-after the loop follow-up fixes in #306 (`7ee7f43`), #307 (`09e08f0`), and #311
-(`560a639`).
+PR #228 (`1320f65`) that remain unresolved after the loop follow-up fixes in
+#306 (`7ee7f43`), #307 (`09e08f0`), and #311 (`560a639`).
 
-Resolved findings are not repeated here. In particular, the follow-ups fixed
-replay-deterministic map serialization, root/non-root loop semantic drift,
-loop-child startup status coverage, the missing #230 regression shape, nested
-and failed-loop coverage, and stale loop documentation. #311 also replaced the
-dedicated loop orchestration with the shared `execute-subtree` path and stopped
-reloading `df.nodes` on every loop generation.
+As these get fixed, leave a placeholder in both the table and the description section.
 
-`0.2.5` is still **Unreleased**, so replay-breaking fixes can still land inside
-the drain boundary already declared for this release.
+`0.2.5` has shipped, so further replay-breaking fixes require orchestration
+versioning or another explicit drain boundary.
 
 ---
 
@@ -28,8 +22,8 @@ Ordered by severity.
 | 3 | [Replay failures strand extension instances](#3-replay-failures-strand-extension-instances) | all replay-breaking changes | 🔴 Blocking | Open |
 | 4 | [Node-status write failures are discarded](#4-node-status-write-failures-are-discarded) | all nodes | 🟡 Medium | Open |
 | 5 | [Parent fallback stamps assume child generation 1](#5-parent-fallback-stamps-assume-child-generation-1) | cancelled or failed loop children | 🟡 Medium | Open |
-| 6 | [Composed child ids block orphan reclamation](#6-composed-child-ids-block-orphan-reclamation) | loop and parallel children | 🟡 Medium | Open |
-| 7 | [Stamp grammar is duplicated and fails open](#7-stamp-grammar-is-duplicated-and-fails-open) | status write fence and inference | 🟡 Medium | Open |
+| 6 | [Composed child ids block orphan reclamation](#6-composed-child-ids-block-orphan-reclamation) | loop and parallel children | 🟡 Medium | Resolved in #323 |
+| 7 | [Stamp validation fails open](#7-stamp-validation-fails-open) | status write fence and inference | 🟡 Medium | Open |
 | 8 | [Nested loops have no cumulative iteration budget](#8-nested-loops-have-no-cumulative-iteration-budget) | nested loops | 🟡 Medium | Open |
 | 9 | [Signals inherit the sub-orchestration startup race](#9-signals-inherit-the-sub-orchestration-startup-race) | non-root loops | 🟡 Medium | Open |
 | 10 | [The 0.2.5 drain guidance is not an executable runbook](#10-the-025-drain-guidance-is-not-an-executable-runbook) | 0.2.4 → 0.2.5 upgrade | 🟡 Medium | Open |
@@ -221,52 +215,22 @@ physical and inferred node statuses are terminal.
 **Tracking:** [#312 — Reconciler misclassifies explicitly named
 sub-orchestrations as root orphans](https://github.com/microsoft/pg_durable/issues/312)
 
-`worker::is_sub_orchestration` recognizes only ids that start with `sub::` or
-contain `::sub::`:
+**Resolved:** [#323 — Fix reconciler child
+classification](https://github.com/microsoft/pg_durable/pull/323)
 
-```rust
-fn is_sub_orchestration(id: &str) -> bool {
-    id.starts_with("sub::") || id.contains("::sub::")
-}
-```
-
-The loop/subtree code instead creates explicit child ids shaped as
-`{root}::{generation}::{node}`. Those ids are classified as roots and enter
-`select_orphans` when they are failed and have no `df.instances` row. The
-worker truncates that candidate list to `RECLAIM_BATCH` before asking duroxide
-to delete it; duroxide's root-only deletion then skips records with a parent.
-
-This is a concrete mismatch between #263 and #283. #263 replaced pg_durable's
-use of duroxide-generated child ids with explicit composed ids for JOIN/RACE;
-#283 later introduced the `sub::` classifier and tests based on the obsolete
-generated-id convention. PR #228 then materially increased the affected
-population by putting non-root loops on the explicit child path, and #311
-retained that naming model.
-
-Once enough composed children occupy the batch, the same undeletable ids can
-be selected every tick and prevent genuine root orphans from being reached.
-
-### Suggested fix
-
-Parse composed child instance ids and exclude them before batching. Keep
-support for the legacy `sub::` forms. The parser should be shared with the
-execution-stamp grammar described below so reclamation does not introduce a
-third interpretation of the same lineage.
+PR #323 excludes both explicitly composed child ids and legacy Duroxide
+`sub::` ids before applying `RECLAIM_BATCH`. It also shares the typed lineage
+parser with execution-stamp fencing and status inference.
 
 ---
 
-## 7. Stamp grammar is duplicated and fails open
+## 7. Stamp validation fails open
 
 **Severity: 🟡 Medium — affects node-status fencing and inferred status.**
 
-The write and read sides still implement the composed lineage independently:
-
-- `activities/update_node_status.rs::stamp_lineage` requires an even token
-  count and parses `gen (node gen)*`.
-- `node_status.rs::stamp_of` accepts any string with a numeric final token, and
-  `is_superseded` recursively interprets the remaining tokens as a parent id.
-- `worker.rs::is_sub_orchestration` uses substring matching instead of either
-  grammar.
+#323 introduced a shared typed lineage parser for execution stamps, composed
+instance ids, read-side status inference, and the write-side fence. The
+remaining problem is how parse failures are handled.
 
 Malformed stamps disable protection. `incoming_stamp_is_superseded` returns
 `false` when either stamp fails to parse, including malformed non-legacy data.
@@ -280,12 +244,10 @@ outcome to write order.
 
 ### Suggested fix
 
-Introduce one typed lineage module with separate entry points for execution
-stamps (`{root}::{gen}::{node}::{gen}...`) and composed instance ids
-(`{root}::{gen}::{node}...`). Use one supersession predicate on both fence
-sides. Preserve the inert path only for an absent `status_details` column or an
+Preserve the inert path only for an absent `status_details` column or an
 explicitly recognized legacy value; malformed current-format data should fail
-closed with an observable diagnostic.
+closed with an observable diagnostic. Define and test the intended ordering
+between parent and descendant stamps at equal generations.
 
 ---
 

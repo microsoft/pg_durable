@@ -54,24 +54,10 @@ fn execution_id_from_details(status_details: Option<&serde_json::Value>) -> Opti
 /// token count that is not `gen (node gen)*`), so a legacy/unparseable stamp
 /// degrades to an unfenced write rather than silently dropping it.
 fn stamp_lineage(execution_id: &str) -> Option<(Vec<i64>, Vec<&str>)> {
-    let tokens: Vec<&str> = execution_id.split("::").collect();
-    // token[0] is the root df instance id; the remainder must be
-    // `gen (node gen)*`, i.e. an even total token count (>= 2).
-    if tokens.len() < 2 || !tokens.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut gens = Vec::new();
-    let mut nodes = Vec::new();
-    let mut i = 1;
-    while i < tokens.len() {
-        gens.push(tokens[i].parse::<i64>().ok()?);
-        i += 1;
-        if i < tokens.len() {
-            nodes.push(tokens[i]);
-            i += 1;
-        }
-    }
-    Some((gens, nodes))
+    let (lineage, current_generation) = crate::node_status::parse_execution_stamp(execution_id)?;
+    let mut generations = lineage.generations().to_vec();
+    generations.push(current_generation);
+    Some((generations, lineage.node_ids().to_vec()))
 }
 
 /// Whether the `incoming` write belongs to a superseded generation relative to

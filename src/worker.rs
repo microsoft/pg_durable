@@ -891,13 +891,15 @@ async fn run_until_extension_dropped_or_shutdown(
 }
 
 /// Maximum orphans one reconciliation pass reclaims, bounding a single tick's work.
-const RECLAIM_BATCH: u32 = 1000;
+pub(crate) const RECLAIM_BATCH: u32 = 1000;
 
 /// True for sub-orchestration instance ids, which the engine creates internally
-/// (JOIN/RACE fan-out) and which legitimately have no df.instances row —
-/// reconciliation must never delete them.
+/// or pg_durable names explicitly for composed graph execution. These children
+/// legitimately have no df.instances row, so reconciliation must never delete them.
 fn is_sub_orchestration(id: &str) -> bool {
-    id.starts_with("sub::") || id.contains("::sub::")
+    id.starts_with("sub::")
+        || id.contains("::sub::")
+        || crate::node_status::InstanceLineage::parse(id).is_some_and(|id| id.is_composed())
 }
 
 /// Milliseconds-since-epoch cutoff for "older than `retention`". Used as the
@@ -912,8 +914,8 @@ fn retention_cutoff_ms(retention: Duration) -> u64 {
 
 /// From the engine's `Failed` instance ids and the set that still have a
 /// df.instances row, select the orphans to reclaim: those with no df row and that
-/// are not sub-orchestrations (the engine creates sub-orchestrations internally
-/// for JOIN/RACE fan-out; they legitimately have no df row and must be kept).
+/// are not sub-orchestrations. Both legacy engine-named children and current
+/// explicitly named composed children legitimately have no df row and must be kept.
 pub(crate) fn select_orphans(
     failed_ids: Vec<String>,
     present: &std::collections::HashSet<String>,

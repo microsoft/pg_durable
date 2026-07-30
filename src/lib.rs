@@ -1785,14 +1785,20 @@ mod tests {
         use std::collections::HashSet;
 
         // Failed engine instances reconciliation sees: a df-backed one, a genuine
-        // orphan (rolled-back df.start), and two sub-orchestrations the engine
-        // created internally for fan-out.
-        let failed = vec![
+        // orphan (rolled-back df.start), legacy engine-named children, and current
+        // explicitly named children using the real parent/generation/node shape.
+        let mut failed = vec![
             "inst-backed".to_string(),
-            "inst-orphan".to_string(),
             "sub::inst-backed::0".to_string(),
             "inst-backed::sub::1".to_string(),
+            "aa312000::1::bb312000".to_string(),
+            "aa312000::1::bb312000::2::cc312000".to_string(),
         ];
+        failed
+            .extend((0..=crate::worker::RECLAIM_BATCH).map(|i| format!("aa312001::{i}::bb312001")));
+        // Put the genuine root last: composed children must be excluded before
+        // the caller truncates the selected roots to RECLAIM_BATCH.
+        failed.push("inst-orphan".to_string());
         // Only inst-backed still has a df.instances row.
         let present: HashSet<String> = ["inst-backed".to_string()].into_iter().collect();
 

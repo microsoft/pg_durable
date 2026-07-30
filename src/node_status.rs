@@ -6,6 +6,75 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Parsed pg_durable orchestration instance lineage.
+///
+/// Root instance ids are a single token. Each explicitly named child appends
+/// `::{parent_generation}::{child_root_node_id}`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct InstanceLineage<'a> {
+    instance_id: &'a str,
+    generations: Vec<i64>,
+    node_ids: Vec<&'a str>,
+}
+
+impl<'a> InstanceLineage<'a> {
+    pub(crate) fn parse(instance_id: &'a str) -> Option<Self> {
+        let tokens: Vec<&str> = instance_id.split("::").collect();
+        if tokens.first().is_none_or(|root| root.is_empty()) || tokens.len().is_multiple_of(2) {
+            return None;
+        }
+
+        let mut generations = Vec::new();
+        let mut node_ids = Vec::new();
+        for pair in tokens[1..].chunks_exact(2) {
+            generations.push(pair[0].parse::<i64>().ok()?);
+            if pair[1].is_empty() {
+                return None;
+            }
+            node_ids.push(pair[1]);
+        }
+
+        Some(Self {
+            instance_id,
+            generations,
+            node_ids,
+        })
+    }
+
+    pub(crate) fn instance_id(&self) -> &'a str {
+        self.instance_id
+    }
+
+    pub(crate) fn generations(&self) -> &[i64] {
+        &self.generations
+    }
+
+    pub(crate) fn node_ids(&self) -> &[&'a str] {
+        &self.node_ids
+    }
+
+    pub(crate) fn is_composed(&self) -> bool {
+        !self.node_ids.is_empty()
+    }
+
+    fn parent(&self) -> Option<(&'a str, i64)> {
+        if !self.is_composed() {
+            return None;
+        }
+        let (parent_with_generation, _) = self.instance_id.rsplit_once("::")?;
+        let (parent_instance_id, generation) = parent_with_generation.rsplit_once("::")?;
+        Some((parent_instance_id, generation.parse().ok()?))
+    }
+}
+
+pub(crate) fn parse_execution_stamp(execution_id: &str) -> Option<(InstanceLineage<'_>, i64)> {
+    let (instance_id, generation) = execution_id.rsplit_once("::")?;
+    Some((
+        InstanceLineage::parse(instance_id)?,
+        generation.parse::<i64>().ok()?,
+    ))
+}
+
 pub(crate) fn status_details_select_expr(client: &pgrx::spi::SpiClient) -> &'static str {
     let present = client
         .select(
@@ -63,8 +132,8 @@ fn stamp_of(status_details: Option<&str>) -> Option<(String, i64)> {
     let sd = status_details?;
     let v: serde_json::Value = serde_json::from_str(sd).ok()?;
     let eid = v.get("execution_id")?.as_str()?;
-    let (instance_id, generation) = eid.rsplit_once("::")?;
-    Some((instance_id.to_string(), generation.parse::<i64>().ok()?))
+    let (lineage, generation) = parse_execution_stamp(eid)?;
+    Some((lineage.instance_id().to_string(), generation))
 }
 
 /// Whether a node stamped `(instance_id, gen)` belongs to a superseded generation.
@@ -84,15 +153,11 @@ fn is_superseded(instance_id: &str, gen: i64, scope_max: &HashMap<String, i64>) 
             return true;
         }
     }
-    let tokens: Vec<&str> = instance_id.split("::").collect();
-    if tokens.len() < 3 {
-        // Root scope: no parent scope can supersede this one.
-        return false;
-    }
-    let parent_instance = tokens[..tokens.len() - 2].join("::");
-    match tokens[tokens.len() - 2].parse::<i64>() {
-        Ok(parent_gen) => is_superseded(&parent_instance, parent_gen, scope_max),
-        Err(_) => false,
+    match InstanceLineage::parse(instance_id).and_then(|lineage| lineage.parent()) {
+        Some((parent_instance, parent_gen)) => {
+            is_superseded(parent_instance, parent_gen, scope_max)
+        }
+        None => false,
     }
 }
 
@@ -580,5 +645,27 @@ mod tests {
         ]);
 
         assert!(!is_superseded("root::1::loop::3::branch", 8, &scope_max));
+    }
+
+    #[test]
+    fn instance_lineage_distinguishes_composed_children_from_roots() {
+        let root = InstanceLineage::parse("aa312000").unwrap();
+        assert!(!root.is_composed());
+
+        let child = InstanceLineage::parse("aa312000::1::bb312000").unwrap();
+        assert!(child.is_composed());
+        assert_eq!(child.generations(), &[1]);
+        assert_eq!(child.node_ids(), &["bb312000"]);
+
+        let nested = InstanceLineage::parse("aa312000::1::bb312000::2::cc312000").unwrap();
+        assert_eq!(nested.generations(), &[1, 2]);
+        assert_eq!(nested.node_ids(), &["bb312000", "cc312000"]);
+    }
+
+    #[test]
+    fn instance_lineage_rejects_malformed_child_lookalikes() {
+        assert!(InstanceLineage::parse("root::generation::node").is_none());
+        assert!(InstanceLineage::parse("root::1").is_none());
+        assert!(InstanceLineage::parse("root::1::").is_none());
     }
 }
