@@ -7,7 +7,7 @@ after the loop follow-up fixes in #306 (`7ee7f43`), #307 (`09e08f0`), and #311
 
 Resolved findings are not repeated here. In particular, the follow-ups fixed
 replay-deterministic map serialization, root/non-root loop semantic drift,
-terminal loop-node status coverage, the missing #230 regression shape, nested
+loop-child startup status coverage, the missing #230 regression shape, nested
 and failed-loop coverage, and stale loop documentation. #311 also replaced the
 dedicated loop orchestration with the shared `execute-subtree` path and stopped
 reloading `df.nodes` on every loop generation.
@@ -27,13 +27,14 @@ Ordered by severity.
 | 2 | [Clock failures disable loop rate limiting](#2-clock-failures-disable-loop-rate-limiting) | all loops | 🔴 Blocking | Open |
 | 3 | [Replay failures strand extension instances](#3-replay-failures-strand-extension-instances) | all replay-breaking changes | 🔴 Blocking | Open |
 | 4 | [Node-status write failures are discarded](#4-node-status-write-failures-are-discarded) | all nodes | 🟡 Medium | Open |
-| 5 | [Composed child ids block orphan reclamation](#5-composed-child-ids-block-orphan-reclamation) | loop and parallel children | 🟡 Medium | Open |
-| 6 | [Stamp grammar is duplicated and fails open](#6-stamp-grammar-is-duplicated-and-fails-open) | status write fence and inference | 🟡 Medium | Open |
-| 7 | [Nested loops have no cumulative iteration budget](#7-nested-loops-have-no-cumulative-iteration-budget) | nested loops | 🟡 Medium | Open |
-| 8 | [Signals inherit the sub-orchestration startup race](#8-signals-inherit-the-sub-orchestration-startup-race) | non-root loops | 🟡 Medium | Open |
-| 9 | [The 0.2.5 drain guidance is not an executable runbook](#9-the-025-drain-guidance-is-not-an-executable-runbook) | 0.2.4 → 0.2.5 upgrade | 🟡 Medium | Open |
-| 10 | [The status-write fence holds a row lock across round trips](#10-the-status-write-fence-holds-a-row-lock-across-round-trips) | schemas with `status_details` | 🟢 Low | Open — measure before changing |
-| 11 | [Status capability and inference paths repeat parsing work](#11-status-capability-and-inference-paths-repeat-parsing-work) | status writes and reads | 🟢 Low | Open — measure before changing |
+| 5 | [Parent fallback stamps assume child generation 1](#5-parent-fallback-stamps-assume-child-generation-1) | cancelled or failed loop children | 🟡 Medium | Open |
+| 6 | [Composed child ids block orphan reclamation](#6-composed-child-ids-block-orphan-reclamation) | loop and parallel children | 🟡 Medium | Open |
+| 7 | [Stamp grammar is duplicated and fails open](#7-stamp-grammar-is-duplicated-and-fails-open) | status write fence and inference | 🟡 Medium | Open |
+| 8 | [Nested loops have no cumulative iteration budget](#8-nested-loops-have-no-cumulative-iteration-budget) | nested loops | 🟡 Medium | Open |
+| 9 | [Signals inherit the sub-orchestration startup race](#9-signals-inherit-the-sub-orchestration-startup-race) | non-root loops | 🟡 Medium | Open |
+| 10 | [The 0.2.5 drain guidance is not an executable runbook](#10-the-025-drain-guidance-is-not-an-executable-runbook) | 0.2.4 → 0.2.5 upgrade | 🟡 Medium | Open |
+| 11 | [The status-write fence holds a row lock across round trips](#11-the-status-write-fence-holds-a-row-lock-across-round-trips) | schemas with `status_details` | 🟢 Low | Open — measure before changing |
+| 12 | [Status capability and inference paths repeat parsing work](#12-status-capability-and-inference-paths-repeat-parsing-work) | status writes and reads | 🟢 Low | Open — measure before changing |
 
 ---
 
@@ -166,7 +167,54 @@ marker that the worker can repair.
 
 ---
 
-## 5. Composed child ids block orphan reclamation
+## 5. Parent fallback stamps assume child generation 1
+
+**Severity: 🟡 Medium — affects cancelled or failed loop children that have
+already continued as new.**
+
+PR #228 moved ownership of a non-root loop node's status into its child
+orchestration. The parent still needs a terminal fallback when the child never
+gets far enough to stamp itself, when the child future fails, or when a live
+loop loses a RACE. #307 implemented the latter two paths by constructing a
+child execution stamp with a hard-coded generation 1:
+
+```rust
+let child_stamp = format!("{}::1", subtree_instance_id(ctx, loop_node_id));
+```
+
+The same assumption appears in `cancel_losing_loop_branch`. It is valid only
+before the child completes its first `continue_as_new`. If the loop has reached
+generation 2 or later, its node can already carry a stamp such as
+`{child_instance_id}::2`. The parent's terminal `::1` write is then correctly
+classified as older by `incoming_stamp_is_superseded` and fenced out. A fenced
+write returns `Ok`, so the parent cannot distinguish it from an applied
+terminal update; the completed parent instance can retain a physically
+`running` loop node.
+
+The existing losing-RACE test does not exercise this case. It races
+`df.sleep(1)` against `df.loop(df.sleep(30))`, guaranteeing cancellation during
+the first child generation, and explicitly asserts a trailing `::1` stamp.
+There is no test in which a loop completes at least one `continue_as_new` before
+losing the RACE.
+
+`fail_loop_child_future` has the same stale-fallback problem. A normal child
+failure usually stamps its own current generation before returning, but the
+generation-1 fallback cannot repair a missing or failed child-owned stamp after
+the child has advanced.
+
+### Suggested fix
+
+Do not synthesize a child generation the parent cannot know. Define an explicit
+terminal parent-override operation, use authoritative child execution metadata
+if it can be obtained without violating orchestration determinism, or record
+cancellation separately from execution-lineage ownership. Any design must keep
+later stale child writes from reopening terminal state. Add a regression that
+lets the losing loop reach generation 2 or later, then asserts that both its
+physical and inferred node statuses are terminal.
+
+---
+
+## 6. Composed child ids block orphan reclamation
 
 **Severity: 🟡 Medium — affects composed loop and parallel child ids.**
 
@@ -207,7 +255,7 @@ third interpretation of the same lineage.
 
 ---
 
-## 6. Stamp grammar is duplicated and fails open
+## 7. Stamp grammar is duplicated and fails open
 
 **Severity: 🟡 Medium — affects node-status fencing and inferred status.**
 
@@ -241,7 +289,7 @@ closed with an observable diagnostic.
 
 ---
 
-## 7. Nested loops have no cumulative iteration budget
+## 8. Nested loops have no cumulative iteration budget
 
 **Severity: 🟡 Medium — applies to nested loops.**
 
@@ -265,7 +313,7 @@ runtime input shape.
 
 ---
 
-## 8. Signals inherit the sub-orchestration startup race
+## 9. Signals inherit the sub-orchestration startup race
 
 **Severity: 🟡 Medium — applies to `df.wait_for_signal()` inside non-root loops.**
 
@@ -284,7 +332,7 @@ notes are not sufficient guidance for authors of new workflows.
 
 ---
 
-## 9. The 0.2.5 drain guidance is not an executable runbook
+## 10. The 0.2.5 drain guidance is not an executable runbook
 
 **Severity: 🟡 Medium — applies to the 0.2.4 → 0.2.5 upgrade.**
 
@@ -309,7 +357,7 @@ health. State explicitly that tenant-scoped execution is insufficient.
 
 ---
 
-## 10. The status-write fence holds a row lock across round trips
+## 11. The status-write fence holds a row lock across round trips
 
 **Severity: 🟢 Low — measure before changing.**
 
@@ -333,7 +381,7 @@ lock/CAS timeout as a retryable activity failure.
 
 ---
 
-## 11. Status capability and inference paths repeat parsing work
+## 12. Status capability and inference paths repeat parsing work
 
 **Severity: 🟢 Low — measure before changing.**
 
