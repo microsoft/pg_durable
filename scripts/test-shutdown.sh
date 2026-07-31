@@ -17,7 +17,8 @@
 #
 # Options:
 #   --pg-version VER     PostgreSQL major version (default: 17)
-#   --timeout SEC        Max seconds allowed for a graceful stop (default: 20)
+#   --timeout SEC        pg_ctl graceful-stop deadline (default: 20)
+#   --latency-limit SEC  Max clean-stop duration (default: 3)
 #   --cycles N           Number of stop/start cycles per scenario (default: 2)
 #   --verbose, -v        Show detailed output
 
@@ -28,6 +29,9 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PG_VERSION="${PG_VERSION:-17}"
 STOP_TIMEOUT=20
+# A clean stop measures ~1.2s, dominated by SHUTDOWN_CHECK_INTERVAL. 3s leaves
+# headroom for loaded CI while still catching a regression to the old ~8s path.
+SHUTDOWN_LATENCY_LIMIT=3
 CYCLES=2
 VERBOSE=false
 
@@ -37,6 +41,8 @@ while [[ $# -gt 0 ]]; do
             PG_VERSION="$2"; shift 2 ;;
         --timeout)
             STOP_TIMEOUT="$2"; shift 2 ;;
+        --latency-limit)
+            SHUTDOWN_LATENCY_LIMIT="$2"; shift 2 ;;
         --cycles)
             CYCLES="$2"; shift 2 ;;
         --verbose|-v)
@@ -132,20 +138,25 @@ wait_for_worker() {
     return 1
 }
 
-# Stop the server and return the elapsed time in seconds.
-# Prints elapsed time to stdout; returns 0 on clean stop, 1 on fallback.
+# Render milliseconds as seconds with 2 decimals, e.g. 1210 -> 1.21
+fmt_secs() {
+    printf '%d.%02d' "$(($1 / 1000))" "$(($1 % 1000 / 10))"
+}
+
+# Stop the server and return the elapsed time in milliseconds. Whole-second
+# resolution is too coarse to distinguish a ~1.2s clean stop from a regression.
+# Prints elapsed ms to stdout; returns 0 on clean stop, 1 on fallback.
 timed_stop() {
-    local start end elapsed rc=0
-    start=$(date +%s)
+    local start end rc=0
+    start=$(date +%s%3N)
 
     if ! "$PG_CTL" -D "$DATA_DIR" stop -m fast -t "$STOP_TIMEOUT" >/dev/null 2>&1; then
         rc=1
         "$PG_CTL" -D "$DATA_DIR" stop -m immediate >/dev/null 2>&1 || true
     fi
 
-    end=$(date +%s)
-    elapsed=$((end - start))
-    echo "$elapsed"
+    end=$(date +%s%3N)
+    echo "$((end - start))"
     return $rc
 }
 
@@ -203,12 +214,13 @@ for cycle in $(seq 1 "$CYCLES"); do
     ensure_extension
     wait_for_worker
 
-    elapsed=$(timed_stop) && clean=true || clean=false
+    elapsed_ms=$(timed_stop) && clean=true || clean=false
+    elapsed=$(fmt_secs "$elapsed_ms")
     if [ "$VERBOSE" = true ]; then
-        log "    stop took ${elapsed}s (limit ${STOP_TIMEOUT}s)"
+        log "    stop took ${elapsed}s (limit ${SHUTDOWN_LATENCY_LIMIT}s)"
     fi
 
-    if [ "$clean" = true ] && [ "$elapsed" -le "$STOP_TIMEOUT" ]; then
+    if [ "$clean" = true ] && [ "$elapsed_ms" -le "$((SHUTDOWN_LATENCY_LIMIT * 1000))" ]; then
         ok "Scenario A cycle $cycle: clean stop in ${elapsed}s"
     else
         fail "Scenario A cycle $cycle: stop took ${elapsed}s or required immediate fallback"
@@ -234,12 +246,13 @@ for cycle in $(seq 1 "$CYCLES"); do
     # Give the function a moment to start executing
     sleep 2
 
-    elapsed=$(timed_stop) && clean=true || clean=false
+    elapsed_ms=$(timed_stop) && clean=true || clean=false
+    elapsed=$(fmt_secs "$elapsed_ms")
     if [ "$VERBOSE" = true ]; then
-        log "    stop took ${elapsed}s (limit ${STOP_TIMEOUT}s)"
+        log "    stop took ${elapsed}s (limit ${SHUTDOWN_LATENCY_LIMIT}s)"
     fi
 
-    if [ "$clean" = true ] && [ "$elapsed" -le "$STOP_TIMEOUT" ]; then
+    if [ "$clean" = true ] && [ "$elapsed_ms" -le "$((SHUTDOWN_LATENCY_LIMIT * 1000))" ]; then
         ok "Scenario B cycle $cycle: clean stop in ${elapsed}s"
     else
         fail "Scenario B cycle $cycle: stop took ${elapsed}s or required immediate fallback"
@@ -259,7 +272,7 @@ for cycle in $(seq 1 "$CYCLES"); do
     info "  Cycle $cycle: stop..."
     # Server may still be running from previous scenario
     if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
-        elapsed=$(timed_stop) && clean=true || clean=false
+        elapsed_ms=$(timed_stop) && clean=true || clean=false
         sleep 1
     else
         clean=true

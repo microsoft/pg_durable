@@ -296,24 +296,15 @@ async fn run_duroxide_runtime() {
         .await;
     }
 
-    // Close shared pools explicitly with a bounded timeout so that a
-    // shutting-down or already-gone PostgreSQL server cannot cause
-    // pool.close().await to block indefinitely (e.g. while waiting for
-    // in-flight queries to return their connections or for the TCP handshake
-    // to complete).
-    const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-    if tokio::time::timeout(POOL_CLOSE_TIMEOUT, mgmt_pool.close())
-        .await
-        .is_err()
-    {
-        log!("pg_durable: management pool close timed out — forcing shutdown");
-    }
-    if tokio::time::timeout(POOL_CLOSE_TIMEOUT, poll_pool.close())
-        .await
-        .is_err()
-    {
-        log!("pg_durable: poll pool close timed out — forcing shutdown");
-    }
+    // Mark the shared pools closed and briefly poll their close futures so
+    // maintenance tasks and pending acquisitions observe shutdown. In-flight
+    // queries may not return connections while PostgreSQL is terminating its
+    // backends, so the BGW process exit performs the final cleanup.
+    const POOL_CLOSE_GRACE: Duration = Duration::from_millis(100);
+    let _ = tokio::join!(
+        tokio::time::timeout(POOL_CLOSE_GRACE, mgmt_pool.close()),
+        tokio::time::timeout(POOL_CLOSE_GRACE, poll_pool.close()),
+    );
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
@@ -957,30 +948,41 @@ async fn run_until_extension_dropped_or_shutdown(
     }
 
     log!("pg_durable: initiating duroxide runtime shutdown...");
-    // Give duroxide workers 2 seconds to finish their current turn before
-    // aborting.  Any task that has not completed by then is force-cancelled.
-    // We use a short timeout because PostgreSQL is already shutting down its
-    // backends: long-running work will error out anyway, and blocking the BGW
-    // here prevents the postmaster from completing its graceful stop.
-    duroxide_runtime.shutdown(Some(2_000)).await;
-    log!("pg_durable: duroxide runtime shutdown complete");
 
-    // Explicitly close the duroxide store's connection pool.  Without this
-    // the pool is only closed on Drop (when the Arc refcount hits zero), which
-    // spawns async cleanup tasks that can outlive the runtime-shutdown window.
-    //
-    // The duroxide-pg pool is configured with min_connections=1, so its
-    // maintenance task would otherwise try to re-open a connection to the
-    // shutting-down PostgreSQL, potentially blocking in the Tokio blocking
-    // thread pool.  Closing the pool explicitly here — with a bounded timeout
-    // — drains those tasks inside our controlled async context.
-    const DUROXIDE_POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-    if tokio::time::timeout(DUROXIDE_POOL_CLOSE_TIMEOUT, duroxide_store.pool().close())
-        .await
-        .is_err()
-    {
-        log!("pg_durable: duroxide store pool close timed out — forcing shutdown");
+    if is_shutdown_requested() {
+        // Close before aborting — the reverse of the branch below. PostgreSQL is
+        // killing this process's backends, so duroxide's dispatcher tasks stay
+        // parked on dead sockets and never return their connections; close()
+        // can never resolve here. Closing first still marks the pool closed so
+        // pending acquisitions fail fast rather than waiting on a server that is
+        // going away. In-flight queries see PoolClosed, which is correct: they
+        // cannot commit against a stopping server anyway. proc_exit() reclaims
+        // whatever is left.
+        const POOL_CLOSE_GRACE: Duration = Duration::from_millis(100);
+        let _ = tokio::time::timeout(POOL_CLOSE_GRACE, duroxide_store.pool().close()).await;
+
+        // Some(0) is load-bearing on two duroxide internals: a non-zero timeout
+        // is an unconditional sleep rather than a deadline, and the zero branch
+        // returns without setting duroxide's cooperative shutdown_flag. Leaving
+        // that flag unset is only safe because proc_exit() follows immediately.
+        // Re-verify both when upgrading duroxide.
+        duroxide_runtime.shutdown(Some(0)).await;
+    } else {
+        // Live process: the runtime is being restarted after an extension drop
+        // or recreation, so connections must actually be reclaimed. Drain first,
+        // then close, and keep the timeout as a backstop against the same
+        // upstream deadlock should the server become unreachable mid-restart.
+        duroxide_runtime.shutdown(Some(2_000)).await;
+
+        const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+        if tokio::time::timeout(POOL_CLOSE_TIMEOUT, duroxide_store.pool().close())
+            .await
+            .is_err()
+        {
+            log!("pg_durable: duroxide store pool close timed out — forcing shutdown");
+        }
     }
+    log!("pg_durable: duroxide runtime shutdown complete");
 }
 
 /// Maximum orphans one reconciliation pass reclaims, bounding a single tick's work.
