@@ -825,6 +825,12 @@ const TXN_MODE_NEW: &str = "new";
 /// Advisory-lock namespace for admission control on `transaction_mode => 'new'`
 /// launches. Each slot is a separate session-level advisory lock object under
 /// this class ID.
+///
+/// The value spells `PGDF` in ASCII to make the slots easy to spot in
+/// `pg_locks` (they appear with `locktype = 'advisory'`, `classid = 1346982470`,
+/// `objsubid = 2`, and `objid` equal to the slot index). Reserving a distinctive
+/// two-int advisory-lock class id means a collision is only possible if an
+/// application separately calls `pg_advisory_lock(0x50474446::int4, ...)`.
 const NEW_TRANSACTION_START_LOCK_CLASS_ID: i32 = 0x5047_4446;
 
 struct NewTransactionStartAdmissionGuard {
@@ -887,6 +893,11 @@ fn acquire_new_transaction_start_slot() -> Result<NewTransactionStartAdmissionGu
             ));
         }
 
+        // Poll instead of blocking on a lock: a failed pg_try_advisory_lock
+        // returns immediately holding nothing, so a waiting caller blocks no one
+        // and cannot deadlock. Note this sleep does not CHECK_FOR_INTERRUPTS, so
+        // a cancel / statement_timeout on a waiting caller is only honored on the
+        // next SPI poll (<=100ms later, when pg_try_advisory_lock runs).
         std::thread::sleep(Duration::from_millis(100));
     }
 }

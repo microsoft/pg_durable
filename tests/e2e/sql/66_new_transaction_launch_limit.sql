@@ -207,6 +207,54 @@ BEGIN
     RAISE NOTICE 'PASSED [rejection_cleanup]: rejected launches left no runnable or orphaned work';
 END $$;
 
+-- A launch that acquires an admission slot and then FAILS inside the loopback
+-- session must still release its slot. This exercises the RAII guard's Drop on
+-- the error path, which the concurrency assertions above never hit (their
+-- rejected callers time out before acquiring a slot, so they hold nothing).
+-- Regression guard for a slot leak on the acquired-then-failed path.
+DO $$
+DECLARE
+    held_slots    INT;
+    launch_failed BOOLEAN := false;
+    recover_id    TEXT;
+    status        TEXT;
+BEGIN
+    -- Target a database that does not exist so the loopback df.start fails only
+    -- *after* the outer session has taken an admission slot.
+    BEGIN
+        PERFORM df.start('SELECT 1', 'test-new-start-fail', 'no_such_db_pg_durable', 'new');
+    EXCEPTION WHEN OTHERS THEN
+        launch_failed := true;
+    END;
+
+    IF NOT launch_failed THEN
+        RAISE EXCEPTION 'TEST FAILED: launch against a missing database unexpectedly succeeded';
+    END IF;
+
+    -- Admission slots are two-int session advisory locks under class id
+    -- 0x50474446 (1346982470). If the guard released the slot on the error path,
+    -- none remain held anywhere in the cluster.
+    SELECT count(*)
+    INTO held_slots
+    FROM pg_locks
+    WHERE locktype = 'advisory'
+      AND classid = 1346982470
+      AND objsubid = 2;
+
+    IF held_slots <> 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: % admission slot(s) leaked after a failed loopback launch', held_slots;
+    END IF;
+
+    -- Capacity must be fully restored: a normal 'new' launch still succeeds.
+    recover_id := df.start('SELECT 1', 'test-new-start-recover', NULL, 'new');
+    SELECT df.await_instance(recover_id, 30) INTO status;
+    IF status <> 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: post-failure launch status = %', status;
+    END IF;
+
+    RAISE NOTICE 'PASSED [slot_release_on_error]: failed loopback launch released its admission slot';
+END $$;
+
 DROP TABLE _dblink_conn;
 DROP TABLE _launch_conn;
 
