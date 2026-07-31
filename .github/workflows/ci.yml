@@ -201,6 +201,10 @@ jobs:
         id: upgrade_tests
         run: ./scripts/test-upgrade.sh --pg-version ${{ matrix.pg_version }}
 
+      - name: Run shutdown regression test
+        id: shutdown_test
+        run: ./scripts/test-shutdown.sh --pg-version ${{ matrix.pg_version }} --cycles 1
+
       - name: Upload PostgreSQL logs on E2E failure
         if: failure()
         uses: actions/upload-artifact@v4

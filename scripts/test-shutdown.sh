@@ -91,6 +91,7 @@ configure_standard() {
     local conf="$DATA_DIR/postgresql.conf"
     sed -i.bak '/^[#[:space:]]*shared_preload_libraries/d' "$conf"
     sed -i.bak '/^[#[:space:]]*pg_durable\./d' "$conf"
+    rm -f "$conf.bak"
     : > "$DATA_DIR/postgresql.auto.conf"
     cat >> "$conf" <<EOF
 port = $PG_PORT
@@ -108,7 +109,7 @@ start_server() {
         attempts=$((attempts + 1))
         if [ "$attempts" -ge 60 ]; then
             echo "PostgreSQL did not become ready on port $PG_PORT"
-            exit 1
+            return 1
         fi
         sleep 0.5
     done
@@ -173,7 +174,11 @@ SQL
 
 info "Building pg_durable extension..."
 cd "$PROJECT_DIR"
-cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains >/dev/null 2>&1
+if ! cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains > /tmp/pg_durable-shutdown-build.log 2>&1; then
+    echo -e "${RED}Build failed:${NC}"
+    cat /tmp/pg_durable-shutdown-build.log
+    exit 1
+fi
 info "Build complete"
 
 if [ ! -d "$DATA_DIR" ]; then
