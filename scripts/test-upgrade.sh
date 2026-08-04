@@ -778,6 +778,10 @@ test_b1_dsl_chain() {
     assert_sql_contains "SELECT df.sql('SELECT 1') ~> df.sql('SELECT 2');" '"node_type":"THEN"'
 }
 
+test_b1_conditional_operators() {
+    assert_sql_contains "SELECT ('SELECT true' ?> 'SELECT 1') !> 'SELECT 0';" '"node_type":"IF"'
+}
+
 # Verify that release_extension_owned_duroxide_objects de-registered all
 # duroxide objects from the extension.  On a fresh install there are none;
 # on a v0.1.1-schema upgrade the BGW must have removed them before this runs.
@@ -901,6 +905,7 @@ else
         run_test "B1 [v${B1_VERSION}]: df.version()" test_b1_version
         run_test "B1 [v${B1_VERSION}]: df.sql() construction" test_b1_dsl_construction
         run_test "B1 [v${B1_VERSION}]: DSL chain (~>)" test_b1_dsl_chain
+        run_test "B1 [v${B1_VERSION}]: conditional operators (?>/!>)" test_b1_conditional_operators
         run_test "B1 [v${B1_VERSION}]: df.start()/wait_for_completion()" test_b1_start_and_complete
         run_test "B1 [v${B1_VERSION}]: df.status() on real instance" test_b1_status_instance
         run_test "B1 [v${B1_VERSION}]: df.result()" test_b1_result

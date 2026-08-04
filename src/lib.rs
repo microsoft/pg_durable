@@ -741,76 +741,39 @@ CREATE OPERATOR | (
 -- Helper: cond ?> then creates a partial if (stores condition and then branch)
 CREATE OR REPLACE FUNCTION df.if_then_op(condition text, then_branch text) RETURNS text AS $$
 DECLARE
-    cond_fut jsonb;
-    then_fut jsonb;
     result_obj jsonb;
 BEGIN
-    -- Ensure both are durofuts
-    cond_fut := df.ensure_durofut(condition)::jsonb;
-    then_fut := df.ensure_durofut(then_branch)::jsonb;
-    
-    -- Return a special marker object for the partial if
-    result_obj := jsonb_build_object(
+    -- Keep operands as text until !> completes the expression. df.if() then
+    -- performs the same Durofut normalization as the function-call syntax.
+    result_obj := pg_catalog.jsonb_build_object(
         '_partial_if', true,
-        'condition', cond_fut,
-        'then_branch', then_fut
+        'condition', condition,
+        'then_branch', then_branch
     );
-    RETURN result_obj::text;
+    RETURN result_obj::pg_catalog.text;
 END;
-$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp;
 
 -- Helper: partial_if !> else completes the if node
 CREATE OR REPLACE FUNCTION df.if_else_op(partial_if text, else_branch text) RETURNS text AS $$
 DECLARE
     partial jsonb;
-    else_fut text;
     cond_text text;
     then_text text;
 BEGIN
-    partial := partial_if::jsonb;
+    partial := partial_if::pg_catalog.jsonb;
     
     -- Check if it's a partial if
     IF partial->>'_partial_if' IS NULL THEN
         RAISE EXCEPTION 'Invalid if-then-else: left side of !> must be a ?> expression';
     END IF;
     
-    cond_text := partial->'condition'::text;
-    then_text := partial->'then_branch'::text;
-    else_fut := df.ensure_durofut(else_branch);
+    -- ->> handles both the text operands emitted above and object operands
+    -- emitted by the pre-0.2.6 helper, so partial expressions survive upgrade.
+    cond_text := partial->>'condition';
+    then_text := partial->>'then_branch';
     
-    -- Now call the real df.if function
-    RETURN df.if(cond_text, then_text, else_fut);
-END;
-$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, df, pg_temp;
-
--- Helper to ensure a value is a durofut (returns JSON string)
--- Rejects JSON with unknown node_type values.
--- NOTE: The valid node type list here must be kept in sync with
--- VALID_NODE_TYPES in src/types.rs (the Rust constant is the canonical source).
-CREATE OR REPLACE FUNCTION df.ensure_durofut(val text) RETURNS text AS $$
-DECLARE
-    node_type_val text;
-BEGIN
-    -- Try to parse as JSON to check if it's already a durofut
-    BEGIN
-        node_type_val := (val::jsonb)->>'node_type';
-        IF node_type_val IS NOT NULL THEN
-            -- Has a node_type - validate it
-            IF node_type_val NOT IN ('SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL') THEN
-                RAISE EXCEPTION 'Unknown node_type ''%''. Valid types: SQL, THEN, IF, JOIN, LOOP, BREAK, RACE, SLEEP, WAIT_SCHEDULE, HTTP, HTTP_MULTIPART, SIGNAL', node_type_val;
-            END IF;
-            RETURN val;
-        END IF;
-    EXCEPTION WHEN invalid_text_representation THEN
-        -- Not valid JSON, treat as SQL
-        NULL;
-    WHEN raise_exception THEN
-        -- Re-raise our validation error
-        RAISE;
-    END;
-    
-    -- It's plain SQL, wrap it
-    RETURN df.sql(val);
+    RETURN df.if(cond_text, then_text, else_branch);
 END;
 $$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp;
 
@@ -1549,6 +1512,35 @@ mod tests {
             .unwrap();
         let fut = Durofut::from_json(&result);
         assert_eq!(fut.result_name, Some("my_name".to_string()));
+    }
+
+    #[pg_test]
+    fn test_conditional_operator_accepts_legacy_partial() {
+        let result = Spi::get_one::<String>(
+            r#"SELECT df.if_else_op(
+                pg_catalog.jsonb_build_object(
+                    '_partial_if', true,
+                    'condition', df.sql('SELECT true')::jsonb,
+                    'then_branch', df.sql('SELECT 1')::jsonb
+                )::text,
+                'SELECT 0'
+            )"#,
+        )
+        .unwrap()
+        .unwrap();
+        let fut = Durofut::from_json(&result);
+        assert_eq!(fut.node_type, "IF");
+        assert!(fut.validate_recursive().is_ok());
+    }
+
+    #[pg_test]
+    fn test_ensure_durofut_is_not_installed() {
+        let exists = Spi::get_one::<bool>(
+            "SELECT pg_catalog.to_regprocedure('df.ensure_durofut(text)') IS NOT NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!exists);
     }
 
     #[pg_test]

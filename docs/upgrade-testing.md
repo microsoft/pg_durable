@@ -205,11 +205,13 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.5 → v0.2.6
 
-#### Preserve parser resource errors in `df.ensure_durofut()`
-- **DDL change (function body only):** `df.ensure_durofut(text)` no longer catches `WHEN OTHERS` while deciding whether an operand is Durofut JSON or plain SQL. It still treats `invalid_text_representation` as plain SQL and re-raises its explicit unknown-node-type error, but PostgreSQL stack/resource errors now propagate instead of silently wrapping the serialized graph as a SQL node. The signature, volatility, search path, grants, and schema shape are unchanged.
-- **Upgrade script:** `sql/pg_durable--0.2.5--0.2.6.sql` uses `CREATE OR REPLACE FUNCTION` with the same body emitted for fresh installs from `src/lib.rs`. This keeps Scenario A snapshots identical without dropping the function or changing dependent operators.
-- **Scenario B1 considerations:** The new `.so` works against pre-0.2.6 schemas without runtime schema detection because no Rust SQL query or C symbol changed. Rust composers receive the opaque-child deserialization fix immediately from the new binary. Until `ALTER EXTENSION UPDATE` replaces the cataloged PL/pgSQL helper, the `?>` / `!>` operator path retains its older broad exception handler and can still misclassify a graph if PostgreSQL itself raises a stack/resource error while parsing it.
-- **Scenario B2 considerations:** No data migration and no durable-state or replay change. Existing serialized graphs retain the same wire format.
+#### Remove `df.ensure_durofut()`
+- **DDL change:** Fresh installs no longer create the undocumented `df.ensure_durofut(text)` PL/pgSQL helper. `df.if_then_op()` now stores its condition and then-branch operands as text in the partial marker; `df.if_else_op()` extracts those operands and passes all three directly to the Rust-backed `df.if()`, which already performs Durofut normalization.
+- **Upgrade script:** `sql/pg_durable--0.2.5--0.2.6.sql` replaces both operator helpers before dropping `df.ensure_durofut(text)` with `RESTRICT`. The new `df.if_else_op()` uses JSON text extraction, which accepts both new string-valued partial markers and object-valued markers emitted before the upgrade. `RESTRICT` deliberately aborts rather than silently removing a customer-owned object that depends on the undocumented helper.
+- **Behavior change:** The operators now classify operands exactly like `df.if()`. In particular, JSON with an unknown `node_type` is treated as plain SQL during composition instead of being rejected by the former PL/pgSQL helper.
+- **Scenario A considerations:** Fresh and upgraded schemas both omit `df.ensure_durofut(text)` and expose byte-equivalent `df.if_then_op()` / `df.if_else_op()` definitions, including their pinned `search_path`.
+- **Scenario B1 considerations:** A binary-only update against any supported pre-0.2.6 schema leaves the cataloged PL/pgSQL helper and old operator bodies intact. They continue calling the unchanged `df.sql()` and `df.if()` C bindings; no binary symbol is removed because `df.ensure_durofut()` was not C-backed. B1 explicitly composes a `?>` / `!>` expression against every supported old schema.
+- **Scenario B2 considerations:** No durable data or graph wire format changes. A partial `?>` value materialized before `ALTER EXTENSION` can still be completed with `!>` afterward. The upgrade can fail only when a customer-owned catalog object depends directly on `df.ensure_durofut(text)`; the operator helpers themselves are replaced before the drop.
 
 ### v0.2.4 → v0.2.5
 

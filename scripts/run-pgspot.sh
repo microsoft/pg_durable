@@ -42,18 +42,21 @@ PGSPOT_ALLOW=(
   # example, `df.sql(...) ~> df.sql(...)`) so users do not need df in search_path.
   # pgspot reports the generated CREATE OPERATOR name as an unqualified object.
   '^PS017: Unqualified object reference: ~> at line [0-9]+$'
-  # Upgrade scripts CREATE OR REPLACE df.grant_usage()/df.revoke_usage()/
-  # df.ensure_durofut() to migrate pre-existing installs. pgspot flags PS002
+  # Upgrade scripts CREATE OR REPLACE selected df helpers to migrate
+  # pre-existing installs. pgspot flags PS002
   # because a standalone upgrade script has no `CREATE SCHEMA df` to prove df is
   # extension-owned (the install SQL does, so it is not flagged there).
   # PostgreSQL 14.5+ blocks a CREATE OR REPLACE in an extension script that
   # would replace a non-extension object, so this is safe. Scoped to these
-  # three functions only. ensure_durofut's PS005/PS001/PS017 are fixed at the
-  # source (its search_path omits df — see the function's NOTE comment), so
-  # only its inherent PS002 needs allowing.
+  # these functions only. Their search paths and references are safe, so only
+  # the inherent PS002 needs allowing. ensure_durofut remains here solely
+  # because the released 0.2.4 -> 0.2.5 script still defines it; fresh 0.2.6
+  # installs and the 0.2.5 -> 0.2.6 result remove the function.
   '^PS002: Unsafe function creation: df\.grant_usage\(p_role text,include_http boolean,with_grant boolean\) at line [0-9]+$'
   '^PS002: Unsafe function creation: df\.revoke_usage\(p_role text\) at line [0-9]+$'
   '^PS002: Unsafe function creation: df\.ensure_durofut\(val text\) at line [0-9]+$'
+  '^PS002: Unsafe function creation: df\.if_then_op\(condition text,then_branch text\) at line [0-9]+$'
+  '^PS002: Unsafe function creation: df\.if_else_op\(partial_if text,else_branch text\) at line [0-9]+$'
 )
 
 # Whole codes to suppress globally (pgspot --ignore). Prefer PGSPOT_ALLOW. Empty.
