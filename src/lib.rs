@@ -2238,6 +2238,37 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_ensure_rejects_corrupt_durofut_envelope() {
+        // A JSON object carrying a node_type but failing to deserialize (here a
+        // non-object child) is a corrupt Durofut envelope. Durofut::ensure must
+        // fail loudly rather than silently wrap the raw JSON as a SQL node,
+        // which would only blow up later at execution time.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            r#"SELECT pg_temp.capture_error($$
+                 SELECT df.seq('{"node_type":"THEN","left_node":123}', df.sql('SELECT 1'))
+             $$)"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("Invalid Durofut JSON"),
+            "expected df.seq to reject the corrupt Durofut envelope, got: {msg}"
+        );
+    }
+
+    #[pg_test]
     fn test_autowrap_start_plain_sql() {
         // Start with plain SQL - simplest possible durable function
         let instance_id = crate::dsl::start("SELECT 42", Some("autowrap-test"), None);

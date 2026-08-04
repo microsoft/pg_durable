@@ -301,12 +301,12 @@ fn collect_nodes(
     // Recursively collect children first to get their IDs
     let left_id = node.left_node.as_ref().map(|raw| {
         let child = crate::types::Durofut::child_from_raw(raw)
-            .expect("validated Durofut child must deserialize");
+            .unwrap_or_else(|e| pgrx::error!("Invalid left child in graph: {}", e));
         collect_nodes(&child, nodes, id_counter)
     });
     let right_id = node.right_node.as_ref().map(|raw| {
         let child = crate::types::Durofut::child_from_raw(raw)
-            .expect("validated Durofut child must deserialize");
+            .unwrap_or_else(|e| pgrx::error!("Invalid right child in graph: {}", e));
         collect_nodes(&child, nodes, id_counter)
     });
 

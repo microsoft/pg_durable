@@ -1279,6 +1279,16 @@ impl Durofut {
             .unwrap_or(false)
     }
 
+    /// True when `s` is a JSON object carrying a `node_type` field, i.e. a
+    /// Durofut envelope (possibly corrupt) rather than plain SQL text. Uses a
+    /// generic JSON parse so it is robust to serialized field ordering.
+    fn is_durofut_envelope(s: &str) -> bool {
+        matches!(
+            serde_json::from_str::<serde_json::Value>(s),
+            Ok(v) if v.get("node_type").and_then(|nt| nt.as_str()).is_some()
+        )
+    }
+
     /// Ensure a string is a Durofut - if it's already one, parse it; if not, treat as SQL and create a node.
     /// Uses a single deserialization attempt to avoid redundant parsing.
     pub fn ensure(s: &str) -> Self {
@@ -1287,6 +1297,16 @@ impl Durofut {
         }
         match serde_json::from_str::<Durofut>(s) {
             Ok(d) if VALID_NODE_TYPES.contains(&d.node_type.as_str()) => d,
+            Err(serde_err) if Self::is_durofut_envelope(s) => {
+                // A JSON object carrying a node_type is a Durofut envelope that
+                // failed to deserialize (e.g. a corrupt or non-object child).
+                // Fail loudly instead of silently wrapping the raw envelope as
+                // a SQL node, which would later blow up at execution time.
+                pgrx::error!(
+                    "Invalid Durofut JSON: failed to deserialize workflow step: {}",
+                    serde_err
+                );
+            }
             _ => Durofut {
                 node_type: "SQL".to_string(),
                 query: Some(s.to_string()),
@@ -1538,6 +1558,39 @@ mod tests {
 
         assert!(durofut.validate_recursive().is_ok());
         assert_eq!(durofut.to_json(), json);
+    }
+
+    #[test]
+    fn deep_join_chain_deserializes_and_validates() {
+        // JOIN/RACE nest through left/right RawValue children just like THEN,
+        // so a deep JOIN fold must share the corrected opaque-child path.
+        let mut json = r#"{"node_type":"SQL","query":"SELECT 1"}"#.to_string();
+        for _ in 0..129 {
+            json = format!(
+                r#"{{"node_type":"JOIN","left_node":{},"right_node":{{"node_type":"SQL","query":"SELECT 1"}}}}"#,
+                json
+            );
+        }
+
+        let durofut = Durofut::try_from_json(&json).unwrap();
+
+        assert!(durofut.validate_recursive().is_ok());
+        assert_eq!(durofut.to_json(), json);
+    }
+
+    #[test]
+    fn is_durofut_envelope_detects_node_type_regardless_of_order() {
+        // Robust to serialized field ordering: node_type not first.
+        assert!(Durofut::is_durofut_envelope(
+            r#"{"query":"SELECT 1","node_type":"SQL"}"#
+        ));
+        // A corrupt envelope (non-object child) still reads as an envelope.
+        assert!(Durofut::is_durofut_envelope(
+            r#"{"node_type":"THEN","left_node":123}"#
+        ));
+        // Plain SQL and non-envelope JSON are not envelopes.
+        assert!(!Durofut::is_durofut_envelope("SELECT 1"));
+        assert!(!Durofut::is_durofut_envelope(r#"{"foo":1}"#));
     }
 
     #[test]
