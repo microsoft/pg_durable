@@ -203,6 +203,14 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.5 → v0.2.6
+
+#### Preserve parser resource errors in `df.ensure_durofut()`
+- **DDL change (function body only):** `df.ensure_durofut(text)` no longer catches `WHEN OTHERS` while deciding whether an operand is Durofut JSON or plain SQL. It still treats `invalid_text_representation` as plain SQL and re-raises its explicit unknown-node-type error, but PostgreSQL stack/resource errors now propagate instead of silently wrapping the serialized graph as a SQL node. The signature, volatility, search path, grants, and schema shape are unchanged.
+- **Upgrade script:** `sql/pg_durable--0.2.5--0.2.6.sql` uses `CREATE OR REPLACE FUNCTION` with the same body emitted for fresh installs from `src/lib.rs`. This keeps Scenario A snapshots identical without dropping the function or changing dependent operators.
+- **Scenario B1 considerations:** The new `.so` works against pre-0.2.6 schemas without runtime schema detection because no Rust SQL query or C symbol changed. Rust composers receive the opaque-child deserialization fix immediately from the new binary. Until `ALTER EXTENSION UPDATE` replaces the cataloged PL/pgSQL helper, the `?>` / `!>` operator path retains its older broad exception handler and can still misclassify a graph if PostgreSQL itself raises a stack/resource error while parsing it.
+- **Scenario B2 considerations:** No data migration and no durable-state or replay change. Existing serialized graphs retain the same wire format.
+
 ### v0.2.4 → v0.2.5
 
 #### Loop and sub-orchestration replay compatibility

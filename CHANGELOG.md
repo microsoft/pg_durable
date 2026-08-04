@@ -6,6 +6,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.6] - Unreleased
 
+### Fixed
+
+- **Deep workflow composition (#327):** workflow graphs deeper than serde_json's 127-level recursion limit no longer silently collapse into SQL text. Nested children are deserialized one graph level at a time, and `df.explain()` now enforces the configured graph-depth limit before traversal.
+
 ## [0.2.5] - 2026-07-30
 
 ### Added

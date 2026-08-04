@@ -235,8 +235,8 @@ pub fn then_fn(a: &str, b: &str) -> String {
 
     Durofut {
         node_type: "THEN".to_string(),
-        left_node: Some(Box::new(a_fut)),
-        right_node: Some(Box::new(b_fut)),
+        left_node: Some(a_fut.into_raw()),
+        right_node: Some(b_fut.into_raw()),
         ..Default::default()
     }
     .to_json()
@@ -337,7 +337,7 @@ pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String 
 
     Durofut {
         node_type: "LOOP".to_string(),
-        left_node: Some(Box::new(body_fut)),
+        left_node: Some(body_fut.into_raw()),
         query,
         ..Default::default()
     }
@@ -390,8 +390,8 @@ pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
 
     Durofut {
         node_type: "IF".to_string(),
-        left_node: Some(Box::new(then_fut)),
-        right_node: Some(Box::new(else_fut)),
+        left_node: Some(then_fut.into_raw()),
+        right_node: Some(else_fut.into_raw()),
         query: Some(config.to_string()),
         ..Default::default()
     }
@@ -413,8 +413,8 @@ pub fn if_rows_fn(result_name: &str, then_branch: &str, else_branch: &str) -> St
 
     Durofut {
         node_type: "IF".to_string(),
-        left_node: Some(Box::new(then_fut)),
-        right_node: Some(Box::new(else_fut)),
+        left_node: Some(then_fut.into_raw()),
+        right_node: Some(else_fut.into_raw()),
         query: Some(config.to_string()),
         ..Default::default()
     }
@@ -430,8 +430,8 @@ pub fn join(a: &str, b: &str) -> String {
 
     Durofut {
         node_type: "JOIN".to_string(),
-        left_node: Some(Box::new(a_fut)),
-        right_node: Some(Box::new(b_fut)),
+        left_node: Some(a_fut.into_raw()),
+        right_node: Some(b_fut.into_raw()),
         ..Default::default()
     }
     .to_json()
@@ -451,8 +451,8 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
 
     Durofut {
         node_type: "JOIN".to_string(),
-        left_node: Some(Box::new(a_fut)),
-        right_node: Some(Box::new(b_fut)),
+        left_node: Some(a_fut.into_raw()),
+        right_node: Some(b_fut.into_raw()),
         query: Some(config.to_string()),
         ..Default::default()
     }
@@ -468,8 +468,8 @@ pub fn race(a: &str, b: &str) -> String {
 
     Durofut {
         node_type: "RACE".to_string(),
-        left_node: Some(Box::new(a_fut)),
-        right_node: Some(Box::new(b_fut)),
+        left_node: Some(a_fut.into_raw()),
+        right_node: Some(b_fut.into_raw()),
         ..Default::default()
     }
     .to_json()
@@ -1072,9 +1072,11 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
             );
         }
         // Recursively insert children FIRST to get their IDs
-        let left_id = node.left_node.as_ref().map(|n| {
+        let left_id = node.left_node.as_ref().map(|raw| {
+            let child = Durofut::child_from_raw(raw)
+                .unwrap_or_else(|e| pgrx::error!("Invalid left child in graph: {}", e));
             insert_nodes(
-                n,
+                &child,
                 instance_id,
                 None,
                 current_user_oid,
@@ -1083,9 +1085,11 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                 node_count,
             )
         });
-        let right_id = node.right_node.as_ref().map(|n| {
+        let right_id = node.right_node.as_ref().map(|raw| {
+            let child = Durofut::child_from_raw(raw)
+                .unwrap_or_else(|e| pgrx::error!("Invalid right child in graph: {}", e));
             insert_nodes(
-                n,
+                &child,
                 instance_id,
                 None,
                 current_user_oid,

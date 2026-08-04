@@ -178,5 +178,100 @@ END $$;
 
 DROP TABLE _test_wait_blocked;
 
+-- === Test: deep graph composition (#327) ===
+
+DO $$
+DECLARE
+    graph TEXT := df.sql('SELECT 1');
+    explanation TEXT;
+BEGIN
+    FOR i IN 1..129 LOOP
+        graph := df.seq(graph, 'SELECT 1');
+    END LOOP;
+
+    explanation := df.explain(graph);
+    IF explanation LIKE 'Invalid durable function graph:%'
+         OR pg_catalog.regexp_count(explanation, '→') != 129 THEN
+        RAISE EXCEPTION 'TEST FAILED: 129-level df.seq graph was corrupted: %', explanation;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: df.seq composes beyond serde recursion limit';
+END $$;
+
+DO $$
+DECLARE
+    graph TEXT := df.sql('SELECT 1');
+    explanation TEXT;
+BEGIN
+    FOR i IN 1..129 LOOP
+        graph := ('SELECT true' ?> graph) !> 'SELECT 0';
+    END LOOP;
+
+    explanation := df.explain(graph);
+    IF explanation LIKE 'Invalid durable function graph:%'
+       OR pg_catalog.regexp_count(explanation, 'IF') != 129 THEN
+        RAISE EXCEPTION 'TEST FAILED: 129-level ?>/!> graph was corrupted: %', explanation;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: ?>/!> composes beyond parser recursion limit';
+END $$;
+
+DO $$
+DECLARE
+    graph TEXT := df.sql('SELECT 1');
+    explanation TEXT;
+BEGIN
+    FOR i IN 1..256 LOOP
+        graph := df.seq(graph, 'SELECT 1');
+    END LOOP;
+
+    explanation := df.explain(graph);
+    IF explanation LIKE 'Invalid durable function graph:%' THEN
+        RAISE EXCEPTION 'TEST FAILED: graph at maximum depth was rejected: %', explanation;
+    END IF;
+
+    graph := df.seq(graph, 'SELECT 1');
+    explanation := df.explain(graph);
+    IF explanation NOT LIKE '%maximum nesting depth of 256%' THEN
+        RAISE EXCEPTION 'TEST FAILED: graph beyond maximum depth was not rejected cleanly: %', explanation;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: df.explain enforces the configured depth boundary';
+END $$;
+
+CREATE TEMP TABLE _deep_graph_execution (instance_id TEXT);
+
+DO $$
+DECLARE
+    graph TEXT := df.sql('SELECT 1');
+BEGIN
+    FOR i IN 2..200 LOOP
+        graph := df.seq(graph, 'SELECT 1');
+    END LOOP;
+
+    INSERT INTO _deep_graph_execution SELECT df.start(graph, 'test-deep-graph-200');
+END $$;
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _deep_graph_execution;
+    SELECT df.await_instance(inst_id, 300) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: 200-step graph status = %', status;
+    END IF;
+
+    IF (SELECT count(*) FROM df.nodes WHERE instance_id = inst_id) != 399 THEN
+        RAISE EXCEPTION 'TEST FAILED: 200-step graph did not materialize 399 nodes';
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: 200-step graph executes end to end';
+END $$;
+
+DROP TABLE _deep_graph_execution;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

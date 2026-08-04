@@ -229,6 +229,9 @@ fn explain_expression(expr: &str) -> String {
 
     // First try to parse as Durofut JSON
     if let Ok(root) = Durofut::try_from_json(expr) {
+        if let Err(e) = root.validate_recursive() {
+            return format!("Invalid durable function graph: {e}");
+        }
         // Build in-memory node map from nested structure with generated IDs
         let mut nodes = HashMap::new();
         let mut id_counter = 0;
@@ -271,6 +274,9 @@ fn explain_expression(expr: &str) -> String {
         Ok(d) => d,
         Err(e) => return format!("Failed to parse Durofut JSON: {e}"),
     };
+    if let Err(e) = root.validate_recursive() {
+        return format!("Invalid durable function graph: {e}");
+    }
 
     // Build in-memory node map from nested structure with generated IDs
     let mut nodes = HashMap::new();
@@ -293,14 +299,16 @@ fn collect_nodes(
     let node_id = format!("N{}", id_counter);
 
     // Recursively collect children first to get their IDs
-    let left_id = node
-        .left_node
-        .as_ref()
-        .map(|n| collect_nodes(n, nodes, id_counter));
-    let right_id = node
-        .right_node
-        .as_ref()
-        .map(|n| collect_nodes(n, nodes, id_counter));
+    let left_id = node.left_node.as_ref().map(|raw| {
+        let child = crate::types::Durofut::child_from_raw(raw)
+            .expect("validated Durofut child must deserialize");
+        collect_nodes(&child, nodes, id_counter)
+    });
+    let right_id = node.right_node.as_ref().map(|raw| {
+        let child = crate::types::Durofut::child_from_raw(raw)
+            .expect("validated Durofut child must deserialize");
+        collect_nodes(&child, nodes, id_counter)
+    });
 
     // Process config JSON to collect embedded nodes and replace Durofuts with IDs
     let updated_query =

@@ -309,6 +309,12 @@ SELECT df.start(
 );
 ```
 
+### Graph Depth
+
+A workflow graph can contain at most 256 nested composition levels. `df.start()` and
+`df.explain()` reject deeper graphs with a maximum-nesting-depth error. Split a larger workflow
+into smaller sub-workflows when it would exceed this limit.
+
 ### Variable Substitution
 
 Use `$name` to reference named results in subsequent steps:

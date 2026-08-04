@@ -113,8 +113,8 @@ pub async fn is_role_superuser_name(pool: &sqlx::PgPool, role_name: &str) -> Res
         .and_then(|opt| opt.ok_or_else(|| format!("role '{}' not found in pg_roles", role_name)))
 }
 
-/// Maximum nesting depth for workflow graphs. Prevents stack overflow from
-/// deeply nested operator chains (e.g., 10,000 levels of `~>`).
+/// Maximum nesting depth for workflow graphs. Bounds recursive graph walkers
+/// after opaque child storage removes serde_json's incidental depth limit.
 pub const MAX_GRAPH_DEPTH: usize = 256;
 
 /// Maximum number of nodes allowed in a single workflow instance. Prevents
@@ -1168,16 +1168,43 @@ pub fn mark_non_future_helper_call(function_name: &str) {
     }
 }
 
+fn deserialize_raw_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Box<serde_json::value::RawValue>>::deserialize(deserializer)?;
+    if value
+        .as_ref()
+        .is_some_and(|raw| !raw.get().trim_start().starts_with('{'))
+    {
+        return Err(serde::de::Error::custom(
+            "Durofut children must be JSON objects",
+        ));
+    }
+    Ok(value)
+}
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
-/// Children are embedded as nested structures, not stored as ID references.
+/// Children are embedded as opaque JSON objects, not stored as ID references. Keeping them as
+/// `RawValue` lets each graph level deserialize independently without serde_json's recursion limit.
 /// Node IDs are generated during insertion into df.nodes, not during graph construction.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Durofut {
     pub node_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub left_node: Option<Box<Durofut>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub right_node: Option<Box<Durofut>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_raw_object",
+        default
+    )]
+    pub left_node: Option<Box<serde_json::value::RawValue>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_raw_object",
+        default
+    )]
+    pub right_node: Option<Box<serde_json::value::RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1185,6 +1212,15 @@ pub struct Durofut {
 }
 
 impl Durofut {
+    pub fn into_raw(self) -> Box<serde_json::value::RawValue> {
+        serde_json::value::to_raw_value(&self).expect("failed to serialize Durofut child")
+    }
+
+    pub(crate) fn child_from_raw(raw: &serde_json::value::RawValue) -> Result<Self, String> {
+        serde_json::from_str(raw.get())
+            .map_err(|e| format!("failed to deserialize Durofut child: {}", e))
+    }
+
     fn same_statement_non_future_helper_name(s: &str) -> Option<String> {
         // Fast path: legitimate Durofut envelopes are JSON objects starting
         // with '{'. Anything else (plain text such as "OK", "completed",
@@ -1338,10 +1374,10 @@ impl Durofut {
             ));
         }
         if let Some(ref left) = self.left_node {
-            left.validate_recursive_inner(depth + 1, node_count)?;
+            Self::child_from_raw(left)?.validate_recursive_inner(depth + 1, node_count)?;
         }
         if let Some(ref right) = self.right_node {
-            right.validate_recursive_inner(depth + 1, node_count)?;
+            Self::child_from_raw(right)?.validate_recursive_inner(depth + 1, node_count)?;
         }
         // Validate config-embedded nodes (condition_node, extra_nodes)
         let d = depth + 1;
@@ -1478,6 +1514,31 @@ fn summarize_json_type(v: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn durofut_raw_children_preserve_wire_format() {
+        let json = r#"{"node_type":"THEN","left_node":{"node_type":"SQL","query":"SELECT 1"},"right_node":{"node_type":"SQL","query":"SELECT 2"}}"#;
+
+        let durofut = Durofut::try_from_json(json).unwrap();
+
+        assert_eq!(durofut.to_json(), json);
+    }
+
+    #[test]
+    fn durofut_deserializes_beyond_serde_recursion_limit() {
+        let mut json = r#"{"node_type":"SQL","query":"SELECT 1"}"#.to_string();
+        for _ in 0..129 {
+            json = format!(
+                r#"{{"node_type":"THEN","left_node":{},"right_node":{{"node_type":"SQL","query":"SELECT 1"}}}}"#,
+                json
+            );
+        }
+
+        let durofut = Durofut::try_from_json(&json).unwrap();
+
+        assert!(durofut.validate_recursive().is_ok());
+        assert_eq!(durofut.to_json(), json);
+    }
 
     #[test]
     fn whole_value_reference_accepts_single_references() {
@@ -2142,12 +2203,15 @@ mod tests {
         for _ in 0..MAX_GRAPH_DEPTH + 1 {
             node = Durofut {
                 node_type: "THEN".to_string(),
-                left_node: Some(Box::new(node)),
-                right_node: Some(Box::new(Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 1".to_string()),
-                    ..Default::default()
-                })),
+                left_node: Some(node.into_raw()),
+                right_node: Some(
+                    Durofut {
+                        node_type: "SQL".to_string(),
+                        query: Some("SELECT 1".to_string()),
+                        ..Default::default()
+                    }
+                    .into_raw(),
+                ),
                 ..Default::default()
             };
         }
@@ -2171,12 +2235,15 @@ mod tests {
         for _ in 0..MAX_GRAPH_DEPTH - 1 {
             node = Durofut {
                 node_type: "THEN".to_string(),
-                left_node: Some(Box::new(node)),
-                right_node: Some(Box::new(Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 1".to_string()),
-                    ..Default::default()
-                })),
+                left_node: Some(node.into_raw()),
+                right_node: Some(
+                    Durofut {
+                        node_type: "SQL".to_string(),
+                        query: Some("SELECT 1".to_string()),
+                        ..Default::default()
+                    }
+                    .into_raw(),
+                ),
                 ..Default::default()
             };
         }
@@ -2198,8 +2265,8 @@ mod tests {
 
         Durofut {
             node_type: "JOIN".to_string(),
-            left_node: Some(Box::new(sql_node.clone())),
-            right_node: Some(Box::new(sql_node)),
+            left_node: Some(sql_node.clone().into_raw()),
+            right_node: Some(sql_node.into_raw()),
             query: Some(config.to_string()),
             ..Default::default()
         }

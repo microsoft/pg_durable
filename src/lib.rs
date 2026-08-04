@@ -807,9 +807,6 @@ BEGIN
     WHEN raise_exception THEN
         -- Re-raise our validation error
         RAISE;
-    WHEN OTHERS THEN
-        -- Not valid JSON, treat as SQL
-        NULL;
     END;
     
     -- It's plain SQL, wrap it
@@ -2213,6 +2210,34 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_all_composers_round_trip_opaque_children() {
+        let sequence = crate::dsl::then_fn("SELECT 1", "SELECT 2");
+        let graphs = [
+            sequence.clone(),
+            crate::dsl::as_named(&sequence, "sequence_result"),
+            crate::dsl::loop_fn("SELECT 1", Some("SELECT true")),
+            crate::dsl::if_fn("SELECT true", "SELECT 1", "SELECT 0"),
+            crate::dsl::if_rows_fn("rows_result", "SELECT 1", "SELECT 0"),
+            crate::dsl::join("SELECT 1", "SELECT 2"),
+            crate::dsl::join3("SELECT 1", "SELECT 2", "SELECT 3"),
+            crate::dsl::race("SELECT 1", "SELECT 2"),
+        ];
+
+        for graph in graphs {
+            let durofut = Durofut::try_from_json(&graph).unwrap();
+            assert!(durofut
+                .left_node
+                .as_ref()
+                .is_none_or(|child| child.get().starts_with('{')));
+            assert!(durofut
+                .right_node
+                .as_ref()
+                .is_none_or(|child| child.get().starts_with('{')));
+            assert!(durofut.validate_recursive().is_ok());
+        }
+    }
+
+    #[pg_test]
     fn test_autowrap_start_plain_sql() {
         // Start with plain SQL - simplest possible durable function
         let instance_id = crate::dsl::start("SELECT 42", Some("autowrap-test"), None);
@@ -2677,16 +2702,22 @@ mod tests {
         // should be rejected by validate_recursive
         let durofut = Durofut {
             node_type: "IF".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 'then'".to_string()),
-                ..Default::default()
-            })),
-            right_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 'else'".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 'then'".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 'else'".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             query: Some(r#"{"condition_node": {"foo": "bar"}}"#.to_string()),
             ..Default::default()
         };
@@ -2706,11 +2737,14 @@ mod tests {
         // condition_node as a number should be rejected
         let durofut = Durofut {
             node_type: "LOOP".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 1".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             query: Some(r#"{"condition_node": 42}"#.to_string()),
             ..Default::default()
         };
@@ -2723,16 +2757,22 @@ mod tests {
         // condition_node as a string ID (old format) should be rejected
         let durofut = Durofut {
             node_type: "IF".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 'then'".to_string()),
-                ..Default::default()
-            })),
-            right_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 'else'".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 'then'".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 'else'".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             query: Some(r#"{"condition_node": "a1b2c3d4"}"#.to_string()),
             ..Default::default()
         };
@@ -2750,22 +2790,28 @@ mod tests {
         };
         let middle = Durofut {
             node_type: "THEN".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 1".to_string()),
-                ..Default::default()
-            })),
-            right_node: Some(Box::new(inner_bad)),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(inner_bad.into_raw()),
             ..Default::default()
         };
         let root = Durofut {
             node_type: "THEN".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 0".to_string()),
-                ..Default::default()
-            })),
-            right_node: Some(Box::new(middle)),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 0".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(middle.into_raw()),
             ..Default::default()
         };
         let result = root.validate_recursive();
@@ -2784,16 +2830,22 @@ mod tests {
         // An extra_nodes entry that is not a valid Durofut
         let durofut = Durofut {
             node_type: "JOIN".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 1".to_string()),
-                ..Default::default()
-            })),
-            right_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 2".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 2".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             query: Some(r#"{"extra_nodes": [{"not": "a durofut"}]}"#.to_string()),
             ..Default::default()
         };
@@ -2855,16 +2907,22 @@ mod tests {
         let config = serde_json::json!({ "condition_node": condition });
         let durofut = Durofut {
             node_type: "IF".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 'then'".to_string()),
-                ..Default::default()
-            })),
-            right_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 'else'".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 'then'".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 'else'".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             query: Some(config.to_string()),
             ..Default::default()
         };
@@ -3042,12 +3100,15 @@ mod tests {
         for _ in 0..MAX_GRAPH_DEPTH + 1 {
             node = Durofut {
                 node_type: "THEN".to_string(),
-                left_node: Some(Box::new(node)),
-                right_node: Some(Box::new(Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 1".to_string()),
-                    ..Default::default()
-                })),
+                left_node: Some(node.into_raw()),
+                right_node: Some(
+                    Durofut {
+                        node_type: "SQL".to_string(),
+                        query: Some("SELECT 1".to_string()),
+                        ..Default::default()
+                    }
+                    .into_raw(),
+                ),
                 ..Default::default()
             };
         }
@@ -3074,12 +3135,15 @@ mod tests {
         for _ in 0..10 {
             node = Durofut {
                 node_type: "THEN".to_string(),
-                left_node: Some(Box::new(node)),
-                right_node: Some(Box::new(Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 1".to_string()),
-                    ..Default::default()
-                })),
+                left_node: Some(node.into_raw()),
+                right_node: Some(
+                    Durofut {
+                        node_type: "SQL".to_string(),
+                        query: Some("SELECT 1".to_string()),
+                        ..Default::default()
+                    }
+                    .into_raw(),
+                ),
                 ..Default::default()
             };
         }
@@ -3111,8 +3175,8 @@ mod tests {
 
         let join_node = Durofut {
             node_type: "JOIN".to_string(),
-            left_node: Some(Box::new(sql_node.clone())),
-            right_node: Some(Box::new(sql_node)),
+            left_node: Some(sql_node.clone().into_raw()),
+            right_node: Some(sql_node.into_raw()),
             query: Some(config.to_string()),
             ..Default::default()
         };
@@ -3288,11 +3352,14 @@ mod tests {
         // requires condition_node to deserialize as a valid Durofut.
         let node = Durofut {
             node_type: "LOOP".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 1".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             // Malformed config: valid JSON but condition_node is a string, not a Durofut object.
             query: Some(r#"{"condition_node": "nonexist"}"#.to_string()),
             ..Default::default()
@@ -3308,11 +3375,14 @@ mod tests {
         // (it's treated as a plain query string, not a config object).
         let non_json_node = Durofut {
             node_type: "LOOP".to_string(),
-            left_node: Some(Box::new(Durofut {
-                node_type: "SQL".to_string(),
-                query: Some("SELECT 1".to_string()),
-                ..Default::default()
-            })),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
             query: Some("this is not json at all!!!".to_string()),
             ..Default::default()
         };
