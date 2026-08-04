@@ -2018,7 +2018,8 @@ mod tests {
                  WITH _mark AS (
                      SELECT pg_catalog.set_config(
                          'df.non_future_helper',
-                         'df.await_instance' || E'\\n' || pg_catalog.statement_timestamp()::text,
+                         'df.await_instance' || E'\n' ||
+                             ((extract(epoch FROM pg_catalog.statement_timestamp()) - 946684800) * 1000000)::bigint::text,
                          true
                      )
                  )

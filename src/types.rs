@@ -10,7 +10,7 @@ use cron::Schedule as CronSchedule;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -1149,11 +1149,22 @@ pub const VALID_NODE_TYPES: &[&str] = &[
 const NON_FUTURE_HELPER_GUC: &str = "df.non_future_helper";
 
 pub fn mark_non_future_helper_call(function_name: &str) {
-    if let Err(e) = Spi::run_with_args(
-        "SELECT pg_catalog.set_config('df.non_future_helper', $1 || E'\n' || pg_catalog.statement_timestamp()::text, true)",
-        &[function_name.into()],
-    ) {
-        pgrx::error!("Failed to mark helper call: {:?}", e);
+    let name = CString::new(NON_FUTURE_HELPER_GUC).expect("GUC name must not contain NUL bytes");
+    let statement_timestamp = unsafe { pgrx::pg_sys::GetCurrentStatementStartTimestamp() };
+    let marker = CString::new(format!("{}\n{}", function_name, statement_timestamp))
+        .expect("helper name must not contain NUL bytes");
+
+    unsafe {
+        pgrx::pg_sys::set_config_option(
+            name.as_ptr(),
+            marker.as_ptr(),
+            pgrx::pg_sys::GucContext::PGC_USERSET,
+            pgrx::pg_sys::GucSource::PGC_S_SESSION,
+            pgrx::pg_sys::GucAction::GUC_ACTION_LOCAL,
+            true,
+            pgrx::PgLogLevel::ERROR as i32,
+            false,
+        );
     }
 }
 
@@ -1188,17 +1199,15 @@ impl Durofut {
             return None;
         }
 
-        let marker = Spi::get_one::<String>(&format!(
-            "SELECT pg_catalog.current_setting('{}', true)",
-            NON_FUTURE_HELPER_GUC
-        ))
-        .ok()
-        .flatten()?;
+        let name =
+            CString::new(NON_FUTURE_HELPER_GUC).expect("GUC name must not contain NUL bytes");
+        let marker = unsafe {
+            let value = pgrx::pg_sys::GetConfigOption(name.as_ptr(), true, false);
+            (!value.is_null()).then(|| CStr::from_ptr(value).to_string_lossy().into_owned())
+        }?;
         let (helper_name, marker_timestamp) = marker.split_once('\n')?;
-        let statement_timestamp =
-            Spi::get_one::<String>("SELECT pg_catalog.statement_timestamp()::text")
-                .ok()
-                .flatten()?;
+        let marker_timestamp = marker_timestamp.parse::<pgrx::pg_sys::TimestampTz>().ok()?;
+        let statement_timestamp = unsafe { pgrx::pg_sys::GetCurrentStatementStartTimestamp() };
 
         (marker_timestamp == statement_timestamp).then(|| helper_name.to_string())
     }
