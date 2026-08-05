@@ -205,6 +205,10 @@ jobs:
         id: shutdown_test
         run: ./scripts/test-shutdown.sh --pg-version ${{ matrix.pg_version }} --cycles 1
 
+      - name: Run epoch-race regression test
+        id: epoch_race_test
+        run: ./scripts/test-epoch-race.sh --pg-version ${{ matrix.pg_version }}
+
       - name: Upload PostgreSQL logs on E2E failure
         if: failure()
         uses: actions/upload-artifact@v4
