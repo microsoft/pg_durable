@@ -252,6 +252,13 @@ async fn run_duroxide_runtime() {
             duroxide_schema
         );
 
+        // Capture the extension epoch identity BEFORE initializing the runtime.
+        // A DROP/CREATE during initialization installs a new epoch; readiness must
+        // only be published for a runtime initialized against this same epoch,
+        // otherwise a stale runtime would poll provider objects that no longer
+        // exist while being certified as current.
+        let epoch_oid = capture_extension_epoch(&poll_pool).await;
+
         let Some((duroxide_runtime, duroxide_store)) = initialize_duroxide_runtime(
             &pg_conn_str,
             INIT_RETRY_INTERVAL,
@@ -263,6 +270,28 @@ async fn run_duroxide_runtime() {
             // Shutdown requested or extension dropped while initializing.
             continue;
         };
+
+        // Test-only pause that widens the window between runtime initialization
+        // and readiness publication so a regression test can drop/recreate the
+        // extension deterministically. No-op in production.
+        test_pause_before_ready().await;
+
+        // Revalidate the epoch AFTER initialization and BEFORE publishing
+        // readiness. If the extension was dropped/recreated during init (or the
+        // pre-init capture failed), tear down this now-stale runtime and retry
+        // initialization against the current epoch. This prevents certifying a
+        // runtime bound to provider objects that no longer exist.
+        let current_epoch = capture_extension_epoch(&poll_pool).await;
+        if epoch_oid.is_none() || current_epoch != epoch_oid {
+            log!(
+                "pg_durable: extension epoch changed during initialization \
+                 (before={:?}, after={:?}) — tearing down stale runtime and retrying",
+                epoch_oid,
+                current_epoch
+            );
+            teardown_runtime(duroxide_runtime, duroxide_store).await;
+            continue;
+        }
 
         // Write the worker readiness record so backend sessions know the
         // duroxide schema is fully initialized for this schema version.
@@ -283,6 +312,20 @@ async fn run_duroxide_runtime() {
                 None
             }
         };
+
+        // Final epoch check after readiness/sentinel writes and before entering the
+        // processing loop. A drop/recreate in this narrow window would have written
+        // the readiness record and sentinel into the new epoch's `df` schema, so the
+        // processing loop's sentinel check could not detect the replacement. Catch it
+        // here: tear down and retry against the current epoch.
+        if capture_extension_epoch(&poll_pool).await != epoch_oid {
+            log!(
+                "pg_durable: extension epoch changed after readiness publication \
+                 — tearing down stale runtime and retrying"
+            );
+            teardown_runtime(duroxide_runtime, duroxide_store).await;
+            continue;
+        }
 
         run_until_extension_dropped_or_shutdown(
             &poll_pool,
@@ -339,6 +382,38 @@ async fn check_extension_exists(pool: &sqlx::PgPool) -> bool {
             .await;
 
     result.map(|(exists,)| exists).unwrap_or(false)
+}
+
+/// Identifies a single extension install ("epoch"). `pg_extension.oid` is a fresh
+/// value for every CREATE EXTENSION, so it changes across a DROP/CREATE cycle even
+/// when the extension appears continuously present between polls. Returns `None`
+/// when the extension is absent or the query fails.
+async fn capture_extension_epoch(pool: &sqlx::PgPool) -> Option<i64> {
+    let result: Result<(i64,), sqlx::Error> =
+        sqlx::query_as("SELECT oid::bigint FROM pg_extension WHERE extname = 'pg_durable'")
+            .fetch_one(pool)
+            .await;
+
+    result.map(|(oid,)| oid).ok()
+}
+
+/// Test-only hook: when the `PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS` environment
+/// variable is set to a positive integer, sleep that many milliseconds between
+/// runtime initialization and readiness publication. This creates a deterministic
+/// window for a regression test to DROP/CREATE the extension mid-initialization
+/// and exercise the stale-runtime detection path. No effect in production.
+async fn test_pause_before_ready() {
+    if let Ok(val) = std::env::var("PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS") {
+        if let Ok(ms) = val.parse::<u64>() {
+            if ms > 0 {
+                log!(
+                    "pg_durable: TEST hook — pausing {}ms before readiness publication",
+                    ms
+                );
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
+        }
+    }
 }
 
 /// Returns true if the `duroxide` schema exists AND is owned by the `pg_durable`
@@ -947,8 +1022,20 @@ async fn run_until_extension_dropped_or_shutdown(
         }
     }
 
-    log!("pg_durable: initiating duroxide runtime shutdown...");
+    teardown_runtime(duroxide_runtime, duroxide_store).await;
+    log!("pg_durable: duroxide runtime shutdown complete");
+}
 
+/// Shut down a duroxide runtime and close its store pool.
+///
+/// Used both when exiting the processing loop and when tearing down a runtime that
+/// was initialized against a stale extension epoch (drop/recreate mid-init). The
+/// live path (extension restart) drains and reclaims connections; the shutdown
+/// path closes first because PostgreSQL is terminating this process's backends.
+async fn teardown_runtime(
+    duroxide_runtime: Arc<runtime::Runtime>,
+    duroxide_store: Arc<PostgresProvider>,
+) {
     if is_shutdown_requested() {
         // Close before aborting — the reverse of the branch below. PostgreSQL is
         // killing this process's backends, so duroxide's dispatcher tasks stay
@@ -982,7 +1069,6 @@ async fn run_until_extension_dropped_or_shutdown(
             log!("pg_durable: duroxide store pool close timed out — forcing shutdown");
         }
     }
-    log!("pg_durable: duroxide runtime shutdown complete");
 }
 
 /// Maximum orphans one reconciliation pass reclaims, bounding a single tick's work.
