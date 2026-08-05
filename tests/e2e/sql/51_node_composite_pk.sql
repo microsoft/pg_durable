@@ -16,8 +16,9 @@ SET SESSION AUTHORIZATION df_e2e_user;
 -- === Part 1: schema contract — composite primary key ===
 DO $$
 DECLARE
-    pk_def        TEXT;
-    legacy_unique BOOLEAN;
+    pk_def                   TEXT;
+    legacy_unique            BOOLEAN;
+    deferred_reference_count INT;
 BEGIN
     SELECT pg_get_constraintdef(c.oid) INTO pk_def
     FROM pg_constraint c
@@ -49,7 +50,24 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: legacy nodes_instance_node_key UNIQUE still present';
     END IF;
 
-    RAISE NOTICE 'PASSED: df.nodes composite primary key (instance_id, id)';
+    SELECT count(*) INTO deferred_reference_count
+    FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace ns ON ns.oid = t.relnamespace
+        WHERE ns.nspname = 'df'
+            AND (t.relname, c.conname) IN (
+                    ('nodes', 'nodes_left_node_same_instance_fkey'),
+                    ('nodes', 'nodes_right_node_same_instance_fkey'),
+                    ('instances', 'instances_root_node_same_instance_fkey')
+            )
+      AND c.condeferrable
+      AND c.condeferred;
+
+    IF deferred_reference_count != 3 THEN
+        RAISE EXCEPTION 'TEST FAILED: expected all three graph-reference foreign keys to be DEFERRABLE INITIALLY DEFERRED, found %', deferred_reference_count;
+    END IF;
+
+    RAISE NOTICE 'PASSED: df.nodes composite primary key and deferred graph references';
 END $$;
 
 -- === Part 2: regression — multi-node workflow under instance_id scoping ===

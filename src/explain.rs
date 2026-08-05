@@ -6,7 +6,7 @@
 use pgrx::prelude::*;
 use std::collections::HashMap;
 
-use crate::types::{flatten_graph, Durofut, FunctionNode};
+use crate::types::{flatten_graph, Durofut, MaterializedNode};
 
 /// Represents a node for visualization
 #[derive(Debug, Clone)]
@@ -271,7 +271,7 @@ fn explain_durofut(root: &Durofut) -> String {
     let mut id_counter = 0;
     let mut ids = || {
         id_counter += 1;
-        format!("N{id_counter}")
+        Ok(format!("N{id_counter}"))
     };
     let (root_id, flat_nodes) = match flatten_graph(root, &mut ids) {
         Ok(flattened) => flattened,
@@ -284,8 +284,8 @@ fn explain_durofut(root: &Durofut) -> String {
     build_tree_visualization(&root_id, &nodes, false)
 }
 
-impl From<FunctionNode> for ExplainNode {
-    fn from(node: FunctionNode) -> Self {
+impl From<MaterializedNode> for ExplainNode {
+    fn from(node: MaterializedNode) -> Self {
         Self {
             id: node.id,
             node_type: node.node_type,

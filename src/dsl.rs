@@ -15,7 +15,7 @@ use crate::client::start_durable_function;
 use crate::types::{
     flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
-    FunctionNode,
+    MaterializedNode,
 };
 
 /// Check if we're running inside a workflow context (background worker connection).
@@ -1034,7 +1034,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     }
 
     fn insert_node(
-        node: &FunctionNode,
+        node: &MaterializedNode,
         instance_id: &str,
         current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
@@ -1047,78 +1047,77 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         // cannot run df.start() until it upgrades. That is fine: the supported
         // B1 floor is 0.2.2 (docs/upgrade-testing.md), so this legacy branch is
         // effectively dead code for every supported install.
-        let node_id = node.id.clone();
-        if let Err(e) = pick_id_with_retry(
-            || node_id.clone(),
-            |candidate| {
-                let query_arg: DatumWithOid = match &node.query {
-                    Some(q) => q.as_str().into(),
-                    None => DatumWithOid::null::<String>(),
-                };
-                let result_name_arg: DatumWithOid = match &node.result_name {
-                    Some(n) => n.as_str().into(),
-                    None => DatumWithOid::null::<String>(),
-                };
-                let left_node_arg: DatumWithOid = match &node.left_node {
-                    Some(id) => id.as_str().into(),
-                    None => DatumWithOid::null::<String>(),
-                };
-                let right_node_arg: DatumWithOid = match &node.right_node {
-                    Some(id) => id.as_str().into(),
-                    None => DatumWithOid::null::<String>(),
-                };
-                let database_arg: DatumWithOid = match database {
-                    Some(db) => db.into(),
-                    None => DatumWithOid::null::<String>(),
-                };
-                let (node_sql, node_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
-                    (
-                        "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)
-                         ON CONFLICT (instance_id, id) DO NOTHING
-                         RETURNING id",
-                        vec![
-                            candidate.into(),
-                            instance_id.into(),
-                            node.node_type.as_str().into(),
-                            query_arg,
-                            result_name_arg,
-                            left_node_arg,
-                            right_node_arg,
-                            current_user_oid.into(),
-                            current_user_oid.into(), // login_role = submitted_by
-                            database_arg,
-                        ],
-                    )
-                } else {
-                    (
-                        "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)
-                         ON CONFLICT (instance_id, id) DO NOTHING
-                         RETURNING id",
-                        vec![
-                            candidate.into(),
-                            instance_id.into(),
-                            node.node_type.as_str().into(),
-                            query_arg,
-                            result_name_arg,
-                            left_node_arg,
-                            right_node_arg,
-                            current_user_oid.into(),
-                            database_arg,
-                        ],
-                    )
-                };
-                Spi::connect_mut(
-                    |client| match client.update(node_sql, Some(1), &node_args) {
-                        Ok(table) => Ok(!table.is_empty()),
-                        Err(e) => Err(format!("{e:?}")),
-                    },
-                )
+        let query_arg: DatumWithOid = match &node.query {
+            Some(q) => q.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let result_name_arg: DatumWithOid = match &node.result_name {
+            Some(n) => n.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let left_node_arg: DatumWithOid = match &node.left_node {
+            Some(id) => id.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let right_node_arg: DatumWithOid = match &node.right_node {
+            Some(id) => id.as_str().into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let database_arg: DatumWithOid = match database {
+            Some(db) => db.into(),
+            None => DatumWithOid::null::<String>(),
+        };
+        let (node_sql, node_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
+            (
+                "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)
+                 ON CONFLICT (instance_id, id) DO NOTHING
+                 RETURNING id",
+                vec![
+                    node.id.as_str().into(),
+                    instance_id.into(),
+                    node.node_type.as_str().into(),
+                    query_arg,
+                    result_name_arg,
+                    left_node_arg,
+                    right_node_arg,
+                    current_user_oid.into(),
+                    current_user_oid.into(), // login_role = submitted_by
+                    database_arg,
+                ],
+            )
+        } else {
+            (
+                "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)
+                 ON CONFLICT (instance_id, id) DO NOTHING
+                 RETURNING id",
+                vec![
+                    node.id.as_str().into(),
+                    instance_id.into(),
+                    node.node_type.as_str().into(),
+                    query_arg,
+                    result_name_arg,
+                    left_node_arg,
+                    right_node_arg,
+                    current_user_oid.into(),
+                    database_arg,
+                ],
+            )
+        };
+        match Spi::connect_mut(
+            |client| match client.update(node_sql, Some(1), &node_args) {
+                Ok(table) => Ok(!table.is_empty()),
+                Err(e) => Err(format!("{e:?}")),
             },
-            1,
         ) {
-            pgrx::error!("Failed to insert node '{}': {}", node.id, e);
+            Ok(true) => {}
+            Ok(false) => pgrx::error!(
+                "Failed to insert node '{}': ID conflicts with an existing node in instance '{}'",
+                node.id,
+                instance_id
+            ),
+            Err(e) => pgrx::error!("Failed to insert node '{}': {}", node.id, e),
         }
     }
 
@@ -1127,11 +1126,16 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     // Assign IDs as nodes are discovered. Per-graph uniqueness is required
     // because parent references are materialized before any rows are inserted.
     let mut assigned_ids = std::collections::HashSet::new();
-    let mut id_source = || loop {
-        let candidate = short_id();
-        if assigned_ids.insert(candidate.clone()) {
-            break candidate;
+    let mut id_source = || {
+        for _ in 0..MAX_ID_ATTEMPTS {
+            let candidate = short_id();
+            if assigned_ids.insert(candidate.clone()) {
+                return Ok(candidate);
+            }
         }
+        Err(format!(
+            "exhausted {MAX_ID_ATTEMPTS} attempts to generate a graph-unique node ID"
+        ))
     };
     let (root_id, nodes) = match flatten_graph(&durofut, &mut id_source) {
         Ok(flattened) => flattened,

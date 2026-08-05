@@ -124,20 +124,15 @@ pub const MAX_GRAPH_NODES: usize = 10_000;
 /// Generate a short 8-character ID from a UUID.
 ///
 /// This serves two distinct uniqueness contracts (#129). Both keep the value
-/// `VARCHAR(8)` HEX (the maintainer-requested minimal change) and manage
-/// collision risk by retrying on conflict rather than by widening the value:
+/// `VARCHAR(8)` HEX (the maintainer-requested minimal change):
 /// - **Instance IDs** (`df.instances.id`) are global with no scoping column.
 ///   `df.start()` reserves the ID with `INSERT ... ON CONFLICT (id) DO NOTHING
 ///   RETURNING id` and re-rolls on collision; the primary key on `df.instances`
 ///   is the hard guarantee.
 /// - **Node IDs** (`df.nodes.id`) only need to be unique per instance. Node
-///   inserts use `INSERT ... ON CONFLICT (instance_id, id) DO NOTHING RETURNING
-///   id` and re-roll on collision; the composite primary key `(instance_id, id)`
-///   is the hard guarantee.
-///
-/// The mechanism is symmetric (re-roll on conflict); only the conflict target
-/// differs — the global `id` index for instances vs. the per-instance
-/// `(instance_id, id)` index for nodes.
+///   IDs are assigned uniquely while the graph is materialized, before parent
+///   references are fixed. The composite primary key `(instance_id, id)` is the
+///   final database guarantee; an unexpected insert conflict aborts the start.
 pub fn short_id() -> String {
     let uuid = Uuid::new_v4();
     uuid.to_string()
@@ -1027,19 +1022,25 @@ pub struct FunctionNode {
     pub database: Option<String>,
 }
 
+/// Supplies graph-local node IDs during materialization.
+///
+/// IDs must be unique within a graph. Callers that persist the result must also
+/// supply IDs matching the database's `^[0-9a-f]{8}$` constraint; non-persisting
+/// callers such as explain may use display-only IDs.
 pub(crate) trait IdSource {
-    fn next_id(&mut self) -> String;
+    fn next_id(&mut self) -> Result<String, String>;
 }
 
 impl<F> IdSource for F
 where
-    F: FnMut() -> String,
+    F: FnMut() -> Result<String, String>,
 {
-    fn next_id(&mut self) -> String {
+    fn next_id(&mut self) -> Result<String, String> {
         self()
     }
 }
 
+/// A graph-materialization error with the path of the offending node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GraphError {
     pub path: String,
@@ -1059,11 +1060,34 @@ struct PendingGraphNode {
     path: String,
 }
 
+/// A node whose graph references and config children have been materialized.
+///
+/// Persistence metadata is intentionally absent because flattening does not
+/// know the submitting role, target database, or instance ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedNode {
+    pub id: String,
+    pub node_type: String,
+    pub query: Option<String>,
+    pub result_name: Option<String>,
+    pub left_node: Option<String>,
+    pub right_node: Option<String>,
+}
+
+/// Materialize a Durofut tree into pre-order nodes with parent-before-child
+/// references.
+///
+/// For a valid graph, the returned root ID equals the first node's ID. The ID
+/// source is called once per discovered node and may reject generation before
+/// any persistence occurs.
 pub(crate) fn flatten_graph(
     root: &Durofut,
     ids: &mut impl IdSource,
-) -> Result<(String, Vec<FunctionNode>), GraphError> {
-    let root_id = ids.next_id();
+) -> Result<(String, Vec<MaterializedNode>), GraphError> {
+    let root_id = ids.next_id().map_err(|message| GraphError {
+        path: "root".to_string(),
+        message,
+    })?;
     let mut pending = vec![PendingGraphNode {
         node: root.clone(),
         id: root_id.clone(),
@@ -1071,17 +1095,11 @@ pub(crate) fn flatten_graph(
         path: "root".to_string(),
     }];
     let mut nodes = Vec::new();
+    let mut discovered_nodes = 1;
 
     while let Some(entry) = pending.pop() {
-        if nodes.len() >= MAX_GRAPH_NODES {
-            return Err(GraphError {
-                path: entry.path,
-                message: format!(
-                    "Workflow exceeds maximum node count of {}. Simplify the workflow or break it into multiple instances.",
-                    MAX_GRAPH_NODES
-                ),
-            });
-        }
+        #[cfg(not(test))]
+        pgrx::check_for_interrupts!();
         if entry.depth > MAX_GRAPH_DEPTH {
             return Err(GraphError {
                 path: entry.path,
@@ -1112,11 +1130,24 @@ pub(crate) fn flatten_graph(
         let mut children = Vec::new();
         let mut parse_child = |raw: &serde_json::value::RawValue, segment: String| {
             let path = format!("{}.{}", entry.path, segment);
+            if discovered_nodes >= MAX_GRAPH_NODES {
+                return Err(GraphError {
+                    path,
+                    message: format!(
+                        "Workflow exceeds maximum node count of {}. Simplify the workflow or break it into multiple instances.",
+                        MAX_GRAPH_NODES
+                    ),
+                });
+            }
             let node = Durofut::child_from_raw(raw).map_err(|message| GraphError {
                 path: path.clone(),
                 message,
             })?;
-            let id = ids.next_id();
+            let id = ids.next_id().map_err(|message| GraphError {
+                path: path.clone(),
+                message,
+            })?;
+            discovered_nodes += 1;
             children.push(PendingGraphNode {
                 node,
                 id: id.clone(),
@@ -1168,15 +1199,13 @@ pub(crate) fn flatten_graph(
                 message,
             })?;
 
-        nodes.push(FunctionNode {
+        nodes.push(MaterializedNode {
             id: entry.id,
             node_type: entry.node.node_type,
             query,
             result_name: entry.node.result_name,
             left_node,
             right_node,
-            submitted_by: String::new(),
-            database: None,
         });
 
         pending.extend(children.into_iter().rev());
@@ -1383,7 +1412,7 @@ where
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as opaque JSON objects, not stored as ID references. Keeping them as
 /// `RawValue` lets each graph level deserialize independently without serde_json's recursion limit.
-/// Node IDs are generated during insertion into df.nodes, not during graph construction.
+/// Node IDs are generated when the graph is materialized, before insertion into df.nodes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Durofut {
     pub node_type: String,
@@ -1571,7 +1600,11 @@ impl Durofut {
     /// Kept as a compatibility helper for callers that only need validation;
     /// graph entrypoints should consume `flatten_graph` directly.
     pub fn validate_recursive(&self) -> Result<(), String> {
-        let mut next_id = || String::new();
+        let mut counter = 0_u32;
+        let mut next_id = || {
+            counter += 1;
+            Ok(format!("{counter:08x}"))
+        };
         flatten_graph(self, &mut next_id)
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -2412,8 +2445,8 @@ mod tests {
             query: Some("SELECT 1".to_string()),
             ..Default::default()
         };
-        // MAX_GRAPH_DEPTH - 1 nestings (the root counts as depth 0)
-        for _ in 0..MAX_GRAPH_DEPTH - 1 {
+        // MAX_GRAPH_DEPTH nestings (the root counts as depth 0)
+        for _ in 0..MAX_GRAPH_DEPTH {
             node = Durofut {
                 node_type: "THEN".to_string(),
                 left_node: Some(node.into_raw()),
@@ -2453,23 +2486,27 @@ mod tests {
 
     #[test]
     fn test_flatten_graph_preserves_condition_nodes_query_format() {
-        let condition = Durofut {
-            node_type: "SQL".to_string(),
-            query: Some("SELECT true".to_string()),
-            ..Default::default()
-        };
-        let node = Durofut {
-            node_type: "IF".to_string(),
-            condition_node: Some(condition.into_raw()),
-            ..Default::default()
-        };
+        for node_type in ["IF", "LOOP"] {
+            let condition = Durofut {
+                node_type: "SQL".to_string(),
+                query: Some("SELECT true".to_string()),
+                ..Default::default()
+            };
+            let node = Durofut {
+                node_type: node_type.to_string(),
+                condition_node: Some(condition.into_raw()),
+                ..Default::default()
+            };
 
-        let mut ids = ["root", "condition-id"].into_iter().map(str::to_string);
-        let (_, nodes) = flatten_graph(&node, &mut || ids.next().unwrap()).unwrap();
-        assert_eq!(
-            nodes[0].query.as_deref(),
-            Some(r#"{"condition_node":"condition-id"}"#)
-        );
+            let mut ids = ["root", "condition-id"].into_iter().map(str::to_string);
+            let (root_id, nodes) = flatten_graph(&node, &mut || Ok(ids.next().unwrap())).unwrap();
+            assert_eq!(nodes[0].id, root_id);
+            assert_eq!(nodes[1].id, "condition-id");
+            assert_eq!(
+                nodes[0].query.as_deref(),
+                Some(r#"{"condition_node":"condition-id"}"#)
+            );
+        }
     }
 
     #[test]
@@ -2487,7 +2524,7 @@ mod tests {
         };
 
         let mut ids = ["root", "condition-id"].into_iter().map(str::to_string);
-        let (_, nodes) = flatten_graph(&node, &mut || ids.next().unwrap()).unwrap();
+        let (_, nodes) = flatten_graph(&node, &mut || Ok(ids.next().unwrap())).unwrap();
         assert_eq!(
             nodes[0].query.as_deref(),
             Some(r#"{"a":1,"condition_node":"condition-id"}"#)
@@ -2508,7 +2545,8 @@ mod tests {
         };
 
         let mut ids = ["root", "extra-id"].into_iter().map(str::to_string);
-        let (_, nodes) = flatten_graph(&node, &mut || ids.next().unwrap()).unwrap();
+        let (_, nodes) = flatten_graph(&node, &mut || Ok(ids.next().unwrap())).unwrap();
+        assert_eq!(nodes[1].id, "extra-id");
         assert_eq!(
             nodes[0].query.as_deref(),
             Some(r#"{"extra_nodes":["extra-id"]}"#)
@@ -2546,7 +2584,7 @@ mod tests {
             .validate_recursive()
             .unwrap_err()
             .contains("condition_node in LOOP must be a first-class Durofut field"));
-        let mut ids = || "unused".to_string();
+        let mut ids = || Ok("unused".to_string());
         assert!(flatten_graph(&legacy_join, &mut ids)
             .unwrap_err()
             .to_string()
@@ -2626,7 +2664,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flatten_graph_assigns_preorder_ids_and_reports_error_path() {
+    fn test_flatten_graph_reports_invalid_child_path() {
         let invalid = Durofut {
             node_type: "NOT_A_NODE".to_string(),
             ..Default::default()
@@ -2647,12 +2685,80 @@ mod tests {
         let mut counter = 0;
         let error = flatten_graph(&root, &mut || {
             counter += 1;
-            format!("N{counter}")
+            Ok(format!("N{counter}"))
         })
         .unwrap_err();
 
         assert_eq!(error.path, "root.right");
         assert!(error.message.contains("Unknown node_type 'NOT_A_NODE'"));
+    }
+
+    #[test]
+    fn test_flatten_graph_assigns_unique_preorder_ids_and_forward_references() {
+        let root = Durofut {
+            node_type: "THEN".to_string(),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(
+                Durofut {
+                    node_type: "THEN".to_string(),
+                    left_node: Some(
+                        Durofut {
+                            node_type: "SQL".to_string(),
+                            query: Some("SELECT 2".to_string()),
+                            ..Default::default()
+                        }
+                        .into_raw(),
+                    ),
+                    right_node: Some(
+                        Durofut {
+                            node_type: "SQL".to_string(),
+                            query: Some("SELECT 3".to_string()),
+                            ..Default::default()
+                        }
+                        .into_raw(),
+                    ),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            ..Default::default()
+        };
+        let mut counter = 0;
+        let (root_id, nodes) = flatten_graph(&root, &mut || {
+            counter += 1;
+            Ok(format!("{counter:08x}"))
+        })
+        .unwrap();
+
+        assert_eq!(nodes[0].id, root_id);
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.node_type.as_str())
+                .collect::<Vec<_>>(),
+            ["THEN", "SQL", "THEN", "SQL", "SQL"]
+        );
+        let positions = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.as_str(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(positions.len(), nodes.len());
+        for (index, node) in nodes.iter().enumerate() {
+            for child_id in [node.left_node.as_deref(), node.right_node.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(positions[child_id] > index);
+            }
+        }
     }
 
     #[test]
@@ -2670,14 +2776,70 @@ mod tests {
     }
 
     #[test]
+    fn test_flatten_graph_bounds_id_generation_for_oversized_join() {
+        let join_node = build_wide_join(MAX_GRAPH_NODES);
+        let mut id_calls = 0;
+
+        let result = flatten_graph(&join_node, &mut || {
+            id_calls += 1;
+            Ok(format!("{id_calls:08x}"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(id_calls, MAX_GRAPH_NODES);
+        assert_eq!(result.unwrap_err().path, "root.extra_nodes[9997]");
+    }
+
+    #[test]
+    fn test_flatten_graph_reports_id_source_failure_at_child_path() {
+        let root = Durofut {
+            node_type: "THEN".to_string(),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 2".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            ..Default::default()
+        };
+        let mut calls = 0;
+        let result = flatten_graph(&root, &mut || {
+            calls += 1;
+            if calls == 2 {
+                Err("ID source exhausted".to_string())
+            } else {
+                Ok(format!("{calls:08x}"))
+            }
+        });
+
+        assert_eq!(
+            result.unwrap_err(),
+            GraphError {
+                path: "root.left".to_string(),
+                message: "ID source exhausted".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn test_validate_recursive_node_count_within_limit() {
-        // A graph with a moderate number of nodes should pass
-        let join_node = build_wide_join(50);
+        // Root + left + right + extra nodes totals exactly MAX_GRAPH_NODES.
+        let join_node = build_wide_join(MAX_GRAPH_NODES - 3);
 
         let result = join_node.validate_recursive();
         assert!(
             result.is_ok(),
-            "should accept graph within node count limit"
+            "should accept graph exactly at node count limit"
         );
     }
 

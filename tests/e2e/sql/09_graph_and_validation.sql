@@ -118,19 +118,26 @@ DROP TABLE test_graph_reuse;
 -- === Test: 32_invalid_node_type ===
 
 DO $body$
+DECLARE
+    explanation TEXT;
 BEGIN
     BEGIN
         PERFORM df.start('{"node_type":"NOT_A_NODE"}');
         RAISE EXCEPTION 'TEST FAILED: df.start should have rejected invalid node_type';
     EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE 'TEST FAILED:%' THEN
+            RAISE;
+        END IF;
+        IF SQLERRM NOT LIKE '%Unknown node_type ''NOT_A_NODE''%' THEN
+            RAISE EXCEPTION 'TEST FAILED: df.start returned the wrong error: %', SQLERRM;
+        END IF;
         RAISE NOTICE 'Caught expected error: %', SQLERRM;
     END;
 
-    BEGIN
-        PERFORM df.explain('{"node_type":"NOT_A_NODE"}');
-    EXCEPTION WHEN OTHERS THEN
-        RAISE EXCEPTION 'TEST FAILED: df.explain should not raise on invalid node_type';
-    END;
+    explanation := df.explain('{"node_type":"NOT_A_NODE"}');
+    IF explanation NOT LIKE 'Invalid durable function graph: root: Unknown node_type ''NOT_A_NODE''%' THEN
+        RAISE EXCEPTION 'TEST FAILED: df.explain returned the wrong error: %', explanation;
+    END IF;
 
     RAISE NOTICE 'TEST PASSED: invalid node_type handling';
 END $body$;
