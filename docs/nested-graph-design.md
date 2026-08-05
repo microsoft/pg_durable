@@ -49,6 +49,13 @@ Conditions for IF/LOOP and additional JOIN branches are first-class `condition_n
 `extra_nodes` fields. They do not live inside the escaped `query` string, so nested config graphs
 grow linearly and use the same traversal path as left and right children.
 
+The left-fold composers `df.seq()`, `df.join()`, and `df.race()` remember their most recent output
+in backend-local state. When that exact output is the next call's left operand, they embed it
+verbatim and validate only the newly arrived right operand. Other left operands pass through normal
+`Durofut` parsing or SQL wrapping. This avoids rescanning an increasingly large left-deep graph at
+every composition step without trusting caller-crafted text; `flatten_graph` remains the path-aware
+validation boundary for the complete graph.
+
 `flatten_graph` is the single materialization and validation pass used by both `df.start()` and `df.explain()`. It walks the envelope iteratively, enforces node-type, depth, and node-count limits, and reports failures with paths such as `root.left.condition_node`. IDs are assigned when children are discovered, allowing the parent `FunctionNode` to be emitted before its children. Persisting that pre-order output is valid because the same-instance node foreign keys are `DEFERRABLE INITIALLY DEFERRED`; changing that constraint requires changing the materialization order too.
 
 The envelope is distinct from durable execution state. During `df.start()`, config children are

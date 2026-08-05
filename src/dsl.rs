@@ -6,6 +6,7 @@
 use cron::Schedule as CronSchedule;
 use pgrx::datum::DatumWithOid;
 use pgrx::prelude::*;
+use serde::ser::SerializeStruct;
 use std::str::FromStr;
 
 use std::cell::RefCell;
@@ -215,6 +216,65 @@ pub fn clearvars() -> String {
 // Node Creation Functions
 // ============================================================================
 
+struct PreviouslyComposed<'a>(&'a str);
+
+impl serde::Serialize for PreviouslyComposed<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // serde_json uses this token to copy a RawValue's bytes without parsing them again.
+        const RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
+
+        let mut raw = serializer.serialize_struct(RAW_VALUE_TOKEN, 1)?;
+        raw.serialize_field(RAW_VALUE_TOKEN, self.0)?;
+        raw.end()
+    }
+}
+
+#[derive(serde::Serialize)]
+struct BinaryComposition<'a> {
+    node_type: &'static str,
+    left_node: PreviouslyComposed<'a>,
+    right_node: Box<serde_json::value::RawValue>,
+}
+
+thread_local! {
+    static LAST_BINARY_COMPOSITION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn remember_binary_composition(composition: String) -> String {
+    LAST_BINARY_COMPOSITION.with(|last| *last.borrow_mut() = Some(composition.clone()));
+    composition
+}
+
+fn compose_binary(node_type: &'static str, left: &str, right: &str) -> String {
+    let left_was_composed =
+        LAST_BINARY_COMPOSITION.with(|last| last.borrow().as_deref() == Some(left));
+
+    let composition = if left_was_composed {
+        let right_fut = Durofut::ensure(right);
+        serde_json::to_string(&BinaryComposition {
+            node_type,
+            left_node: PreviouslyComposed(left),
+            right_node: right_fut.into_raw(),
+        })
+        .expect("failed to serialize binary composition")
+    } else {
+        let left_fut = Durofut::ensure(left);
+        let right_fut = Durofut::ensure(right);
+        Durofut {
+            node_type: node_type.to_string(),
+            left_node: Some(left_fut.into_raw()),
+            right_node: Some(right_fut.into_raw()),
+            ..Default::default()
+        }
+        .to_json()
+    };
+
+    remember_binary_composition(composition)
+}
+
 /// Creates a SQL node in the function graph.
 #[pg_extern(schema = "df")]
 pub fn sql(query: &str) -> String {
@@ -231,16 +291,7 @@ pub fn sql(query: &str) -> String {
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(name = "seq", schema = "df")]
 pub fn then_fn(a: &str, b: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
-
-    Durofut {
-        node_type: "THEN".to_string(),
-        left_node: Some(a_fut.into_raw()),
-        right_node: Some(b_fut.into_raw()),
-        ..Default::default()
-    }
-    .to_json()
+    compose_binary("THEN", a, b)
 }
 
 /// Names a result for later reference.
@@ -413,16 +464,7 @@ pub fn if_rows_fn(result_name: &str, then_branch: &str, else_branch: &str) -> St
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(schema = "df")]
 pub fn join(a: &str, b: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
-
-    Durofut {
-        node_type: "JOIN".to_string(),
-        left_node: Some(a_fut.into_raw()),
-        right_node: Some(b_fut.into_raw()),
-        ..Default::default()
-    }
-    .to_json()
+    compose_binary("JOIN", a, b)
 }
 
 /// Creates a parallel join node for 3 branches.
@@ -447,16 +489,7 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
 /// Arguments can be either Durofut JSON or plain SQL strings (auto-wrapped).
 #[pg_extern(schema = "df")]
 pub fn race(a: &str, b: &str) -> String {
-    let a_fut = Durofut::ensure(a);
-    let b_fut = Durofut::ensure(b);
-
-    Durofut {
-        node_type: "RACE".to_string(),
-        left_node: Some(a_fut.into_raw()),
-        right_node: Some(b_fut.into_raw()),
-        ..Default::default()
-    }
-    .to_json()
+    compose_binary("RACE", a, b)
 }
 
 /// Creates an HTTP request node.

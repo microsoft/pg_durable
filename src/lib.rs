@@ -1019,6 +1019,51 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_seq_preserves_previously_composed_left_operand() {
+        let left = crate::dsl::then_fn("SELECT 1", "SELECT 2");
+        let result = crate::dsl::then_fn(&left, "SELECT 3");
+        let parent = Durofut::from_json(&result);
+
+        assert_eq!(parent.left_node.unwrap().get(), left);
+    }
+
+    #[pg_test]
+    fn test_seq_quotes_sibling_key_injection_in_new_operand() {
+        let injection = r#"{"node_type":"SQL"},"result_name":"injected""#;
+        let result = crate::dsl::then_fn(&crate::dsl::sql("SELECT 1"), injection);
+        let parent = Durofut::from_json(&result);
+        let right = Durofut::child_from_raw(parent.right_node.as_deref().unwrap()).unwrap();
+
+        assert_eq!(parent.result_name, None);
+        assert_eq!(right.node_type, "SQL");
+        assert_eq!(right.query.as_deref(), Some(injection));
+    }
+
+    #[pg_test]
+    fn test_seq_corrupt_accumulator_reports_graph_path() {
+        let corrupt = r#"{"node_type":"THEN","left_node":{"node_type":"BOGUS"},"right_node":{"node_type":"SQL","query":"SELECT 1"}}"#;
+        let accumulator = crate::dsl::then_fn(corrupt, "SELECT 2");
+        let graph = crate::dsl::then_fn(&accumulator, "SELECT 3");
+        let explanation = crate::explain::explain(&graph);
+
+        assert!(
+            explanation.contains("root.left.left.left: Unknown node_type 'BOGUS'"),
+            "expected corrupt accumulator path, got: {explanation}"
+        );
+    }
+
+    #[pg_test]
+    fn test_binary_fold_composers_preserve_left_accumulator() {
+        let left = crate::dsl::then_fn("SELECT 1", "SELECT 2");
+
+        for compose in [crate::dsl::join, crate::dsl::race] {
+            let result = compose(&left, "SELECT 3");
+            let parent = Durofut::from_json(&result);
+            assert_eq!(parent.left_node.unwrap().get(), left);
+        }
+    }
+
+    #[pg_test]
     fn test_as_named_sets_result_name() {
         let sql_json = crate::dsl::sql("SELECT 1");
         let named_json = crate::dsl::as_named(&sql_json, "my_result");
@@ -1928,6 +1973,31 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_non_future_helper_rejected_as_new_seq_operand() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               EXECUTE sql_text;
+               RETURN NULL;
+             EXCEPTION WHEN OTHERS THEN
+               RETURN SQLERRM;
+             END;
+             $$;",
+        )
+        .unwrap();
+        let msg = Spi::get_one::<String>(
+            "SELECT pg_temp.capture_error($$SELECT df.seq(df.sql('SELECT 1'), df.clearvars())$$)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            msg.contains("df.clearvars cannot be used as a workflow step"),
+            "Unexpected error: {msg}"
+        );
+    }
+
+    #[pg_test]
     fn test_unsetvar_cannot_be_used_in_seq_composition() {
         Spi::run(
             "CREATE OR REPLACE FUNCTION pg_temp.capture_error(sql_text text) RETURNS text
@@ -2245,7 +2315,7 @@ mod tests {
         .unwrap();
         let msg = Spi::get_one::<String>(
             r#"SELECT pg_temp.capture_error($$
-                 SELECT df.seq('{"node_type":"THEN","left_node":123}', df.sql('SELECT 1'))
+                 SELECT df.seq(df.sql('SELECT 1'), '{"node_type":"THEN","left_node":123}')
              $$)"#,
         )
         .unwrap()
