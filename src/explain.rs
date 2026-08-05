@@ -6,6 +6,8 @@
 use pgrx::prelude::*;
 use std::collections::HashMap;
 
+use crate::types::{flatten_graph, Durofut, FunctionNode};
+
 /// Represents a node for visualization
 #[derive(Debug, Clone)]
 struct ExplainNode {
@@ -225,18 +227,9 @@ fn looks_like_dsl_expression(input: &str) -> bool {
 
 /// Explain a DSL expression without executing it
 fn explain_expression(expr: &str) -> String {
-    use crate::types::Durofut;
-
     // First try to parse as Durofut JSON
     if let Ok(root) = Durofut::try_from_json(expr) {
-        if let Err(e) = root.validate_recursive() {
-            return format!("Invalid durable function graph: {e}");
-        }
-        // Build in-memory node map from nested structure with generated IDs
-        let mut nodes = HashMap::new();
-        let mut id_counter = 0;
-        let root_id = collect_nodes(&root, &mut nodes, &mut id_counter);
-        return build_tree_visualization(&root_id, &nodes, false);
+        return explain_durofut(&root);
     }
 
     // Require DSL markers (df.* calls or operators like ~>, |=>) before evaluating via SPI.
@@ -251,10 +244,7 @@ fn explain_expression(expr: &str) -> String {
                 query: Some(expr.to_string()),
                 ..Default::default()
             };
-            let mut nodes = HashMap::new();
-            let mut id_counter = 0;
-            let root_id = collect_nodes(&sql_node, &mut nodes, &mut id_counter);
-            return build_tree_visualization(&root_id, &nodes, false);
+            return explain_durofut(&sql_node);
         }
         return "Cannot explain input: not a valid Durofut JSON, instance ID, SQL statement, or DSL expression.\n\
              Hint: DSL expressions use df.*() functions and operators like ~>, |=>, &, |.".to_string();
@@ -274,68 +264,40 @@ fn explain_expression(expr: &str) -> String {
         Ok(d) => d,
         Err(e) => return format!("Failed to parse Durofut JSON: {e}"),
     };
-    if let Err(e) = root.validate_recursive() {
-        return format!("Invalid durable function graph: {e}");
-    }
+    explain_durofut(&root)
+}
 
-    // Build in-memory node map from nested structure with generated IDs
-    let mut nodes = HashMap::new();
+fn explain_durofut(root: &Durofut) -> String {
     let mut id_counter = 0;
-    let root_id = collect_nodes(&root, &mut nodes, &mut id_counter);
-
-    // Visualize (existing visualization code)
+    let mut ids = || {
+        id_counter += 1;
+        format!("N{id_counter}")
+    };
+    let (root_id, flat_nodes) = match flatten_graph(root, &mut ids) {
+        Ok(flattened) => flattened,
+        Err(e) => return format!("Invalid durable function graph: {e}"),
+    };
+    let nodes = flat_nodes
+        .into_iter()
+        .map(|node| (node.id.clone(), ExplainNode::from(node)))
+        .collect();
     build_tree_visualization(&root_id, &nodes, false)
 }
 
-/// Collect all nodes from a nested Durofut structure into a flat HashMap
-/// Generates temporary IDs for visualization (e.g., "N1", "N2", ...)
-/// Returns the ID of the current node
-fn collect_nodes(
-    node: &crate::types::Durofut,
-    nodes: &mut HashMap<String, ExplainNode>,
-    id_counter: &mut i32,
-) -> String {
-    *id_counter += 1;
-    let node_id = format!("N{}", id_counter);
-
-    // Recursively collect children first to get their IDs
-    let left_id = node.left_node.as_ref().map(|raw| {
-        let child = crate::types::Durofut::child_from_raw(raw)
-            .unwrap_or_else(|e| pgrx::error!("Invalid left child in graph: {}", e));
-        collect_nodes(&child, nodes, id_counter)
-    });
-    let right_id = node.right_node.as_ref().map(|raw| {
-        let child = crate::types::Durofut::child_from_raw(raw)
-            .unwrap_or_else(|e| pgrx::error!("Invalid right child in graph: {}", e));
-        collect_nodes(&child, nodes, id_counter)
-    });
-
-    // Process config JSON to collect embedded nodes and replace Durofuts with IDs
-    let updated_query =
-        match node.transform_config_children(|child| Ok(collect_nodes(child, nodes, id_counter))) {
-            Ok(q) => q,
-            Err(e) => {
-                // In explain context, report errors as part of the visualization rather than panicking
-                Some(format!("ERROR: {e}"))
-            }
-        };
-
-    nodes.insert(
-        node_id.clone(),
-        ExplainNode {
-            id: node_id.clone(),
-            node_type: node.node_type.clone(),
-            query: updated_query,
-            result_name: node.result_name.clone(),
-            left_node: left_id,
-            right_node: right_id,
+impl From<FunctionNode> for ExplainNode {
+    fn from(node: FunctionNode) -> Self {
+        Self {
+            id: node.id,
+            node_type: node.node_type,
+            query: node.query,
+            result_name: node.result_name,
+            left_node: node.left_node,
+            right_node: node.right_node,
             status: None,
             result: None,
             status_details: None,
-        },
-    );
-
-    node_id
+        }
+    }
 }
 
 /// Load nodes from a table into a HashMap

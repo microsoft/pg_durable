@@ -1027,6 +1027,164 @@ pub struct FunctionNode {
     pub database: Option<String>,
 }
 
+pub(crate) trait IdSource {
+    fn next_id(&mut self) -> String;
+}
+
+impl<F> IdSource for F
+where
+    F: FnMut() -> String,
+{
+    fn next_id(&mut self) -> String {
+        self()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GraphError {
+    pub path: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for GraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)
+    }
+}
+
+struct PendingGraphNode {
+    node: Durofut,
+    id: String,
+    depth: usize,
+    path: String,
+}
+
+pub(crate) fn flatten_graph(
+    root: &Durofut,
+    ids: &mut impl IdSource,
+) -> Result<(String, Vec<FunctionNode>), GraphError> {
+    let root_id = ids.next_id();
+    let mut pending = vec![PendingGraphNode {
+        node: root.clone(),
+        id: root_id.clone(),
+        depth: 0,
+        path: "root".to_string(),
+    }];
+    let mut nodes = Vec::new();
+
+    while let Some(entry) = pending.pop() {
+        if nodes.len() >= MAX_GRAPH_NODES {
+            return Err(GraphError {
+                path: entry.path,
+                message: format!(
+                    "Workflow exceeds maximum node count of {}. Simplify the workflow or break it into multiple instances.",
+                    MAX_GRAPH_NODES
+                ),
+            });
+        }
+        if entry.depth > MAX_GRAPH_DEPTH {
+            return Err(GraphError {
+                path: entry.path,
+                message: format!(
+                    "Graph exceeds maximum nesting depth of {}. Simplify the workflow or break it into multiple instances.",
+                    MAX_GRAPH_DEPTH
+                ),
+            });
+        }
+        if !VALID_NODE_TYPES.contains(&entry.node.node_type.as_str()) {
+            return Err(GraphError {
+                path: entry.path,
+                message: format!(
+                    "Unknown node_type '{}'. Valid types: {}",
+                    entry.node.node_type,
+                    VALID_NODE_TYPES.join(", ")
+                ),
+            });
+        }
+        entry
+            .node
+            .validate_config_children()
+            .map_err(|message| GraphError {
+                path: entry.path.clone(),
+                message,
+            })?;
+
+        let mut children = Vec::new();
+        let mut parse_child = |raw: &serde_json::value::RawValue, segment: String| {
+            let path = format!("{}.{}", entry.path, segment);
+            let node = Durofut::child_from_raw(raw).map_err(|message| GraphError {
+                path: path.clone(),
+                message,
+            })?;
+            let id = ids.next_id();
+            children.push(PendingGraphNode {
+                node,
+                id: id.clone(),
+                depth: entry.depth + 1,
+                path,
+            });
+            Ok::<String, GraphError>(id)
+        };
+
+        let left_node = entry
+            .node
+            .left_node
+            .as_deref()
+            .map(|raw| parse_child(raw, "left".to_string()))
+            .transpose()?;
+        let right_node = entry
+            .node
+            .right_node
+            .as_deref()
+            .map(|raw| parse_child(raw, "right".to_string()))
+            .transpose()?;
+        let condition_node = if entry.node.node_type == "IF" || entry.node.node_type == "LOOP" {
+            entry
+                .node
+                .condition_node
+                .as_deref()
+                .map(|raw| parse_child(raw, "condition_node".to_string()))
+                .transpose()?
+        } else {
+            None
+        };
+        let extra_nodes = if entry.node.node_type == "JOIN" {
+            entry
+                .node
+                .extra_nodes
+                .iter()
+                .enumerate()
+                .map(|(index, raw)| parse_child(raw, format!("extra_nodes[{index}]")))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+
+        let query = entry
+            .node
+            .materialized_query(condition_node.as_deref(), &extra_nodes)
+            .map_err(|message| GraphError {
+                path: entry.path.clone(),
+                message,
+            })?;
+
+        nodes.push(FunctionNode {
+            id: entry.id,
+            node_type: entry.node.node_type,
+            query,
+            result_name: entry.node.result_name,
+            left_node,
+            right_node,
+            submitted_by: String::new(),
+            database: None,
+        });
+
+        pending.extend(children.into_iter().rev());
+    }
+
+    Ok((root_id, nodes))
+}
+
 /// Represents the entire function graph for an instance
 /// Note: Uses BTreeMap for deterministic serialization order (required for Duroxide replay)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1410,12 +1568,13 @@ impl Durofut {
     }
 
     /// Validate a Durofut node and all its children have valid node_types.
-    /// Used during insertion in df.start() to catch invalid nested nodes.
-    /// Also enforces MAX_GRAPH_NODES so oversized graphs fail fast without
-    /// needing a second traversal during insertion.
+    /// Kept as a compatibility helper for callers that only need validation;
+    /// graph entrypoints should consume `flatten_graph` directly.
     pub fn validate_recursive(&self) -> Result<(), String> {
-        let mut node_count = 0;
-        self.validate_recursive_inner(0, &mut node_count)
+        let mut next_id = || String::new();
+        flatten_graph(self, &mut next_id)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn reject_embedded_config_children(&self) -> Result<(), String> {
@@ -1457,115 +1616,16 @@ impl Durofut {
         }
 
         self.reject_embedded_config_children()?;
-
-        let has_config_children = (supports_condition && self.condition_node.is_some())
-            || (self.node_type == "JOIN" && !self.extra_nodes.is_empty());
-        let Some(query) = self.query.as_ref().filter(|_| has_config_children) else {
-            return Ok(());
-        };
-        let config = serde_json::from_str::<serde_json::Value>(query).map_err(|e| {
-            format!(
-                "query in {} must be valid JSON config: {}",
-                self.node_type, e
-            )
-        })?;
-        if !config.is_object() {
-            return Err(format!(
-                "query in {} must be a JSON config object",
-                self.node_type
-            ));
-        }
-
         Ok(())
     }
 
-    fn validate_recursive_inner(&self, depth: usize, node_count: &mut usize) -> Result<(), String> {
-        *node_count += 1;
-        if *node_count > MAX_GRAPH_NODES {
-            return Err(format!(
-                "Workflow exceeds maximum node count of {}. \
-                 Simplify the workflow or break it into multiple instances.",
-                MAX_GRAPH_NODES
-            ));
-        }
-        if depth > MAX_GRAPH_DEPTH {
-            return Err(format!(
-                "Graph exceeds maximum nesting depth of {}. \
-                 Simplify the workflow or break it into multiple instances.",
-                MAX_GRAPH_DEPTH
-            ));
-        }
-        if !VALID_NODE_TYPES.contains(&self.node_type.as_str()) {
-            return Err(format!(
-                "Unknown node_type '{}'. Valid types: {}",
-                self.node_type,
-                VALID_NODE_TYPES.join(", ")
-            ));
-        }
-        self.validate_config_children()?;
-        if let Some(ref left) = self.left_node {
-            Self::child_from_raw(left)?.validate_recursive_inner(depth + 1, node_count)?;
-        }
-        if let Some(ref right) = self.right_node {
-            Self::child_from_raw(right)?.validate_recursive_inner(depth + 1, node_count)?;
-        }
-        // Validate config children (condition_node, extra_nodes)
-        let d = depth + 1;
-        self.for_each_config_child(|child| child.validate_recursive_inner(d, node_count))?;
-        Ok(())
-    }
-
-    /// Parse each opaque config child and apply a callback to it.
-    ///
-    /// The callback receives each embedded child and returns `Result<(), String>`.
-    /// Parsing failures are always treated as errors — a `condition_node` or `extra_nodes`
-    /// entry that cannot be deserialized as a valid Durofut is rejected.
-    pub fn for_each_config_child<F>(&self, mut f: F) -> Result<(), String>
-    where
-        F: FnMut(&Durofut) -> Result<(), String>,
-    {
-        // IF/LOOP nodes: condition_node
-        if self.node_type == "IF" || self.node_type == "LOOP" {
-            if let Some(cond) = self.condition_node.as_ref() {
-                let cond_node = Self::child_from_raw(cond).map_err(|e| {
-                    format!(
-                        "condition_node in {} must be a valid Durofut object: {}",
-                        self.node_type, e
-                    )
-                })?;
-                f(&cond_node)?;
-            }
-        }
-
-        // JOIN nodes: extra_nodes array
-        if self.node_type == "JOIN" {
-            for (i, extra) in self.extra_nodes.iter().enumerate() {
-                let extra_node = Self::child_from_raw(extra).map_err(|e| {
-                    format!(
-                        "extra_nodes[{}] in {} must be a valid Durofut object: {}",
-                        i, self.node_type, e
-                    )
-                })?;
-                f(&extra_node)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Transform config children into string IDs via a callback, returning the
-    /// `df.nodes.query` JSON string used by `insert_nodes` and `collect_nodes`.
-    ///
-    /// The callback receives each embedded child and returns the generated ID string.
-    /// Parsing failures are always treated as errors.
-    pub fn transform_config_children<F>(&self, mut f: F) -> Result<Option<String>, String>
-    where
-        F: FnMut(&Durofut) -> Result<String, String>,
-    {
-        self.validate_config_children()?;
-        let has_condition =
-            (self.node_type == "IF" || self.node_type == "LOOP") && self.condition_node.is_some();
-        let has_extras = self.node_type == "JOIN" && !self.extra_nodes.is_empty();
+    fn materialized_query(
+        &self,
+        condition_node: Option<&str>,
+        extra_nodes: &[String],
+    ) -> Result<Option<String>, String> {
+        let has_condition = condition_node.is_some();
+        let has_extras = !extra_nodes.is_empty();
         if !has_condition && !has_extras {
             return Ok(self.query.clone());
         }
@@ -1586,33 +1646,12 @@ impl Durofut {
             ));
         }
 
-        // IF/LOOP nodes: condition_node
-        if has_condition {
-            if let Some(cond) = self.condition_node.as_ref() {
-                let cond_node = Self::child_from_raw(cond).map_err(|e| {
-                    format!(
-                        "condition_node in {} must be a valid Durofut object: {}",
-                        self.node_type, e
-                    )
-                })?;
-                let cond_id = f(&cond_node)?;
-                config["condition_node"] = serde_json::json!(cond_id);
-            }
+        if let Some(condition_node) = condition_node {
+            config["condition_node"] = serde_json::json!(condition_node);
         }
 
-        // JOIN nodes: extra_nodes array
         if has_extras {
-            let mut extra_ids: Vec<String> = Vec::with_capacity(self.extra_nodes.len());
-            for (i, extra) in self.extra_nodes.iter().enumerate() {
-                let extra_node = Self::child_from_raw(extra).map_err(|e| {
-                    format!(
-                        "extra_nodes[{}] in {} must be a valid Durofut object: {}",
-                        i, self.node_type, e
-                    )
-                })?;
-                extra_ids.push(f(&extra_node)?);
-            }
-            config["extra_nodes"] = serde_json::json!(extra_ids);
+            config["extra_nodes"] = serde_json::json!(extra_nodes);
         }
 
         Ok(Some(serde_json::to_string(&config).unwrap()))
@@ -2413,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_config_children_preserves_nodes_query_format() {
+    fn test_flatten_graph_preserves_condition_nodes_query_format() {
         let condition = Durofut {
             node_type: "SQL".to_string(),
             query: Some("SELECT true".to_string()),
@@ -2425,15 +2464,16 @@ mod tests {
             ..Default::default()
         };
 
-        let query = node
-            .transform_config_children(|_| Ok("condition-id".to_string()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(query, r#"{"condition_node":"condition-id"}"#);
+        let mut ids = ["root", "condition-id"].into_iter().map(str::to_string);
+        let (_, nodes) = flatten_graph(&node, &mut || ids.next().unwrap()).unwrap();
+        assert_eq!(
+            nodes[0].query.as_deref(),
+            Some(r#"{"condition_node":"condition-id"}"#)
+        );
     }
 
     #[test]
-    fn test_transform_config_children_preserves_existing_query() {
+    fn test_flatten_graph_preserves_existing_query() {
         let condition = Durofut {
             node_type: "SQL".to_string(),
             query: Some("SELECT true".to_string()),
@@ -2446,15 +2486,16 @@ mod tests {
             ..Default::default()
         };
 
-        let query = node
-            .transform_config_children(|_| Ok("condition-id".to_string()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(query, r#"{"a":1,"condition_node":"condition-id"}"#);
+        let mut ids = ["root", "condition-id"].into_iter().map(str::to_string);
+        let (_, nodes) = flatten_graph(&node, &mut || ids.next().unwrap()).unwrap();
+        assert_eq!(
+            nodes[0].query.as_deref(),
+            Some(r#"{"a":1,"condition_node":"condition-id"}"#)
+        );
     }
 
     #[test]
-    fn test_transform_extra_nodes_preserves_nodes_query_format() {
+    fn test_flatten_graph_preserves_extra_nodes_query_format() {
         let extra = Durofut {
             node_type: "SQL".to_string(),
             query: Some("SELECT 3".to_string()),
@@ -2466,11 +2507,12 @@ mod tests {
             ..Default::default()
         };
 
-        let query = node
-            .transform_config_children(|_| Ok("extra-id".to_string()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(query, r#"{"extra_nodes":["extra-id"]}"#);
+        let mut ids = ["root", "extra-id"].into_iter().map(str::to_string);
+        let (_, nodes) = flatten_graph(&node, &mut || ids.next().unwrap()).unwrap();
+        assert_eq!(
+            nodes[0].query.as_deref(),
+            Some(r#"{"extra_nodes":["extra-id"]}"#)
+        );
     }
 
     #[test]
@@ -2500,17 +2542,14 @@ mod tests {
             .validate_recursive()
             .unwrap_err()
             .contains("condition_node in IF must be a first-class Durofut field"));
-        assert!(legacy_join
-            .validate_recursive()
-            .unwrap_err()
-            .contains("extra_nodes in JOIN must be a first-class Durofut field"));
         assert!(legacy_loop
             .validate_recursive()
             .unwrap_err()
             .contains("condition_node in LOOP must be a first-class Durofut field"));
-        assert!(legacy_join
-            .transform_config_children(|_| Ok("unused".to_string()))
+        let mut ids = || "unused".to_string();
+        assert!(flatten_graph(&legacy_join, &mut ids)
             .unwrap_err()
+            .to_string()
             .contains("extra_nodes in JOIN must be a first-class Durofut field"));
     }
 
@@ -2584,6 +2623,36 @@ mod tests {
             Durofut::try_from_json(non_array).is_err(),
             "should reject non-array extra_nodes"
         );
+    }
+
+    #[test]
+    fn test_flatten_graph_assigns_preorder_ids_and_reports_error_path() {
+        let invalid = Durofut {
+            node_type: "NOT_A_NODE".to_string(),
+            ..Default::default()
+        };
+        let root = Durofut {
+            node_type: "THEN".to_string(),
+            left_node: Some(
+                Durofut {
+                    node_type: "SQL".to_string(),
+                    query: Some("SELECT 1".to_string()),
+                    ..Default::default()
+                }
+                .into_raw(),
+            ),
+            right_node: Some(invalid.into_raw()),
+            ..Default::default()
+        };
+        let mut counter = 0;
+        let error = flatten_graph(&root, &mut || {
+            counter += 1;
+            format!("N{counter}")
+        })
+        .unwrap_err();
+
+        assert_eq!(error.path, "root.right");
+        assert!(error.message.contains("Unknown node_type 'NOT_A_NODE'"));
     }
 
     #[test]

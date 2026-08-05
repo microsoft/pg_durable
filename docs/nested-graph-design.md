@@ -49,6 +49,8 @@ Conditions for IF/LOOP and additional JOIN branches are first-class `condition_n
 `extra_nodes` fields. They do not live inside the escaped `query` string, so nested config graphs
 grow linearly and use the same traversal path as left and right children.
 
+`flatten_graph` is the single materialization and validation pass used by both `df.start()` and `df.explain()`. It walks the envelope iteratively, enforces node-type, depth, and node-count limits, and reports failures with paths such as `root.left.condition_node`. IDs are assigned when children are discovered, allowing the parent `FunctionNode` to be emitted before its children. Persisting that pre-order output is valid because the same-instance node foreign keys are `DEFERRABLE INITIALLY DEFERRED`; changing that constraint requires changing the materialization order too.
+
 The envelope is distinct from durable execution state. During `df.start()`, config children are
 materialized as node rows and `df.nodes.query` retains the worker-facing format with child IDs:
 

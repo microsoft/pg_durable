@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use crate::client::start_durable_function;
 use crate::types::{
-    get_max_new_transaction_starts, get_new_transaction_start_timeout, mark_non_future_helper_call,
-    short_id, validate_result_name, Durofut, FunctionInput,
+    flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
+    mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
+    FunctionNode,
 };
 
 /// Check if we're running inside a workflow context (background worker connection).
@@ -990,10 +991,6 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         Err(e) => pgrx::error!("Invalid durable function: {}", e),
     };
 
-    // Validate the entire graph recursively before inserting
-    if let Err(e) = durofut.validate_recursive() {
-        pgrx::error!("Invalid durable function graph: {}", e);
-    }
     // The instance ID is reserved later (after identity validation), using an
     // INSERT ... ON CONFLICT (id) DO NOTHING retry so collisions — including
     // against other roles' instances invisible under RLS — re-roll instead of
@@ -1036,75 +1033,13 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         }
     }
 
-    // Insert all nodes from the nested graph into df.nodes, returning root node ID
-    fn insert_nodes(
-        node: &Durofut,
+    fn insert_node(
+        node: &FunctionNode,
         instance_id: &str,
-        force_id: Option<&str>,
         current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
         legacy_login_role: bool,
-        node_count: &mut usize,
-    ) -> String {
-        *node_count += 1;
-        if *node_count > crate::types::MAX_GRAPH_NODES {
-            pgrx::error!(
-                "Workflow exceeds maximum node count of {}. \
-                 Simplify the workflow or break it into multiple instances.",
-                crate::types::MAX_GRAPH_NODES
-            );
-        }
-        // Recursively insert children FIRST to get their IDs
-        let left_id = node.left_node.as_ref().map(|raw| {
-            let child = Durofut::child_from_raw(raw)
-                .unwrap_or_else(|e| pgrx::error!("Invalid left child in graph: {}", e));
-            insert_nodes(
-                &child,
-                instance_id,
-                None,
-                current_user_oid,
-                database,
-                legacy_login_role,
-                node_count,
-            )
-        });
-        let right_id = node.right_node.as_ref().map(|raw| {
-            let child = Durofut::child_from_raw(raw)
-                .unwrap_or_else(|e| pgrx::error!("Invalid right child in graph: {}", e));
-            insert_nodes(
-                &child,
-                instance_id,
-                None,
-                current_user_oid,
-                database,
-                legacy_login_role,
-                node_count,
-            )
-        });
-
-        // Process config JSON to recursively insert embedded nodes and get their IDs
-        let query_val: Option<String> = match node.transform_config_children(|child| {
-            Ok(insert_nodes(
-                child,
-                instance_id,
-                None,
-                current_user_oid,
-                database,
-                legacy_login_role,
-                node_count,
-            ))
-        }) {
-            Ok(updated_query) => updated_query,
-            Err(e) => pgrx::error!("Invalid config in {} node: {}", node.node_type, e),
-        };
-
-        // Claim a per-instance-unique node ID. Node IDs only need to be unique
-        // within their owning instance — the df.nodes composite PRIMARY KEY
-        // (instance_id, id) is the guard — so we INSERT ... ON CONFLICT
-        // (instance_id, id) DO NOTHING RETURNING id and re-roll on collision
-        // instead of surfacing a raw key violation (issue #129). Near the
-        // MAX_GRAPH_NODES ceiling the per-instance birthday-collision odds are
-        // small but non-trivial, so the retry keeps large graphs from flaking.
+    ) {
         // B1 backward compat: the v0.1.x schema has login_role NOT NULL on
         // df.nodes, so the legacy branch still sets it (= submitted_by).
         // Caveat: the ON CONFLICT (instance_id, id) clause below needs the
@@ -1112,25 +1047,11 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         // cannot run df.start() until it upgrades. That is fine: the supported
         // B1 floor is 0.2.2 (docs/upgrade-testing.md), so this legacy branch is
         // effectively dead code for every supported install.
-        // The root node's ID is forced (force_id) to the value the instance row
-        // already points at via root_node, so the deferred same-instance FK is
-        // satisfied at commit without an UPDATE the caller isn't privileged to
-        // run. The instance is freshly reserved, so the only way the forced
-        // insert can conflict is a child node in this same graph randomly
-        // claiming the identical 8-hex value (~1 in 2^32): give it a single
-        // attempt and let the error abort the txn (the caller retries) rather
-        // than re-rolling away from the reserved ID. Non-root nodes generate a
-        // random ID and re-roll on collision.
-        let mut forced_id = force_id.map(str::to_string);
-        let max_attempts = if force_id.is_some() {
-            1
-        } else {
-            MAX_ID_ATTEMPTS
-        };
-        let node_id = match pick_id_with_retry(
-            move || forced_id.take().unwrap_or_else(short_id),
+        let node_id = node.id.clone();
+        if let Err(e) = pick_id_with_retry(
+            || node_id.clone(),
             |candidate| {
-                let query_arg: DatumWithOid = match &query_val {
+                let query_arg: DatumWithOid = match &node.query {
                     Some(q) => q.as_str().into(),
                     None => DatumWithOid::null::<String>(),
                 };
@@ -1138,11 +1059,11 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                     Some(n) => n.as_str().into(),
                     None => DatumWithOid::null::<String>(),
                 };
-                let left_node_arg: DatumWithOid = match &left_id {
+                let left_node_arg: DatumWithOid = match &node.left_node {
                     Some(id) => id.as_str().into(),
                     None => DatumWithOid::null::<String>(),
                 };
-                let right_node_arg: DatumWithOid = match &right_id {
+                let right_node_arg: DatumWithOid = match &node.right_node {
                     Some(id) => id.as_str().into(),
                     None => DatumWithOid::null::<String>(),
                 };
@@ -1195,35 +1116,27 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                     },
                 )
             },
-            max_attempts,
+            1,
         ) {
-            Ok(id) => id,
-            Err(e) => match force_id {
-                // The forced root id collided with an already-inserted child
-                // node id in this same graph (~1 in 2^32). The whole df.start()
-                // txn aborts cleanly (no orphan, no corruption) so the caller
-                // can simply retry df.start().
-                Some(forced) => pgrx::error!(
-                    "root node id '{}' collided with a child node id in the same graph \
-                     (~1 in 2^32); df.start() aborted safely, retry it ({})",
-                    forced,
-                    e
-                ),
-                None => pgrx::error!("Failed to insert node: {}", e),
-            },
-        };
-
-        // Return the generated ID for parent to reference
-        node_id
+            pgrx::error!("Failed to insert node '{}': {}", node.id, e);
+        }
     }
 
     let legacy_login_role = legacy_login_role_schema();
 
-    // Pre-generate the root node's ID so the instance row can point at it up
-    // front. The same-instance FK on root_node is DEFERRABLE INITIALLY
-    // DEFERRED, so the referenced node row need not exist yet — insert_nodes
-    // below inserts the root node with this exact ID before commit.
-    let root_id = short_id();
+    // Assign IDs as nodes are discovered. Per-graph uniqueness is required
+    // because parent references are materialized before any rows are inserted.
+    let mut assigned_ids = std::collections::HashSet::new();
+    let mut id_source = || loop {
+        let candidate = short_id();
+        if assigned_ids.insert(candidate.clone()) {
+            break candidate;
+        }
+    };
+    let (root_id, nodes) = match flatten_graph(&durofut, &mut id_source) {
+        Ok(flattened) => flattened,
+        Err(e) => pgrx::error!("Invalid durable function graph: {}", e),
+    };
 
     // Reserve the instance ID before inserting nodes so node rows can reference
     // it. Collisions on the 8-hex ID space are rare, but we reserve via
@@ -1291,21 +1204,17 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         Err(e) => pgrx::error!("Failed to create instance: {}", e),
     };
 
-    // Insert the graph. The top-level (root) node's ID is forced to root_id —
-    // the value the instance row already points at via root_node — so the
-    // deferred same-instance FK is satisfied at commit with no UPDATE (df
-    // callers aren't granted UPDATE on root_node). Child node IDs are random
-    // with collision re-roll.
-    let mut node_count: usize = 0;
-    insert_nodes(
-        &durofut,
-        &instance_id,
-        Some(&root_id),
-        current_user_oid,
-        database,
-        legacy_login_role,
-        &mut node_count,
-    );
+    // The same-instance node references are DEFERRABLE INITIALLY DEFERRED, so
+    // pre-order insertion is valid even when a parent row precedes its child.
+    for node in &nodes {
+        insert_node(
+            node,
+            &instance_id,
+            current_user_oid,
+            database,
+            legacy_login_role,
+        );
+    }
 
     // Capture vars from df.vars using the installed extension version as the
     // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
