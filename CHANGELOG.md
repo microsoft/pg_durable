@@ -19,6 +19,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 - **`df.ensure_durofut(text)`:** removed this undocumented internal helper. The `0.2.5 -> 0.2.6` upgrade replaces its operator callers before dropping it with `RESTRICT`; customer-owned dependent objects must be changed or removed before upgrading.
 
+### Changed
+
+- **Workflow graph envelope:** IF/LOOP conditions and additional JOIN branches are now first-class opaque children instead of JSON embedded inside the `query` string. This removes the remaining parser-depth limit and repeated escaping for config-nested graphs. The transient `Durofut` JSON representation changes; persisted `df.nodes` rows and in-flight instances are unaffected.
+
 ## [0.2.5] - 2026-07-30
 
 ### Added

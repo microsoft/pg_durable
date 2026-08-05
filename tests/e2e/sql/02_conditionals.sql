@@ -128,7 +128,7 @@ BEGIN
             "node_type": "IF",
             "left_node": {"node_type": "SQL", "query": "SELECT 1"},
             "right_node": {"node_type": "SQL", "query": "SELECT 2"},
-            "query": "{\"condition_node\": {\"foo\": \"bar\"}}"
+            "condition_node": {"foo": "bar"}
         }');
         RAISE EXCEPTION 'TEST FAILED: df.start should have rejected malformed condition_node';
     EXCEPTION WHEN OTHERS THEN
@@ -147,7 +147,7 @@ BEGIN
         PERFORM df.start('{
             "node_type": "LOOP",
             "left_node": {"node_type": "SQL", "query": "SELECT 1"},
-            "query": "{\"condition_node\": \"a1b2c3d4\"}"
+            "condition_node": "a1b2c3d4"
         }');
         RAISE EXCEPTION 'TEST FAILED: df.start should have rejected string condition_node';
     EXCEPTION WHEN OTHERS THEN
@@ -167,7 +167,7 @@ BEGIN
             "node_type": "IF",
             "left_node": {"node_type": "SQL", "query": "SELECT 1"},
             "right_node": {"node_type": "SQL", "query": "SELECT 2"},
-            "query": "{\"condition_node\": 42}"
+            "condition_node": 42
         }');
         RAISE EXCEPTION 'TEST FAILED: df.start should have rejected numeric condition_node';
     EXCEPTION WHEN OTHERS THEN
@@ -189,6 +189,34 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: df.if should return non-null graph';
     END IF;
     RAISE NOTICE 'Test 4 PASSED: Valid IF graph produced: %', left(graph, 80);
+END $body$;
+
+-- Test 5: condition_node embedded in the legacy query format should be rejected before persistence
+DO $body$
+DECLARE
+    nodes_before BIGINT;
+BEGIN
+    SELECT count(*) INTO nodes_before FROM df.nodes;
+
+    BEGIN
+        PERFORM df.start('{
+            "node_type": "IF",
+            "left_node": {"node_type": "SQL", "query": "SELECT 1"},
+            "right_node": {"node_type": "SQL", "query": "SELECT 2"},
+            "query": "{\"condition_node\":{\"node_type\":\"SQL\",\"query\":\"SELECT true\"}}"
+        }');
+        RAISE EXCEPTION 'TEST FAILED: df.start should have rejected legacy condition_node format';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE '%condition_node in IF must be a first-class Durofut field%' THEN
+            RAISE NOTICE 'Test 5 PASSED: Caught legacy condition_node format: %', SQLERRM;
+        ELSE
+            RAISE EXCEPTION 'TEST FAILED: Wrong error for legacy condition_node format: %', SQLERRM;
+        END IF;
+    END;
+
+    IF (SELECT count(*) FROM df.nodes) != nodes_before THEN
+        RAISE EXCEPTION 'TEST FAILED: legacy condition_node format persisted node rows';
+    END IF;
 END $body$;
 
 -- === Test: 40_if_rows ===

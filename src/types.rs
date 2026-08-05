@@ -1186,6 +1186,42 @@ where
     Ok(value)
 }
 
+fn deserialize_raw_objects<'de, D>(
+    deserializer: D,
+) -> Result<Vec<Box<serde_json::value::RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<Box<serde_json::value::RawValue>>::deserialize(deserializer)?;
+    if values
+        .iter()
+        .any(|raw| !raw.get().trim_start().starts_with('{'))
+    {
+        return Err(serde::de::Error::custom(
+            "Durofut children must be JSON objects",
+        ));
+    }
+    Ok(values)
+}
+
+fn deserialize_condition_node<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Box<serde_json::value::RawValue>>::deserialize(deserializer)?;
+    if value
+        .as_ref()
+        .is_some_and(|raw| !raw.get().trim_start().starts_with('{'))
+    {
+        return Err(serde::de::Error::custom(
+            "condition_node must be a Durofut JSON object",
+        ));
+    }
+    Ok(value)
+}
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as opaque JSON objects, not stored as ID references. Keeping them as
 /// `RawValue` lets each graph level deserialize independently without serde_json's recursion limit.
@@ -1205,6 +1241,18 @@ pub struct Durofut {
         default
     )]
     pub right_node: Option<Box<serde_json::value::RawValue>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_condition_node",
+        default
+    )]
+    pub condition_node: Option<Box<serde_json::value::RawValue>>,
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_raw_objects",
+        default
+    )]
+    pub extra_nodes: Vec<Box<serde_json::value::RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1370,6 +1418,29 @@ impl Durofut {
         self.validate_recursive_inner(0, &mut node_count)
     }
 
+    fn reject_embedded_config_children(&self) -> Result<(), String> {
+        let Some(query) = self.query.as_ref() else {
+            return Ok(());
+        };
+        let Ok(config) = serde_json::from_str::<serde_json::Value>(query) else {
+            return Ok(());
+        };
+
+        let legacy_field = match self.node_type.as_str() {
+            "IF" | "LOOP" if config.get("condition_node").is_some() => Some("condition_node"),
+            "JOIN" if config.get("extra_nodes").is_some() => Some("extra_nodes"),
+            _ => None,
+        };
+        if let Some(field) = legacy_field {
+            return Err(format!(
+                "{} in {} must be a first-class Durofut field, not embedded in query",
+                field, self.node_type
+            ));
+        }
+
+        Ok(())
+    }
+
     fn validate_recursive_inner(&self, depth: usize, node_count: &mut usize) -> Result<(), String> {
         *node_count += 1;
         if *node_count > MAX_GRAPH_NODES {
@@ -1393,21 +1464,20 @@ impl Durofut {
                 VALID_NODE_TYPES.join(", ")
             ));
         }
+        self.reject_embedded_config_children()?;
         if let Some(ref left) = self.left_node {
             Self::child_from_raw(left)?.validate_recursive_inner(depth + 1, node_count)?;
         }
         if let Some(ref right) = self.right_node {
             Self::child_from_raw(right)?.validate_recursive_inner(depth + 1, node_count)?;
         }
-        // Validate config-embedded nodes (condition_node, extra_nodes)
+        // Validate config children (condition_node, extra_nodes)
         let d = depth + 1;
         self.for_each_config_child(|child| child.validate_recursive_inner(d, node_count))?;
         Ok(())
     }
 
-    /// Extract config-embedded Durofut children from the `query` JSON field and apply
-    /// a callback to each. This is the single source of truth for walking `condition_node`
-    /// (in IF/LOOP nodes) and `extra_nodes` (in JOIN nodes).
+    /// Parse each opaque config child and apply a callback to it.
     ///
     /// The callback receives each embedded child and returns `Result<(), String>`.
     /// Parsing failures are always treated as errors — a `condition_node` or `extra_nodes`
@@ -1416,24 +1486,13 @@ impl Durofut {
     where
         F: FnMut(&Durofut) -> Result<(), String>,
     {
-        let query_str = match self.query.as_ref() {
-            Some(s) => s,
-            None => return Ok(()),
-        };
-        let config = match serde_json::from_str::<serde_json::Value>(query_str) {
-            Ok(c) => c,
-            Err(_) => return Ok(()), // not JSON config, nothing to walk
-        };
-
         // IF/LOOP nodes: condition_node
         if self.node_type == "IF" || self.node_type == "LOOP" {
-            if let Some(cond) = config.get("condition_node") {
-                let cond_node = serde_json::from_value::<Durofut>(cond.clone()).map_err(|e| {
+            if let Some(cond) = self.condition_node.as_ref() {
+                let cond_node = Self::child_from_raw(cond).map_err(|e| {
                     format!(
-                        "condition_node in {} must be a valid Durofut object, got {}: {}",
-                        self.node_type,
-                        summarize_json_type(cond),
-                        e
+                        "condition_node in {} must be a valid Durofut object: {}",
+                        self.node_type, e
                     )
                 })?;
                 f(&cond_node)?;
@@ -1442,26 +1501,22 @@ impl Durofut {
 
         // JOIN nodes: extra_nodes array
         if self.node_type == "JOIN" {
-            if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
-                for (i, extra) in extras.iter().enumerate() {
-                    let extra_node =
-                        serde_json::from_value::<Durofut>(extra.clone()).map_err(|e| {
-                            format!(
-                                "extra_nodes[{}] in {} must be a valid Durofut object: {}",
-                                i, self.node_type, e
-                            )
-                        })?;
-                    f(&extra_node)?;
-                }
+            for (i, extra) in self.extra_nodes.iter().enumerate() {
+                let extra_node = Self::child_from_raw(extra).map_err(|e| {
+                    format!(
+                        "extra_nodes[{}] in {} must be a valid Durofut object: {}",
+                        i, self.node_type, e
+                    )
+                })?;
+                f(&extra_node)?;
             }
         }
 
         Ok(())
     }
 
-    /// Transform config-embedded Durofut children into string IDs via a callback,
-    /// returning the updated query JSON string. Used by `insert_nodes` and `collect_nodes`
-    /// to replace nested Durofut objects with generated node IDs.
+    /// Transform config children into string IDs via a callback, returning the
+    /// `df.nodes.query` JSON string used by `insert_nodes` and `collect_nodes`.
     ///
     /// The callback receives each embedded child and returns the generated ID string.
     /// Parsing failures are always treated as errors.
@@ -1469,24 +1524,37 @@ impl Durofut {
     where
         F: FnMut(&Durofut) -> Result<String, String>,
     {
-        let query_str = match self.query.as_ref() {
-            Some(s) => s,
-            None => return Ok(None),
+        self.reject_embedded_config_children()?;
+        let has_condition =
+            (self.node_type == "IF" || self.node_type == "LOOP") && self.condition_node.is_some();
+        let has_extras = self.node_type == "JOIN" && !self.extra_nodes.is_empty();
+        if !has_condition && !has_extras {
+            return Ok(self.query.clone());
+        }
+
+        let mut config = match self.query.as_ref() {
+            Some(query) => serde_json::from_str::<serde_json::Value>(query).map_err(|e| {
+                format!(
+                    "query in {} must be valid JSON config: {}",
+                    self.node_type, e
+                )
+            })?,
+            None => serde_json::json!({}),
         };
-        let mut config = match serde_json::from_str::<serde_json::Value>(query_str) {
-            Ok(c) => c,
-            Err(_) => return Ok(Some(query_str.clone())), // not JSON, pass through as-is
-        };
+        if !config.is_object() {
+            return Err(format!(
+                "query in {} must be a JSON config object",
+                self.node_type
+            ));
+        }
 
         // IF/LOOP nodes: condition_node
-        if self.node_type == "IF" || self.node_type == "LOOP" {
-            if let Some(cond) = config.get("condition_node") {
-                let cond_node = serde_json::from_value::<Durofut>(cond.clone()).map_err(|e| {
+        if has_condition {
+            if let Some(cond) = self.condition_node.as_ref() {
+                let cond_node = Self::child_from_raw(cond).map_err(|e| {
                     format!(
-                        "condition_node in {} must be a valid Durofut object, got {}: {}",
-                        self.node_type,
-                        summarize_json_type(cond),
-                        e
+                        "condition_node in {} must be a valid Durofut object: {}",
+                        self.node_type, e
                     )
                 })?;
                 let cond_id = f(&cond_node)?;
@@ -1495,38 +1563,21 @@ impl Durofut {
         }
 
         // JOIN nodes: extra_nodes array
-        if self.node_type == "JOIN" {
-            if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
-                let mut extra_ids: Vec<String> = Vec::new();
-                for (i, extra) in extras.iter().enumerate() {
-                    let extra_node =
-                        serde_json::from_value::<Durofut>(extra.clone()).map_err(|e| {
-                            format!(
-                                "extra_nodes[{}] in {} must be a valid Durofut object: {}",
-                                i, self.node_type, e
-                            )
-                        })?;
-                    extra_ids.push(f(&extra_node)?);
-                }
-                if !extra_ids.is_empty() {
-                    config["extra_nodes"] = serde_json::json!(extra_ids);
-                }
+        if has_extras {
+            let mut extra_ids: Vec<String> = Vec::with_capacity(self.extra_nodes.len());
+            for (i, extra) in self.extra_nodes.iter().enumerate() {
+                let extra_node = Self::child_from_raw(extra).map_err(|e| {
+                    format!(
+                        "extra_nodes[{}] in {} must be a valid Durofut object: {}",
+                        i, self.node_type, e
+                    )
+                })?;
+                extra_ids.push(f(&extra_node)?);
             }
+            config["extra_nodes"] = serde_json::json!(extra_ids);
         }
 
         Ok(Some(serde_json::to_string(&config).unwrap()))
-    }
-}
-
-/// Helper to describe a JSON value type for error messages
-fn summarize_json_type(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
     }
 }
 
@@ -2312,17 +2363,80 @@ mod tests {
             query: Some("SELECT 1".to_string()),
             ..Default::default()
         };
-        let sql_value = serde_json::to_value(&sql_node).unwrap();
-        let extra_nodes: Vec<serde_json::Value> = vec![sql_value; n];
-        let config = serde_json::json!({ "extra_nodes": extra_nodes });
+        let extra_node = sql_node.clone().into_raw();
 
         Durofut {
             node_type: "JOIN".to_string(),
             left_node: Some(sql_node.clone().into_raw()),
             right_node: Some(sql_node.into_raw()),
-            query: Some(config.to_string()),
+            extra_nodes: vec![extra_node; n],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_transform_config_children_preserves_nodes_query_format() {
+        let condition = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT true".to_string()),
+            ..Default::default()
+        };
+        let node = Durofut {
+            node_type: "IF".to_string(),
+            condition_node: Some(condition.into_raw()),
+            ..Default::default()
+        };
+
+        let query = node
+            .transform_config_children(|_| Ok("condition-id".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(query, r#"{"condition_node":"condition-id"}"#);
+    }
+
+    #[test]
+    fn test_transform_extra_nodes_preserves_nodes_query_format() {
+        let extra = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 3".to_string()),
+            ..Default::default()
+        };
+        let node = Durofut {
+            node_type: "JOIN".to_string(),
+            extra_nodes: vec![extra.into_raw()],
+            ..Default::default()
+        };
+
+        let query = node
+            .transform_config_children(|_| Ok("extra-id".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(query, r#"{"extra_nodes":["extra-id"]}"#);
+    }
+
+    #[test]
+    fn test_rejects_config_children_embedded_in_query() {
+        let legacy_if = Durofut {
+            node_type: "IF".to_string(),
+            query: Some(
+                r#"{"condition_node":{"node_type":"SQL","query":"SELECT true"}}"#.to_string(),
+            ),
+            ..Default::default()
+        };
+        let legacy_join = Durofut {
+            node_type: "JOIN".to_string(),
+            query: Some(r#"{"extra_nodes":[{"node_type":"SQL","query":"SELECT 3"}]}"#.to_string()),
+            ..Default::default()
+        };
+
+        assert!(legacy_if
+            .validate_recursive()
+            .unwrap_err()
+            .contains("condition_node in IF must be a first-class Durofut field"));
+        assert!(legacy_join
+            .transform_config_children(|_| Ok("unused".to_string()))
+            .unwrap_err()
+            .contains("extra_nodes in JOIN must be a first-class Durofut field"));
     }
 
     #[test]

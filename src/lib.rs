@@ -1102,18 +1102,14 @@ mod tests {
         assert!(
             fut.right_node.is_none(),
             "right_node should be None for LOOP"
-        ); // condition in config now
-        assert!(
-            fut.query.is_some(),
-            "should have config with condition_node"
-        ); // has config with condition_node
-
-        // Verify condition is embedded in config
-        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
-        assert!(
-            config.get("condition_node").is_some(),
-            "config should have condition_node"
         );
+        let condition = Durofut::child_from_raw(fut.condition_node.as_ref().unwrap()).unwrap();
+        assert_eq!(condition.node_type, "SQL");
+        assert_eq!(
+            condition.query.as_deref(),
+            Some("SELECT count(*) > 0 FROM queue")
+        );
+        assert!(fut.query.is_none());
     }
 
     #[pg_test]
@@ -1147,9 +1143,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_if_condition_embedded_in_config() {
-        // Verify that if_fn embeds condition as a nested Durofut in the config JSON,
-        // not as a string ID reference.
+    fn test_if_condition_is_first_class_child() {
         let condition = crate::dsl::sql("SELECT count(*) > 0 FROM tasks");
         let then_branch = crate::dsl::sql("SELECT 'yes'");
         let else_branch = crate::dsl::sql("SELECT 'no'");
@@ -1160,19 +1154,13 @@ mod tests {
         assert!(fut.left_node.is_some(), "then branch should be left_node");
         assert!(fut.right_node.is_some(), "else branch should be right_node");
 
-        // Parse the config to verify condition_node structure
-        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
-        let cond_node = config
-            .get("condition_node")
-            .expect("config should have condition_node");
-
-        // condition_node must be a nested Durofut object, not a string ID
-        assert!(
-            cond_node.is_object(),
-            "condition_node should be an object, not a string"
+        let cond_node = Durofut::child_from_raw(fut.condition_node.as_ref().unwrap()).unwrap();
+        assert_eq!(cond_node.node_type, "SQL");
+        assert_eq!(
+            cond_node.query.as_deref(),
+            Some("SELECT count(*) > 0 FROM tasks")
         );
-        assert_eq!(cond_node["node_type"], "SQL");
-        assert_eq!(cond_node["query"], "SELECT count(*) > 0 FROM tasks");
+        assert!(fut.query.is_none());
 
         // Verify it round-trips through validation
         assert!(
@@ -1182,9 +1170,25 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_join3_extra_nodes_embedded_in_config() {
-        // Verify that join3 embeds the third branch as a nested Durofut in extra_nodes,
-        // not as a string ID reference.
+    fn test_nested_if_condition_envelope_grows_linearly() {
+        let branch = crate::dsl::sql("SELECT 1");
+        let mut graph = crate::dsl::sql("SELECT true");
+        let mut sizes = Vec::new();
+
+        for _ in 0..20 {
+            graph = crate::dsl::if_fn(&graph, &branch, &branch);
+            sizes.push(graph.len());
+        }
+
+        let increments: Vec<usize> = sizes.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(
+            increments.windows(2).all(|pair| pair[0] == pair[1]),
+            "first-class condition children should add constant envelope overhead: {increments:?}"
+        );
+    }
+
+    #[pg_test]
+    fn test_join3_extra_nodes_are_first_class_children() {
         let a = crate::dsl::sql("SELECT 1");
         let b = crate::dsl::sql("SELECT 2");
         let c = crate::dsl::sql("SELECT 3");
@@ -1198,23 +1202,11 @@ mod tests {
             "second branch should be right_node"
         );
 
-        // Parse the config to verify extra_nodes structure
-        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
-        let extras = config
-            .get("extra_nodes")
-            .and_then(|e| e.as_array())
-            .expect("config should have extra_nodes array");
-
-        assert_eq!(extras.len(), 1, "join3 should have exactly 1 extra node");
-
-        // extra_nodes[0] must be a nested Durofut object, not a string ID
-        let extra = &extras[0];
-        assert!(
-            extra.is_object(),
-            "extra_nodes entry should be an object, not a string"
-        );
-        assert_eq!(extra["node_type"], "SQL");
-        assert_eq!(extra["query"], "SELECT 3");
+        assert_eq!(fut.extra_nodes.len(), 1);
+        let extra = Durofut::child_from_raw(&fut.extra_nodes[0]).unwrap();
+        assert_eq!(extra.node_type, "SQL");
+        assert_eq!(extra.query.as_deref(), Some("SELECT 3"));
+        assert!(fut.query.is_none());
 
         // Verify it round-trips through validation
         assert!(
@@ -2741,7 +2733,10 @@ mod tests {
                 }
                 .into_raw(),
             ),
-            query: Some(r#"{"condition_node": {"foo": "bar"}}"#.to_string()),
+            condition_node: Some(
+                serde_json::from_str::<Box<serde_json::value::RawValue>>(r#"{"foo":"bar"}"#)
+                    .unwrap(),
+            ),
             ..Default::default()
         };
         let result = durofut.validate_recursive();
@@ -2757,49 +2752,13 @@ mod tests {
 
     #[pg_test]
     fn test_validate_rejects_condition_node_number() {
-        // condition_node as a number should be rejected
-        let durofut = Durofut {
-            node_type: "LOOP".to_string(),
-            left_node: Some(
-                Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 1".to_string()),
-                    ..Default::default()
-                }
-                .into_raw(),
-            ),
-            query: Some(r#"{"condition_node": 42}"#.to_string()),
-            ..Default::default()
-        };
-        let result = durofut.validate_recursive();
+        let result = Durofut::try_from_json(r#"{"node_type":"LOOP","condition_node":42}"#);
         assert!(result.is_err(), "Should reject numeric condition_node");
     }
 
     #[pg_test]
     fn test_validate_rejects_condition_node_string_id() {
-        // condition_node as a string ID (old format) should be rejected
-        let durofut = Durofut {
-            node_type: "IF".to_string(),
-            left_node: Some(
-                Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 'then'".to_string()),
-                    ..Default::default()
-                }
-                .into_raw(),
-            ),
-            right_node: Some(
-                Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 'else'".to_string()),
-                    ..Default::default()
-                }
-                .into_raw(),
-            ),
-            query: Some(r#"{"condition_node": "a1b2c3d4"}"#.to_string()),
-            ..Default::default()
-        };
-        let result = durofut.validate_recursive();
+        let result = Durofut::try_from_json(r#"{"node_type":"IF","condition_node":"a1b2c3d4"}"#);
         assert!(result.is_err(), "Should reject string ID condition_node");
     }
 
@@ -2869,7 +2828,10 @@ mod tests {
                 }
                 .into_raw(),
             ),
-            query: Some(r#"{"extra_nodes": [{"not": "a durofut"}]}"#.to_string()),
+            extra_nodes: vec![serde_json::from_str::<Box<serde_json::value::RawValue>>(
+                r#"{"not":"a durofut"}"#,
+            )
+            .unwrap()],
             ..Default::default()
         };
         let result = durofut.validate_recursive();
@@ -2927,7 +2889,6 @@ mod tests {
             query: Some("SELECT true".to_string()),
             ..Default::default()
         };
-        let config = serde_json::json!({ "condition_node": condition });
         let durofut = Durofut {
             node_type: "IF".to_string(),
             left_node: Some(
@@ -2946,7 +2907,7 @@ mod tests {
                 }
                 .into_raw(),
             ),
-            query: Some(config.to_string()),
+            condition_node: Some(condition.into_raw()),
             ..Default::default()
         };
         assert!(
@@ -3192,15 +3153,13 @@ mod tests {
             ..Default::default()
         };
 
-        let sql_value = serde_json::to_value(&sql_node).unwrap();
-        let extra_nodes: Vec<serde_json::Value> = vec![sql_value; MAX_GRAPH_NODES];
-        let config = serde_json::json!({ "extra_nodes": extra_nodes });
+        let extra_node = sql_node.clone().into_raw();
 
         let join_node = Durofut {
             node_type: "JOIN".to_string(),
             left_node: Some(sql_node.clone().into_raw()),
             right_node: Some(sql_node.into_raw()),
-            query: Some(config.to_string()),
+            extra_nodes: vec![extra_node; MAX_GRAPH_NODES],
             ..Default::default()
         };
 
@@ -3370,9 +3329,7 @@ mod tests {
 
     #[pg_test]
     fn test_malformed_loop_condition_detected_at_validate() {
-        // A LOOP node whose condition_node is a plain string (not a Durofut object)
-        // should be rejected by validate_recursive because for_each_config_child
-        // requires condition_node to deserialize as a valid Durofut.
+        // A LOOP condition object without a node_type is rejected by validation.
         let node = Durofut {
             node_type: "LOOP".to_string(),
             left_node: Some(
@@ -3383,35 +3340,16 @@ mod tests {
                 }
                 .into_raw(),
             ),
-            // Malformed config: valid JSON but condition_node is a string, not a Durofut object.
-            query: Some(r#"{"condition_node": "nonexist"}"#.to_string()),
+            condition_node: Some(
+                serde_json::from_str::<Box<serde_json::value::RawValue>>(r#"{"id":"nonexist"}"#)
+                    .unwrap(),
+            ),
             ..Default::default()
         };
-        // Validate should fail because condition_node is not a valid Durofut object
         let err = node.validate_recursive().unwrap_err();
         assert!(
             err.contains("condition_node"),
             "Error should mention condition_node, got: {err}"
-        );
-
-        // But if the config is totally not JSON, for_each_config_child skips it
-        // (it's treated as a plain query string, not a config object).
-        let non_json_node = Durofut {
-            node_type: "LOOP".to_string(),
-            left_node: Some(
-                Durofut {
-                    node_type: "SQL".to_string(),
-                    query: Some("SELECT 1".to_string()),
-                    ..Default::default()
-                }
-                .into_raw(),
-            ),
-            query: Some("this is not json at all!!!".to_string()),
-            ..Default::default()
-        };
-        assert!(
-            non_json_node.validate_recursive().is_ok(),
-            "LOOP with non-JSON config passes DSL validation (caught at execution time)"
         );
     }
 }

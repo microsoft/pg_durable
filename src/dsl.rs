@@ -324,21 +324,12 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 #[pg_extern(name = "loop", schema = "df")]
 pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String {
     let body_fut = Durofut::ensure(body);
-
-    let query = if let Some(cond) = condition {
-        let cond_fut = Durofut::ensure(cond);
-        let config = serde_json::json!({
-            "condition_node": cond_fut
-        });
-        Some(config.to_string())
-    } else {
-        None
-    };
+    let condition_node = condition.map(|cond| Durofut::ensure(cond).into_raw());
 
     Durofut {
         node_type: "LOOP".to_string(),
         left_node: Some(body_fut.into_raw()),
-        query,
+        condition_node,
         ..Default::default()
     }
     .to_json()
@@ -384,15 +375,11 @@ pub fn if_fn(condition: &str, then_branch: &str, else_branch: &str) -> String {
     let then_fut = Durofut::ensure(then_branch);
     let else_fut = Durofut::ensure(else_branch);
 
-    let config = serde_json::json!({
-        "condition_node": condition_fut
-    });
-
     Durofut {
         node_type: "IF".to_string(),
         left_node: Some(then_fut.into_raw()),
         right_node: Some(else_fut.into_raw()),
-        query: Some(config.to_string()),
+        condition_node: Some(condition_fut.into_raw()),
         ..Default::default()
     }
     .to_json()
@@ -445,15 +432,11 @@ pub fn join3(a: &str, b: &str, c: &str) -> String {
     let b_fut = Durofut::ensure(b);
     let c_fut = Durofut::ensure(c);
 
-    let config = serde_json::json!({
-        "extra_nodes": [c_fut]
-    });
-
     Durofut {
         node_type: "JOIN".to_string(),
         left_node: Some(a_fut.into_raw()),
         right_node: Some(b_fut.into_raw()),
-        query: Some(config.to_string()),
+        extra_nodes: vec![c_fut.into_raw()],
         ..Default::default()
     }
     .to_json()
