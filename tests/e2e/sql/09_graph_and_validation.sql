@@ -222,6 +222,7 @@ DECLARE
     graph TEXT;
     explanation TEXT;
 BEGIN
+    -- 129 levels intentionally exceed serde_json's default 128-level recursion limit.
     FOR i IN 1..129 LOOP
         condition_graph := df.seq(condition_graph, 'SELECT true');
     END LOOP;

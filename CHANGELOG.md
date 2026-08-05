@@ -21,7 +21,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Changed
 
-- **Workflow graph envelope:** IF/LOOP conditions and additional JOIN branches are now first-class opaque children instead of JSON embedded inside the `query` string. This removes the remaining parser-depth limit and repeated escaping for config-nested graphs. The transient `Durofut` JSON representation changes; persisted `df.nodes` rows and in-flight instances are unaffected.
+- **Workflow graph envelope:** IF/LOOP conditions and additional JOIN branches are now first-class opaque children instead of JSON embedded inside the `query` string. This removes the remaining parser-depth limit and repeated escaping for config-nested graphs. The transient `Durofut` JSON representation changes; persisted `df.nodes` rows and in-flight instances are unaffected. Applications must not store this internal envelope for replay across an upgrade or downgrade.
 
 ## [0.2.5] - 2026-07-30
 

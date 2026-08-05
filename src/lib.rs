@@ -1185,6 +1185,10 @@ mod tests {
             increments.windows(2).all(|pair| pair[0] == pair[1]),
             "first-class condition children should add constant envelope overhead: {increments:?}"
         );
+
+        let fut = Durofut::try_from_json(&graph).expect("final graph should deserialize");
+        fut.validate_recursive()
+            .expect("final graph should preserve every nested condition");
     }
 
     #[pg_test]

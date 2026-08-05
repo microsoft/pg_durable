@@ -339,87 +339,20 @@ CREATE OPERATOR @> (FUNCTION = df.loop_prefix_op, RIGHTARG = text);
 
 ### Node Insertion
 
-When `df.start()` is called, it recursively inserts all nodes from the nested graph into the database:
+When `df.start()` is called, it validates the complete graph and recursively inserts all nodes.
+Opaque children are parsed one level at a time, and config children are materialized through the
+same helper used by `df.explain()`:
 
 ```rust
-// src/dsl.rs - df.start()
-pub fn start(fut: &str, label: Option<&str>) -> String {
-    let durofut = Durofut::ensure(fut);
-    let instance_id = short_id();
-    
-    // Recursively insert all nodes from the nested graph
-    // Note: No HashSet needed - nested graphs are trees, not DAGs
-    fn insert_nodes(node: &Durofut, instance_id: &str) -> String {
-        let node_id = short_id();  // Generate ID at insertion time
-        
-        // Recursively insert children FIRST to get their IDs
-        let left_id = node.left_node.as_ref().map(|n| insert_nodes(n, instance_id));
-        let right_id = node.right_node.as_ref().map(|n| insert_nodes(n, instance_id));
-        
-        // Process config JSON to replace embedded Durofuts with IDs
-        // (for IF condition_node, LOOP condition_node, JOIN3 extra_nodes)
-        let query_escaped = if let Some(ref query_str) = node.query {
-            if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(query_str) {
-                // For IF/LOOP nodes: replace condition_node Durofut with ID
-                if node.node_type == "IF" || node.node_type == "LOOP" {
-                    if let Some(cond_json) = config.get("condition_node") {
-                        if let Ok(cond_node) = serde_json::from_value::<Durofut>(cond_json.clone()) {
-                            let cond_id = insert_nodes(&cond_node, instance_id);
-                            config["condition_node"] = serde_json::json!(cond_id);
-                        }
-                    }
-                }
-                // For JOIN3 nodes: replace extra_nodes Durofuts with IDs
-                if node.node_type == "JOIN" {
-                    if let Some(extras) = config.get("extra_nodes").and_then(|e| e.as_array()) {
-                        let extra_ids: Vec<String> = extras.iter()
-                            .filter_map(|e| serde_json::from_value::<Durofut>(e.clone()).ok())
-                            .map(|n| insert_nodes(&n, instance_id))
-                            .collect();
-                        if !extra_ids.is_empty() {
-                            config["extra_nodes"] = serde_json::json!(extra_ids);
-                        }
-                    }
-                }
-                format!("'{}'", serde_json::to_string(&config).unwrap().replace('\'', "''"))
-            } else {
-                format!("'{}'", query_str.replace('\'', "''"))
-            }
-        } else {
-            "NULL".to_string()
-        };
+fn insert_nodes(node: &Durofut, instance_id: &str) -> Result<String, String> {
+    let left_id = insert_optional_child(node.left_node.as_deref(), instance_id)?;
+    let right_id = insert_optional_child(node.right_node.as_deref(), instance_id)?;
 
-        // Insert this node with all fields
-        Spi::run(&format!(
-            "INSERT INTO df.nodes
-             (id, instance_id, node_type, query, result_name, left_node, right_node)
-             VALUES ('{}', '{}', '{}', {}, {}, {}, {})",
-            node_id, instance_id, node.node_type,
-            query_escaped,
-            escape_option(&node.result_name),
-            escape_option(&left_id),
-            escape_option(&right_id)
-        ));
+    // condition_node and extra_nodes are first-class Durofut children. The
+    // persisted query keeps the worker-facing child-ID representation.
+    let query = node.transform_config_children(|child| insert_nodes(child, instance_id))?;
 
-        node_id  // Return the generated ID
-    }
-    
-    let root_node_id = insert_nodes(&durofut, &instance_id);
-
-    // Create instance record with the root node ID
-    Spi::run(&format!(
-        "INSERT INTO df.instances (id, label, root_node, status)
-         VALUES ('{}', {}, '{}', 'pending')",
-        instance_id, label_sql, root_node_id
-    ));
-    
-    // Capture variables and enqueue to duroxide
-    let vars = capture_vars();  // SELECT * FROM df.vars
-    let input = FunctionInput { instance_id, label, vars };
-    
-    start_durable_function(ORCHESTRATION_NAME, &instance_id, &input.to_json());
-    
-    instance_id  // Return to user immediately
+    insert_node_row(node, query, left_id, right_id, instance_id)
 }
 ```
 

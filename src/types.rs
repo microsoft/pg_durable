@@ -1198,7 +1198,7 @@ where
         .any(|raw| !raw.get().trim_start().starts_with('{'))
     {
         return Err(serde::de::Error::custom(
-            "Durofut children must be JSON objects",
+            "extra_nodes entries must be Durofut JSON objects",
         ));
     }
     Ok(values)
@@ -1441,6 +1441,44 @@ impl Durofut {
         Ok(())
     }
 
+    fn validate_config_children(&self) -> Result<(), String> {
+        let supports_condition = self.node_type == "IF" || self.node_type == "LOOP";
+        if self.condition_node.is_some() && !supports_condition {
+            return Err(format!(
+                "condition_node is not valid for {} nodes",
+                self.node_type
+            ));
+        }
+        if !self.extra_nodes.is_empty() && self.node_type != "JOIN" {
+            return Err(format!(
+                "extra_nodes is not valid for {} nodes",
+                self.node_type
+            ));
+        }
+
+        self.reject_embedded_config_children()?;
+
+        let has_config_children = (supports_condition && self.condition_node.is_some())
+            || (self.node_type == "JOIN" && !self.extra_nodes.is_empty());
+        let Some(query) = self.query.as_ref().filter(|_| has_config_children) else {
+            return Ok(());
+        };
+        let config = serde_json::from_str::<serde_json::Value>(query).map_err(|e| {
+            format!(
+                "query in {} must be valid JSON config: {}",
+                self.node_type, e
+            )
+        })?;
+        if !config.is_object() {
+            return Err(format!(
+                "query in {} must be a JSON config object",
+                self.node_type
+            ));
+        }
+
+        Ok(())
+    }
+
     fn validate_recursive_inner(&self, depth: usize, node_count: &mut usize) -> Result<(), String> {
         *node_count += 1;
         if *node_count > MAX_GRAPH_NODES {
@@ -1464,7 +1502,7 @@ impl Durofut {
                 VALID_NODE_TYPES.join(", ")
             ));
         }
-        self.reject_embedded_config_children()?;
+        self.validate_config_children()?;
         if let Some(ref left) = self.left_node {
             Self::child_from_raw(left)?.validate_recursive_inner(depth + 1, node_count)?;
         }
@@ -1524,7 +1562,7 @@ impl Durofut {
     where
         F: FnMut(&Durofut) -> Result<String, String>,
     {
-        self.reject_embedded_config_children()?;
+        self.validate_config_children()?;
         let has_condition =
             (self.node_type == "IF" || self.node_type == "LOOP") && self.condition_node.is_some();
         let has_extras = self.node_type == "JOIN" && !self.extra_nodes.is_empty();
@@ -2395,6 +2433,27 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_config_children_preserves_existing_query() {
+        let condition = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT true".to_string()),
+            ..Default::default()
+        };
+        let node = Durofut {
+            node_type: "IF".to_string(),
+            condition_node: Some(condition.into_raw()),
+            query: Some(r#"{"a":1}"#.to_string()),
+            ..Default::default()
+        };
+
+        let query = node
+            .transform_config_children(|_| Ok("condition-id".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(query, r#"{"a":1,"condition_node":"condition-id"}"#);
+    }
+
+    #[test]
     fn test_transform_extra_nodes_preserves_nodes_query_format() {
         let extra = Durofut {
             node_type: "SQL".to_string(),
@@ -2429,14 +2488,102 @@ mod tests {
             ..Default::default()
         };
 
+        let legacy_loop = Durofut {
+            node_type: "LOOP".to_string(),
+            query: Some(
+                r#"{"condition_node":{"node_type":"SQL","query":"SELECT true"}}"#.to_string(),
+            ),
+            ..Default::default()
+        };
+
         assert!(legacy_if
             .validate_recursive()
             .unwrap_err()
             .contains("condition_node in IF must be a first-class Durofut field"));
         assert!(legacy_join
+            .validate_recursive()
+            .unwrap_err()
+            .contains("extra_nodes in JOIN must be a first-class Durofut field"));
+        assert!(legacy_loop
+            .validate_recursive()
+            .unwrap_err()
+            .contains("condition_node in LOOP must be a first-class Durofut field"));
+        assert!(legacy_join
             .transform_config_children(|_| Ok("unused".to_string()))
             .unwrap_err()
             .contains("extra_nodes in JOIN must be a first-class Durofut field"));
+    }
+
+    #[test]
+    fn test_config_children_require_json_object_query() {
+        let condition = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT true".to_string()),
+            ..Default::default()
+        }
+        .into_raw();
+        for query in ["SELECT 1", "42"] {
+            let node = Durofut {
+                node_type: "IF".to_string(),
+                condition_node: Some(condition.clone()),
+                query: Some(query.to_string()),
+                ..Default::default()
+            };
+
+            assert!(node
+                .validate_recursive()
+                .unwrap_err()
+                .contains("query in IF must be"));
+        }
+    }
+
+    #[test]
+    fn test_config_children_reject_fields_on_wrong_node_types() {
+        let child = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        }
+        .into_raw();
+        let sql_with_condition = Durofut {
+            node_type: "SQL".to_string(),
+            condition_node: Some(child.clone()),
+            ..Default::default()
+        };
+        let race_with_extras = Durofut {
+            node_type: "RACE".to_string(),
+            extra_nodes: vec![child],
+            ..Default::default()
+        };
+
+        assert!(sql_with_condition
+            .validate_recursive()
+            .unwrap_err()
+            .contains("condition_node is not valid for SQL nodes"));
+        assert!(race_with_extras
+            .validate_recursive()
+            .unwrap_err()
+            .contains("extra_nodes is not valid for RACE nodes"));
+    }
+
+    #[test]
+    fn test_extra_nodes_deserialization_rejects_invalid_shapes() {
+        for json in [
+            r#"{"node_type":"JOIN","extra_nodes":["a1b2c3d4"]}"#,
+            r#"{"node_type":"JOIN","extra_nodes":[42]}"#,
+        ] {
+            let error = Durofut::try_from_json(json).unwrap_err();
+            assert!(
+                error.contains("extra_nodes entries must be Durofut JSON objects"),
+                "should identify the invalid extra_nodes entry: {error}"
+            );
+        }
+
+        let non_array = r#"{"node_type":"JOIN","extra_nodes":{"node_type":"SQL"}}"#;
+        assert!(
+            Durofut::try_from_json(non_array).is_err(),
+            "should reject non-array extra_nodes"
+        );
     }
 
     #[test]

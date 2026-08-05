@@ -219,6 +219,55 @@ BEGIN
     END IF;
 END $body$;
 
+-- Test 6: extra_nodes string IDs from the old envelope format should be rejected
+DO $body$
+BEGIN
+    BEGIN
+        PERFORM df.start('{
+            "node_type": "JOIN",
+            "left_node": {"node_type": "SQL", "query": "SELECT 1"},
+            "right_node": {"node_type": "SQL", "query": "SELECT 2"},
+            "extra_nodes": ["a1b2c3d4"]
+        }');
+        RAISE EXCEPTION 'TEST FAILED: df.start should have rejected string extra_nodes';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE '%extra_nodes entries must be Durofut JSON objects%' THEN
+            RAISE NOTICE 'Test 6 PASSED: Caught string extra_nodes: %', SQLERRM;
+        ELSE
+            RAISE EXCEPTION 'TEST FAILED: Wrong error for string extra_nodes: %', SQLERRM;
+        END IF;
+    END;
+END $body$;
+
+-- Test 7: invalid config query shape should be rejected before persistence
+DO $body$
+DECLARE
+    nodes_before BIGINT;
+BEGIN
+    SELECT count(*) INTO nodes_before FROM df.nodes;
+
+    BEGIN
+        PERFORM df.start('{
+            "node_type": "IF",
+            "left_node": {"node_type": "SQL", "query": "SELECT 1"},
+            "right_node": {"node_type": "SQL", "query": "SELECT 2"},
+            "condition_node": {"node_type": "SQL", "query": "SELECT true"},
+            "query": "not-json"
+        }');
+        RAISE EXCEPTION 'TEST FAILED: df.start should have rejected invalid config query';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE '%query in IF must be valid JSON config%' THEN
+            RAISE NOTICE 'Test 7 PASSED: Caught invalid config query: %', SQLERRM;
+        ELSE
+            RAISE EXCEPTION 'TEST FAILED: Wrong error for invalid config query: %', SQLERRM;
+        END IF;
+    END;
+
+    IF (SELECT count(*) FROM df.nodes) != nodes_before THEN
+        RAISE EXCEPTION 'TEST FAILED: invalid config query persisted node rows';
+    END IF;
+END $body$;
+
 -- === Test: 40_if_rows ===
 
 -- Test 1: if_rows with rows present → then branch executes
