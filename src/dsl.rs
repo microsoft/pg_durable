@@ -725,6 +725,11 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 /// rather than an unverified ID.
 const MAX_ID_ATTEMPTS: usize = 10;
 
+/// Keep each node INSERT comfortably below PostgreSQL's 65,535 bind-parameter
+/// limit. The legacy schema uses ten parameters per row, so this caps a batch
+/// at 10,000 parameters and a maximum-size graph at ten INSERT statements.
+const NODE_INSERT_BATCH_SIZE: usize = 1_000;
+
 /// Generate a random ID and claim it, retrying on collision (issue #129).
 ///
 /// `generate` produces a fresh candidate ID; `try_claim` attempts to durably
@@ -749,6 +754,56 @@ fn pick_id_with_retry(
     Err(format!(
         "exhausted {max_attempts} attempts to generate a collision-free ID"
     ))
+}
+
+fn node_insert_sql(row_count: usize, legacy_login_role: bool) -> String {
+    let (columns, parameters_per_row) = if legacy_login_role {
+        (
+            "id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database",
+            10,
+        )
+    } else {
+        (
+            "id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database",
+            9,
+        )
+    };
+    let mut sql = format!("INSERT INTO df.nodes ({columns}) VALUES ");
+
+    for row_index in 0..row_count {
+        if row_index > 0 {
+            sql.push_str(", ");
+        }
+        let first = row_index * parameters_per_row + 1;
+        if legacy_login_role {
+            sql.push_str(&format!(
+                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${}::oid::regrole, ${})",
+                first + 1,
+                first + 2,
+                first + 3,
+                first + 4,
+                first + 5,
+                first + 6,
+                first + 7,
+                first + 8,
+                first + 9,
+            ));
+        } else {
+            sql.push_str(&format!(
+                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${})",
+                first + 1,
+                first + 2,
+                first + 3,
+                first + 4,
+                first + 5,
+                first + 6,
+                first + 7,
+                first + 8,
+            ));
+        }
+    }
+
+    sql
 }
 
 /// Capture the effective role identity (after `SET ROLE` / `SECURITY DEFINER`)
@@ -1033,8 +1088,8 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         }
     }
 
-    fn insert_node(
-        node: &FunctionNode,
+    fn insert_nodes(
+        nodes: &[FunctionNode],
         instance_id: &str,
         current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
@@ -1042,15 +1097,10 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     ) {
         // B1 backward compat: the v0.1.x schema has login_role NOT NULL on
         // df.nodes, so the legacy branch still sets it (= submitted_by).
-        // Caveat: the ON CONFLICT (instance_id, id) clause below needs the
-        // composite key that 0.1.1->0.2.0 adds, so a true pre-0.2.0 runtime
-        // cannot run df.start() until it upgrades. That is fine: the supported
-        // B1 floor is 0.2.2 (docs/upgrade-testing.md), so this legacy branch is
-        // effectively dead code for every supported install.
-        let node_id = node.id.clone();
-        if let Err(e) = pick_id_with_retry(
-            || node_id.clone(),
-            |candidate| {
+        for batch in nodes.chunks(NODE_INSERT_BATCH_SIZE) {
+            let mut node_args =
+                Vec::with_capacity(batch.len() * if legacy_login_role { 10 } else { 9 });
+            for node in batch {
                 let query_arg: DatumWithOid = match &node.query {
                     Some(q) => q.as_str().into(),
                     None => DatumWithOid::null::<String>(),
@@ -1071,54 +1121,33 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                     Some(db) => db.into(),
                     None => DatumWithOid::null::<String>(),
                 };
-                let (node_sql, node_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
-                    (
-                        "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)
-                         ON CONFLICT (instance_id, id) DO NOTHING
-                         RETURNING id",
-                        vec![
-                            candidate.into(),
-                            instance_id.into(),
-                            node.node_type.as_str().into(),
-                            query_arg,
-                            result_name_arg,
-                            left_node_arg,
-                            right_node_arg,
-                            current_user_oid.into(),
-                            current_user_oid.into(), // login_role = submitted_by
-                            database_arg,
-                        ],
-                    )
-                } else {
-                    (
-                        "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)
-                         ON CONFLICT (instance_id, id) DO NOTHING
-                         RETURNING id",
-                        vec![
-                            candidate.into(),
-                            instance_id.into(),
-                            node.node_type.as_str().into(),
-                            query_arg,
-                            result_name_arg,
-                            left_node_arg,
-                            right_node_arg,
-                            current_user_oid.into(),
-                            database_arg,
-                        ],
-                    )
-                };
-                Spi::connect_mut(
-                    |client| match client.update(node_sql, Some(1), &node_args) {
-                        Ok(table) => Ok(!table.is_empty()),
-                        Err(e) => Err(format!("{e:?}")),
-                    },
-                )
-            },
-            1,
-        ) {
-            pgrx::error!("Failed to insert node '{}': {}", node.id, e);
+                node_args.extend([
+                    node.id.as_str().into(),
+                    instance_id.into(),
+                    node.node_type.as_str().into(),
+                    query_arg,
+                    result_name_arg,
+                    left_node_arg,
+                    right_node_arg,
+                    current_user_oid.into(),
+                ]);
+                if legacy_login_role {
+                    node_args.push(current_user_oid.into()); // login_role = submitted_by
+                }
+                node_args.push(database_arg);
+            }
+
+            let node_sql = node_insert_sql(batch.len(), legacy_login_role);
+            if let Err(e) = Spi::run_with_args(&node_sql, &node_args) {
+                let first_id = batch.first().map(|node| node.id.as_str()).unwrap_or("");
+                let last_id = batch.last().map(|node| node.id.as_str()).unwrap_or("");
+                pgrx::error!(
+                    "Failed to insert node batch '{}..{}': {:?}",
+                    first_id,
+                    last_id,
+                    e
+                );
+            }
         }
     }
 
@@ -1206,15 +1235,13 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
 
     // The same-instance node references are DEFERRABLE INITIALLY DEFERRED, so
     // pre-order insertion is valid even when a parent row precedes its child.
-    for node in &nodes {
-        insert_node(
-            node,
-            &instance_id,
-            current_user_oid,
-            database,
-            legacy_login_role,
-        );
-    }
+    insert_nodes(
+        &nodes,
+        &instance_id,
+        current_user_oid,
+        database,
+        legacy_login_role,
+    );
 
     // Capture vars from df.vars using the installed extension version as the
     // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
@@ -1456,7 +1483,34 @@ pub fn wait_for_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_semver, pick_id_with_retry};
+    use super::{node_insert_sql, parse_semver, pick_id_with_retry};
+
+    #[test]
+    fn test_node_insert_sql_uses_current_schema_columns_and_numbered_parameters() {
+        let sql = node_insert_sql(2, false);
+
+        assert!(sql.starts_with(
+            "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) VALUES "
+        ));
+        assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)"));
+        assert!(sql.contains("($10, $11, $12, $13, $14, $15, $16, $17::oid::regrole, $18)"));
+        assert!(!sql.contains("login_role"));
+    }
+
+    #[test]
+    fn test_node_insert_sql_uses_legacy_schema_columns_and_numbered_parameters() {
+        let sql = node_insert_sql(2, true);
+
+        assert!(sql.starts_with(
+            "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database) VALUES "
+        ));
+        assert!(
+            sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)")
+        );
+        assert!(sql.contains(
+            "($11, $12, $13, $14, $15, $16, $17, $18::oid::regrole, $19::oid::regrole, $20)"
+        ));
+    }
 
     #[test]
     fn test_parse_semver_basic() {

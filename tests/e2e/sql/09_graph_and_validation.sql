@@ -294,5 +294,43 @@ END $$;
 
 DROP TABLE _deep_graph_execution;
 
+-- Exercise the node INSERT chunk boundary without committing a workflow that
+-- would schedule 1,001 parallel SQL activities.
+BEGIN;
+CREATE TEMP TABLE _batched_graph_execution (instance_id TEXT);
+
+INSERT INTO _batched_graph_execution
+SELECT df.start(
+    pg_catalog.jsonb_build_object(
+        'node_type', 'JOIN',
+        'left_node', pg_catalog.jsonb_build_object('node_type', 'SQL', 'query', 'SELECT 1'),
+        'right_node', pg_catalog.jsonb_build_object('node_type', 'SQL', 'query', 'SELECT 1'),
+        'extra_nodes', (
+            SELECT pg_catalog.jsonb_agg(
+                pg_catalog.jsonb_build_object('node_type', 'SQL', 'query', 'SELECT 1')
+            )
+            FROM pg_catalog.generate_series(1, 999)
+        )
+    )::TEXT,
+    'test-batched-node-insert'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    node_total BIGINT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _batched_graph_execution;
+    SELECT count(*) INTO node_total FROM df.nodes WHERE instance_id = inst_id;
+
+    IF node_total != 1002 THEN
+        RAISE EXCEPTION 'TEST FAILED: batched graph materialized % nodes instead of 1002', node_total;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: df.start inserts nodes across the batch boundary';
+END $$;
+
+ROLLBACK;
+
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;
