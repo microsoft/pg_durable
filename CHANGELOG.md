@@ -17,6 +17,7 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Removed
 
+- **Pre-v0.2.2 compatibility:** packages from this release forward contain no incoming upgrade paths from v0.1.1, v0.2.0, or v0.2.1, and the binary no longer carries the runtime shims that served those schemas (`login_role` inserts, pre-v0.2.0 global-variable queries, and v0.1.1 provider-object ownership conversion). Support is scoped to the `duroxide-pg` provider compatibility line, which starts at v0.2.2. The background worker now refuses to initialize against a pre-v0.2.2 schema rather than applying `duroxide-pg` migrations over retired `duroxide-pg-opt` state. If you are unexpectedly on a pre-v0.2.2 schema, reinstall a package at v0.2.5 or earlier to regain the migration chain, or follow the downstream process for the `duroxide-pg-opt` line — the older package's SQL files are overwritten on disk by this install. Git history retains the exact retired DDL.
 - **`df.ensure_durofut(text)`:** removed this undocumented internal helper. The `0.2.5 -> 0.2.6` upgrade replaces its operator callers before dropping it with `RESTRICT`; customer-owned dependent objects must be changed or removed before upgrading.
 
 ### Changed

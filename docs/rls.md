@@ -183,7 +183,8 @@ CREATE POLICY vars_user_isolation ON df.vars
     WITH CHECK (owner = current_user::regrole);
 ```
 
-**Upgrade script** (`pg_durable--0.1.1--0.2.0.sql`):
+**Upgrade script** (`pg_durable--0.1.1--0.2.0.sql`, retired in v0.2.6 — reproduced
+here for design history; see [upgrade-testing.md](upgrade-testing.md)):
 ```sql
 ALTER TABLE df.vars ADD COLUMN owner REGROLE NOT NULL DEFAULT current_user::regrole;
 ALTER TABLE df.vars DROP CONSTRAINT vars_pkey;

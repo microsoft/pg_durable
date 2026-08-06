@@ -188,8 +188,13 @@ from v0.1.1 — there is no pre-existing PUBLIC grant to worry about.
 
 ### 6. Behaviour for upgrades from v0.1.1
 
+> **Retired in v0.2.6.** `pg_durable--0.1.1--0.2.0.sql` is no longer checked in
+> or packaged, and v0.1.1 is below the v0.2.2 provider compatibility floor. This
+> section records the decision as it was made. An install that completed that
+> upgrade before the retirement still carries the PUBLIC grant described below.
+
 v0.1.1 issued `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df TO PUBLIC`, which
-covered `df.http()`. The upgrade script (`pg_durable--0.1.1--0.2.0.sql`) does
+covered `df.http()`. The upgrade script (`pg_durable--0.1.1--0.2.0.sql`) did
 **not** revoke this automatically, because:
 
 - The upgrade may be applied to installs that intentionally chose to allow HTTP

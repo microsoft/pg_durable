@@ -11,6 +11,8 @@ This means the new `.so` **must be backward compatible** with the previous versi
 
 Compatibility is scoped to a **provider compatibility line**. A provider line is the set of pg_durable versions that use the same durable-state provider family and are expected to upgrade in place. The open-source line starts at v0.2.2, where pg_durable switches from `duroxide-pg-opt` to crates.io `duroxide-pg`. Versions before v0.2.2 used `duroxide-pg-opt`; they are not upgrade sources for the `duroxide-pg` line because the provider schemas and runtime state are different. Azure's fork owns upgrade testing for the `duroxide-pg-opt` line.
 
+As of v0.2.6 the floor is enforced rather than merely documented. No install fixture or upgrade script below v0.2.2 is checked in or packaged, so PostgreSQL offers no `ALTER EXTENSION UPDATE` path from v0.1.1, v0.2.0, or v0.2.1; and the background worker refuses to initialize against a pre-v0.2.2 schema instead of letting `MigrationPolicy::ApplyAll` run `duroxide-pg` migrations over `duroxide-pg-opt` state. The evidence for setting the floor here is the release history: this repository's published GitHub releases begin at v0.2.2. No telemetry or support data was consulted, and none is available — hence the runtime guard.
+
 We never downgrade. Downgrade scripts are not needed.
 
 ## Test Scenarios
@@ -147,9 +149,7 @@ Returns the version that was last installed/updated. Compare against known thres
 
 ### Test infrastructure
 
-- `sql/pg_durable--0.1.1.sql` — first install SQL for the current major version
-- `sql/pg_durable--0.2.2.sql` — install SQL fixture at the start of the current provider compatibility line (`PROVIDER_COMPAT_START_VERSION`). The harness reconstructs a target version from the **highest install fixture at or below it** (see `base_fixture_for_version` in `scripts/test-upgrade.sh`), then chains `ALTER EXTENSION UPDATE`. A fixture is required at the provider-compat-start boundary so reconstruction never has to chain across it — the pre-0.2.2 install SQL embeds a hand-written `duroxide` schema that is incompatible with the duroxide-pg provider's migration tracking (`_duroxide_migrations`).
-- `sql/pg_durable--0.1.1--0.2.0.sql` — upgrade script (initially empty, populated by subsequent PRs)
+- `sql/pg_durable--0.2.2.sql` — the baseline install SQL fixture, at the start of the current provider compatibility line (`PROVIDER_COMPAT_START_VERSION`). The harness reconstructs a target version from the **highest install fixture at or below it** (see `base_fixture_for_version` in `scripts/test-upgrade.sh`), then chains `ALTER EXTENSION UPDATE`. This is the only checked-in fixture: everything below the floor was retired in v0.2.6, so reconstruction can never chain across the provider-line boundary.
 - `scripts/test-upgrade.sh` — runs Scenarios A, B1, and B2. The `PROVIDER_COMPAT_START_VERSION` environment variable/default controls the first version in the current provider compatibility line. Versions before that boundary are excluded from B1 and cannot be used as A/B2 upgrade sources.
 - CI step in `.github/workflows/ci.yml`
 
@@ -189,12 +189,11 @@ No additional fixture is needed for subsequent minors — intermediate versions 
 
 ### Upgrade scripts and the pgspot gate
 
-The pgspot gate scans every upgrade script matching `*--*--*.sql`, except a small
-hardcoded list of pre-pgspot legacy scripts in `scripts/pgspot-gate.sh` (authored
-before the install DDL was schema-qualified, and immutable now that they're
-released). Every new upgrade script is gated and must pass — keep its DDL
-schema-qualified (see step 3 above). Scripts written after qualification pass the
-gate, so they never need to be added to the exclude list.
+The pgspot gate scans every upgrade script matching `*--*--*.sql`. The
+pre-pgspot legacy scripts that used to be excluded (authored before the install
+DDL was schema-qualified) were all below the v0.2.2 floor and were retired in
+v0.2.6, so no exclusion list remains. Every upgrade script is gated and must
+pass — keep its DDL schema-qualified (see step 3 above).
 
 ---
 
@@ -204,6 +203,16 @@ Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.5 → v0.2.6
+
+#### Retire pre-v0.2.2 compatibility
+- **DDL change:** None. This adds no DDL and no replacement upgrade script; the v0.2.2+ install SQL and every v0.2.2+ upgrade edge are byte-identical to before.
+- **Packaging change:** `sql/pg_durable--0.1.1.sql`, `sql/pg_durable--0.1.1--0.2.0.sql`, `sql/pg_durable--0.2.0--0.2.1.sql`, and `sql/pg_durable--0.2.1--0.2.2.sql` are deleted. Packages from v0.2.6 forward therefore advertise no `ALTER EXTENSION UPDATE` path whose source version is below v0.2.2. This is a deliberate support-policy change, not an oversight; Git history retains the exact retired DDL.
+- **Runtime change:** The background worker now reads `extversion` at initialization and refuses to start against a schema below v0.2.2, before `MigrationPolicy::ApplyAll` can execute any provider DDL. Previously the migration set would have been applied over `duroxide-pg-opt` state with no user in the loop.
+- **Removed compatibility paths:** `login_role` detection and the legacy instance/node insert layouts, the pre-v0.2.0 global-variable query branch (and the extension-version cache that selected it), and the v0.1.1 provider-object ownership conversion in the BGW.
+- **Scenario A considerations:** Unaffected. The A path (`0.2.5 → 0.2.6`) is unchanged, and no deleted file participates in a v0.2.2+ chain.
+- **Scenario B1 considerations:** The B1 version set is unchanged — it already skipped everything below `PROVIDER_COMPAT_START_VERSION`. The harness's readiness probe was corrected at the same time: it now resolves the provider schema via `df.duroxide_schema()` (with the `duroxide` fallback for v0.2.2) and tests for `_worker_ready` inside the polling loop, since the BGW creates that table lazily after `CREATE EXTENSION` returns.
+- **Scenario B2 considerations:** No durable data or wire format changes.
+- **Downstream note:** A fork whose floor is below v0.2.2 must retain all four deleted SQL files and the removed Rust compatibility paths, or make its own boundary decision. The `duroxide-pg-opt` line is owned by the Azure fork.
 
 #### Remove `df.ensure_durofut()`
 - **DDL change:** Fresh installs no longer create the undocumented `df.ensure_durofut(text)` PL/pgSQL helper. `df.if_then_op()` now stores its condition and then-branch operands as text in the partial marker; `df.if_else_op()` extracts those operands and passes all three directly to the Rust-backed `df.if()`, which already performs Durofut normalization.

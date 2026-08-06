@@ -217,6 +217,12 @@ Call `wait_for_ready` after any `CREATE EXTENSION` in scenarios that subsequentl
 | `docs/upgrade-testing.md` | Add duroxide ownership entry to the v0.1.1→v0.2.0 version-specific changes section. Note that both paths converge (objects not extension-owned after BGW runs). Note `wait_for_ready()` requirement in upgrade test infrastructure. |
 | `USER_GUIDE.md` | Add note that `DROP EXTENSION pg_durable CASCADE` is always required. Update readiness polling to use `duroxide._worker_ready` directly. |
 
+> **Superseded in v0.2.6.** The two v0.1.1 SQL files above, and the
+> ownership-conversion helpers `release_extension_owned_duroxide_objects` /
+> `has_extension_owned_duroxide_objects`, were retired when pre-v0.2.2
+> compatibility was dropped. `check_duroxide_schema_owned` remains. The rest of
+> this document describes the design as it was implemented at the time.
+
 `duroxide-pg` is a crates.io dependency. No extra provider checkout or CI repository-recursion configuration is required.
 
 ## What this enables going forward

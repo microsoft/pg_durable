@@ -2184,7 +2184,9 @@ For non-superusers, `df.revoke_usage()` is subject to PostgreSQL's normal granto
 
 ### Hardening Upgraded Installs
 
-Installs upgraded from v0.1.1 retain legacy PUBLIC grants. To lock down an upgraded install to match the fresh-install security posture:
+Installs that were upgraded from v0.1.1 before that version was retired may still
+carry legacy PUBLIC grants, which no upgrade script revokes. To lock such an
+install down to match the fresh-install security posture:
 
 ```sql
 -- Revoke legacy PUBLIC grants

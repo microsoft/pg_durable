@@ -6,9 +6,14 @@
 #
 # Validates:
 #   Scenario A:  Schema produced by ALTER EXTENSION UPDATE matches fresh CREATE EXTENSION
-#   Scenario B1: New .so works correctly against all previous versions' schemas
-#                (same major version — customers may never run ALTER EXTENSION UPDATE)
+#   Scenario B1: New .so works correctly against all previous versions' schemas in
+#                the current provider compatibility line (customers may never run
+#                ALTER EXTENSION UPDATE)
 #   Scenario B2: Data created under the previous version remains accessible after upgrade
+#
+# Support is scoped to the provider compatibility line, whose floor is
+# PROVIDER_COMPAT_START_VERSION (v0.2.2). Pre-v0.2.2 schemas belong to the
+# retired duroxide-pg-opt line and are neither packaged nor tested here.
 #
 # Usage: ./scripts/test-upgrade.sh [options]
 #
@@ -119,11 +124,10 @@ first_fixture_for_major() {
 
 # Selects the best checked-in install fixture to use as the base for
 # reconstructing a target version: the highest install fixture (same major)
-# that is <= the target version. This lets the harness install a version
-# directly from its own fixture (e.g. 0.2.2) instead of always chaining from
-# the major's first fixture (0.1.1), which would drag in the pre-provider
-# legacy duroxide schema. Versions before PROVIDER_COMPAT_START_VERSION are
-# never selected as a base for targets within the provider compatibility line.
+# that is <= the target version. Versions before PROVIDER_COMPAT_START_VERSION
+# are never selected as a base for targets within the provider compatibility
+# line. No sub-floor fixture is checked in today; the guard remains as defensive
+# code for downstream forks that override PROVIDER_COMPAT_START_VERSION.
 base_fixture_for_version() {
     local target_version="$1"
     local target_major
@@ -424,43 +428,51 @@ setup_b2_tables() {
     run_sql_capture "DROP TABLE IF EXISTS test_upgrade_b2_log; CREATE TABLE test_upgrade_b2_log (id SERIAL PRIMARY KEY, kind TEXT, msg TEXT);" >/dev/null
 }
 
-# Polls duroxide._worker_ready until the BGW has initialized the duroxide
-# schema. Must be called after CREATE EXTENSION before any df.start() calls.
+# Resolves the provider schema for the installed extension. v0.2.3+ exposes
+# df.duroxide_schema() ('_duroxide' on fresh installs, 'duroxide' on upgraded
+# ones); v0.2.2 predates that helper and always uses 'duroxide'.
+resolve_provider_schema() {
+    local has_helper
+
+    has_helper=$(run_sql_capture "SELECT to_regprocedure('df.duroxide_schema()') IS NOT NULL") || return 1
+    if [ "$has_helper" = "t" ]; then
+        run_sql_capture "SELECT df.duroxide_schema()"
+    else
+        printf 'duroxide'
+    fi
+}
+
+# Polls <provider schema>._worker_ready until the BGW has finished applying
+# provider migrations. Must be called after CREATE EXTENSION before any
+# df.start() calls.
 #
-# For v0.2.0+ the BGW writes a row to duroxide._worker_ready after ApplyAll
-# completes. For schemas that predate that table (v0.1.1 and earlier), falls
-# back to polling df._worker_epoch — the BGW writes that sentinel only after
-# PostgresProvider::new_with_config() completes.
+# The BGW creates _worker_ready lazily, after CREATE EXTENSION returns, so the
+# relation is normally absent on the first polls. The existence probe therefore
+# has to run inside the loop.
 wait_for_ready() {
     local attempts=0
-    local has_worker_ready
-    has_worker_ready=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = 'duroxide' AND table_name = '_worker_ready')") || true
+    local schema exists result
+
+    schema=$(resolve_provider_schema) || return 1
 
     while [ $attempts -lt 60 ]; do
-        if [ "$has_worker_ready" = "t" ]; then
-            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 1)") || return 1
-        else
-            # Old schemas (pre-0.2.0) don't have duroxide._worker_ready.
-            # The BGW writes a row to df._worker_epoch after ApplyAll
-            # completes, so a non-empty _worker_epoch means migrations
-            # are done.
-            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM df._worker_epoch)") || return 1
+        exists=$(run_sql_capture "SELECT to_regclass('${schema}._worker_ready') IS NOT NULL") || return 1
+        if [ "$exists" = "t" ]; then
+            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM ${schema}._worker_ready WHERE schema_version >= 1)") || return 1
+            [ "$result" = "t" ] && return 0
         fi
-        [ "$result" = "t" ] && return 0
         sleep 0.5
         attempts=$((attempts + 1))
     done
     echo ""
-    echo "    Timed out waiting for duroxide._worker_ready after 30s"
+    echo "    Timed out waiting for ${schema}._worker_ready after 30s"
     return 1
 }
 
 # Creates the extension at a specific version by installing from the closest
 # checked-in fixture at or below the target (see base_fixture_for_version) and
-# chaining ALTER EXTENSION UPDATE if needed. This keeps reconstruction within
-# the provider compatibility line and avoids chaining across the pre-0.2.2
-# boundary, where the legacy in-extension duroxide schema is incompatible with
-# the duroxide-pg provider.
+# chaining ALTER EXTENSION UPDATE if needed. Reconstruction stays within the
+# provider compatibility line; the v0.2.2 fixture is its baseline.
 create_extension_at_version() {
     local target_version="$1"
     local base_version
@@ -782,9 +794,10 @@ test_b1_conditional_operators() {
     assert_sql_contains "SELECT ('SELECT true' ?> 'SELECT 1') !> 'SELECT 0';" '"node_type":"IF"'
 }
 
-# Verify that release_extension_owned_duroxide_objects de-registered all
-# duroxide objects from the extension.  On a fresh install there are none;
-# on a v0.1.1-schema upgrade the BGW must have removed them before this runs.
+# Invariant: objects the duroxide-pg provider creates via ApplyAll must never be
+# registered as pg_durable extension members, otherwise migration scripts would
+# be unable to DROP them. This used to also cover the v0.1.1 ownership-conversion
+# path, which was retired in v0.2.6 along with pre-v0.2.2 support.
 test_b1_no_extension_owned_duroxide_objects() {
     assert_sql_equals \
         "SELECT COUNT(*)::int = 0
