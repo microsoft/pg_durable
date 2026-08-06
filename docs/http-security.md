@@ -155,8 +155,9 @@ remain accessible.
 #### PUBLIC grant and upgrades
 
 Fresh installs (v0.2.0+) have `EXECUTE` on `df.http()` revoked from `PUBLIC`
-at `CREATE EXTENSION` time.  Installs that upgraded from v0.1.1 **retain** the
-PUBLIC grant that v0.1.1 issued — the upgrade script does not revoke it.
+at `CREATE EXTENSION` time.  An install that was upgraded from v0.1.1 before
+that version was retired **retains** the PUBLIC grant v0.1.1 issued — no upgrade
+script revokes it.
 
 If an upgraded install should enforce opt-in HTTP permissions, the admin must
 run manually:

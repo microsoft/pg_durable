@@ -44,6 +44,10 @@ Already-shipped versions in Azure and open source assume the provider schema is 
 - Azure-shipped: v0.1.1, v0.2.1, v0.2.2 in progress
 - Open source supported baseline: v0.2.2
 
+Since v0.2.6 the open-source binary serves v0.2.2 and later only; the v0.1.1 and
+v0.2.1 entries above describe the Azure fork's `duroxide-pg-opt` lineage, which
+that fork owns.
+
 Therefore, a new binary must continue to work with existing databases where `pg_durable` already owns a `duroxide` schema. Existing instances and engine state must remain in place and must not be migrated implicitly to a different schema.
 
 The compatibility rules:
@@ -132,7 +136,7 @@ No GUC source inspection, no `pg_depend` scan, no metadata-vs-GUC priority puzzl
 ### Phase 4: Worker ownership and migration flow
 
 - Generalize `check_duroxide_schema_owned()` to accept the resolved schema name.
-- Generalize `has_extension_owned_duroxide_objects()` and `release_extension_owned_duroxide_objects()` to filter on the resolved schema.
+- ~~Generalize `has_extension_owned_duroxide_objects()` and `release_extension_owned_duroxide_objects()` to filter on the resolved schema.~~ Obsolete: both helpers were deleted in v0.2.6 when pre-v0.2.2 compatibility was retired.
 - Generalize `write_worker_ready()` to write to `<resolved_schema>._worker_ready`.
 - Keep `MigrationPolicy::ApplyAll` in the worker and `VerifyOnly` in backend sessions.
 - Because `_duroxide` is a bare identifier, no special quoting is required for the new default. The schema-name string can be interpolated into SQL via the same code paths used today, but it is still good practice to use `quote_ident` for any dynamic-schema SQL to remain robust against future name choices.

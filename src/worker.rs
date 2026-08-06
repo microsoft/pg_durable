@@ -368,157 +368,46 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> 
     result.map(|(owned,)| owned).unwrap_or(false)
 }
 
-/// Release all objects inside the `duroxide` schema that are still owned by the
-/// `pg_durable` extension, so that migration scripts (which use DROP/CREATE FUNCTION)
-/// can run without hitting "cannot drop … because extension pg_durable requires it".
-///
-/// This is a no-op on fresh installs (nothing is extension-owned inside duroxide beyond
-/// the schema namespace itself). On upgrades from v0.1.1 — where CREATE EXTENSION
-/// embedded the full duroxide DDL — this de-registers those embedded objects from
-/// the extension before the BGW applies any new migrations.
-async fn release_extension_owned_duroxide_objects(
-    pool: &sqlx::PgPool,
-    schema_name: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(&format!(
-        r#"DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    -- Release triggers before their functions: ALTER EXTENSION DROP TRIGGER only
-    -- removes the pg_depend row; the trigger itself stays on the table.  Must
-    -- precede the function loop so that CASCADE on function drops doesn't error
-    -- trying to drop a still-extension-owned trigger.
-    FOR r IN
-        SELECT quote_ident(t.tgname)                                        AS trigger_name,
-               quote_ident(n.nspname) || '.' || quote_ident(c.relname)     AS table_name
-        FROM pg_trigger t
-        JOIN pg_class c     ON c.oid = t.tgrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid    = t.oid
-            AND d.classid = 'pg_trigger'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
-    LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP TRIGGER '
-                || r.trigger_name || ' ON ' || r.table_name;
-    END LOOP;
+/// Pre-v0.2.2 schemas belong to the retired `duroxide-pg-opt` provider line.
+/// Letting `MigrationPolicy::ApplyAll` loose on one would run `duroxide-pg`
+/// migrations — `DROP FUNCTION`, `ALTER TABLE` — over live orchestration state
+/// with no user in the loop, so refuse before any provider DDL can execute.
+const PROVIDER_COMPAT_FLOOR: (u32, u32, u32) = (0, 2, 2);
 
-    -- Release functions (regular, window, and procedures)
-    FOR r IN
-        SELECT p.oid::regprocedure::text AS sig
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        JOIN pg_depend d
-            ON d.objid = p.oid
-            AND d.classid = 'pg_proc'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
-    LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP FUNCTION ' || r.sig;
-    END LOOP;
+/// Returns `Err` with an operator-actionable message when `installed` predates
+/// the provider compatibility floor or cannot be parsed.
+fn provider_compat_floor_verdict(installed: &str) -> Result<(), String> {
+    let parsed = crate::dsl::parse_semver(installed)
+        .ok_or_else(|| format!("unrecognized pg_durable version format: {installed}"))?;
 
-    -- Release tables
-    FOR r IN
-        SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid = c.oid
-            AND d.classid = 'pg_class'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'r'
-    LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP TABLE ' || r.name;
-    END LOOP;
+    if parsed >= PROVIDER_COMPAT_FLOOR {
+        return Ok(());
+    }
 
-    -- Release indexes: must be de-registered before migration scripts can
-    -- DROP them; PostgreSQL rejects DROP INDEX (even with IF EXISTS) when the
-    -- index is still an extension member.
-    FOR r IN
-        SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid = c.oid
-            AND d.classid = 'pg_class'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'i'
-    LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP INDEX ' || r.name;
-    END LOOP;
-
-    -- Release sequences
-    FOR r IN
-        SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid = c.oid
-            AND d.classid = 'pg_class'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'S'
-    LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP SEQUENCE ' || r.name;
-    END LOOP;
-END $$"#,
-        schema = schema_name
+    let (fmaj, fmin, fpatch) = PROVIDER_COMPAT_FLOOR;
+    Err(format!(
+        "installed schema is pg_durable {installed}, but this binary supports \
+         {fmaj}.{fmin}.{fpatch} and later only. Versions before \
+         {fmaj}.{fmin}.{fpatch} use the retired duroxide-pg-opt provider line and \
+         are not upgradable with this package. Reinstall a pg_durable package at \
+         0.2.5 or earlier to regain the pre-{fmaj}.{fmin}.{fpatch} upgrade chain, \
+         or follow the downstream process that owns the duroxide-pg-opt line. \
+         Refusing to start so that provider migrations are not applied over \
+         incompatible state."
     ))
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
-/// Returns true if any object inside the `duroxide` schema (other than the
-/// schema namespace entry itself) is still registered as an extension member.
-/// Used to short-circuit `release_extension_owned_duroxide_objects` on the
-/// common path (fresh 0.2.0 installs and all restarts after the first upgrade).
-async fn has_extension_owned_duroxide_objects(pool: &sqlx::PgPool, schema_name: &str) -> bool {
-    let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM pg_depend d
-            JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-            JOIN pg_class c     ON c.oid = d.objid
-            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-            WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e'
-            UNION ALL
-            SELECT 1
-            FROM pg_depend d
-            JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-            JOIN pg_proc p      ON p.oid = d.objid
-            JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = $1
-            WHERE d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
-            UNION ALL
-            SELECT 1
-            FROM pg_depend d
-            JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-            JOIN pg_trigger t   ON t.oid = d.objid
-            JOIN pg_class c     ON c.oid = t.tgrelid
-            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-            WHERE d.classid = 'pg_trigger'::regclass AND d.deptype = 'e'
-        )",
+/// Reads the installed extension version and applies [`provider_compat_floor_verdict`].
+async fn check_provider_compat_floor(pool: &sqlx::PgPool) -> Result<(), String> {
+    let installed: String = sqlx::query_as::<_, (String,)>(
+        "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'",
     )
-    .bind(schema_name)
     .fetch_one(pool)
-    .await;
-    result.map(|(b,)| b).unwrap_or(false)
+    .await
+    .map(|(v,)| v)
+    .map_err(|e| format!("could not read the installed pg_durable version: {e}"))?;
+
+    provider_compat_floor_verdict(&installed)
 }
 
 async fn initialize_duroxide_runtime(
@@ -559,6 +448,12 @@ async fn initialize_duroxide_runtime(
             return None;
         }
 
+        // Retrying cannot fix a version mismatch, so give up rather than loop.
+        if let Err(e) = check_provider_compat_floor(mgmt_pool).await {
+            log!("pg_durable: refusing to initialize duroxide runtime: {}", e);
+            return None;
+        }
+
         if !check_duroxide_schema_owned(mgmt_pool, schema_name).await {
             log!(
                 "pg_durable: duroxide schema missing or not extension-owned \
@@ -569,26 +464,6 @@ async fn initialize_duroxide_runtime(
                 _ = wait_for_shutdown() => { return None; }
             }
             continue;
-        }
-
-        // Release any duroxide objects still owned by the extension so migration
-        // scripts (which use DROP/CREATE FUNCTION) can run freely.  This is a
-        // no-op on fresh installs; on upgrades from ≤0.1.1 it de-registers the
-        // embedded DDL from the extension before ApplyAll runs.
-        // The existence check avoids executing the five-loop DO block on every
-        // clean restart once the upgrade has already been applied.
-        if has_extension_owned_duroxide_objects(mgmt_pool, schema_name).await {
-            if let Err(e) = release_extension_owned_duroxide_objects(mgmt_pool, schema_name).await {
-                log!(
-                    "pg_durable: failed to release extension-owned duroxide objects (will retry): {}",
-                    e
-                );
-                tokio::select! {
-                    _ = tokio::time::sleep(retry_interval) => {}
-                    _ = wait_for_shutdown() => { return None; }
-                }
-                continue;
-            }
         }
 
         let store = match PostgresProvider::new_with_config(worker_provider_config(
@@ -1109,5 +984,47 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
             log!("pg_durable: failed to retire engine records; deferring df removal: {e:?}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_compat_floor_verdict;
+
+    #[test]
+    fn rejects_versions_below_the_provider_compat_floor() {
+        for version in ["0.1.1", "0.2.0", "0.2.1"] {
+            let err = provider_compat_floor_verdict(version)
+                .expect_err("pre-0.2.2 schema must be rejected");
+            assert!(err.contains(version), "message should name the version");
+            assert!(
+                err.contains("0.2.2"),
+                "message should name the required floor"
+            );
+            assert!(
+                err.contains("duroxide-pg-opt"),
+                "message should point at the downstream line"
+            );
+        }
+    }
+
+    #[test]
+    fn admits_the_floor_and_later() {
+        for version in ["0.2.2", "0.2.3", "0.2.6", "0.3.0", "1.0.0"] {
+            assert!(
+                provider_compat_floor_verdict(version).is_ok(),
+                "{version} is in the provider compatibility line"
+            );
+        }
+    }
+
+    #[test]
+    fn admits_a_prerelease_at_the_floor() {
+        assert!(provider_compat_floor_verdict("0.2.2-rc1").is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unparseable_version() {
+        assert!(provider_compat_floor_verdict("garbage").is_err());
     }
 }

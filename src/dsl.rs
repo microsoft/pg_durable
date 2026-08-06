@@ -8,7 +8,6 @@ use pgrx::datum::DatumWithOid;
 use pgrx::prelude::*;
 use std::str::FromStr;
 
-use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use crate::client::start_durable_function;
@@ -72,7 +71,9 @@ pub fn debug_connection() -> String {
 // Variable Functions
 // ============================================================================
 
-fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
+/// Parses a `MAJOR.MINOR.PATCH` version, ignoring any pre-release/build suffix
+/// on the patch component.
+pub(crate) fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
@@ -85,52 +86,6 @@ fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-fn installed_extension_version() -> String {
-    thread_local! {
-        static CACHE: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
-    }
-    const TTL_SECS: u64 = 5;
-
-    CACHE.with(|cache| {
-        let cached = cache.borrow();
-        if let Some((ref version, ref ts)) = *cached {
-            if ts.elapsed().as_secs() < TTL_SECS {
-                return version.clone();
-            }
-        }
-        drop(cached);
-
-        let version = Spi::get_one::<String>(
-            "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
-        )
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| pgrx::error!("pg_durable extension metadata not found"));
-
-        *cache.borrow_mut() = Some((version.clone(), Instant::now()));
-        version
-    })
-}
-
-fn owner_scoped_vars_enabled() -> bool {
-    let extversion = installed_extension_version();
-    let ext_semver = parse_semver(&extversion).unwrap_or_else(|| {
-        pgrx::error!(
-            "Unsupported pg_durable extension version format: {}",
-            extversion
-        )
-    });
-
-    ext_semver >= (0, 2, 0)
-}
-
-/// Returns true when the installed schema still has the legacy `login_role`
-/// column (v0.1.x).  The new .so must set this column on INSERT to satisfy
-/// the NOT NULL constraint until the customer runs ALTER EXTENSION UPDATE.
-fn legacy_login_role_schema() -> bool {
-    !owner_scoped_vars_enabled()
-}
-
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -141,13 +96,8 @@ pub fn setvar(name: &str, value: &str) -> String {
         pgrx::error!("df.setvar() cannot be called inside a workflow - set variables before starting the workflow");
     }
 
-    let sql = if owner_scoped_vars_enabled() {
-        "INSERT INTO df.vars (name, value) VALUES ($1, $2)
-         ON CONFLICT (owner, name) DO UPDATE SET value = EXCLUDED.value"
-    } else {
-        "INSERT INTO df.vars (name, value) VALUES ($1, $2)
-         ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
-    };
+    let sql = "INSERT INTO df.vars (name, value) VALUES ($1, $2)
+         ON CONFLICT (owner, name) DO UPDATE SET value = EXCLUDED.value";
     if let Err(e) = Spi::run_with_args(sql, &[name.into(), value.into()]) {
         pgrx::error!("Failed to set variable: {:?}", e);
     }
@@ -159,11 +109,8 @@ pub fn setvar(name: &str, value: &str) -> String {
 /// Returns the variable owned by the current user.
 #[pg_extern(schema = "df")]
 pub fn getvar(name: &str) -> Option<String> {
-    let sql = if owner_scoped_vars_enabled() {
-        "SELECT value FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole"
-    } else {
-        "SELECT value FROM df.vars WHERE name = $1"
-    };
+    let sql =
+        "SELECT value FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole";
     Spi::get_one_with_args::<String>(sql, &[name.into()])
         .ok()
         .flatten()
@@ -178,11 +125,7 @@ pub fn unsetvar(name: &str) -> String {
         pgrx::error!("df.unsetvar() cannot be called inside a workflow - manage variables before starting the workflow");
     }
 
-    let sql = if owner_scoped_vars_enabled() {
-        "DELETE FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole"
-    } else {
-        "DELETE FROM df.vars WHERE name = $1"
-    };
+    let sql = "DELETE FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole";
     if let Err(e) = Spi::run_with_args(sql, &[name.into()]) {
         pgrx::error!("Failed to unset variable: {:?}", e);
     }
@@ -198,11 +141,7 @@ pub fn clearvars() -> String {
         pgrx::error!("df.clearvars() cannot be called inside a workflow - manage variables before starting the workflow");
     }
 
-    let sql = if owner_scoped_vars_enabled() {
-        "DELETE FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
-    } else {
-        "DELETE FROM df.vars"
-    };
+    let sql = "DELETE FROM df.vars WHERE owner = quote_ident(current_user)::regrole";
 
     if let Err(e) = Spi::run(sql) {
         pgrx::error!("Failed to clear variables: {:?}", e);
@@ -726,8 +665,8 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
 const MAX_ID_ATTEMPTS: usize = 10;
 
 /// Keep each node INSERT comfortably below PostgreSQL's 65,535 bind-parameter
-/// limit. The legacy schema uses ten parameters per row, so this caps a batch
-/// at 10,000 parameters and a maximum-size graph at ten INSERT statements.
+/// limit. Each row uses nine parameters, so this caps a batch at 9,000
+/// parameters and a maximum-size graph at ten INSERT statements.
 const NODE_INSERT_BATCH_SIZE: usize = 1_000;
 
 /// Generate a random ID and claim it, retrying on collision (issue #129).
@@ -756,51 +695,28 @@ fn pick_id_with_retry(
     ))
 }
 
-fn node_insert_sql(row_count: usize, legacy_login_role: bool) -> String {
-    let (columns, parameters_per_row) = if legacy_login_role {
-        (
-            "id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database",
-            10,
-        )
-    } else {
-        (
-            "id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database",
-            9,
-        )
-    };
-    let mut sql = format!("INSERT INTO df.nodes ({columns}) VALUES ");
+fn node_insert_sql(row_count: usize) -> String {
+    const COLUMNS: &str = "id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database";
+    const PARAMETERS_PER_ROW: usize = 9;
+
+    let mut sql = format!("INSERT INTO df.nodes ({COLUMNS}) VALUES ");
 
     for row_index in 0..row_count {
         if row_index > 0 {
             sql.push_str(", ");
         }
-        let first = row_index * parameters_per_row + 1;
-        if legacy_login_role {
-            sql.push_str(&format!(
-                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${}::oid::regrole, ${})",
-                first + 1,
-                first + 2,
-                first + 3,
-                first + 4,
-                first + 5,
-                first + 6,
-                first + 7,
-                first + 8,
-                first + 9,
-            ));
-        } else {
-            sql.push_str(&format!(
-                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${})",
-                first + 1,
-                first + 2,
-                first + 3,
-                first + 4,
-                first + 5,
-                first + 6,
-                first + 7,
-                first + 8,
-            ));
-        }
+        let first = row_index * PARAMETERS_PER_ROW + 1;
+        sql.push_str(&format!(
+            "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${})",
+            first + 1,
+            first + 2,
+            first + 3,
+            first + 4,
+            first + 5,
+            first + 6,
+            first + 7,
+            first + 8,
+        ));
     }
 
     sql
@@ -1093,13 +1009,9 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         instance_id: &str,
         current_user_oid: pgrx::pg_sys::Oid,
         database: Option<&str>,
-        legacy_login_role: bool,
     ) {
-        // B1 backward compat: the v0.1.x schema has login_role NOT NULL on
-        // df.nodes, so the legacy branch still sets it (= submitted_by).
         for batch in nodes.chunks(NODE_INSERT_BATCH_SIZE) {
-            let mut node_args =
-                Vec::with_capacity(batch.len() * if legacy_login_role { 10 } else { 9 });
+            let mut node_args = Vec::with_capacity(batch.len() * 9);
             for node in batch {
                 let query_arg: DatumWithOid = match &node.query {
                     Some(q) => q.as_str().into(),
@@ -1131,13 +1043,10 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                     right_node_arg,
                     current_user_oid.into(),
                 ]);
-                if legacy_login_role {
-                    node_args.push(current_user_oid.into()); // login_role = submitted_by
-                }
                 node_args.push(database_arg);
             }
 
-            let node_sql = node_insert_sql(batch.len(), legacy_login_role);
+            let node_sql = node_insert_sql(batch.len());
             if let Err(e) = Spi::run_with_args(&node_sql, &node_args) {
                 let first_id = batch.first().map(|node| node.id.as_str()).unwrap_or("");
                 let last_id = batch.last().map(|node| node.id.as_str()).unwrap_or("");
@@ -1150,8 +1059,6 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
             }
         }
     }
-
-    let legacy_login_role = legacy_login_role_schema();
 
     // Assign IDs as nodes are discovered. Per-graph uniqueness is required
     // because parent references are materialized before any rows are inserted.
@@ -1195,36 +1102,17 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                 Some(db) => db.into(),
                 None => DatumWithOid::null::<String>(),
             };
-            let (inst_sql, inst_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
-                (
-                    "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database)
-                     VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)
-                     ON CONFLICT (id) DO NOTHING
-                     RETURNING id",
-                    vec![
-                        candidate.into(),
-                        label_arg,
-                        root_id.as_str().into(),
-                        current_user_oid.into(),
-                        current_user_oid.into(), // login_role = submitted_by
-                        database_arg,
-                    ],
-                )
-            } else {
-                (
-                    "INSERT INTO df.instances (id, label, root_node, submitted_by, database)
+            let inst_sql = "INSERT INTO df.instances (id, label, root_node, submitted_by, database)
                      VALUES ($1, $2, $3, $4::oid::regrole, $5)
                      ON CONFLICT (id) DO NOTHING
-                     RETURNING id",
-                    vec![
-                        candidate.into(),
-                        label_arg,
-                        root_id.as_str().into(),
-                        current_user_oid.into(),
-                        database_arg,
-                    ],
-                )
-            };
+                     RETURNING id";
+            let inst_args: Vec<DatumWithOid> = vec![
+                candidate.into(),
+                label_arg,
+                root_id.as_str().into(),
+                current_user_oid.into(),
+                database_arg,
+            ];
             Spi::connect_mut(
                 |client| match client.update(inst_sql, Some(1), &inst_args) {
                     Ok(table) => Ok(!table.is_empty()),
@@ -1240,22 +1128,10 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
 
     // The same-instance node references are DEFERRABLE INITIALLY DEFERRED, so
     // pre-order insertion is valid even when a parent row precedes its child.
-    insert_nodes(
-        &nodes,
-        &instance_id,
-        current_user_oid,
-        database,
-        legacy_login_role,
-    );
+    insert_nodes(&nodes, &instance_id, current_user_oid, database);
 
-    // Capture vars from df.vars using the installed extension version as the
-    // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
-    // owner-scoped vars.
-    let vars_query = if owner_scoped_vars_enabled() {
-        "SELECT name, value FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
-    } else {
-        "SELECT name, value FROM df.vars"
-    };
+    let vars_query =
+        "SELECT name, value FROM df.vars WHERE owner = quote_ident(current_user)::regrole";
 
     let vars: std::collections::HashMap<String, String> = Spi::connect(|client| {
         let mut vars = std::collections::HashMap::new();
@@ -1492,7 +1368,7 @@ mod tests {
 
     #[test]
     fn test_node_insert_sql_uses_current_schema_columns_and_numbered_parameters() {
-        let sql = node_insert_sql(2, false);
+        let sql = node_insert_sql(2);
 
         assert!(sql.starts_with(
             "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) VALUES "
@@ -1500,21 +1376,6 @@ mod tests {
         assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)"));
         assert!(sql.contains("($10, $11, $12, $13, $14, $15, $16, $17::oid::regrole, $18)"));
         assert!(!sql.contains("login_role"));
-    }
-
-    #[test]
-    fn test_node_insert_sql_uses_legacy_schema_columns_and_numbered_parameters() {
-        let sql = node_insert_sql(2, true);
-
-        assert!(sql.starts_with(
-            "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database) VALUES "
-        ));
-        assert!(
-            sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)")
-        );
-        assert!(sql.contains(
-            "($11, $12, $13, $14, $15, $16, $17, $18::oid::regrole, $19::oid::regrole, $20)"
-        ));
     }
 
     #[test]

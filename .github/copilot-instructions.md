@@ -21,7 +21,7 @@ pg_durable is a **PostgreSQL extension** (pgrx/Rust) providing durable SQL funct
 | [src/activities/](../src/activities/) | Duroxide activities (I/O happens here) |
 | [src/types.rs](../src/types.rs) | Core types: `Durofut`, `FunctionGraph`, `FunctionNode` |
 | [tests/e2e/sql/](../tests/e2e/sql/) | SQL-based E2E tests (numbered, run sequentially) |
-| [sql/pg_durable--0.1.1.sql](../sql/pg_durable--0.1.1.sql) | First version install SQL fixture (for upgrade testing) |
+| [sql/pg_durable--0.2.2.sql](../sql/pg_durable--0.2.2.sql) | Baseline install SQL fixture at the v0.2.2 provider compatibility floor (for upgrade testing) |
 ## Development Commands
 
 ```bash
@@ -90,7 +90,7 @@ Tests in `tests/e2e/sql/` follow this pattern:
 4. Cleanup and output `SELECT 'TEST PASSED'`
 
 ### Binary Backward Compatibility
-The new `.so` must work against **all** previous versions' schemas (same major version) because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](../docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
+The new `.so` must work against **all** previous versions' schemas in the current provider compatibility line — v0.2.2 and later — because customers may never run `ALTER EXTENSION UPDATE`. Pre-v0.2.2 schemas belong to the retired `duroxide-pg-opt` line: they are not packaged, not tested, and the background worker refuses to initialize against them. When changing SQL queries in Rust code, ensure they work against both old and new schemas at or above the floor (see [docs/upgrade-testing.md](../docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
 
 ## Common Tasks
 

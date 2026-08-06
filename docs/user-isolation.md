@@ -99,9 +99,19 @@ In v0.2.0, `login_role` was dropped and the model simplified to a single `submit
 
 The identity function also changed from `GetOuterUserId()` to `GetUserId()` (`current_user`). pg_durable does not use `SECURITY DEFINER` functions internally, so the distinction only matters for external callers — function authors can choose whether to call `df.start()` from a `SECURITY DEFINER` or `SECURITY INVOKER` function, and the captured identity will reflect that choice.
 
-**Backward compatibility:** The new binary still works with the v0.1.1 schema shape because it detects the legacy tables and continues to populate `login_role` on inserts until the customer runs `ALTER EXTENSION UPDATE`. Pre-existing v0.1.1 instances also continue to run when `submitted_by` itself has the `LOGIN` attribute, because the worker now authenticates directly as `submitted_by`.
+**Backward compatibility (retired):** Until v0.2.6 the binary detected the legacy
+tables and continued to populate `login_role` on inserts for a v0.1.1 schema that
+had not yet run `ALTER EXTENSION UPDATE`. That path has been removed along with
+the rest of the pre-v0.2.2 compatibility surface. The current binary supports
+v0.2.2 and later only, and the background worker refuses to initialize against
+anything older. See [upgrade-testing.md](upgrade-testing.md).
 
-**Breaking edge case:** pg_durable no longer preserves the old `login_role + SET ROLE submitted_by` execution path. A pending or running v0.1.1 instance whose `submitted_by` is a NOLOGIN role from the old `SET ROLE` workflow will fail after the binary upgrade, regardless of whether `ALTER EXTENSION UPDATE` has been run. Those instances must be allowed to finish before upgrading, or be recreated afterward under the new model.
+**Breaking edge case:** pg_durable no longer preserves the old
+`login_role + SET ROLE submitted_by` execution path. A pending or running v0.1.1
+instance whose `submitted_by` was a NOLOGIN role from the old `SET ROLE`
+workflow would fail after the binary upgrade, regardless of whether
+`ALTER EXTENSION UPDATE` had been run. Those instances had to be allowed to
+finish before upgrading, or be recreated afterward under the new model.
 
 ## Future work
 
