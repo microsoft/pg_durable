@@ -89,6 +89,7 @@ SETUP_TEST="00_setup_playground"
 COMPATIBILITY_REJECTION_TEST="67_provider_compatibility_lifecycle"
 PROVIDER_OWNERSHIP_REJECTION_TEST="68_provider_schema_ownership_lifecycle"
 PHASE_LOG_START_LINE=1
+LIFECYCLE_FIXTURE_ACTIVE=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -316,9 +317,17 @@ stop_server() {
 }
 
 cleanup() {
+    local original_status=$?
+
+    if [ "$LIFECYCLE_FIXTURE_ACTIVE" = true ]; then
+        echo ""
+        echo -e "${YELLOW}Restoring current extension after interrupted lifecycle phase...${NC}"
+        restore_current_extension || echo -e "${RED}Lifecycle fixture restoration failed; manual cleanup may be required${NC}"
+    fi
+
     if [ "$KEEP_RUNNING" = false ]; then
         stop_server
-        return
+        return "$original_status"
     fi
 
     echo ""
@@ -326,6 +335,7 @@ cleanup() {
     echo "Connect: $PSQL -h localhost -p $PG_PORT -d $PG_DB"
     echo "Logs:    tail -f $LOG_FILE"
     echo "Stop:    ./scripts/pg-stop.sh"
+    return "$original_status"
 }
 
 trap cleanup EXIT
@@ -596,6 +606,7 @@ prepare_phase() {
     configure_phase "$phase"
 
     if [ "$phase" = "compatibility-rejection" ] || [ "$phase" = "provider-ownership-rejection" ]; then
+        LIFECYCLE_FIXTURE_ACTIVE=true
         prepare_lifecycle_setup_role
         configure_lifecycle_setup
         restart_server
@@ -675,17 +686,18 @@ prepare_phase() {
 
 restore_current_extension() {
     configure_lifecycle_setup
-    restart_server
+    restart_server || return 1
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
-        -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/restore-current-extension.sql" >/dev/null
+        -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/restore-current-extension.sql" >/dev/null || return 1
 
     configure_phase "standard"
-    restart_server
-    wait_for_worker_ready
+    restart_server || return 1
+    wait_for_worker_ready || return 1
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
-        -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/verify-current-extension.sql" >/dev/null
+        -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/verify-current-extension.sql" >/dev/null || return 1
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
-        -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS unit4_blocked_worker;" >/dev/null
+        -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS unit4_blocked_worker;" >/dev/null || return 1
+    LIFECYCLE_FIXTURE_ACTIVE=false
 }
 
 verify_compatibility_rejection_phase() {
