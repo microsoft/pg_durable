@@ -29,8 +29,8 @@ or SQL.
 | Feature | What is allowed | Use case |
 |---------|-----------------|----------|
 | *(none)* | Nothing — `df.http()` errors immediately at DSL time **and** at execution time | Deployments that don't need HTTP |
-| `http-allow-azure-domains` | Subdomains of the Azure allow-list only; bare IPs blocked; redirects blocked | Production |
-| `http-allow-test-domains` | Everything in `http-allow-azure-domains` **plus** `api.github.com` and `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
+| `http-allow-azure-domains` | Subdomains of the Azure allow-list plus `api.github.com`; bare IPs blocked; redirects blocked | Production |
+| `http-allow-test-domains` | Everything in `http-allow-azure-domains` **plus** `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
 | `http-allow-all` | All URLs; SSRF IP blocklist and allow-list are both disabled | Local development only |
 
 The scripts and CI use `http-allow-test-domains` so that the HTTP E2E tests
@@ -269,14 +269,21 @@ Only subdomains of the following suffixes are permitted.  Apex domains (e.g.
 | `.trafficmanager.net` | Azure Traffic Manager |
 | `.cloudapp.azure.com` | Azure Cloud App |
 
-### 5.2 Test domains (additional with `http-allow-test-domains`)
+### 5.2 Exact-match domains (always present with `http-allow-azure-domains`)
+
+Matched exactly — subdomains and lookalikes are rejected.
 
 | Domain | Purpose |
 |--------|---------|
-| `api.github.com` | GitHub API (used in HTTP E2E tests) |
+| `api.github.com` | GitHub API |
+
+### 5.3 Test domains (additional with `http-allow-test-domains`)
+
+| Domain | Purpose |
+|--------|---------|
 | `httpbingo.org` | HTTP echo service (used in HTTP E2E tests) |
 
-### 5.3 Bare IP rejection
+### 5.4 Bare IP rejection
 
 All bare IPv4 and IPv6 addresses are rejected by `validate_url_allowlist`
 regardless of feature flag — even under `http-allow-azure-domains`.

@@ -4,8 +4,9 @@
 //! ExecuteHTTP activity - makes HTTP requests
 //!
 //! Cargo features control what outbound HTTP(S) is allowed:
-//! - `http-allow-azure-domains`: Azure endpoints only (+ IP blocklist, no redirects).
-//! - `http-allow-test-domains`: same + api.github.com / httpbingo.org.
+//! - `http-allow-azure-domains`: Azure endpoints + api.github.com only
+//!   (+ IP blocklist, no redirects).
+//! - `http-allow-test-domains`: same + httpbingo.org.
 //! - `http-allow-all`: no restrictions (development only).
 //! - *(none)*: all HTTP calls fail at execution time.
 //!

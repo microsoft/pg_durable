@@ -9,8 +9,8 @@
 //! | Feature | Behaviour |
 //! |---------|-----------|
 //! | *(none)* | **All** outbound HTTP is blocked — at DSL time and at execution time. |
-//! | `http-allow-azure-domains` | SSRF IP blocklist active, bare IPs blocked, redirects blocked, only Azure suffixes allowed. |
-//! | `http-allow-test-domains` | Same as `http-allow-azure-domains` **plus** `api.github.com` and `httpbingo.org` (for E2E tests). Implies `http-allow-azure-domains`. |
+//! | `http-allow-azure-domains` | SSRF IP blocklist active, bare IPs blocked, redirects blocked, only Azure suffixes plus `api.github.com` allowed. |
+//! | `http-allow-test-domains` | Same as `http-allow-azure-domains` **plus** `httpbingo.org` (for E2E tests). Implies `http-allow-azure-domains`. |
 //! | `http-allow-all` | All SSRF protections disabled — any URL is allowed (development only). |
 //!
 //! The blocklist and allow-list are hardcoded and cannot be bypassed by any
@@ -66,9 +66,20 @@ pub(crate) const AZURE_DOMAIN_SUFFIXES: &[&str] = &[
     ".cloudapp.azure.com",
 ];
 
+/// Fully-qualified non-Azure domains allowed alongside the Azure suffixes
+/// (exact match, not suffix).
+///
+/// Available whenever `http-allow-azure-domains` (or `http-allow-test-domains`,
+/// which implies it) is enabled.
+#[cfg(any(
+    feature = "http-allow-azure-domains",
+    feature = "http-allow-test-domains"
+))]
+pub(crate) const EXACT_DOMAINS: &[&str] = &["api.github.com"];
+
 /// Fully-qualified test domains (exact match, not suffix).
 #[cfg(feature = "http-allow-test-domains")]
-pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["api.github.com", "httpbingo.org"];
+pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["httpbingo.org"];
 
 // ---------------------------------------------------------------------------
 // IP blocklist
@@ -162,9 +173,10 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
 /// Behaviour depends on Cargo features (most to least restrictive):
 ///
 /// * *(none)* — all requests blocked, regardless of domain.
-/// * `http-allow-azure-domains` — bare IPs blocked; only Azure suffixes allowed.
-/// * `http-allow-test-domains` — same as above **plus** `api.github.com` and
-///   `httpbingo.org` (for E2E tests).
+/// * `http-allow-azure-domains` — bare IPs blocked; only Azure suffixes and
+///   `api.github.com` allowed.
+/// * `http-allow-test-domains` — same as above **plus** `httpbingo.org`
+///   (for E2E tests).
 /// * `http-allow-all` — allow-list check is skipped entirely; all domains pass.
 pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
     // http-allow-all: skip all domain checks.
@@ -209,6 +221,13 @@ pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
             // Check Azure suffixes (always present when either azure or test feature is on).
             for suffix in AZURE_DOMAIN_SUFFIXES {
                 if host_lower.ends_with(suffix) {
+                    return Ok(());
+                }
+            }
+
+            // Exact-match non-Azure domains allowed in the same tier.
+            for exact in EXACT_DOMAINS {
+                if host_lower == *exact {
                     return Ok(());
                 }
             }
@@ -665,9 +684,23 @@ mod tests {
     fn allowlist_blocks_non_azure_domains() {
         assert!(validate_url_allowlist("https://example.com/path").is_err());
         assert!(validate_url_allowlist("https://httpbingo.org/get").is_err());
-        assert!(validate_url_allowlist("https://api.github.com/repos").is_err());
         assert!(validate_url_allowlist("https://evil.com/steal").is_err());
         assert!(validate_url_allowlist("https://management.azure.com/sub").is_err());
+    }
+
+    // api.github.com is allowed in the azure-domains tier (and above).
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[test]
+    fn allowlist_allows_api_github_com() {
+        assert!(validate_url_allowlist("https://api.github.com/repos").is_ok());
+        assert!(validate_url_allowlist("https://API.GITHUB.COM/repos").is_ok());
+        // Exact match only — subdomains and lookalikes stay blocked.
+        assert!(validate_url_allowlist("https://evil.api.github.com/repos").is_err());
+        assert!(validate_url_allowlist("https://api.github.com.evil.com/repos").is_err());
+        assert!(validate_url_allowlist("https://github.com/repos").is_err());
     }
 
     #[cfg(any(
@@ -858,7 +891,6 @@ mod tests {
     #[cfg(feature = "http-allow-test-domains")]
     #[test]
     fn allowlist_allows_test_domains() {
-        assert!(validate_url_allowlist("https://api.github.com/repos").is_ok());
         assert!(validate_url_allowlist("https://httpbingo.org/get").is_ok());
     }
 
