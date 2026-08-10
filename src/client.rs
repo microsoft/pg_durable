@@ -35,12 +35,20 @@ fn check_provider_compatibility() -> Result<(), String> {
     let installed = Spi::get_one::<String>(
         "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
     )
-    .map_err(|e| {
-        format!("could not read the installed pg_durable version — try again in a moment: {e}")
-    })?
-    .ok_or_else(|| "pg_durable extension metadata not found".to_string())?;
+    .map_err(|e| e.to_string());
 
-    crate::compatibility::provider_compatibility_verdict(&installed)
+    match crate::compatibility::classify_provider_compatibility(installed) {
+        crate::compatibility::ProviderCompatibility::Compatible => Ok(()),
+        crate::compatibility::ProviderCompatibility::ExtensionMissing => {
+            Err("pg_durable extension metadata not found".to_string())
+        }
+        crate::compatibility::ProviderCompatibility::TransientReadFailure(e) => Err(format!(
+            "could not read the installed pg_durable version — try again in a moment: {e}"
+        )),
+        crate::compatibility::ProviderCompatibility::PermanentlyRejected { message, .. } => {
+            Err(message)
+        }
+    }
 }
 
 /// Check whether the background worker has finished initializing the duroxide

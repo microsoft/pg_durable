@@ -5,6 +5,27 @@ use semver::Version;
 
 const PROVIDER_COMPAT_FLOOR: Version = Version::new(0, 2, 2);
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProviderCompatibility {
+    Compatible,
+    ExtensionMissing,
+    TransientReadFailure(String),
+    PermanentlyRejected { installed: String, message: String },
+}
+
+pub(crate) fn classify_provider_compatibility(
+    installed: Result<Option<String>, String>,
+) -> ProviderCompatibility {
+    match installed {
+        Ok(Some(installed)) => match provider_compatibility_verdict(&installed) {
+            Ok(()) => ProviderCompatibility::Compatible,
+            Err(message) => ProviderCompatibility::PermanentlyRejected { installed, message },
+        },
+        Ok(None) => ProviderCompatibility::ExtensionMissing,
+        Err(message) => ProviderCompatibility::TransientReadFailure(message),
+    }
+}
+
 pub(crate) fn provider_compatibility_verdict(installed: &str) -> Result<(), String> {
     let installed_version = Version::parse(installed)
         .map_err(|_| format!("unrecognized pg_durable version format: {installed}"))?;
@@ -27,7 +48,29 @@ pub(crate) fn provider_compatibility_verdict(installed: &str) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
-    use super::provider_compatibility_verdict;
+    use super::{
+        classify_provider_compatibility, provider_compatibility_verdict, ProviderCompatibility,
+    };
+
+    #[test]
+    fn classifies_adapter_outcomes_without_conflating_transient_errors() {
+        assert_eq!(
+            classify_provider_compatibility(Ok(Some("0.2.2".to_string()))),
+            ProviderCompatibility::Compatible
+        );
+        assert_eq!(
+            classify_provider_compatibility(Ok(None)),
+            ProviderCompatibility::ExtensionMissing
+        );
+        assert_eq!(
+            classify_provider_compatibility(Err("connection reset".to_string())),
+            ProviderCompatibility::TransientReadFailure("connection reset".to_string())
+        );
+        assert!(matches!(
+            classify_provider_compatibility(Ok(Some("0.2.1".to_string()))),
+            ProviderCompatibility::PermanentlyRejected { .. }
+        ));
+    }
 
     #[test]
     fn rejects_versions_below_the_provider_compat_floor() {

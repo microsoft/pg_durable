@@ -74,6 +74,39 @@ BEGIN
     RAISE NOTICE 'PASSED [normal_start]: df.start() completes normally when the worker is ready';
 END $$;
 
+-- A compatibility transition must gate an already-cached Duroxide client in
+-- this same backend session, not only newly constructed clients.
+DO $$
+DECLARE
+    original_version TEXT;
+    compatibility_error TEXT;
+    cached_instance_id TEXT;
+BEGIN
+    SELECT instance_id INTO cached_instance_id FROM _ff_state;
+    SELECT extversion INTO original_version
+    FROM pg_catalog.pg_extension
+    WHERE extname = 'pg_durable';
+
+    UPDATE pg_catalog.pg_extension
+    SET extversion = '0.2.2-rc1'
+    WHERE extname = 'pg_durable';
+
+    BEGIN
+        PERFORM df.signal(cached_instance_id, 'cached-client-probe', '{}');
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS compatibility_error = MESSAGE_TEXT;
+    END;
+
+    UPDATE pg_catalog.pg_extension
+    SET extversion = original_version
+    WHERE extname = 'pg_durable';
+
+    IF compatibility_error NOT LIKE '%supports 0.2.2 and later only%' THEN
+        RAISE EXCEPTION 'TEST FAILED [cached_client]: cached client bypassed compatibility rejection: %',
+            compatibility_error;
+    END IF;
+END $$;
+
 DROP TABLE _ff_state;
 
 SELECT 'TEST PASSED: start fail-fast' AS result;

@@ -439,13 +439,18 @@ async fn initialize_duroxide_runtime(
             return None;
         }
 
-        let installed_version = match read_installed_extension_version(mgmt_pool).await {
-            Ok(Some(installed)) => installed,
-            Ok(None) => {
+        let compatibility = crate::compatibility::classify_provider_compatibility(
+            read_installed_extension_version(mgmt_pool)
+                .await
+                .map_err(|e| e.to_string()),
+        );
+        match compatibility {
+            crate::compatibility::ProviderCompatibility::Compatible => {}
+            crate::compatibility::ProviderCompatibility::ExtensionMissing => {
                 log!("pg_durable: extension no longer exists; returning to wait state");
                 return None;
             }
-            Err(e) => {
+            crate::compatibility::ProviderCompatibility::TransientReadFailure(e) => {
                 log!(
                     "pg_durable: could not read the installed pg_durable version (will retry): {}",
                     e
@@ -456,14 +461,18 @@ async fn initialize_duroxide_runtime(
                 }
                 continue;
             }
-        };
-
-        if let Err(e) = crate::compatibility::provider_compatibility_verdict(&installed_version) {
-            log!("pg_durable: refusing to initialize duroxide runtime: {}", e);
-            match wait_for_compatibility_change(mgmt_pool, &installed_version, retry_interval).await
-            {
-                CompatibilityStandDown::Recheck => continue,
-                CompatibilityStandDown::StopInitializing => return None,
+            crate::compatibility::ProviderCompatibility::PermanentlyRejected {
+                installed,
+                message,
+            } => {
+                log!(
+                    "pg_durable: refusing to initialize duroxide runtime: {}",
+                    message
+                );
+                match wait_for_compatibility_change(mgmt_pool, &installed, retry_interval).await {
+                    CompatibilityStandDown::Recheck => continue,
+                    CompatibilityStandDown::StopInitializing => return None,
+                }
             }
         }
 

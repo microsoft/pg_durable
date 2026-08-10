@@ -87,4 +87,47 @@ BEGIN
     END IF;
 END $$;
 
+-- Correcting the installed version while PostgreSQL remains running must wake
+-- the stood-down worker and initialize the provider without a server restart.
+UPDATE pg_catalog.pg_extension
+SET extversion = '0.2.6'
+WHERE extname = 'pg_durable';
+
+DO $$
+DECLARE
+    attempts INT := 0;
+    ready BOOLEAN := FALSE;
+BEGIN
+    WHILE attempts < 100 LOOP
+        SELECT EXISTS (
+            SELECT 1 FROM _duroxide._worker_ready
+            WHERE sentinel AND schema_version = 1
+        ) INTO ready;
+        EXIT WHEN ready;
+        PERFORM pg_catalog.pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF NOT ready THEN
+        RAISE EXCEPTION 'TEST FAILED: worker did not leave compatibility stand-down after version correction';
+    END IF;
+END $$;
+
+CREATE TEMP TABLE unit4_live_recovery (instance_id TEXT);
+INSERT INTO unit4_live_recovery
+SELECT df.start('SELECT 606 AS recovered', 'unit4-live-version-recovery');
+
+DO $$
+DECLARE
+    recovered_id TEXT;
+    recovered_status TEXT;
+BEGIN
+    SELECT instance_id INTO recovered_id FROM unit4_live_recovery;
+    recovered_status := df.await_instance(recovered_id, 30);
+    IF recovered_status <> 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: live version correction did not restore execution (status=%)',
+            recovered_status;
+    END IF;
+END $$;
+
 SELECT 'TEST PASSED: provider compatibility lifecycle rejection' AS result;
