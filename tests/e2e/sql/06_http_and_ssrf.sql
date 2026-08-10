@@ -948,8 +948,7 @@ END $$;
 DROP TABLE _test_ssrf7;
 
 -- Test 8: Redirects are not followed
--- Uses httpbingo.org (maintained Go reimplementation) rather than httpbin.org,
--- which is frequently unavailable and was the dominant source of CI flakiness.
+-- Uses the maintained httpbingo.org echo service to avoid CI flakiness.
 CREATE TEMP TABLE _test_ssrf8 (instance_id TEXT);
 
 INSERT INTO _test_ssrf8 SELECT df.start(

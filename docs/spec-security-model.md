@@ -1574,14 +1574,14 @@ GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO sec_test_
 GRANT sec_test_http_denied TO duroxide;
 GRANT sec_test_http_allowed TO duroxide;
 
--- Build with a feature set that allows httpbin.org.
+-- Build with a feature set that allows httpbingo.org.
 
 -- Test 1: User WITHOUT df.http permission should fail
 SET ROLE sec_test_http_denied;
 DO $$
 BEGIN
     PERFORM df.start(
-        df.http('https://httpbin.org/get', 'GET'),
+        df.http('https://httpbingo.org/get', 'GET'),
         'http-test-denied'
     );
     RAISE EXCEPTION 'SECURITY FAILURE: User without df.http permission could use it!';
@@ -1600,7 +1600,7 @@ RESET ROLE;
 SET ROLE sec_test_http_allowed;
 CREATE TEMP TABLE _test_http_allowed (instance_id TEXT);
 INSERT INTO _test_http_allowed SELECT df.start(
-    df.http('https://httpbin.org/get', 'GET'),
+    df.http('https://httpbingo.org/get', 'GET'),
     'http-test-allowed'
 );
 RESET ROLE;
@@ -1653,13 +1653,13 @@ GRANT EXECUTE ON FUNCTION df.status TO sec_test_allowlist_user;
 GRANT SELECT ON df.instances TO sec_test_allowlist_user;
 GRANT sec_test_allowlist_user TO duroxide;
 
--- Build with a feature set that allows httpbin.org but not evil.com.
+-- Build with a feature set that allows httpbingo.org but not evil.com.
 
 -- Test 1: Allowlisted host should succeed
 SET ROLE sec_test_allowlist_user;
 CREATE TEMP TABLE _test_allowed (instance_id TEXT);
 INSERT INTO _test_allowed SELECT df.start(
-    df.http('https://httpbin.org/get', 'GET'),
+    df.http('https://httpbingo.org/get', 'GET'),
     'allowlist-test-allowed'
 );
 RESET ROLE;

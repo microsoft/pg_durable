@@ -1304,7 +1304,7 @@ mod tests {
         use crate::types::HttpConfig;
 
         let json = crate::dsl::http(
-            "https://httpbin.org/post",
+            "https://example.azurewebsites.net/post",
             "POST",
             Some(r#"{"test": true}"#),
             None,
@@ -1313,7 +1313,7 @@ mod tests {
         let fut = Durofut::from_json(&json);
         let config: HttpConfig = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
 
-        assert_eq!(config.url, "https://httpbin.org/post");
+        assert_eq!(config.url, "https://example.azurewebsites.net/post");
         assert_eq!(config.method, "POST");
         assert_eq!(config.body, Some(r#"{"test": true}"#.to_string()));
         assert_eq!(config.timeout_seconds, 45);

@@ -723,11 +723,11 @@ fn test_http_invalid_method() {
 ```sql
 -- tests/e2e/sql/XX_http.sql
 
--- Test basic HTTP GET (use httpbin.org for testing)
+-- Test basic HTTP GET (use httpbingo.org for testing)
 CREATE TEMP TABLE _http_test (instance_id TEXT);
 
 INSERT INTO _http_test SELECT df.start(
-    df.http('https://httpbin.org/get', 'GET') |=> 'response'
+    df.http('https://httpbingo.org/get', 'GET') |=> 'response'
     ~> 'SELECT ($response::jsonb->>''url'') as url',
     'test-http-get'
 );

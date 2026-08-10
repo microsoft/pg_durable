@@ -68,7 +68,7 @@ pub(crate) const AZURE_DOMAIN_SUFFIXES: &[&str] = &[
 
 /// Fully-qualified test domains (exact match, not suffix).
 #[cfg(feature = "http-allow-test-domains")]
-pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["api.github.com", "httpbin.org", "httpbingo.org"];
+pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["api.github.com", "httpbingo.org"];
 
 // ---------------------------------------------------------------------------
 // IP blocklist
