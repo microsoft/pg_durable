@@ -41,6 +41,11 @@ SKIP_TESTS=(
     # container keeps the production defaults (reconcile_interval=3600,
     # retention_days=30), under which the orphan is never reclaimed in time.
     "54_reconcile_orphans"
+    # Lifecycle phases in test-e2e-local.sh build a below-floor / unowned-schema
+    # catalog fixture and restart the server around these tests. This script runs
+    # one fixed-config healthy container, where their setup does not exist.
+    "67_provider_compatibility_lifecycle"
+    "68_provider_schema_ownership_lifecycle"
 )
 
 # Defaults
@@ -222,10 +227,16 @@ for run in $(seq 1 $REPEAT_COUNT); do
         [[ "$skip" == true ]] && continue
 
         echo -n "  $test_name ... "
-        
-        output=$(docker exec "$CONTAINER_NAME" psql -U postgres -v ON_ERROR_STOP=1 -f "/tests/$test_name.sql" 2>&1)
-        exit_code=$?
-        
+
+        # Capture inside `if` so `set -e` cannot abort on a failing test: a bare
+        # assignment would inherit the substitution's status and kill the run
+        # before the FAIL branch below could report it.
+        if output=$(docker exec "$CONTAINER_NAME" psql -U postgres -v ON_ERROR_STOP=1 -f "/tests/$test_name.sql" 2>&1); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+
         if [ $exit_code -eq 0 ]; then
             if echo "$output" | grep -q "TEST PASSED"; then
                 echo -e "${GREEN}PASS${NC}"
