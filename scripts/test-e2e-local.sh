@@ -369,7 +369,7 @@ wait_for_server() {
         attempts=$((attempts + 1))
         if [ "$attempts" -ge 60 ]; then
             echo "PostgreSQL did not become ready on port $PG_PORT"
-            exit 1
+            return 1
         fi
         sleep 0.5
     done
@@ -378,7 +378,7 @@ wait_for_server() {
 restart_server() {
     stop_server
     echo -e "${YELLOW}Starting PostgreSQL...${NC}"
-    "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1 || return 1
     wait_for_server
 }
 
@@ -459,7 +459,7 @@ wait_for_worker_ready() {
     done
 
     echo "Background worker did not become ready. Check server logs."
-    exit 1
+    return 1
 }
 
 recreate_extension() {

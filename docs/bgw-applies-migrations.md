@@ -53,8 +53,9 @@ Steps 4–6 are grouped inside the main loop in `run_duroxide_runtime()`. Step 4
 
 In v0.2.6 and later, the ownership-release step is retired with pre-v0.2.2
 compatibility. Current initialization reads and validates `extversion`, verifies
-provider-schema ownership, runs `ApplyAll`, records readiness, and starts the
-runtime. An unsupported v0.1.1 lineage is recovered through the documented
+provider-schema ownership, runs `ApplyAll`, starts the runtime, and then records
+readiness before entering the running-state poll loop. An unsupported v0.1.1
+lineage is recovered through the documented
 destructive drop/recreate procedure, not an automatic ownership conversion.
 
 Step 1 is unchanged from the previous design and is not detailed further.
