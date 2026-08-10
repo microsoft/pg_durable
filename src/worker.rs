@@ -368,17 +368,42 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> 
     result.map(|(owned,)| owned).unwrap_or(false)
 }
 
-/// Reads the installed extension version and applies the provider compatibility policy.
-async fn check_provider_compat_floor(pool: &sqlx::PgPool) -> Result<(), String> {
-    let installed: String = sqlx::query_as::<_, (String,)>(
-        "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'",
-    )
-    .fetch_one(pool)
-    .await
-    .map(|(v,)| v)
-    .map_err(|e| format!("could not read the installed pg_durable version: {e}"))?;
+async fn read_installed_extension_version(
+    pool: &sqlx::PgPool,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'")
+        .fetch_optional(pool)
+        .await
+}
 
-    crate::compatibility::provider_compatibility_verdict(&installed)
+enum CompatibilityStandDown {
+    Recheck,
+    StopInitializing,
+}
+
+async fn wait_for_compatibility_change(
+    pool: &sqlx::PgPool,
+    rejected_version: &str,
+    retry_interval: Duration,
+) -> CompatibilityStandDown {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(retry_interval) => {}
+            _ = wait_for_shutdown() => { return CompatibilityStandDown::StopInitializing; }
+        }
+
+        match read_installed_extension_version(pool).await {
+            Ok(None) => return CompatibilityStandDown::StopInitializing,
+            Ok(Some(installed)) if installed != rejected_version => {
+                return CompatibilityStandDown::Recheck;
+            }
+            Ok(Some(_)) => {}
+            Err(e) => log!(
+                "pg_durable: could not recheck the installed version while compatibility is rejected (will retry): {}",
+                e
+            ),
+        }
+    }
 }
 
 async fn initialize_duroxide_runtime(
@@ -414,15 +439,32 @@ async fn initialize_duroxide_runtime(
             return None;
         }
 
-        if !check_extension_exists(mgmt_pool).await {
-            log!("pg_durable: extension no longer exists; returning to wait state");
-            return None;
-        }
+        let installed_version = match read_installed_extension_version(mgmt_pool).await {
+            Ok(Some(installed)) => installed,
+            Ok(None) => {
+                log!("pg_durable: extension no longer exists; returning to wait state");
+                return None;
+            }
+            Err(e) => {
+                log!(
+                    "pg_durable: could not read the installed pg_durable version (will retry): {}",
+                    e
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_interval) => {}
+                    _ = wait_for_shutdown() => { return None; }
+                }
+                continue;
+            }
+        };
 
-        // Retrying cannot fix a version mismatch, so give up rather than loop.
-        if let Err(e) = check_provider_compat_floor(mgmt_pool).await {
+        if let Err(e) = crate::compatibility::provider_compatibility_verdict(&installed_version) {
             log!("pg_durable: refusing to initialize duroxide runtime: {}", e);
-            return None;
+            match wait_for_compatibility_change(mgmt_pool, &installed_version, retry_interval).await
+            {
+                CompatibilityStandDown::Recheck => continue,
+                CompatibilityStandDown::StopInitializing => return None,
+            }
         }
 
         if !check_duroxide_schema_owned(mgmt_pool, schema_name).await {
@@ -446,7 +488,7 @@ async fn initialize_duroxide_runtime(
             Ok(s) => Arc::new(s),
             Err(e) => {
                 log!(
-                    "pg_durable: failed to create PostgreSQL store (will retry): {}",
+                    "pg_durable: failed to create PostgreSQL store (will retry): {}. If this database originated before pg_durable 0.2.2 and still has extension-owned provider objects, that lineage is unsupported and retries cannot repair it; back up required data, review dependencies, then drop and recreate the pg_durable extension as documented.",
                     e
                 );
                 tokio::select! {
