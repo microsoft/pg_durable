@@ -3,6 +3,12 @@
 **Status:** Implemented  
 **Target version:** 0.2.0
 
+> **Document scope:** The before/after architecture and rollout sequence below
+> record the v0.2.0 design. Current binaries retain BGW-managed migrations but
+> first enforce the v0.2.2 provider compatibility floor, and they no longer run
+> the v0.1.1 provider-object ownership conversion. See
+> [extension_lifecycle.md](extension_lifecycle.md) for the current state machine.
+
 ## Motivation
 
 Previously, `CREATE EXTENSION pg_durable` included the full duroxide-pg schema DDL via `extension_sql_file!("../sql/duroxide_install.sql")`, creating all duroxide tables, functions, indexes, and triggers as extension-owned objects. This change moved schema migration responsibility from the extension to the background worker (BGW).
@@ -27,7 +33,7 @@ The absence of `IF NOT EXISTS` is intentional: if a `duroxide` schema already ex
 
 The `df.*` tables, RLS policies, functions, and operators are all unchanged.
 
-### Background worker initialization (changed)
+### Background worker initialization (historical v0.2.0 sequence)
 
 **Before:**
 1. Wait for extension to be created
@@ -44,6 +50,12 @@ The `df.*` tables, RLS policies, functions, and operators are all unchanged.
 6. Write epoch sentinel to `df._worker_epoch`
 
 Steps 4–6 are grouped inside the main loop in `run_duroxide_runtime()`. Step 4 is performed by `initialize_duroxide_runtime()`, which returns the running runtime handle. Steps 5 and 6 execute immediately after, before entering the running-state poll loop.
+
+In v0.2.6 and later, the ownership-release step is retired with pre-v0.2.2
+compatibility. Current initialization reads and validates `extversion`, verifies
+provider-schema ownership, runs `ApplyAll`, records readiness, and starts the
+runtime. An unsupported v0.1.1 lineage is recovered through the documented
+destructive drop/recreate procedure, not an automatic ownership conversion.
 
 Step 1 is unchanged from the previous design and is not detailed further.
 
