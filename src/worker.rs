@@ -368,36 +368,7 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> 
     result.map(|(owned,)| owned).unwrap_or(false)
 }
 
-/// Pre-v0.2.2 schemas belong to the retired `duroxide-pg-opt` provider line.
-/// Letting `MigrationPolicy::ApplyAll` loose on one would run `duroxide-pg`
-/// migrations — `DROP FUNCTION`, `ALTER TABLE` — over live orchestration state
-/// with no user in the loop, so refuse before any provider DDL can execute.
-const PROVIDER_COMPAT_FLOOR: (u32, u32, u32) = (0, 2, 2);
-
-/// Returns `Err` with an operator-actionable message when `installed` predates
-/// the provider compatibility floor or cannot be parsed.
-fn provider_compat_floor_verdict(installed: &str) -> Result<(), String> {
-    let parsed = crate::dsl::parse_semver(installed)
-        .ok_or_else(|| format!("unrecognized pg_durable version format: {installed}"))?;
-
-    if parsed >= PROVIDER_COMPAT_FLOOR {
-        return Ok(());
-    }
-
-    let (fmaj, fmin, fpatch) = PROVIDER_COMPAT_FLOOR;
-    Err(format!(
-        "installed schema is pg_durable {installed}, but this binary supports \
-         {fmaj}.{fmin}.{fpatch} and later only. Versions before \
-         {fmaj}.{fmin}.{fpatch} use the retired duroxide-pg-opt provider line and \
-         are not upgradable with this package. Reinstall a pg_durable package at \
-         0.2.5 or earlier to regain the pre-{fmaj}.{fmin}.{fpatch} upgrade chain, \
-         or follow the downstream process that owns the duroxide-pg-opt line. \
-         Refusing to start so that provider migrations are not applied over \
-         incompatible state."
-    ))
-}
-
-/// Reads the installed extension version and applies [`provider_compat_floor_verdict`].
+/// Reads the installed extension version and applies the provider compatibility policy.
 async fn check_provider_compat_floor(pool: &sqlx::PgPool) -> Result<(), String> {
     let installed: String = sqlx::query_as::<_, (String,)>(
         "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'",
@@ -407,7 +378,7 @@ async fn check_provider_compat_floor(pool: &sqlx::PgPool) -> Result<(), String> 
     .map(|(v,)| v)
     .map_err(|e| format!("could not read the installed pg_durable version: {e}"))?;
 
-    provider_compat_floor_verdict(&installed)
+    crate::compatibility::provider_compatibility_verdict(&installed)
 }
 
 async fn initialize_duroxide_runtime(
@@ -984,47 +955,5 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
             log!("pg_durable: failed to retire engine records; deferring df removal: {e:?}");
             false
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::provider_compat_floor_verdict;
-
-    #[test]
-    fn rejects_versions_below_the_provider_compat_floor() {
-        for version in ["0.1.1", "0.2.0", "0.2.1"] {
-            let err = provider_compat_floor_verdict(version)
-                .expect_err("pre-0.2.2 schema must be rejected");
-            assert!(err.contains(version), "message should name the version");
-            assert!(
-                err.contains("0.2.2"),
-                "message should name the required floor"
-            );
-            assert!(
-                err.contains("duroxide-pg-opt"),
-                "message should point at the downstream line"
-            );
-        }
-    }
-
-    #[test]
-    fn admits_the_floor_and_later() {
-        for version in ["0.2.2", "0.2.3", "0.2.6", "0.3.0", "1.0.0"] {
-            assert!(
-                provider_compat_floor_verdict(version).is_ok(),
-                "{version} is in the provider compatibility line"
-            );
-        }
-    }
-
-    #[test]
-    fn admits_a_prerelease_at_the_floor() {
-        assert!(provider_compat_floor_verdict("0.2.2-rc1").is_ok());
-    }
-
-    #[test]
-    fn rejects_an_unparseable_version() {
-        assert!(provider_compat_floor_verdict("garbage").is_err());
     }
 }

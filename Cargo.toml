@@ -33,6 +33,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 percent-encoding = "2.3"
+semver = "1"
 
 # duroxide integration
 duroxide = "=0.1.30"

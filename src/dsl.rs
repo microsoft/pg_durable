@@ -71,21 +71,6 @@ pub fn debug_connection() -> String {
 // Variable Functions
 // ============================================================================
 
-/// Parses a `MAJOR.MINOR.PATCH` version, ignoring any pre-release/build suffix
-/// on the patch component.
-pub(crate) fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch_part = parts.next()?;
-    let patch_digits = patch_part
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>();
-    let patch = patch_digits.parse().ok()?;
-    Some((major, minor, patch))
-}
-
 /// Sets a workflow variable. Must be called BEFORE df.start(), not inside a workflow.
 /// Variables are captured at df.start() and remain immutable during execution.
 /// Each user has their own variable namespace (owner = current_user).
@@ -1364,7 +1349,7 @@ pub fn wait_for_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::{node_insert_sql, parse_semver, pick_id_with_retry};
+    use super::{node_insert_sql, pick_id_with_retry};
 
     #[test]
     fn test_node_insert_sql_uses_current_schema_columns_and_numbered_parameters() {
@@ -1376,37 +1361,6 @@ mod tests {
         assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)"));
         assert!(sql.contains("($10, $11, $12, $13, $14, $15, $16, $17::oid::regrole, $18)"));
         assert!(!sql.contains("login_role"));
-    }
-
-    #[test]
-    fn test_parse_semver_basic() {
-        assert_eq!(parse_semver("0.1.1"), Some((0, 1, 1)));
-        assert_eq!(parse_semver("0.2.0"), Some((0, 2, 0)));
-        assert_eq!(parse_semver("1.0.0"), Some((1, 0, 0)));
-        assert_eq!(parse_semver("12.34.56"), Some((12, 34, 56)));
-    }
-
-    #[test]
-    fn test_parse_semver_with_prerelease_suffix() {
-        assert_eq!(parse_semver("0.2.0-rc1"), Some((0, 2, 0)));
-        assert_eq!(parse_semver("1.0.0-beta.2"), Some((1, 0, 0)));
-    }
-
-    #[test]
-    fn test_parse_semver_invalid() {
-        assert_eq!(parse_semver(""), None);
-        assert_eq!(parse_semver("0"), None);
-        assert_eq!(parse_semver("0.1"), None);
-        assert_eq!(parse_semver("abc.def.ghi"), None);
-        assert_eq!(parse_semver("0.1.abc"), None);
-    }
-
-    #[test]
-    fn test_parse_semver_comparison() {
-        assert!(parse_semver("0.2.0").unwrap() >= (0, 2, 0));
-        assert!(parse_semver("0.1.1").unwrap() < (0, 2, 0));
-        assert!(parse_semver("0.3.0").unwrap() >= (0, 2, 0));
-        assert!(parse_semver("1.0.0").unwrap() >= (0, 2, 0));
     }
 
     #[test]

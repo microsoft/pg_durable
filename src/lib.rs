@@ -54,6 +54,7 @@ pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(3600);
 // Module declarations
 pub mod activities;
 pub mod client;
+mod compatibility;
 pub mod dsl;
 pub mod explain;
 pub mod monitoring;

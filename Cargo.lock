@@ -1921,6 +1921,7 @@ dependencies = [
  "pgrx",
  "pgrx-tests",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sqlx",
