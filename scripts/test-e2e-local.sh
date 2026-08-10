@@ -54,6 +54,8 @@ declare -a ACTIVE_PHASES=()
 
 DEFAULT_BUILD_PHASES=(
     "no-preload"
+    "compatibility-rejection"
+    "provider-ownership-rejection"
     "standard"
     "superuser-guc-off"
     "connlimit-backpressure"
@@ -65,6 +67,8 @@ DEFAULT_BUILD_PHASES=(
 
 ALL_PHASES=(
     "no-preload"
+    "compatibility-rejection"
+    "provider-ownership-rejection"
     "standard"
     "superuser-guc-off"
     "connlimit-backpressure"
@@ -82,6 +86,9 @@ PG_DB="postgres"
 E2E_USER="df_e2e_user"
 NO_PRELOAD_TEST="00_requires_shared_preload"
 SETUP_TEST="00_setup_playground"
+COMPATIBILITY_REJECTION_TEST="67_provider_compatibility_lifecycle"
+PROVIDER_OWNERSHIP_REJECTION_TEST="68_provider_schema_ownership_lifecycle"
+PHASE_LOG_START_LINE=1
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -136,6 +143,12 @@ phase_label() {
         standard)
             echo "standard suite"
             ;;
+        compatibility-rejection)
+            echo "provider compatibility rejection lifecycle"
+            ;;
+        provider-ownership-rejection)
+            echo "provider schema ownership rejection lifecycle"
+            ;;
         connlimit-backpressure)
             echo "connection limit backpressure"
             ;;
@@ -167,6 +180,12 @@ phase_for_test() {
     case "$1" in
         "$NO_PRELOAD_TEST")
             echo "no-preload"
+            ;;
+        "$COMPATIBILITY_REJECTION_TEST")
+            echo "compatibility-rejection"
+            ;;
+        "$PROVIDER_OWNERSHIP_REJECTION_TEST")
+            echo "provider-ownership-rejection"
             ;;
         17_superuser_guc)
             echo "superuser-guc-off"
@@ -466,7 +485,7 @@ configure_phase() {
         no-preload)
             remove_conf_key "shared_preload_libraries"
             ;;
-        standard)
+        standard|compatibility-rejection|provider-ownership-rejection)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
@@ -535,6 +554,25 @@ configure_phase() {
     esac
 }
 
+configure_lifecycle_setup() {
+    configure_phase "standard"
+    # CREATE EXTENSION enforces shared_preload_libraries and database binding.
+    # Keep both valid while preventing the BGW's management connection so
+    # catalog fixtures can be built without a worker observing or mutating them.
+    set_conf_line "pg_durable.worker_role" "'unit4_blocked_worker'"
+}
+
+prepare_lifecycle_setup_role() {
+    configure_phase "standard"
+    restart_server
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" <<'SQL' >/dev/null
+DROP EXTENSION IF EXISTS pg_durable CASCADE;
+DROP SCHEMA IF EXISTS _duroxide CASCADE;
+DROP ROLE IF EXISTS unit4_blocked_worker;
+CREATE ROLE unit4_blocked_worker SUPERUSER NOLOGIN;
+SQL
+}
+
 prepare_phase() {
     local phase="$1"
 
@@ -547,7 +585,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
+        no-preload|compatibility-rejection|provider-ownership-rejection|standard|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -556,6 +594,20 @@ prepare_phase() {
     esac
 
     configure_phase "$phase"
+
+    if [ "$phase" = "compatibility-rejection" ] || [ "$phase" = "provider-ownership-rejection" ]; then
+        prepare_lifecycle_setup_role
+        configure_lifecycle_setup
+        restart_server
+
+        "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+            -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/${phase}-setup.sql" >/dev/null
+
+        configure_phase "$phase"
+        PHASE_LOG_START_LINE=$(( $(wc -l < "$LOG_FILE") + 1 ))
+        restart_server
+        return
+    fi
 
     # Drop the extension (and its owned duroxide schema) *before* restarting so
     # the BGW cannot find a pre-existing pg_durable extension on the next boot
@@ -617,6 +669,88 @@ prepare_phase() {
         http-disabled|http-allow-all)
             ensure_e2e_role
             wait_for_worker_ready
+            ;;
+    esac
+}
+
+restore_current_extension() {
+    configure_lifecycle_setup
+    restart_server
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+        -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/restore-current-extension.sql" >/dev/null
+
+    configure_phase "standard"
+    restart_server
+    wait_for_worker_ready
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+        -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/verify-current-extension.sql" >/dev/null
+    "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+        -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS unit4_blocked_worker;" >/dev/null
+}
+
+verify_compatibility_rejection_phase() {
+    local failed=0
+    local refusal_count
+    local initialization_count
+    local stop_started
+    local stop_elapsed
+
+    refusal_count=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE" | \
+        grep -c "refusing to initialize duroxide runtime" || true)
+    initialization_count=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE" | \
+        grep -c "initializing duroxide runtime" || true)
+
+    if [ "$refusal_count" -ne 1 ]; then
+        echo "    Expected exactly one compatibility refusal log, found $refusal_count"
+        failed=1
+    fi
+    if [ "$initialization_count" -ne 1 ]; then
+        echo "    Expected exactly one initialization attempt while rejected, found $initialization_count"
+        failed=1
+    fi
+
+    stop_started=$(date +%s)
+    stop_server
+    stop_elapsed=$(( $(date +%s) - stop_started ))
+    if [ "$stop_elapsed" -gt 10 ]; then
+        echo "    Rejected worker shutdown took ${stop_elapsed}s (limit: 10s)"
+        failed=1
+    fi
+
+    if ! restore_current_extension; then
+        echo "    Failed to restore and verify the current extension after compatibility rejection"
+        failed=1
+    fi
+
+    return "$failed"
+}
+
+verify_provider_ownership_rejection_phase() {
+    local failed=0
+    local ownership_refusal_count
+
+    ownership_refusal_count=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE" | \
+        grep -c "duroxide schema missing or not extension-owned" || true)
+    if [ "$ownership_refusal_count" -lt 1 ]; then
+        echo "    Expected a provider schema ownership refusal log"
+        failed=1
+    fi
+
+    if ! restore_current_extension; then
+        echo "    Failed to restore and verify the current extension after ownership rejection"
+        failed=1
+    fi
+
+    return "$failed"
+}
+
+verify_lifecycle_phase() {
+    case "$1" in
+        compatibility-rejection)
+            verify_compatibility_rejection_phase
+            ;;
+        provider-ownership-rejection)
+            verify_provider_ownership_rejection_phase
             ;;
     esac
 }
@@ -792,6 +926,17 @@ run_phase() {
             phase_failed=$((phase_failed + 1))
         fi
     done
+
+    if [ "$phase" = "compatibility-rejection" ] || [ "$phase" = "provider-ownership-rejection" ]; then
+        printf "  %-45s ... " "${phase}-shell-lifecycle"
+        if verify_lifecycle_phase "$phase"; then
+            echo -e "${GREEN}PASS${NC}"
+            phase_passed=$((phase_passed + 1))
+        else
+            echo -e "${RED}FAIL${NC}"
+            phase_failed=$((phase_failed + 1))
+        fi
+    fi
 
     TOTAL_PASSED=$((TOTAL_PASSED + phase_passed))
     TOTAL_FAILED=$((TOTAL_FAILED + phase_failed))
