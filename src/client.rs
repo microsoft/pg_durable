@@ -31,6 +31,18 @@ thread_local! {
     static DUROXIDE_CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
 }
 
+fn check_provider_compatibility() -> Result<(), String> {
+    let installed = Spi::get_one::<String>(
+        "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+    )
+    .map_err(|e| {
+        format!("could not read the installed pg_durable version — try again in a moment: {e}")
+    })?
+    .ok_or_else(|| "pg_durable extension metadata not found".to_string())?;
+
+    crate::compatibility::provider_compatibility_verdict(&installed)
+}
+
 /// Check whether the background worker has finished initializing the duroxide
 /// schema for the current binary's expected schema version.
 ///
@@ -87,6 +99,13 @@ fn with_duroxide_client<T, F>(f: F) -> Result<T, String>
 where
     F: FnOnce(&Client, &Runtime) -> Result<T, String>,
 {
+    if let Err(e) = check_provider_compatibility() {
+        DUROXIDE_CLIENT.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+        return Err(e);
+    }
+
     let rt = get_client_runtime();
 
     // Try to use existing client
