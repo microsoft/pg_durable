@@ -432,14 +432,31 @@ setup_b2_tables() {
 # df.duroxide_schema() ('_duroxide' on fresh installs, 'duroxide' on upgraded
 # ones); v0.2.2 predates that helper and always uses 'duroxide'.
 resolve_provider_schema() {
-    local has_helper
+    local has_helper schema namespace_exists
 
     has_helper=$(run_sql_capture "SELECT to_regprocedure('df.duroxide_schema()') IS NOT NULL") || return 1
     if [ "$has_helper" = "t" ]; then
-        run_sql_capture "SELECT df.duroxide_schema()"
+        schema=$(run_sql_capture "SELECT df.duroxide_schema()") || return 1
     else
-        printf 'duroxide'
+        schema='duroxide'
     fi
+
+    if [ -z "$schema" ]; then
+        echo "    Provider schema resolution returned an empty name" >&2
+        return 1
+    fi
+    if [[ ! "$schema" =~ ^[A-Za-z_][A-Za-z0-9_$]*$ ]]; then
+        echo "    Provider schema resolution returned an invalid identifier: $schema" >&2
+        return 1
+    fi
+
+    namespace_exists=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = '${schema}')") || return 1
+    if [ "$namespace_exists" != "t" ]; then
+        echo "    Resolved provider schema does not exist: $schema" >&2
+        return 1
+    fi
+
+    printf '%s' "$schema"
 }
 
 # Polls <provider schema>._worker_ready until the BGW has finished applying
@@ -451,14 +468,15 @@ resolve_provider_schema() {
 # has to run inside the loop.
 wait_for_ready() {
     local attempts=0
-    local schema exists result
+    local schema quoted_schema exists result
 
     schema=$(resolve_provider_schema) || return 1
+    quoted_schema=$(run_sql_capture "SELECT quote_ident('${schema}')") || return 1
 
     while [ $attempts -lt 60 ]; do
         exists=$(run_sql_capture "SELECT to_regclass('${schema}._worker_ready') IS NOT NULL") || return 1
         if [ "$exists" = "t" ]; then
-            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM ${schema}._worker_ready WHERE schema_version >= 1)") || return 1
+            result=$(run_sql_capture "SELECT EXISTS(SELECT 1 FROM ${quoted_schema}._worker_ready WHERE schema_version >= 1)") || return 1
             [ "$result" = "t" ] && return 0
         fi
         sleep 0.5
@@ -799,6 +817,22 @@ test_b1_conditional_operators() {
 # be unable to DROP them. This used to also cover the v0.1.1 ownership-conversion
 # path, which was retired in v0.2.6 along with pre-v0.2.2 support.
 test_b1_no_extension_owned_duroxide_objects() {
+    local schema
+
+    schema=$(resolve_provider_schema) || return 1
+
+    assert_sql_equals \
+        "SELECT COUNT(*) = 7
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = '${schema}'
+            AND c.relkind IN ('r', 'p')
+            AND c.relname IN (
+                '_duroxide_migrations', 'instances', 'executions', 'history',
+                'orchestrator_queue', 'worker_queue', 'instance_locks'
+            );" \
+        "t" || return 1
+
     assert_sql_equals \
         "SELECT COUNT(*)::int = 0
            FROM (
@@ -811,7 +845,7 @@ test_b1_no_extension_owned_duroxide_objects() {
                                    AND d.deptype = 'e'
                JOIN pg_extension e  ON e.oid = d.refobjid
                                    AND e.extname = 'pg_durable'
-              WHERE n.nspname = 'duroxide' AND c.relkind = 'r'
+              WHERE n.nspname = '${schema}' AND c.relkind = 'r'
              UNION ALL
              -- extension-owned indexes in duroxide schema
              SELECT 1
@@ -822,7 +856,7 @@ test_b1_no_extension_owned_duroxide_objects() {
                                    AND d.deptype = 'e'
                JOIN pg_extension e  ON e.oid = d.refobjid
                                    AND e.extname = 'pg_durable'
-              WHERE n.nspname = 'duroxide' AND c.relkind = 'i'
+              WHERE n.nspname = '${schema}' AND c.relkind = 'i'
              UNION ALL
              -- extension-owned sequences in duroxide schema
              SELECT 1
@@ -833,7 +867,7 @@ test_b1_no_extension_owned_duroxide_objects() {
                                    AND d.deptype = 'e'
                JOIN pg_extension e  ON e.oid = d.refobjid
                                    AND e.extname = 'pg_durable'
-              WHERE n.nspname = 'duroxide' AND c.relkind = 'S'
+              WHERE n.nspname = '${schema}' AND c.relkind = 'S'
              UNION ALL
              -- extension-owned functions in duroxide schema
              SELECT 1
@@ -844,7 +878,7 @@ test_b1_no_extension_owned_duroxide_objects() {
                                    AND d.deptype = 'e'
                JOIN pg_extension e  ON e.oid = d.refobjid
                                    AND e.extname = 'pg_durable'
-              WHERE n.nspname = 'duroxide'
+              WHERE n.nspname = '${schema}'
              UNION ALL
              -- extension-owned triggers in duroxide schema
              SELECT 1
@@ -856,7 +890,7 @@ test_b1_no_extension_owned_duroxide_objects() {
                                    AND d.deptype = 'e'
                JOIN pg_extension e  ON e.oid = d.refobjid
                                    AND e.extname = 'pg_durable'
-              WHERE n.nspname = 'duroxide'
+              WHERE n.nspname = '${schema}'
            ) owned;" \
         "t"
 }
