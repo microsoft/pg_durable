@@ -80,9 +80,9 @@ Unknown-migration rejection is always enforced: `duroxide-pg` unconditionally ca
 
 #### Step 5: readiness record via `duroxide._worker_ready`
 
-After `CREATE EXTENSION`, the duroxide schema is empty until the BGW completes its first `ApplyAll`. Similarly, after a binary upgrade that introduces new duroxide migrations, the schema may be incompatible until the BGW applies the pending changes. Calling `df.status()`, `df.result()`, or any function that instantiates a duroxide client during either window fails with a schema-not-initialized error.
+After `CREATE EXTENSION`, the duroxide schema is empty until the BGW completes its first `ApplyAll`. Similarly, after a binary upgrade that introduces new duroxide migrations, the schema may be incompatible until the BGW applies the pending changes. Engine-dependent calls fail with a schema-not-initialized error during this temporary window. Table-only `df.status()`, `df.result()`, and `df.await_instance()` inspection does not instantiate a Duroxide client and remains available.
 
-Readiness is **not** exposed as a SQL function. It is an internal Rust check called by `get_duroxide_client()` before instantiating the duroxide client. If the check fails, the function raises a PostgreSQL error: `"pg_durable background worker not yet initialized — try again in a moment"`. The readiness state is stored in a single-row table written by the BGW:
+Readiness is **not** exposed as a SQL function. It is an internal Rust check called before instantiating the Duroxide client. If the check fails, the function raises `"pg_durable background worker not yet initialized — try again in a moment"`. Before trusting readiness or a cached client, each engine operation independently checks the installed extension version. A version below the v0.2.2 provider floor returns the permanent, actionable compatibility error instead of the temporary retry message. The readiness state is stored in a single-row table written by the BGW:
 
 ```sql
 CREATE TABLE IF NOT EXISTS duroxide._worker_ready (
@@ -136,7 +136,7 @@ Once the BGW has run (any install path):
 - `DROP EXTENSION pg_durable` fails: PostgreSQL tries to drop the extension-owned schema but finds non-owned objects inside it.
 - `DROP EXTENSION pg_durable CASCADE` succeeds: drops `df.*` (extension-owned), drops the `duroxide` schema (extension-owned), CASCADE drops everything inside the `duroxide` schema.
 
-**CASCADE is always required.** We document this unconditionally and do not qualify it by upgrade path.
+For a destructive reset, start with plain `DROP EXTENSION pg_durable` so PostgreSQL can report blocking dependencies. In an initialized database it normally fails because the provider objects are not extension members. Inventory the reported objects, then use `CASCADE` only when their additional loss is understood and accepted.
 
 ### Security model
 
@@ -215,7 +215,7 @@ Call `wait_for_ready` after any `CREATE EXTENSION` in scenarios that subsequentl
 | `.github/copilot-instructions.md` | Remove "Duroxide Migration Sync Workflow" section and related scripts from the scripts table. Update BGW and activity descriptions. |
 | `docs/extension_lifecycle.md` | Update sections on extension-managed schema (section 1) and BGW lifecycle (section 3). Remove references to `gen-duroxide-install-sql.sh` and migration verification. Update state machine to show ownership-check and `_worker_ready` write steps. |
 | `docs/upgrade-testing.md` | Add duroxide ownership entry to the v0.1.1→v0.2.0 version-specific changes section. Note that both paths converge (objects not extension-owned after BGW runs). Note `wait_for_ready()` requirement in upgrade test infrastructure. |
-| `USER_GUIDE.md` | Add note that `DROP EXTENSION pg_durable CASCADE` is always required. Update readiness polling to use `duroxide._worker_ready` directly. |
+| `USER_GUIDE.md` | Document provider-object dependencies and the reviewed `CASCADE` fallback for destructive reset. Update readiness polling to use `duroxide._worker_ready` directly. |
 
 > **Superseded in v0.2.6.** The two v0.1.1 SQL files above, and the
 > ownership-conversion helpers `release_extension_owned_duroxide_objects` /

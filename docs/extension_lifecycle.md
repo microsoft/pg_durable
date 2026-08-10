@@ -103,7 +103,7 @@ The duroxide provider tables, functions, indexes, and triggers are **not** creat
 - The duroxide schema can evolve independently of pg_durable releases.
 - Swapping the duroxide provider only requires changes to BGW initialization code, not extension DDL.
 
-Because the BGW creates duroxide objects outside the extension transaction, they are not registered as extension members. The `duroxide` schema itself remains extension-owned. This means `DROP EXTENSION pg_durable CASCADE` is always required — `CASCADE` drops the extension-owned schema, which cascades to the non-owned objects inside it.
+Because the BGW creates duroxide objects outside the extension transaction, they are not registered as extension members. The provider schema itself remains extension-owned. Plain `DROP EXTENSION pg_durable` therefore normally reports the non-owned provider objects as blockers. For a destructive reset, inventory that dependency report before choosing `DROP EXTENSION pg_durable CASCADE`, which drops the schema and everything inside it along with any other reported dependents.
 
 See [bgw-applies-migrations.md](bgw-applies-migrations.md) for the full design.
 
@@ -187,7 +187,7 @@ All backend sessions (`df.*` functions) continue to use `MigrationPolicy::Verify
 See `src/worker.rs` for the full implementation. The main loop in `run_duroxide_runtime()` drives the state machine:
 
 1. `wait_for_extension_creation()` polls `pg_extension` via a reusable `sqlx::PgPool` (max 1 connection) every 5 seconds.
-2. `initialize_duroxide_runtime()` first rejects any installed extension version below the v0.2.2 provider compatibility floor, so `ApplyAll` can never run `duroxide-pg` migrations over retired `duroxide-pg-opt` state. It then checks that the `duroxide` schema is owned by the `pg_durable` extension (via `pg_depend`); if not, it logs a warning and retries after the poll interval. Then it creates a `PostgresProvider` using `worker_provider_config()` (from `src/types.rs`) which sets `ApplyAll`. Unknown-migration rejection is always enforced unconditionally by the provider.
+2. `initialize_duroxide_runtime()` reads the installed extension version before provider construction. A transient catalog failure retries with interruptible backoff. A version below the v0.2.2 provider compatibility floor logs one actionable refusal and enters bounded stand-down, polling only for shutdown, extension removal, or a version change; `ApplyAll` cannot run over retired `duroxide-pg-opt` state. A compatible version proceeds to verify that the provider schema is owned by the `pg_durable` extension (via `pg_depend`), then constructs a `PostgresProvider` with `ApplyAll`. Unknown-migration rejection remains unconditional.
 3. After the runtime starts, the BGW writes a **readiness record** (`duroxide._worker_ready`) with the current `WORKER_SCHEMA_VERSION`, then writes an **epoch sentinel** (`df._worker_epoch`) with a fresh UUID. The readiness record signals backend sessions that the duroxide schema is fully initialized; the epoch sentinel detects drop+recreate scenarios (see below).
 4. `run_until_extension_dropped_or_shutdown()` uses `tokio::select!` to interleave shutdown checks (every 1 second, via direct volatile read) with epoch-sentinel checks (every 5 seconds via the shared polling pool).
 
@@ -226,7 +226,7 @@ All backend call sites (client, monitoring, explain) use `new_backend_provider()
 
 Unknown-migration rejection is enforced unconditionally by the provider (not a config flag).
 
-Additionally, backend sessions check `duroxide._worker_ready` before instantiating the duroxide client. If the BGW has not yet initialized the schema for the current binary's expected version, the function raises a clear error: `"pg_durable background worker not yet initialized — try again in a moment"`.
+Additionally, every backend engine operation checks the installed extension version before consulting `duroxide._worker_ready`, constructing a provider, or using a cached client. A below-floor schema returns the permanent compatibility error; a compatible schema whose BGW has not initialized yet returns `"pg_durable background worker not yet initialized — try again in a moment"`.
 
 See `src/client.rs::get_duroxide_client()` for the cached-client implementation.
 
@@ -234,7 +234,7 @@ See `src/client.rs::get_duroxide_client()` for the cached-client implementation.
 - (Future) Check extension existence before attempting duroxide connection
 - Use `VerifyOnly` policy to ensure no schema creation from client code
 - Fail with clear, actionable error messages for different failure scenarios
-- Note on caching: after `DROP EXTENSION`, the `df.*` entrypoints disappear, so cached clients are not reachable through SQL. However, if the extension is later re-created while a backend session remains alive, a previously cached client may be stale; this can be handled later by recreating the client on specific errors.
+- Note on caching: compatibility is rechecked before every engine operation. A rejected or unreadable installed version clears the per-backend cached client before returning the error.
 
 #### Monitoring Functions (src/monitoring.rs, src/explain.rs)
 
@@ -324,7 +324,7 @@ This design uses `sqlx` polling (checking `pg_extension` table every 5 seconds):
 Because the Duroxide schema DDL runs inside `CREATE EXTENSION` as extension SQL, installs are transactional:
 
 - If `CREATE EXTENSION pg_durable` fails, the install is rolled back.
-- If you need to reset state: `DROP EXTENSION pg_durable CASCADE;` then `CREATE EXTENSION pg_durable;`.
+- If you need to reset state, back up required data and inventory dependencies first. Try `DROP EXTENSION pg_durable`; if provider/dependent objects block it, review PostgreSQL's dependency report before choosing `DROP EXTENSION pg_durable CASCADE`. Then run `CREATE EXTENSION pg_durable` and reapply grants. The reset destroys all extension and provider state.
 
 ## Considered and left for later
 

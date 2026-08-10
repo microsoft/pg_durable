@@ -80,7 +80,9 @@ CREATE EXTENSION pg_durable;
 SELECT df.grant_usage('app_role');
 ```
 
-After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
+After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, engine-dependent functions return `"pg_durable background worker not yet initialized — try again in a moment"`; retry that temporary error after a short delay.
+
+An installed schema below the v0.2.2 provider compatibility floor instead returns a permanent error naming the installed version, required floor, and retired `duroxide-pg-opt` provider line. Retrying cannot repair that state. Install a v0.2.5-or-earlier package that still contains the old upgrade chain, or follow the downstream `duroxide-pg-opt` upgrade process. Table-only inspection through `df.status()`, `df.result()`, and `df.await_instance()` remains available while the extension is installed.
 
 > ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
 
@@ -2376,7 +2378,7 @@ Failed to connect to duroxide store: ...
 
 1. **Extension not created**: Run `CREATE EXTENSION pg_durable`
 
-2. **Background worker not yet ready**: After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Simply retry after a short delay — once the worker finishes, the error resolves on its own.
+2. **Background worker not yet ready**: After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Retry the explicit `not yet initialized` error after a short delay. A provider-compatibility-floor error is permanent and requires the package/downstream recovery described under installation; do not keep retrying it.
 
 3. **Database connection issues**: PostgreSQL is not accepting connections
    - Check PostgreSQL is running
@@ -2409,11 +2411,13 @@ pg_durable: waiting for CREATE EXTENSION pg_durable...
 - Returns to waiting for extension creation
 - Any in-flight workflows are terminated
 
-> ⚠️ **`CASCADE` is always required.** The duroxide schema contains tables and functions created by the background worker that are not directly owned by the extension. `DROP EXTENSION pg_durable` (without `CASCADE`) will fail with an error. Always use `DROP EXTENSION pg_durable CASCADE`.
+> ⚠️ **Drop/recreate is destructive.** It removes durable instances, graph nodes, variables, execution history, provider state, and extension grants. Back up anything needed and inventory dependent objects first. Try `DROP EXTENSION pg_durable` as the bounded operation; it can fail because background-worker-created provider objects remain inside the extension-owned schema. Use `CASCADE` only after reviewing and accepting every additional dependent object PostgreSQL reports.
 
 **Solution**: Wait 15-20 seconds after `DROP EXTENSION` before recreating:
 ```sql
-DROP EXTENSION pg_durable CASCADE;
+DROP EXTENSION pg_durable;
+-- If PostgreSQL reports provider/dependent objects, review them before choosing:
+-- DROP EXTENSION pg_durable CASCADE;
 -- Wait ~20 seconds for background worker to fully shut down
 CREATE EXTENSION pg_durable;
 ```
