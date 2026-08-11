@@ -10,6 +10,7 @@ This guide covers all testing scenarios for pg_durable.
 | pg_regress tests | `make test-regress` |
 | E2E tests (local) | `./scripts/test-e2e-local.sh` |
 | E2E tests (Docker) | `./scripts/test-e2e-docker.sh` |
+| Worker lifecycle regressions | `./scripts/test-shutdown.sh`, `./scripts/test-epoch-race.sh` |
 | Stop PostgreSQL | `./scripts/pg-stop.sh` |
 | Deploy to ACR | `./scripts/deploy-acr.sh` |
 
@@ -169,6 +170,29 @@ docker logs -f pg_durable_e2e
 # When done, stop container
 ./scripts/pg-stop.sh --docker
 ```
+
+---
+
+## 4. Worker Lifecycle Regression Tests
+
+Two standalone scripts cover background-worker behaviour that the SQL suites cannot
+express, because they need to control the postmaster itself. Both run in CI and both
+require an exclusive local cluster — stop any server you started with `--keep` first.
+
+```bash
+# Graceful shutdown: SIGTERM latency and stale postmaster.pid (issue #308)
+./scripts/test-shutdown.sh
+
+# Extension epoch race: DROP/CREATE EXTENSION during worker init (issue #333)
+./scripts/test-epoch-race.sh
+```
+
+`test-epoch-race.sh` builds with the `test-hooks` cargo feature, which compiles in
+`PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS` — the pause that makes the race
+reproducible. That feature must never be enabled in a shipped build; the script
+enables it for its own install only.
+
+Both scripts accept `--pg-version` and `--verbose`.
 
 ---
 

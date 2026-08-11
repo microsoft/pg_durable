@@ -11,13 +11,16 @@
 # schema, so the stale runtime — bound to provider objects that no longer existed —
 # was incorrectly certified as current and never restarted. Readiness then timed out.
 #
-# This test makes the race deterministic using a build-in test hook
-# (PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS) that pauses the worker between epoch
-# capture / runtime initialization and readiness publication. During that pause the
-# test drops and recreates the extension, then verifies:
+# This test makes the race deterministic with a test hook
+# (PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS, compiled in only under the `test-hooks`
+# cargo feature) that pauses the worker between epoch capture / runtime
+# initialization and readiness publication. The test waits for the hook's own log
+# line before acting, so the DROP/CREATE is always issued inside the window, then
+# verifies:
 #   1. The worker tears down the stale runtime and reinitializes (log evidence).
 #   2. The worker eventually becomes ready.
 #   3. `_worker_ready` describes the CURRENT provider epoch (a durable function runs).
+#   4. No stale runtime keeps polling provider objects that were dropped.
 #
 # Usage: ./scripts/test-epoch-race.sh [options]
 #
@@ -108,8 +111,17 @@ EOF
 # disable the pause.
 start_server() {
     local pause="${1:-}"
-    PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS="$pause" \
-        "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    # A server already running on this data directory was started without our pause
+    # setting, so every assertion below would be describing the wrong process.
+    if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+        echo "A postmaster is already running in $DATA_DIR; stop it before running this test"
+        return 1
+    fi
+    if ! PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS="$pause" \
+            "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1; then
+        echo "pg_ctl start failed; see $LOG_FILE"
+        return 1
+    fi
     local attempts=0
     until "$PG_ISREADY" -h localhost -p "$PG_PORT" -U postgres -q >/dev/null 2>&1; do
         attempts=$((attempts + 1))
@@ -119,6 +131,25 @@ start_server() {
         fi
         sleep 0.5
     done
+}
+
+# Block until $1 appears in the log past line $2, or until $3 seconds elapse.
+wait_for_log() {
+    local pattern="$1" from_line="$2" timeout_s="${3:-30}"
+    local attempts=0 max=$((timeout_s * 10))
+    while [ "$attempts" -lt "$max" ]; do
+        if log_since "$from_line" | grep -qF -- "$pattern"; then
+            return 0
+        fi
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    return 1
+}
+
+# Emit the portion of the server log written after line $1.
+log_since() {
+    tail -n +"$(($1 + 1))" "$LOG_FILE" 2>/dev/null || true
 }
 
 stop_server() {
@@ -144,7 +175,12 @@ wait_for_worker() {
 }
 
 ensure_extension() {
-    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres >/dev/null 2>&1 <<'SQL'
+    # lock_timeout keeps a blocked DROP from silently consuming the pause window:
+    # the runtime started moments ago is actively querying the provider tables this
+    # statement needs an AccessExclusiveLock on.
+    "$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+        >/tmp/pg_durable-epoch-race-ddl.log 2>&1 <<'SQL'
+SET lock_timeout = '10s';
 BEGIN;
 DROP EXTENSION IF EXISTS pg_durable CASCADE;
 CREATE EXTENSION pg_durable;
@@ -184,7 +220,8 @@ trap cleanup EXIT
 
 info "Building pg_durable extension..."
 cd "$PROJECT_DIR"
-if ! cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains \
+if ! cargo pgrx install --pg-config="$PG_CONFIG" \
+        --features http-allow-test-domains,test-hooks \
         > /tmp/pg_durable-epoch-race-build.log 2>&1; then
     echo -e "${RED}Build failed:${NC}"
     cat /tmp/pg_durable-epoch-race-build.log
@@ -205,8 +242,15 @@ info "=== Epoch race: drop/recreate extension during worker initialization ==="
 
 # 1. Start without the pause and install the extension so the worker is healthy.
 info "Starting server and installing extension..."
-start_server ""
-ensure_extension
+if ! start_server ""; then
+    fail "Could not start PostgreSQL for the baseline"
+    exit 1
+fi
+if ! ensure_extension; then
+    fail "Baseline CREATE EXTENSION failed"
+    cat /tmp/pg_durable-epoch-race-ddl.log
+    exit 1
+fi
 if ! wait_for_worker; then
     fail "Baseline worker readiness failed before the race scenario"
     stop_server
@@ -220,14 +264,35 @@ info "Restarting server with a ${PAUSE_MS}ms init->ready pause..."
 stop_server
 # Record where the current log ends so we only inspect messages from this restart.
 LOG_MARK=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-start_server "$PAUSE_MS"
+if ! start_server "$PAUSE_MS"; then
+    fail "Could not restart PostgreSQL with the test pause enabled"
+    exit 1
+fi
 
-# 3. During the pause window, replace the extension epoch. The just-initialized
-#    runtime is now stale: its provider objects have been dropped and recreated.
+# 3. Replace the extension epoch while the worker sits in the pause. Waiting for
+#    the hook's own log line — rather than sleeping a guessed amount — is what
+#    makes the race deterministic: the DROP is issued only once the worker has
+#    provably initialized a runtime and not yet published readiness.
+if ! wait_for_log "TEST hook — pausing" "$LOG_MARK" 60; then
+    fail "Worker never reached the init->ready pause (is the test-hooks feature enabled?)"
+    stop_server
+    exit 1
+fi
+
 info "Dropping and recreating the extension mid-initialization..."
-# Small delay so the worker has reached the pause; well within the pause window.
-sleep 1
-ensure_extension
+RACE_START=$(date +%s%3N)
+if ! ensure_extension; then
+    fail "DROP/CREATE EXTENSION failed during the pause window"
+    cat /tmp/pg_durable-epoch-race-ddl.log
+    stop_server
+    exit 1
+fi
+RACE_ELAPSED_MS=$(($(date +%s%3N) - RACE_START))
+if [ "$RACE_ELAPSED_MS" -ge "$PAUSE_MS" ]; then
+    fail "DROP/CREATE took ${RACE_ELAPSED_MS}ms, exceeding the ${PAUSE_MS}ms pause — race not exercised"
+    stop_server
+    exit 1
+fi
 
 # 4. The worker must tear down the stale runtime and reinitialize against the new
 #    epoch, then become ready.
@@ -239,8 +304,7 @@ else
 fi
 
 # 5. Log evidence that the stale runtime was detected and torn down.
-if tail -n +"$((LOG_MARK + 1))" "$LOG_FILE" 2>/dev/null \
-        | grep -q "extension epoch changed"; then
+if log_since "$LOG_MARK" | grep -q "extension epoch changed"; then
     ok "Worker logged stale-runtime teardown ('extension epoch changed')"
 else
     fail "Expected 'extension epoch changed' teardown log not found"
@@ -255,9 +319,24 @@ else
     fail "Durable function did not complete — runtime not bound to current epoch"
 fi
 
+# 7. The stale runtime must be gone, not merely superseded: a runtime still bound to
+#    the dropped epoch keeps polling provider objects that no longer exist. Sample a
+#    fresh window so errors logged during the teardown itself are not counted.
+info "Checking for a stale runtime still polling dropped provider objects..."
+QUIET_MARK=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+sleep 5
+STALE_POLLS=$(log_since "$QUIET_MARK" \
+    | grep -cE 'fetch_work_item|fetch_orchestration_item|does not exist' || true)
+if [ "$STALE_POLLS" -eq 0 ]; then
+    ok "No provider-object errors after recovery — the stale runtime is gone"
+else
+    fail "$STALE_POLLS provider-object error(s) after recovery — a stale runtime is still polling"
+    log_since "$QUIET_MARK" | grep -E 'fetch_work_item|fetch_orchestration_item|does not exist' | head -5
+fi
+
 if [ "$VERBOSE" = true ]; then
     info "--- Worker log (this restart) ---"
-    tail -n +"$((LOG_MARK + 1))" "$LOG_FILE" 2>/dev/null | grep "pg_durable:" || true
+    log_since "$LOG_MARK" | grep "pg_durable:" || true
 fi
 
 stop_server

@@ -128,6 +128,9 @@ async fn run_duroxide_runtime() {
     const EXTENSION_DROP_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const INIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
     const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+    // Paced so that a persistently mismatching epoch cannot spin on full runtime
+    // initialization (migrations, provider construction, dispatcher startup).
+    const STALE_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
     let pg_conn_str = postgres_connection_string();
     log!(
@@ -242,6 +245,29 @@ async fn run_duroxide_runtime() {
             break;
         }
 
+        // Capture the extension epoch identity BEFORE anything else reads the
+        // extension's objects. Everything below — schema resolution, migration,
+        // runtime construction, readiness publication — must describe this one
+        // epoch, so a DROP/CREATE at any point after this line has to be caught
+        // rather than silently certified.
+        let epoch_oid = match capture_extension_epoch(&poll_pool).await {
+            Ok(Some(oid)) => oid,
+            Ok(None) => {
+                // Dropped between the existence poll and here; go back to waiting.
+                continue;
+            }
+            Err(e) => {
+                log!(
+                    "pg_durable: failed to read extension epoch (will retry): {}",
+                    e
+                );
+                if !sleep_or_shutdown(INIT_RETRY_INTERVAL).await {
+                    break;
+                }
+                continue;
+            }
+        };
+
         // Resolve the duroxide provider schema for this epoch. The extension may
         // have been dropped and recreated with a different schema version (e.g.
         // a fresh `_duroxide` install vs. a legacy `duroxide` install), so we
@@ -251,13 +277,6 @@ async fn run_duroxide_runtime() {
             "pg_durable: using duroxide provider schema '{}' for this epoch",
             duroxide_schema
         );
-
-        // Capture the extension epoch identity BEFORE initializing the runtime.
-        // A DROP/CREATE during initialization installs a new epoch; readiness must
-        // only be published for a runtime initialized against this same epoch,
-        // otherwise a stale runtime would poll provider objects that no longer
-        // exist while being certified as current.
-        let epoch_oid = capture_extension_epoch(&poll_pool).await;
 
         let Some((duroxide_runtime, duroxide_store)) = initialize_duroxide_runtime(
             &pg_conn_str,
@@ -273,23 +292,22 @@ async fn run_duroxide_runtime() {
 
         // Test-only pause that widens the window between runtime initialization
         // and readiness publication so a regression test can drop/recreate the
-        // extension deterministically. No-op in production.
+        // extension deterministically. Compiled out unless `test-hooks` is on.
         test_pause_before_ready().await;
 
         // Revalidate the epoch AFTER initialization and BEFORE publishing
-        // readiness. If the extension was dropped/recreated during init (or the
-        // pre-init capture failed), tear down this now-stale runtime and retry
-        // initialization against the current epoch. This prevents certifying a
-        // runtime bound to provider objects that no longer exist.
-        let current_epoch = capture_extension_epoch(&poll_pool).await;
-        if epoch_oid.is_none() || current_epoch != epoch_oid {
+        // readiness. If the extension was dropped/recreated during init, tear down
+        // this now-stale runtime and retry against the current epoch, so a runtime
+        // bound to provider objects that no longer exist is never certified.
+        if extension_epoch_replaced(&poll_pool, epoch_oid).await {
             log!(
-                "pg_durable: extension epoch changed during initialization \
-                 (before={:?}, after={:?}) — tearing down stale runtime and retrying",
-                epoch_oid,
-                current_epoch
+                "pg_durable: extension replaced during initialization — \
+                 tearing down stale runtime and retrying"
             );
             teardown_runtime(duroxide_runtime, duroxide_store).await;
+            if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
+                break;
+            }
             continue;
         }
 
@@ -318,12 +336,15 @@ async fn run_duroxide_runtime() {
         // the readiness record and sentinel into the new epoch's `df` schema, so the
         // processing loop's sentinel check could not detect the replacement. Catch it
         // here: tear down and retry against the current epoch.
-        if capture_extension_epoch(&poll_pool).await != epoch_oid {
+        if extension_epoch_replaced(&poll_pool, epoch_oid).await {
             log!(
-                "pg_durable: extension epoch changed after readiness publication \
-                 — tearing down stale runtime and retrying"
+                "pg_durable: extension replaced after readiness publication — \
+                 tearing down stale runtime and retrying"
             );
             teardown_runtime(duroxide_runtime, duroxide_store).await;
+            if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
+                break;
+            }
             continue;
         }
 
@@ -386,22 +407,63 @@ async fn check_extension_exists(pool: &sqlx::PgPool) -> bool {
 
 /// Identifies a single extension install ("epoch"). `pg_extension.oid` is a fresh
 /// value for every CREATE EXTENSION, so it changes across a DROP/CREATE cycle even
-/// when the extension appears continuously present between polls. Returns `None`
-/// when the extension is absent or the query fails.
-async fn capture_extension_epoch(pool: &sqlx::PgPool) -> Option<i64> {
-    let result: Result<(i64,), sqlx::Error> =
+/// when the extension appears continuously present between polls.
+///
+/// `Ok(None)` means the extension is absent; `Err` means the epoch is unknown.
+/// Callers must keep those cases distinct — see `extension_epoch_replaced`.
+async fn capture_extension_epoch(pool: &sqlx::PgPool) -> Result<Option<i64>, sqlx::Error> {
+    let row: Option<(i64,)> =
         sqlx::query_as("SELECT oid::bigint FROM pg_extension WHERE extname = 'pg_durable'")
-            .fetch_one(pool)
-            .await;
+            .fetch_optional(pool)
+            .await?;
 
-    result.map(|(oid,)| oid).ok()
+    Ok(row.map(|(oid,)| oid))
+}
+
+/// True only when the extension is *known* to have been replaced since `captured`.
+///
+/// A failed read reports "not replaced": the poll pool holds a single connection,
+/// and treating a transient error as a replacement would discard a healthy runtime
+/// and repeat the whole initialization. The epoch sentinel poll in the processing
+/// loop already detects a genuine replacement, at far lower cost.
+async fn extension_epoch_replaced(pool: &sqlx::PgPool, captured: i64) -> bool {
+    match capture_extension_epoch(pool).await {
+        Ok(Some(current)) if current == captured => false,
+        Ok(current) => {
+            log!(
+                "pg_durable: extension epoch changed (captured={}, current={:?})",
+                captured,
+                current
+            );
+            true
+        }
+        Err(e) => {
+            log!(
+                "pg_durable: could not read extension epoch ({}) — assuming unchanged",
+                e
+            );
+            false
+        }
+    }
+}
+
+/// Interruptible sleep. Returns false when shutdown was requested during the wait.
+async fn sleep_or_shutdown(duration: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => true,
+        _ = wait_for_shutdown() => false,
+    }
 }
 
 /// Test-only hook: when the `PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS` environment
 /// variable is set to a positive integer, sleep that many milliseconds between
 /// runtime initialization and readiness publication. This creates a deterministic
-/// window for a regression test to DROP/CREATE the extension mid-initialization
-/// and exercise the stale-runtime detection path. No effect in production.
+/// window for `scripts/test-epoch-race.sh` to DROP/CREATE the extension
+/// mid-initialization and exercise the stale-runtime detection path.
+///
+/// Gated behind the `test-hooks` feature so a shipped build cannot be stalled by
+/// its process environment.
+#[cfg(feature = "test-hooks")]
 async fn test_pause_before_ready() {
     if let Ok(val) = std::env::var("PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS") {
         if let Ok(ms) = val.parse::<u64>() {
@@ -415,6 +477,9 @@ async fn test_pause_before_ready() {
         }
     }
 }
+
+#[cfg(not(feature = "test-hooks"))]
+async fn test_pause_before_ready() {}
 
 /// Returns true if the `duroxide` schema exists AND is owned by the `pg_durable`
 /// extension (dependency type 'e' in pg_depend).
@@ -1023,19 +1088,24 @@ async fn run_until_extension_dropped_or_shutdown(
     }
 
     teardown_runtime(duroxide_runtime, duroxide_store).await;
-    log!("pg_durable: duroxide runtime shutdown complete");
 }
 
 /// Shut down a duroxide runtime and close its store pool.
 ///
-/// Used both when exiting the processing loop and when tearing down a runtime that
-/// was initialized against a stale extension epoch (drop/recreate mid-init). The
-/// live path (extension restart) drains and reclaims connections; the shutdown
-/// path closes first because PostgreSQL is terminating this process's backends.
+/// Two callers, and the branch below distinguishes them by cause rather than by
+/// call site. When shutdown was requested, PostgreSQL is terminating this
+/// process's backends, so the pool is closed before the runtime is aborted.
+/// Otherwise the process stays alive and the runtime is being replaced — after an
+/// extension drop/recreate, or after initialization ran against an epoch that has
+/// since been replaced — so connections are drained before the pool is closed. In
+/// the stale-epoch case the provider's objects may already be gone; the drain and
+/// close timeouts bound how long that costs.
 async fn teardown_runtime(
     duroxide_runtime: Arc<runtime::Runtime>,
     duroxide_store: Arc<PostgresProvider>,
 ) {
+    log!("pg_durable: initiating duroxide runtime shutdown...");
+
     if is_shutdown_requested() {
         // Close before aborting — the reverse of the branch below. PostgreSQL is
         // killing this process's backends, so duroxide's dispatcher tasks stay
@@ -1069,6 +1139,8 @@ async fn teardown_runtime(
             log!("pg_durable: duroxide store pool close timed out — forcing shutdown");
         }
     }
+
+    log!("pg_durable: duroxide runtime shutdown complete");
 }
 
 /// Maximum orphans one reconciliation pass reclaims, bounding a single tick's work.

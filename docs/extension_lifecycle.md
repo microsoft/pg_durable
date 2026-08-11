@@ -187,9 +187,10 @@ All backend sessions (`df.*` functions) continue to use `MigrationPolicy::Verify
 See `src/worker.rs` for the full implementation. The main loop in `run_duroxide_runtime()` drives the state machine:
 
 1. `wait_for_extension_creation()` polls `pg_extension` via a reusable `sqlx::PgPool` (max 1 connection) every 5 seconds.
-2. `initialize_duroxide_runtime()` first checks that the `duroxide` schema is owned by the `pg_durable` extension (via `pg_depend`). If not, it logs a warning and retries after the poll interval. It then releases extension ownership of any duroxide objects (no-op on fresh installs; needed for upgrades from ≤0.1.1). Then it creates a `PostgresProvider` using `worker_provider_config()` (from `src/types.rs`) which sets `ApplyAll`. Unknown-migration rejection is always enforced unconditionally by the provider.
-3. After the runtime starts, the BGW writes a **readiness record** (`duroxide._worker_ready`) with the current `WORKER_SCHEMA_VERSION`, then writes an **epoch sentinel** (`df._worker_epoch`) with a fresh UUID. The readiness record signals backend sessions that the duroxide schema is fully initialized; the epoch sentinel detects drop+recreate scenarios (see below).
-4. `run_until_extension_dropped_or_shutdown()` uses `tokio::select!` to interleave shutdown checks (every 1 second, via direct volatile read) with epoch-sentinel checks (every 5 seconds via the shared polling pool).
+2. `capture_extension_epoch()` records `pg_extension.oid` before anything reads the extension's objects. Every step below describes that one epoch (see "Epoch identity" below).
+3. `initialize_duroxide_runtime()` first checks that the `duroxide` schema is owned by the `pg_durable` extension (via `pg_depend`). If not, it logs a warning and retries after the poll interval. It then releases extension ownership of any duroxide objects (no-op on fresh installs; needed for upgrades from ≤0.1.1). Then it creates a `PostgresProvider` using `worker_provider_config()` (from `src/types.rs`) which sets `ApplyAll`. Unknown-migration rejection is always enforced unconditionally by the provider.
+4. After the runtime starts, the BGW writes a **readiness record** (`duroxide._worker_ready`) with the current `WORKER_SCHEMA_VERSION`, then writes an **epoch sentinel** (`df._worker_epoch`) with a fresh UUID. The readiness record signals backend sessions that the duroxide schema is fully initialized; the epoch sentinel detects drop+recreate scenarios (see below). The captured OID is revalidated before this step and again after it; a mismatch tears the runtime down instead of publishing it.
+5. `run_until_extension_dropped_or_shutdown()` uses `tokio::select!` to interleave shutdown checks (every 1 second, via direct volatile read) with epoch-sentinel checks (every 5 seconds via the shared polling pool).
 
 #### Epoch sentinel: detecting drop+recreate
 
@@ -205,7 +206,20 @@ The **epoch sentinel** solves this:
   - **Row missing / different UUID** → extension was drop+recreated → break → reinit.
   - **Query error** (table/schema gone) → extension was dropped → break → reinit.
 
-Because `DROP EXTENSION CASCADE` removes the entire `df` schema (including `_worker_epoch`), the sentinel row is always destroyed by a drop — even if the extension is immediately recreated. The BGW is guaranteed to reinitialise with a fresh runtime.
+Because `DROP EXTENSION CASCADE` removes the entire `df` schema (including `_worker_epoch`), the sentinel row is destroyed by a drop, so the running state can never miss a replacement.
+
+#### Epoch identity: the sentinel alone is not enough
+
+The sentinel is written *after* initialization, so it identifies whichever epoch exists when the write lands — not necessarily the epoch the runtime was built against. A DROP/CREATE completing mid-initialization therefore used to route a *stale* runtime's sentinel into the *new* epoch's `df` schema, where the running-state poll read it as valid and never restarted (issue #333).
+
+`pg_extension.oid` closes that gap. It is a fresh value for every `CREATE EXTENSION`, so it distinguishes epochs even when the extension appears continuously present:
+
+- The OID is captured before schema resolution and runtime construction.
+- It is revalidated twice: after initialization and before the readiness/sentinel writes, and again after those writes before entering the processing loop. The second check is what catches a replacement whose sentinel would otherwise look valid.
+- A mismatch tears the just-built runtime down and retries against the current epoch, paced so a persistent mismatch cannot spin on initialization.
+- A *failed* OID read is treated as "unchanged" rather than "replaced": discarding a healthy runtime over a transient poll error is the more expensive mistake, and the sentinel poll still backstops a genuine replacement.
+
+Regression coverage: `scripts/test-epoch-race.sh`.
 
 Key design choices vs. the original sketch:
 - **Epoch sentinel**: Eliminates the drop+recreate blind spot; no need for explicit sleeps in tests between DROP and CREATE EXTENSION.
