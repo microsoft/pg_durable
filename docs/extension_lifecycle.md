@@ -226,7 +226,9 @@ All backend call sites (client, monitoring, explain) use `new_backend_provider()
 
 Unknown-migration rejection is enforced unconditionally by the provider (not a config flag).
 
-Additionally, every backend engine operation checks the installed extension version before consulting `duroxide._worker_ready`, constructing a provider, or using a cached client. A below-floor schema returns the permanent compatibility error; a compatible schema whose BGW has not initialized yet returns `"pg_durable background worker not yet initialized — try again in a moment"`.
+`df.start()`, `df.signal()`, and `df.cancel()` re-read the installed extension version on every call, before consulting `duroxide._worker_ready`, constructing a provider, or using a cached client. A below-floor schema returns the permanent compatibility error; a compatible schema whose BGW has not initialized yet returns `"pg_durable background worker not yet initialized — try again in a moment"`.
+
+Table-only inspection (`df.status()`, `df.result()`, and terminal-state `df.await_instance()`) is deliberately **not** gated, so operators can inspect existing instances while the worker is stood down. Provider-backed monitoring in `src/monitoring.rs` and `src/explain.rs` constructs a `VerifyOnly` provider directly and carries no compatibility gate; against an incompatible schema it fails with the provider's own error.
 
 See `src/client.rs::get_duroxide_client()` for the cached-client implementation.
 
@@ -234,7 +236,7 @@ See `src/client.rs::get_duroxide_client()` for the cached-client implementation.
 - (Future) Check extension existence before attempting duroxide connection
 - Use `VerifyOnly` policy to ensure no schema creation from client code
 - Fail with clear, actionable error messages for different failure scenarios
-- Note on caching: compatibility is rechecked before every engine operation. A rejected or unreadable installed version clears the per-backend cached client before returning the error.
+- Note on caching: compatibility is rechecked before every engine operation that needs the client. A rejected or unreadable installed version clears the per-backend cached client before returning the error.
 
 #### Monitoring Functions (src/monitoring.rs, src/explain.rs)
 
