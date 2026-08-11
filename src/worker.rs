@@ -433,6 +433,9 @@ async fn initialize_duroxide_runtime(
         get_max_user_connections() as usize
     ));
 
+    // Recovery guidance is logged once per initialization, not once per retry.
+    let mut lineage_hint_logged = false;
+
     loop {
         if is_shutdown_requested() {
             log!("pg_durable: shutdown requested during initialization");
@@ -497,9 +500,18 @@ async fn initialize_duroxide_runtime(
             Ok(s) => Arc::new(s),
             Err(e) => {
                 log!(
-                    "pg_durable: failed to create PostgreSQL store (will retry): {}. If this database originated before pg_durable 0.2.2 and still has extension-owned provider objects, that lineage is unsupported and retries cannot repair it; back up required data, review dependencies, then drop and recreate the pg_durable extension as documented.",
+                    "pg_durable: failed to create PostgreSQL store (will retry): {}",
                     e
                 );
+                if !lineage_hint_logged {
+                    lineage_hint_logged = true;
+                    log!(
+                        "pg_durable: if this database originated before pg_durable 0.2.2 and \
+                         still has extension-owned provider objects, that lineage is unsupported \
+                         and retries cannot repair it; back up required data, review dependencies, \
+                         then drop and recreate the pg_durable extension as documented"
+                    );
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(retry_interval) => {}
                     _ = wait_for_shutdown() => { return None; }
