@@ -333,10 +333,11 @@ async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Du
 }
 
 async fn check_extension_exists(pool: &sqlx::PgPool) -> bool {
-    let result: Result<(bool,), sqlx::Error> =
-        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_durable')")
-            .fetch_one(pool)
-            .await;
+    let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_durable')",
+    )
+    .fetch_one(pool)
+    .await;
 
     result.map(|(exists,)| exists).unwrap_or(false)
 }
@@ -350,12 +351,12 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> 
     let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
         "SELECT EXISTS (
             SELECT 1
-            FROM pg_namespace n
-            JOIN pg_depend d
+            FROM pg_catalog.pg_namespace n
+            JOIN pg_catalog.pg_depend d
                 ON d.objid = n.oid
-                AND d.classid = 'pg_namespace'::regclass
+                AND d.classid = 'pg_catalog.pg_namespace'::pg_catalog.regclass
                 AND d.deptype = 'e'
-            JOIN pg_extension e
+            JOIN pg_catalog.pg_extension e
                 ON e.oid = d.refobjid
                 AND e.extname = 'pg_durable'
             WHERE n.nspname = $1
@@ -371,32 +372,34 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> 
 async fn read_installed_extension_version(
     pool: &sqlx::PgPool,
 ) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_durable'")
-        .fetch_optional(pool)
-        .await
+    sqlx::query_scalar(
+        "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+    )
+    .fetch_optional(pool)
+    .await
 }
 
-enum CompatibilityStandDown {
-    Recheck,
-    StopInitializing,
-}
-
+/// Blocks while a rejected version stays installed, returning once the version
+/// changes, the extension disappears, or shutdown is requested.
+///
+/// Every outcome returns to the caller of `initialize_duroxide_runtime` so the
+/// provider schema is resolved again. A transactional drop+recreate — the
+/// documented recovery — presents as a version change rather than an absence,
+/// and moves the provider schema from a legacy `duroxide` to `_duroxide`.
 async fn wait_for_compatibility_change(
     pool: &sqlx::PgPool,
     rejected_version: &str,
     retry_interval: Duration,
-) -> CompatibilityStandDown {
+) {
     loop {
         tokio::select! {
             _ = tokio::time::sleep(retry_interval) => {}
-            _ = wait_for_shutdown() => { return CompatibilityStandDown::StopInitializing; }
+            _ = wait_for_shutdown() => { return; }
         }
 
         match read_installed_extension_version(pool).await {
-            Ok(None) => return CompatibilityStandDown::StopInitializing,
-            Ok(Some(installed)) if installed != rejected_version => {
-                return CompatibilityStandDown::Recheck;
-            }
+            Ok(None) => return,
+            Ok(Some(installed)) if installed != rejected_version => return,
             Ok(Some(_)) => {}
             Err(e) => log!(
                 "pg_durable: could not recheck the installed version while compatibility is rejected (will retry): {}",
@@ -472,10 +475,8 @@ async fn initialize_duroxide_runtime(
                     "pg_durable: refusing to initialize duroxide runtime: {}",
                     message
                 );
-                match wait_for_compatibility_change(mgmt_pool, &installed, retry_interval).await {
-                    CompatibilityStandDown::Recheck => continue,
-                    CompatibilityStandDown::StopInitializing => return None,
-                }
+                wait_for_compatibility_change(mgmt_pool, &installed, retry_interval).await;
+                return None;
             }
         }
 

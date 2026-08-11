@@ -25,7 +25,7 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM _duroxide._worker_ready
+        SELECT 1 FROM duroxide._worker_ready
         WHERE sentinel
           AND schema_version = 73
           AND initialized_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
@@ -34,7 +34,7 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM _duroxide.compat_rejection_sentinel
+        SELECT 1 FROM duroxide.compat_rejection_sentinel
         WHERE marker = 'must-survive-rejection'
     ) THEN
         RAISE EXCEPTION 'TEST FAILED: provider sentinel changed while compatibility was rejected';
@@ -44,7 +44,7 @@ BEGIN
     INTO provider_tables
     FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = '_duroxide'
+    WHERE n.nspname IN ('duroxide', '_duroxide')
       AND c.relkind IN ('r', 'p')
       AND c.relname IN (
           '_duroxide_migrations', 'instances', 'executions', 'history',

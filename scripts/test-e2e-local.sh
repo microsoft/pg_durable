@@ -582,6 +582,7 @@ prepare_lifecycle_setup_role() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" <<'SQL' >/dev/null
 DROP EXTENSION IF EXISTS pg_durable CASCADE;
 DROP SCHEMA IF EXISTS _duroxide CASCADE;
+DROP SCHEMA IF EXISTS duroxide CASCADE;
 DROP ROLE IF EXISTS lifecycle_blocked_worker;
 CREATE ROLE lifecycle_blocked_worker SUPERUSER NOLOGIN;
 SQL

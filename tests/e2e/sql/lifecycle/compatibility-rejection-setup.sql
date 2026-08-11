@@ -5,24 +5,29 @@ BEGIN;
 
 CREATE EXTENSION pg_durable;
 
-CREATE TABLE _duroxide._worker_ready (
+-- Shape this like an install that originated on pg_durable <= 0.2.2: the
+-- provider schema is the legacy 'duroxide' and the helper reports it. That is
+-- what pg_durable--0.2.2--0.2.3.sql leaves behind, and it is the state every
+-- real below-floor database is in, so the worker resolves 'duroxide' here and
+-- '_duroxide' after the recovery recreate.
+ALTER SCHEMA _duroxide RENAME TO duroxide;
+CREATE OR REPLACE FUNCTION df.duroxide_schema() RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $$ SELECT 'duroxide'::text $$;
+
+CREATE TABLE duroxide._worker_ready (
     sentinel BOOLEAN PRIMARY KEY DEFAULT TRUE,
     schema_version INT NOT NULL,
     initialized_at TIMESTAMPTZ NOT NULL
 );
-INSERT INTO _duroxide._worker_ready
+INSERT INTO duroxide._worker_ready
 VALUES (TRUE, 73, TIMESTAMPTZ '2000-01-01 00:00:00+00');
 
-CREATE TABLE _duroxide.compat_rejection_sentinel (
+CREATE TABLE duroxide.compat_rejection_sentinel (
     marker TEXT PRIMARY KEY
 );
-INSERT INTO _duroxide.compat_rejection_sentinel VALUES ('must-survive-rejection');
-
--- The recovery test restores from this rather than hardcoding a release.
-CREATE TABLE _duroxide.compat_fixture_state AS
-SELECT extversion AS original_version
-FROM pg_catalog.pg_extension
-WHERE extname = 'pg_durable';
+INSERT INTO duroxide.compat_rejection_sentinel VALUES ('must-survive-rejection');
 
 INSERT INTO df.instances (id, label, root_node, status, submitted_by, database)
 VALUES
