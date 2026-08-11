@@ -86,10 +86,17 @@ PG_DB="postgres"
 E2E_USER="df_e2e_user"
 NO_PRELOAD_TEST="00_requires_shared_preload"
 SETUP_TEST="00_setup_playground"
-COMPATIBILITY_REJECTION_TEST="67_provider_compatibility_lifecycle"
-PROVIDER_OWNERSHIP_REJECTION_TEST="68_provider_schema_ownership_lifecycle"
+COMPATIBILITY_REJECTION_PHASE="compatibility-rejection"
+PROVIDER_OWNERSHIP_REJECTION_PHASE="provider-ownership-rejection"
+# Lifecycle phases own SQL under tests/e2e/sql/lifecycle/, deliberately outside
+# the *.sql glob so harnesses that run every file in that directory
+# (test-e2e-docker.sh) cannot pick them up without the fixture they require.
+# They are therefore selected by phase name, not by collected test file.
+LIFECYCLE_PHASES=("$COMPATIBILITY_REJECTION_PHASE" "$PROVIDER_OWNERSHIP_REJECTION_PHASE")
 PHASE_LOG_START_LINE=1
 LIFECYCLE_FIXTURE_ACTIVE=false
+STOP_SERVER_FAST_OK=true
+STOP_SERVER_FAST_TIMEOUT=30
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -181,12 +188,6 @@ phase_for_test() {
     case "$1" in
         "$NO_PRELOAD_TEST")
             echo "no-preload"
-            ;;
-        "$COMPATIBILITY_REJECTION_TEST")
-            echo "compatibility-rejection"
-            ;;
-        "$PROVIDER_OWNERSHIP_REJECTION_TEST")
-            echo "provider-ownership-rejection"
             ;;
         17_superuser_guc)
             echo "superuser-guc-off"
@@ -303,12 +304,15 @@ PG_ISREADY="$PGRX_BIN/pg_isready"
 PG_CONFIG="$PGRX_BIN/pg_config"
 
 stop_server() {
+    STOP_SERVER_FAST_OK=true
     if [ -d "$DATA_DIR" ] && "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
         echo -e "${YELLOW}Stopping PostgreSQL...${NC}"
-        # Attempt a graceful fast stop (30 s timeout). If it does not complete
-        # in time (e.g. a stuck pg_durable_worker), fall back to immediate mode
+        # Attempt a graceful fast stop. If it does not complete within the
+        # budget (e.g. a stuck pg_durable_worker), fall back to immediate mode
         # so the next start is not blocked by a stale postmaster.pid.
-        if ! "$PG_CTL" -D "$DATA_DIR" stop -m fast -t 30 >/dev/null 2>&1; then
+        # STOP_SERVER_FAST_OK lets callers assert that the graceful path worked.
+        if ! "$PG_CTL" -D "$DATA_DIR" stop -m fast -t "$STOP_SERVER_FAST_TIMEOUT" >/dev/null 2>&1; then
+            STOP_SERVER_FAST_OK=false
             echo -e "${RED}Fast stop timed out; falling back to immediate stop${NC}"
             "$PG_CTL" -D "$DATA_DIR" stop -m immediate >/dev/null 2>&1 || true
         fi
@@ -569,7 +573,7 @@ configure_lifecycle_setup() {
     # CREATE EXTENSION enforces shared_preload_libraries and database binding.
     # Keep both valid while preventing the BGW's management connection so
     # catalog fixtures can be built without a worker observing or mutating them.
-    set_conf_line "pg_durable.worker_role" "'unit4_blocked_worker'"
+    set_conf_line "pg_durable.worker_role" "'lifecycle_blocked_worker'"
 }
 
 prepare_lifecycle_setup_role() {
@@ -578,8 +582,8 @@ prepare_lifecycle_setup_role() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" <<'SQL' >/dev/null
 DROP EXTENSION IF EXISTS pg_durable CASCADE;
 DROP SCHEMA IF EXISTS _duroxide CASCADE;
-DROP ROLE IF EXISTS unit4_blocked_worker;
-CREATE ROLE unit4_blocked_worker SUPERUSER NOLOGIN;
+DROP ROLE IF EXISTS lifecycle_blocked_worker;
+CREATE ROLE lifecycle_blocked_worker SUPERUSER NOLOGIN;
 SQL
 }
 
@@ -696,75 +700,87 @@ restore_current_extension() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
         -v ON_ERROR_STOP=1 -f "$SQL_DIR/lifecycle/verify-current-extension.sql" >/dev/null || return 1
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
-        -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS unit4_blocked_worker;" >/dev/null || return 1
+        -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS lifecycle_blocked_worker;" >/dev/null || return 1
     LIFECYCLE_FIXTURE_ACTIVE=false
 }
 
-verify_compatibility_rejection_phase() {
-    local failed=0
-    local refusal_count
-    local initialization_count
-    local stop_started
-    local stop_elapsed
+verify_refusal_logs() {
+    local phase="$1"
+    local window
+    local refusals
+    local inits
 
-    refusal_count=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE" | \
-        grep -c "refusing to initialize duroxide runtime" || true)
-    initialization_count=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE" | \
-        grep -c "initializing duroxide runtime" || true)
+    window=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE")
 
-    if [ "$refusal_count" -ne 1 ]; then
-        echo "    Expected exactly one compatibility refusal log, found $refusal_count"
-        failed=1
-    fi
-    if [ "$initialization_count" -ne 1 ]; then
-        echo "    Expected exactly one initialization attempt while rejected, found $initialization_count"
-        failed=1
-    fi
-
-    stop_started=$(date +%s)
-    stop_server
-    stop_elapsed=$(( $(date +%s) - stop_started ))
-    if [ "$stop_elapsed" -gt 10 ]; then
-        echo "    Rejected worker shutdown took ${stop_elapsed}s (limit: 10s)"
-        failed=1
-    fi
-
-    if ! restore_current_extension; then
-        echo "    Failed to restore and verify the current extension after compatibility rejection"
-        failed=1
-    fi
-
-    return "$failed"
-}
-
-verify_provider_ownership_rejection_phase() {
-    local failed=0
-    local ownership_refusal_count
-
-    ownership_refusal_count=$(tail -n +"$PHASE_LOG_START_LINE" "$LOG_FILE" | \
-        grep -c "duroxide schema missing or not extension-owned" || true)
-    if [ "$ownership_refusal_count" -lt 1 ]; then
-        echo "    Expected a provider schema ownership refusal log"
-        failed=1
-    fi
-
-    if ! restore_current_extension; then
-        echo "    Failed to restore and verify the current extension after ownership rejection"
-        failed=1
-    fi
-
-    return "$failed"
-}
-
-verify_lifecycle_phase() {
-    case "$1" in
-        compatibility-rejection)
-            verify_compatibility_rejection_phase
+    case "$phase" in
+        "$COMPATIBILITY_REJECTION_PHASE")
+            refusals=$(printf '%s\n' "$window" | grep -c "refusing to initialize duroxide runtime" || true)
+            inits=$(printf '%s\n' "$window" | grep -c "initializing duroxide runtime" || true)
+            if [ "$refusals" -ne 1 ]; then
+                echo "    Expected exactly one compatibility refusal log, found $refusals"
+                return 1
+            fi
+            if [ "$inits" -ne 1 ]; then
+                echo "    Expected exactly one initialization attempt while rejected, found $inits"
+                return 1
+            fi
             ;;
-        provider-ownership-rejection)
-            verify_provider_ownership_rejection_phase
+        "$PROVIDER_OWNERSHIP_REJECTION_PHASE")
+            refusals=$(printf '%s\n' "$window" | grep -c "duroxide schema missing or not extension-owned" || true)
+            if [ "$refusals" -lt 1 ]; then
+                echo "    Expected a provider schema ownership refusal log"
+                return 1
+            fi
             ;;
     esac
+}
+
+# Must run while the worker is still stood down, i.e. before any step corrects
+# the installed version. pg_ctl's own -t budget is the assertion: a worker that
+# ignores the shutdown request fails the graceful stop and forces the immediate
+# fallback, which clears STOP_SERVER_FAST_OK.
+verify_standdown_shutdown() {
+    local saved="$STOP_SERVER_FAST_TIMEOUT"
+
+    STOP_SERVER_FAST_TIMEOUT=10
+    stop_server
+    STOP_SERVER_FAST_TIMEOUT="$saved"
+
+    if [ "$STOP_SERVER_FAST_OK" != true ]; then
+        echo "    Stood-down worker did not honour a fast shutdown within 10s"
+        return 1
+    fi
+}
+
+# Brings the server back up still below the floor, and scopes later log
+# assertions to this new boot.
+rearm_phase_log_window() {
+    restart_server || return 1
+    PHASE_LOG_START_LINE=$(( $(wc -l < "$LOG_FILE") + 1 ))
+}
+
+# Steps restart the server and set caller-visible state, so they cannot run in a
+# subshell to capture output. Print the label after the step instead, leaving any
+# server chatter above its own result line rather than splitting it.
+lifecycle_step() {
+    local label="$1"
+    shift
+
+    if "$@"; then
+        printf "  %-45s ... %b\n" "$label" "${GREEN}PASS${NC}"
+        return 0
+    fi
+    printf "  %-45s ... %b\n" "$label" "${RED}FAIL${NC}"
+    return 1
+}
+
+lifecycle_record() {
+    if "$@"; then
+        LIFECYCLE_PASSED=$((LIFECYCLE_PASSED + 1))
+        return 0
+    fi
+    LIFECYCLE_FAILED=$((LIFECYCLE_FAILED + 1))
+    return 1
 }
 
 collect_matched_tests() {
@@ -787,17 +803,19 @@ collect_matched_tests() {
 
         MATCHED_TESTS+=("$test_file")
     done
-
-    if [ "${#MATCHED_TESTS[@]}" -eq 0 ]; then
-        echo "Error: no E2E tests matched the current selection"
-        exit 1
-    fi
 }
 
 phase_has_tests() {
     local phase="$1"
     local test_file
     local test_name
+
+    # Lifecycle phases have no collected test file; select them by phase name.
+    if contains_value "$phase" "${LIFECYCLE_PHASES[@]}"; then
+        [ -z "$TEST_FILTER" ] && return 0
+        [[ "$phase" == *"$TEST_FILTER"* ]] && return 0
+        return 1
+    fi
 
     for test_file in "${MATCHED_TESTS[@]}"; do
         test_name=$(basename "$test_file" .sql)
@@ -908,6 +926,42 @@ run_test_file() {
     return 1
 }
 
+# Lifecycle phases interleave SQL and shell steps in a fixed order, so they
+# cannot use run_phase's "run every collected test, then one hook" shape. The
+# stand-down assertions in particular must observe the same boot that the
+# refusal-log and shutdown checks observe, before any step corrects the version.
+run_lifecycle_phase() {
+    local phase="$1"
+    local lifecycle_dir="$SQL_DIR/lifecycle"
+
+    LIFECYCLE_PASSED=0
+    LIFECYCLE_FAILED=0
+
+    echo ""
+    echo -e "${CYAN}=== $(phase_label "$phase") ===${NC}"
+    prepare_phase "$phase"
+
+    # `|| true` keeps errexit from aborting the phase on a failed step: a
+    # lifecycle phase must always reach its restore step, or it leaves the
+    # below-floor fixture behind for every later run.
+    lifecycle_record run_test_file "$lifecycle_dir/${phase}-assert.sql" || true
+    lifecycle_record lifecycle_step "${phase}-refusal-logs" verify_refusal_logs "$phase" || true
+
+    if [ "$phase" = "$COMPATIBILITY_REJECTION_PHASE" ]; then
+        lifecycle_record lifecycle_step "${phase}-standdown-shutdown" verify_standdown_shutdown || true
+        if lifecycle_record lifecycle_step "${phase}-restart" rearm_phase_log_window; then
+            lifecycle_record run_test_file "$lifecycle_dir/${phase}-recovery.sql" || true
+        fi
+    fi
+
+    lifecycle_record lifecycle_step "${phase}-restore" restore_current_extension || true
+
+    TOTAL_PASSED=$((TOTAL_PASSED + LIFECYCLE_PASSED))
+    TOTAL_FAILED=$((TOTAL_FAILED + LIFECYCLE_FAILED))
+
+    echo -e "  Phase result: ${GREEN}${LIFECYCLE_PASSED} passed${NC}, ${RED}${LIFECYCLE_FAILED} failed${NC}"
+}
+
 run_phase() {
     local phase="$1"
     local phase_passed=0
@@ -915,6 +969,11 @@ run_phase() {
     local test_file
     local test_name
     local phase_tests=()
+
+    if contains_value "$phase" "${LIFECYCLE_PHASES[@]}"; then
+        run_lifecycle_phase "$phase"
+        return
+    fi
 
     for test_file in "${MATCHED_TESTS[@]}"; do
         test_name=$(basename "$test_file" .sql)
@@ -938,17 +997,6 @@ run_phase() {
             phase_failed=$((phase_failed + 1))
         fi
     done
-
-    if [ "$phase" = "compatibility-rejection" ] || [ "$phase" = "provider-ownership-rejection" ]; then
-        printf "  %-45s ... " "${phase}-shell-lifecycle"
-        if verify_lifecycle_phase "$phase"; then
-            echo -e "${GREEN}PASS${NC}"
-            phase_passed=$((phase_passed + 1))
-        else
-            echo -e "${RED}FAIL${NC}"
-            phase_failed=$((phase_failed + 1))
-        fi
-    fi
 
     TOTAL_PASSED=$((TOTAL_PASSED + phase_passed))
     TOTAL_FAILED=$((TOTAL_FAILED + phase_failed))

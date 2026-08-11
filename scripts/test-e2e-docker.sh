@@ -41,12 +41,11 @@ SKIP_TESTS=(
     # container keeps the production defaults (reconcile_interval=3600,
     # retention_days=30), under which the orphan is never reclaimed in time.
     "54_reconcile_orphans"
-    # Lifecycle phases in test-e2e-local.sh build a below-floor / unowned-schema
-    # catalog fixture and restart the server around these tests. This script runs
-    # one fixed-config healthy container, where their setup does not exist.
-    "67_provider_compatibility_lifecycle"
-    "68_provider_schema_ownership_lifecycle"
 )
+
+# Tests needing a catalog fixture and server restarts live in
+# tests/e2e/sql/lifecycle/. The glob below is deliberately non-recursive, so
+# they are excluded structurally and need no entry above.
 
 # Defaults
 KEEP_RUNNING=false

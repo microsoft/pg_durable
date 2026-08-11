@@ -23,7 +23,7 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM _duroxide.unit4_ownership_sentinel
+        SELECT 1 FROM _duroxide.provider_ownership_sentinel
         WHERE marker = 'must-survive-ownership-refusal'
     ) THEN
         RAISE EXCEPTION 'TEST FAILED: ownership sentinel changed before refusal';
