@@ -70,7 +70,7 @@ jobs:
             file_pattern: x86-64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
@@ -81,7 +81,7 @@ jobs:
       # github.sha tracks the workflow's own commit for workflow_dispatch and
       # push:tags, keeping YAML and scripts in sync with the branch that ran it.
       - name: Checkout release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           path: _release_tooling
@@ -98,7 +98,7 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build pgrx package in Docker
         run: |
@@ -177,7 +177,7 @@ jobs:
           file "check-package/usr/lib/postgresql/${{ matrix.pg_version }}/lib/pg_durable.so" | grep -E "${{ matrix.platform.file_pattern }}"
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pg-durable-package-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
           path: |
@@ -197,7 +197,7 @@ jobs:
             docker_platform: linux/amd64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
@@ -205,13 +205,13 @@ jobs:
       # own commit (github.sha), not the target tag, so a tag predating these
       # scripts still validates correctly.
       - name: Checkout release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           path: _release_tooling
 
       - name: Download package artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: pg-durable-package-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
           path: dist
@@ -228,7 +228,7 @@ jobs:
 
       - name: Upload validation diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pg-durable-validation-diagnostics-${{ github.run_id }}-pg${{ matrix.pg_version }}-${{ matrix.platform.type }}
           path: |
@@ -243,7 +243,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
@@ -268,7 +268,7 @@ jobs:
           rm "dist/pg_durable-${clean_version}.tar"
 
       - name: Upload source artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pg-durable-source-${{ github.run_id }}
           path: dist/pg_durable-*.tar.*
@@ -283,7 +283,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
@@ -296,7 +296,7 @@ jobs:
           fi
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 
