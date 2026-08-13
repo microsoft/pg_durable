@@ -10,7 +10,7 @@ EXTRA_FEATURES ?=
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install
+.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install pgxn-zip
 
 # Default target
 all: package
@@ -100,11 +100,34 @@ help:
 	@echo "  install       - Install prebuilt artifacts for the selected PostgreSQL"
 	@echo "  uninstall     - Remove installed artifacts for the selected PostgreSQL"
 	@echo "  pg-install    - Install extension locally"
+	@echo "  pgxn-zip      - Build the PGXN release bundle (META.json + zip)"
+
+# ============================================================================
+# PGXN packaging
+# ============================================================================
+# The distribution version is read from Cargo.toml so the PGXN metadata can
+# never drift from the crate version. META.json is generated, not committed.
+DISTNAME    = pg_durable
+DISTVERSION = $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+
+# Render the PGXN metadata, stamping in the Cargo.toml version. This reuses the
+# same @CARGO_VERSION@ token that pgrx substitutes into pg_durable.control.
+META.json: META.json.in Cargo.toml
+	sed 's/@CARGO_VERSION@/$(DISTVERSION)/g' $< > $@
+
+# Build the PGXN release bundle. git archive ships only committed files, so the
+# generated META.json is added explicitly.
+pgxn-zip: META.json
+	git archive --format zip --prefix $(DISTNAME)-$(DISTVERSION)/ \
+	    --add-file META.json -o $(DISTNAME)-$(DISTVERSION).zip HEAD
 
 # ============================================================================
 # pg_regress (PGXS) configuration
 # ============================================================================
 EXTENSION = pg_durable
+
+# Generated PGXN artifacts, removed by the PGXS clean target.
+EXTRA_CLEAN = META.json $(DISTNAME)-$(DISTVERSION).zip
 
 REGRESS = 00_init simple sequence variables parallel conditional
 

@@ -1,0 +1,51 @@
+{
+   "name": "pg_durable",
+   "abstract": "SQL-native durable orchestrations for PostgreSQL",
+   "description": "pg_durable provides in-database durable execution for PostgreSQL. Durable functions are defined in SQL using composable operators, and their state is persisted to PostgreSQL so that workflows survive crashes, restarts, and failovers. The runtime executes inside a PostgreSQL background worker, with first-class primitives for scheduling, conditions, retries, HTTP activities, and parallel execution. No external orchestrator, queue, or scheduler is required.",
+   "version": "@CARGO_VERSION@",
+   "maintainer": [
+      "Microsoft Corporation <opensource@microsoft.com>"
+   ],
+   "license": "postgresql",
+   "release_status": "stable",
+   "provides": {
+      "pg_durable": {
+         "abstract": "SQL-native durable orchestrations for PostgreSQL",
+         "file": "src/lib.rs",
+         "docfile": "USER_GUIDE.md",
+         "version": "@CARGO_VERSION@"
+      }
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "17.0.0"
+         }
+      }
+   },
+   "resources": {
+      "homepage": "https://microsoft.github.io/pg_durable/",
+      "bugtracker": {
+         "web": "https://github.com/microsoft/pg_durable/issues/"
+      },
+      "repository": {
+         "url": "https://github.com/microsoft/pg_durable.git",
+         "web": "https://github.com/microsoft/pg_durable/",
+         "type": "git"
+      }
+   },
+   "generated_by": "Microsoft Corporation",
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   },
+   "tags": [
+      "durable execution",
+      "durable functions",
+      "workflow",
+      "orchestration",
+      "background worker",
+      "pgrx",
+      "rust"
+   ]
+}

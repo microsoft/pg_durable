@@ -158,6 +158,8 @@ staging files for a package.
 `sudo make uninstall PG_CONFIG="$PG_CONFIG"` removes the installed files again.
 It needs no build, so it also works from an unbuilt source tree.
 
+The extension is also distributed on [PGXN](https://pgxn.org/dist/pg_durable/), the PostgreSQL Extension Network. PGXN carries the **source** distribution: building from it requires the Rust toolchain and cargo-pgrx, as described under Development Installation below. For prebuilt binaries, use the Debian packages or the Docker image above.
+
 ## Development Installation
 
 ### Prerequisites

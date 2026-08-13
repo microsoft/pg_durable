@@ -132,6 +132,9 @@ Confirm these are consistent on the release commit:
 - The upgrade script `sql/pg_durable--<prev>--X.Y.Z.sql` exists (even if it only
   carries the license header + upgrade stub).
 - Any version-stamped `expected/` fixtures are consistent.
+- `META.json.in` is present and `make META.json` renders the release
+  version. The PGXN metadata is generated from `Cargo.toml`, so there is no
+  separate version to bump.
 
 > **Update the tracking issue:** tick **Version/upgrade-script sanity**.
 
@@ -320,6 +323,27 @@ nothing).
 
 > **Update the tracking issue:** link the Docker Publish run and tick **GHCR
 > images confirmed**.
+
+## Step 6b: Publish to PGXN
+
+Build and upload the PGXN bundle from the release tag. `make pgxn-zip`
+renders `META.json` from `Cargo.toml` and archives the tagged tree, so the
+distribution version always matches the crate version:
+
+```bash
+git checkout vX.Y.Z
+docker run --rm -v "$PWD:/repo" -w /repo \
+  -e PGXN_USERNAME -e PGXN_PASSWORD \
+  pgxn/pgxn-tools sh -c 'make META.json && pgxn-bundle && pgxn-release'
+```
+
+`pgxn-bundle` validates `META.json` against the PGXN Meta Spec before it
+builds the zip, so invalid metadata fails before anything is uploaded.
+Confirm the distribution at <https://pgxn.org/dist/pg_durable/>.
+
+Running this from the Package Release workflow is tracked separately.
+
+> **Update the tracking issue:** tick **PGXN release confirmed**.
 
 ## Step 7: Open the next development cycle
 

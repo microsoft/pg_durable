@@ -35,3 +35,7 @@ results/
 tmp_check/
 tmp_check_iso/
 log/
+
+# PGXN packaging (generated)
+/META.json
+/pg_durable-*.zip
