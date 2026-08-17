@@ -139,7 +139,24 @@ CREATE EXTENSION pg_durable;
 
 The default pg_durable database is `postgres`; see [User Guide](USER_GUIDE.md) for background worker configuration and privilege setup.
 
-Each release also publishes source archives for building from source and a `SHA256SUMS` file for verifying downloaded assets.
+Each release also publishes source archives and a `SHA256SUMS` file. To build
+and install from a source archive, initialize cargo-pgrx for the target
+PostgreSQL installation, build the package as your normal user, then install
+the generated artifacts with elevated privileges:
+
+```bash
+export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+cargo pgrx init --pg17 "$PG_CONFIG"
+make PG_CONFIG="$PG_CONFIG"
+sudo make install PG_CONFIG="$PG_CONFIG"
+```
+
+PostgreSQL 17 and 18 are supported. Set `EXTRA_FEATURES` on the build command
+to enable an HTTP policy feature. `DESTDIR` may be set on `make install` when
+staging files for a package.
+
+`sudo make uninstall PG_CONFIG="$PG_CONFIG"` removes the installed files again.
+It needs no build, so it also works from an unbuilt source tree.
 
 ## Development Installation
 
@@ -249,9 +266,14 @@ Fast, deterministic tests for core DSL functionality using PostgreSQL's standard
 Test SQL lives in `sql/`, expected output in `expected/`, and PGXS is configured in the root `Makefile`.
 
 ```bash
-make test-regress          # full reset + run
-make installcheck          # run only (PostgreSQL must already be running)
+make test-regress          # recommended: reset the dedicated local cluster and run
+make installcheck          # advanced: run against a disposable configured server
 ```
+
+Direct `installcheck` drops and recreates its regression database. It also
+requires explicit connection settings when PostgreSQL is not on the default
+socket and port. See [Testing](docs/TESTING.md#2-pg_regress-tests) for the full
+command and server prerequisites.
 
 ### E2E Tests (Comprehensive Scenario Tests)
 

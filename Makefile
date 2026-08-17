@@ -3,19 +3,38 @@
 
 # pg_durable Makefile
 
-# PostgreSQL major version for pgrx (override with: make ... PG_VERSION=pg16)
+# PostgreSQL major version for pgrx (override with: make ... PG_VERSION=pg18)
 PG_VERSION ?= pg17
+CARGO ?= cargo
+EXTRA_FEATURES ?=
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: build test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install
+.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install
 
 # Default target
-all: build
+all: package
 
 # Build the extension
 build:
 	cargo build
+
+# Build release artifacts for source installation. This runs without elevated
+# privileges; `install` only copies the resulting package tree.
+package:
+	@if test -e "$(PGRX_PACKAGE_DIR)" \
+	    && test "$(PGRX_PACKAGE_DIR)" != "$(DEFAULT_PGRX_PACKAGE_DIR)" \
+	    && test ! -f "$(PGRX_PACKAGE_MARKER)" \
+	    && { test ! -d "$(PGRX_PACKAGE_DIR)" \
+	        || test -n "$$(ls -A "$(PGRX_PACKAGE_DIR)" 2>/dev/null)"; }; then \
+	    echo "refusing to replace unowned package directory: $(PGRX_PACKAGE_DIR)" >&2; \
+	    exit 1; \
+	fi
+	rm -rf "$(PGRX_PACKAGE_DIR)"
+	$(CARGO) pgrx package --pg-config "$(PG_CONFIG)" \
+	    --out-dir "$(PGRX_PACKAGE_DIR)" \
+	    --no-default-features --features "$(strip pg$(PG_MAJOR) $(EXTRA_FEATURES))"
+	@touch "$(PGRX_PACKAGE_MARKER)"
 
 # Run all tests (unit + E2E)
 test:
@@ -53,7 +72,7 @@ pg-install:
 	cargo pgrx install --features http-allow-test-domains
 
 # Run pg_regress tests (convenience target)
-# Override version: make test-regress PG_VERSION=pg16
+# Override version: make test-regress PG_VERSION=pg18
 test-regress:
 	@echo "Resetting PostgreSQL..."
 	./scripts/pg-reset.sh $(subst pg,,$(PG_VERSION))
@@ -66,7 +85,9 @@ test-regress:
 help:
 	@echo "pg_durable Makefile targets:"
 	@echo ""
-	@echo "  build         - Build the extension"
+	@echo "  all           - Build release artifacts for source installation"
+	@echo "  build         - Build the extension in debug mode"
+	@echo "  package       - Build release artifacts for source installation"
 	@echo "  test          - Run all tests (unit + E2E)"
 	@echo "  test-unit     - Run pgrx unit tests only"
 	@echo "  test-e2e      - Run E2E tests only (Docker)"
@@ -76,6 +97,8 @@ help:
 	@echo "  docker-push   - Build and push to ACR"
 	@echo "  run           - Start local pgrx dev server"
 	@echo "  pg-clean      - Clean build artifacts"
+	@echo "  install       - Install prebuilt artifacts for the selected PostgreSQL"
+	@echo "  uninstall     - Remove installed artifacts for the selected PostgreSQL"
 	@echo "  pg-install    - Install extension locally"
 
 # ============================================================================
@@ -85,22 +108,95 @@ EXTENSION = pg_durable
 
 REGRESS = 00_init simple sequence variables parallel conditional
 
+REQUESTED_GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)
+PG_CONFIG_GOALS := all package install uninstall installcheck
+
+ifneq ($(filter $(PG_CONFIG_GOALS),$(REQUESTED_GOALS)),)
 ifndef PG_CONFIG
-  PG_CONFIG := $(shell cargo pgrx info pg-config $(PG_VERSION) 2>/dev/null)
-  ifeq ($(PG_CONFIG),)
-    PG_CONFIG := $(shell which pg_config 2>/dev/null)
-  endif
+PG_CONFIG := $(shell $(CARGO) pgrx info pg-config $(PG_VERSION) 2>/dev/null)
+ifeq ($(PG_CONFIG),)
+PG_CONFIG := $(shell command -v pg_config 2>/dev/null)
+endif
 endif
 
 ifeq ($(PG_CONFIG),)
-  # PG_CONFIG is not available; handle PGXS targets explicitly.
-  ifneq ($(filter installcheck,$(MAKECMDGOALS)),)
-    $(error PG_CONFIG is not set and could not be auto-detected; cannot run 'make installcheck')
-  else
-    $(warning PG_CONFIG is not set and could not be auto-detected; PGXS-based targets such as 'installcheck' are unavailable)
-  endif
-else
-  PGXS := $(shell $(PG_CONFIG) --pgxs)
-  include $(PGXS)
+$(error PG_CONFIG is not set and pg_config could not be found via cargo-pgrx or PATH)
 endif
 
+PG_MAJOR := $(shell "$(PG_CONFIG)" --version 2>/dev/null | sed -nE 's/^PostgreSQL ([0-9]+).*/\1/p')
+ifeq ($(filter $(PG_MAJOR),17 18),)
+$(error unsupported PostgreSQL major '$(PG_MAJOR)'; pg_durable supports PostgreSQL 17 and 18)
+endif
+endif
+
+ifneq ($(filter install uninstall,$(REQUESTED_GOALS)),)
+ifneq ($(filter installcheck,$(REQUESTED_GOALS)),)
+$(error run 'make install' or 'make uninstall' and 'make installcheck' as separate commands)
+endif
+endif
+
+# PGXS is used only for the regression-test entry point. Keeping it out of
+# normal builds prevents its `install` recipe from conflicting with ours.
+ifneq ($(filter installcheck,$(REQUESTED_GOALS)),)
+ifndef PGXS
+PGXS := $(shell "$(PG_CONFIG)" --pgxs)
+endif
+include $(PGXS)
+endif
+
+# ============================================================================
+# Source installation
+# ============================================================================
+DEFAULT_PGRX_PACKAGE_DIR = $(CURDIR)/target/release/pg_durable-pg$(PG_MAJOR)
+PGRX_PACKAGE_DIR ?= $(DEFAULT_PGRX_PACKAGE_DIR)
+PGRX_PACKAGE_MARKER = $(PGRX_PACKAGE_DIR).pg_durable-owned
+
+ifeq ($(filter installcheck,$(REQUESTED_GOALS)),)
+
+PG_PKGLIBDIR = $(shell "$(PG_CONFIG)" --pkglibdir)
+PG_EXTENSION_DIR = $(shell "$(PG_CONFIG)" --sharedir)/extension
+PACKAGE_LIBRARY = $(PGRX_PACKAGE_DIR)$(PG_PKGLIBDIR)/pg_durable.so
+PACKAGE_EXTENSION_DIR = $(PGRX_PACKAGE_DIR)$(PG_EXTENSION_DIR)
+# Same directories relative to the package root, for auditing the packaged tree.
+PG_PKGLIBDIR_REL = $(patsubst /%,%,$(PG_PKGLIBDIR))
+PG_EXTENSION_DIR_REL = $(patsubst /%,%,$(PG_EXTENSION_DIR))
+
+install:
+	@set -eu; \
+	package_library="$(PACKAGE_LIBRARY)"; \
+	package_extension_dir="$(PACKAGE_EXTENSION_DIR)"; \
+	test -f "$$package_library" || { echo "missing packaged library: $$package_library; run 'make package' first" >&2; exit 1; }; \
+	test -f "$$package_extension_dir/pg_durable.control" || { echo "missing packaged control file; run 'make package' first" >&2; exit 1; }; \
+	set -- "$$package_extension_dir"/pg_durable--*.sql; \
+	test -f "$$1" || { echo "missing packaged SQL files; run 'make package' first" >&2; exit 1; }; \
+	unexpected="$$(cd "$(PGRX_PACKAGE_DIR)" && find . -type f \
+	    ! -path "./$(PG_PKGLIBDIR_REL)/pg_durable.so" \
+	    ! -path "./$(PG_EXTENSION_DIR_REL)/pg_durable.control" \
+	    ! -path "./$(PG_EXTENSION_DIR_REL)/pg_durable--*.sql")"; \
+	test -z "$$unexpected" || { \
+	    echo "packaged tree contains files this target does not install:" >&2; \
+	    echo "$$unexpected" >&2; \
+	    echo "the Debian package ships the whole tree, so a source install would silently differ from it; extend the install and uninstall recipes or exclude these files" >&2; \
+	    exit 1; }; \
+	install -d -m 0755 "$(DESTDIR)$(PG_PKGLIBDIR)" "$(DESTDIR)$(PG_EXTENSION_DIR)"; \
+	install -m 0755 "$$package_library" "$(DESTDIR)$(PG_PKGLIBDIR)/pg_durable.so"; \
+	install -m 0644 "$$package_extension_dir/pg_durable.control" "$$@" "$(DESTDIR)$(PG_EXTENSION_DIR)/"
+
+# `pgxn uninstall` runs this target directly, without building first, so it must
+# not depend on a package tree. It removes only what `install` places, and is
+# idempotent so a partial installation can always be cleaned up.
+uninstall:
+	@set -eu; \
+	extension_dir="$(DESTDIR)$(PG_EXTENSION_DIR)"; \
+	library="$(DESTDIR)$(PG_PKGLIBDIR)/pg_durable.so"; \
+	removed=0; \
+	if test -e "$$library"; then rm -f "$$library"; removed=1; fi; \
+	if test -e "$$extension_dir/pg_durable.control"; then rm -f "$$extension_dir/pg_durable.control"; removed=1; fi; \
+	for sql in "$$extension_dir"/pg_durable--*.sql; do \
+	    test -e "$$sql" || continue; \
+	    rm -f "$$sql"; \
+	    removed=1; \
+	done; \
+	test "$$removed" -eq 1 || echo "pg_durable is not installed for $(PG_CONFIG); nothing to remove"
+
+endif

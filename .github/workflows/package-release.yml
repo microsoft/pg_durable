@@ -146,15 +146,19 @@ jobs:
               cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
               cargo pgrx init --pg${{ matrix.pg_version }} "$PG_CONFIG"
 
-              FEATURES="pg${{ matrix.pg_version }}"
-              if [ -n "${{ env.PACKAGE_HTTP_FEATURE }}" ]; then
-                FEATURES="$FEATURES,${{ env.PACKAGE_HTTP_FEATURE }}"
-              fi
+              make -f _release_tooling/Makefile package \
+                PG_CONFIG="$PG_CONFIG" \
+                EXTRA_FEATURES="${{ env.PACKAGE_HTTP_FEATURE }}"
 
-              cargo pgrx package \
-                --pg-config "$PG_CONFIG" \
-                --no-default-features \
-                --features "$FEATURES"
+              STAGE_DIR="$PWD/target/source-install-stage-pg${{ matrix.pg_version }}"
+              make -f _release_tooling/Makefile install \
+                PG_CONFIG="$PG_CONFIG" \
+                PGRX_PACKAGE_DIR="$PWD/target/release/pg_durable-pg${{ matrix.pg_version }}" \
+                DESTDIR="$STAGE_DIR"
+              test -f "$STAGE_DIR/usr/lib/postgresql/${{ matrix.pg_version }}/lib/pg_durable.so"
+              test -f "$STAGE_DIR/usr/share/postgresql/${{ matrix.pg_version }}/extension/pg_durable.control"
+              compgen -G "$STAGE_DIR/usr/share/postgresql/${{ matrix.pg_version }}/extension/pg_durable--*.sql" >/dev/null
+              compgen -G "$STAGE_DIR/usr/share/postgresql/${{ matrix.pg_version }}/extension/pg_durable--*--*.sql" >/dev/null
 
               _release_tooling/scripts/package-deb.sh \
                 "$VERSION" \

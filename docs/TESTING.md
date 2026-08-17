@@ -57,10 +57,15 @@ Runs Rust unit tests using `cargo pgrx test`. These test individual functions in
 Standard PostgreSQL regression tests for core DSL functionality. These tests are fast, deterministic, and use PostgreSQL's industry-standard testing framework.
 
 ```bash
-# Run all pg_regress tests (resets PostgreSQL, installs extension, runs tests)
+# Recommended: reset the dedicated local cluster, install, and run all tests
 make test-regress
 
-# Or if PostgreSQL is already running with PGDATABASE=contrib_regression:
+# Run against an already-running disposable test cluster
+PGHOST=localhost \
+PGPORT=28817 \
+PGUSER=postgres \
+PG_CONFIG=/path/to/pg_config \
+CONTRIB_TESTDB=contrib_regression \
 make installcheck
 
 # Run specific test
@@ -72,6 +77,14 @@ cat regression.out
 # View diffs (on failure)
 cat regression.diffs
 ```
+
+Direct `make installcheck` uses PGXS against an installed PostgreSQL server. By
+default, `pg_regress` drops and recreates `CONTRIB_TESTDB`; never point it at a
+database containing valuable data. The server must already have the current
+pg_durable artifacts installed, `shared_preload_libraries = 'pg_durable'`, and
+`pg_durable.database` set to the same database as `CONTRIB_TESTDB`, followed by
+a restart. The test user must be able to create databases, roles, and
+extensions. Use `make test-regress` for the managed local test cluster.
 
 **What it tests:**
 - Core DSL operators: `~>`, `|=>`, `&`, `?>`, `!>`
