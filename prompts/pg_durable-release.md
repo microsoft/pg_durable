@@ -336,33 +336,48 @@ workflow can come later, once there is nothing left to learn.
 Requires the `PGXN_USERNAME` and `PGXN_PASSWORD` credentials for the project's
 PGXN account.
 
-### First, bundle without uploading
+### First, build and validate without uploading
 
-`pgxn-bundle` renders `META.json` from `Cargo.toml`, validates it against the
-PGXN Meta Spec, and builds the release zip. Run it on its own first — nothing is
-uploaded, and invalid metadata fails here rather than in front of an audience:
+Nothing is uploaded by this step, and invalid metadata fails here rather than in
+front of an audience:
 
 ```bash
 git checkout vX.Y.Z
-docker run --rm -v "$PWD:/repo" -w /repo \
-  pgxn/pgxn-tools sh -c 'make META.json && pgxn-bundle'
+docker run --rm -v "$PWD:/repo" -w /repo pgxn/pgxn-tools sh -c '
+  make META.json &&
+  pgxn validate-meta META.json &&
+  make pgxn-zip'
 ```
 
 Expect `META.json is OK`. Then inspect what you are about to publish:
 
 ```bash
-unzip -l pg_durable-X.Y.Z.zip   # META.json must be at the archive root
+unzip -l pg_durable-X.Y.Z.zip | grep META.json   # must be at the archive root
 ```
 
 Check that the version in `META.json` matches the tag, and that `provides`
 names the extension you intend to claim.
 
+> **Why not `pgxn-bundle`?** It is the upstream wrapper for exactly this step,
+> but it has two traps here, both verified against `pgxn/pgxn-tools`. It archives
+> only committed files unless `GIT_BUNDLE_OPTS` is set, and `META.json` is
+> generated and gitignored — so a plain `pgxn-bundle` silently produces an
+> archive containing **no `META.json` at all**, which is the one file PGXN
+> requires. It also ends with
+> `[ -n "${GITHUB_OUTPUT:-}" ] && echo ... >> "$GITHUB_OUTPUT"`, so outside
+> GitHub Actions it **exits 1 even on success**, which silently breaks any `&&`
+> chain built on it. `make pgxn-zip` already passes `--add-file META.json` and
+> exits 0, and `pgxn validate-meta` performs the same Meta Spec check.
+
 ### Then upload
+
+Pass the zip built above explicitly, so the upload cannot be chained onto a
+command whose exit status is unreliable:
 
 ```bash
 docker run --rm -v "$PWD:/repo" -w /repo \
   -e PGXN_USERNAME -e PGXN_PASSWORD \
-  pgxn/pgxn-tools sh -c 'make META.json && pgxn-bundle && pgxn-release'
+  pgxn/pgxn-tools pgxn-release pg_durable-X.Y.Z.zip
 ```
 
 Confirm the distribution at <https://pgxn.org/dist/pg_durable/>, and check that
