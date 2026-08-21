@@ -326,22 +326,57 @@ nothing).
 
 ## Step 6b: Publish to PGXN
 
-Build and upload the PGXN bundle from the release tag. `make pgxn-zip`
-renders `META.json` from `Cargo.toml` and archives the tagged tree, so the
-distribution version always matches the crate version:
+**This step is deliberately manual.** A PGXN upload is not a routine artifact
+push: it publishes to a public registry under an account the project owns, and
+the first upload permanently claims both the distribution name `pg_durable` and
+the extension name it provides. Keep a human watching it until the process has
+been run successfully a few times; automating it inside the Package Release
+workflow can come later, once there is nothing left to learn.
+
+Requires the `PGXN_USERNAME` and `PGXN_PASSWORD` credentials for the project's
+PGXN account.
+
+### First, bundle without uploading
+
+`pgxn-bundle` renders `META.json` from `Cargo.toml`, validates it against the
+PGXN Meta Spec, and builds the release zip. Run it on its own first — nothing is
+uploaded, and invalid metadata fails here rather than in front of an audience:
 
 ```bash
 git checkout vX.Y.Z
+docker run --rm -v "$PWD:/repo" -w /repo \
+  pgxn/pgxn-tools sh -c 'make META.json && pgxn-bundle'
+```
+
+Expect `META.json is OK`. Then inspect what you are about to publish:
+
+```bash
+unzip -l pg_durable-X.Y.Z.zip   # META.json must be at the archive root
+```
+
+Check that the version in `META.json` matches the tag, and that `provides`
+names the extension you intend to claim.
+
+### Then upload
+
+```bash
 docker run --rm -v "$PWD:/repo" -w /repo \
   -e PGXN_USERNAME -e PGXN_PASSWORD \
   pgxn/pgxn-tools sh -c 'make META.json && pgxn-bundle && pgxn-release'
 ```
 
-`pgxn-bundle` validates `META.json` against the PGXN Meta Spec before it
-builds the zip, so invalid metadata fails before anything is uploaded.
-Confirm the distribution at <https://pgxn.org/dist/pg_durable/>.
+Confirm the distribution at <https://pgxn.org/dist/pg_durable/>, and check that
+the README and documentation render — PGXN indexes documentation for search, so
+a distribution whose docs fail to render is much harder to find.
 
-Running this from the Package Release workflow is tracked separately.
+### On the very first upload
+
+Consider setting `release_status` to `testing` in `META.json.in` for the first
+release only. Per the Meta Spec, a `testing` distribution should not be
+installed over a stable release without an explicit request, and stays out of
+the default search index. That claims the name and exercises the whole path
+while keeping automated clients away from a release nobody has installed from
+PGXN yet. Switch to `stable` for the following release.
 
 > **Update the tracking issue:** tick **PGXN release confirmed**.
 

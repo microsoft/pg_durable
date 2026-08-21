@@ -66,6 +66,7 @@ run:
 pg-clean:
 	cargo clean
 	rm -rf target/
+	rm -f META.json $(DISTNAME)-$(DISTVERSION).zip
 
 # Install extension locally (renamed to avoid PGXS conflict)
 pg-install:
@@ -125,9 +126,6 @@ pgxn-zip: META.json
 # pg_regress (PGXS) configuration
 # ============================================================================
 EXTENSION = pg_durable
-
-# Generated PGXN artifacts, removed by the PGXS clean target.
-EXTRA_CLEAN = META.json $(DISTNAME)-$(DISTVERSION).zip
 
 REGRESS = 00_init simple sequence variables parallel conditional
 
