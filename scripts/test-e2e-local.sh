@@ -47,6 +47,7 @@ SETUP_PLAYGROUND_APPLIED=false
 E2E_ROLE_ENSURED=false
 VERSION_SHOWN=false
 CURRENT_FEATURES=""  # tracks what Cargo features the installed .so was built with
+PHASE_LOG_MARK=0
 
 declare -a REQUESTED_PHASES=()
 declare -a MATCHED_TESTS=()
@@ -461,6 +462,7 @@ configure_phase() {
     : > "$DATA_DIR/postgresql.auto.conf"
     set_conf_line "port" "$PG_PORT"
     clear_connlimit_gucs
+    remove_conf_key "log_connections"
 
     case "$phase" in
         no-preload)
@@ -471,6 +473,7 @@ configure_phase() {
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "log_connections" "on"
             ;;
         superuser-guc-off)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -569,6 +572,12 @@ prepare_phase() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
         -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" \
         >/dev/null 2>&1 || true
+
+    if [ -f "$LOG_FILE" ]; then
+        PHASE_LOG_MARK=$(wc -l < "$LOG_FILE")
+    else
+        PHASE_LOG_MARK=0
+    fi
 
     restart_server
 
@@ -714,6 +723,43 @@ check_expected_warning_fragments() {
     return 0
 }
 
+assert_application_names_logged() {
+    local expected_names=(
+        "pg_durable:worker:management"
+        "pg_durable:worker:poll"
+        "pg_durable:worker:duroxide"
+        "pg_durable:worker:workflow-sql"
+        "pg_durable:backend:duroxide"
+        "pg_durable:backend:monitoring"
+        "pg_durable:backend:new-transaction"
+    )
+    local missing_names=()
+    local application_name
+    local needle
+
+    for application_name in "${expected_names[@]}"; do
+        needle="application_name=$application_name"
+        if ! awk -v start="$PHASE_LOG_MARK" -v needle="$needle" \
+            'NR > start && index($0, needle) { found = 1 } END { exit(found ? 0 : 1) }' \
+            "$LOG_FILE"; then
+            missing_names+=("$application_name")
+        fi
+    done
+
+    if [ "${#missing_names[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "    Missing connection log application names:"
+    printf '      %s\n' "${missing_names[@]}"
+    echo "    pg_durable connection authorization entries for this phase:"
+    awk -v start="$PHASE_LOG_MARK" \
+        'NR > start && /connection authorized:/ && /application_name=pg_durable:/ { print "      " $0 }' \
+        "$LOG_FILE" | tail -20
+    return 1
+}
+
 run_test_file() {
     local test_file="$1"
     local test_name
@@ -792,6 +838,17 @@ run_phase() {
             phase_failed=$((phase_failed + 1))
         fi
     done
+
+    if [ "$phase" = "standard" ] && [ -z "$TEST_FILTER" ]; then
+        printf "  %-45s ... " "application_name_connection_logs"
+        if assert_application_names_logged; then
+            echo -e "${GREEN}PASS${NC}"
+            phase_passed=$((phase_passed + 1))
+        else
+            echo -e "${RED}FAIL${NC}"
+            phase_failed=$((phase_failed + 1))
+        fi
+    fi
 
     TOTAL_PASSED=$((TOTAL_PASSED + phase_passed))
     TOTAL_FAILED=$((TOTAL_FAILED + phase_failed))
