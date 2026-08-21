@@ -26,7 +26,7 @@ impl<'a> InstanceLineage<'a> {
 
         let mut generations = Vec::new();
         let mut node_ids = Vec::new();
-        for pair in tokens[1..].chunks_exact(2) {
+        for pair in tokens[1..].as_chunks::<2>().0 {
             generations.push(pair[0].parse::<i64>().ok()?);
             if pair[1].is_empty() {
                 return None;
