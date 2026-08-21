@@ -10,7 +10,10 @@ use pgrx::datum::TimestampWithTimeZone;
 use pgrx::prelude::*;
 use std::collections::HashMap;
 
-use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
+use crate::types::{
+    backend_duroxide_schema, connection_url_with_application_name, new_backend_provider,
+    postgres_connection_string, BACKEND_MONITORING_APPLICATION_NAME,
+};
 
 // ============================================================================
 // Monitoring Functions
@@ -164,9 +167,11 @@ fn fetch_instance_info_map(
 
         let mut info_by_id: HashMap<String, (String, i64, Option<String>)> = HashMap::new();
 
+        let monitoring_conn_str =
+            connection_url_with_application_name(pg_conn_str, BACKEND_MONITORING_APPLICATION_NAME);
         let pool = match PgPoolOptions::new()
             .max_connections(1)
-            .connect(pg_conn_str)
+            .connect(&monitoring_conn_str)
             .await
         {
             Ok(p) => p,

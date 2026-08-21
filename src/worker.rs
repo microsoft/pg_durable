@@ -20,7 +20,8 @@ use crate::registry::{create_activity_registry, create_orchestration_registry};
 use crate::types::{
     get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
     get_reconcile_interval, get_retention_days, postgres_connection_string,
-    resolve_duroxide_schema_pool, worker_provider_config,
+    postgres_connection_string_with_application_name, resolve_duroxide_schema_pool,
+    worker_provider_config, WORKER_MANAGEMENT_APPLICATION_NAME, WORKER_POLL_APPLICATION_NAME,
 };
 
 // Retention policy for terminal ('completed'/'failed'/'cancelled') instances.
@@ -133,6 +134,10 @@ async fn run_duroxide_runtime() {
     const STALE_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
     let pg_conn_str = postgres_connection_string();
+    let management_conn_str =
+        postgres_connection_string_with_application_name(WORKER_MANAGEMENT_APPLICATION_NAME);
+    let poll_conn_str =
+        postgres_connection_string_with_application_name(WORKER_POLL_APPLICATION_NAME);
     log!(
         "pg_durable: background worker connected to PostgreSQL at {}",
         pg_conn_str,
@@ -181,7 +186,7 @@ async fn run_duroxide_runtime() {
         match sqlx::postgres::PgPoolOptions::new()
             .max_connections(mgmt_conns)
             .acquire_timeout(Duration::from_secs(5))
-            .connect(&pg_conn_str)
+            .connect(&management_conn_str)
             .await
         {
             Ok(pool) => break pool,
@@ -214,7 +219,7 @@ async fn run_duroxide_runtime() {
         match sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_secs(5))
-            .connect(&pg_conn_str)
+            .connect(&poll_conn_str)
             .await
         {
             Ok(pool) => break pool,

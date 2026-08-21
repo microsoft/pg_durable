@@ -16,6 +16,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use uuid::Uuid;
 
+pub(crate) const WORKER_MANAGEMENT_APPLICATION_NAME: &str = "pg_durable:worker:management";
+pub(crate) const WORKER_POLL_APPLICATION_NAME: &str = "pg_durable:worker:poll";
+pub(crate) const WORKER_DUROXIDE_APPLICATION_NAME: &str = "pg_durable:worker:duroxide";
+pub(crate) const WORKER_WORKFLOW_SQL_APPLICATION_NAME: &str = "pg_durable:worker:workflow-sql";
+pub(crate) const BACKEND_DUROXIDE_APPLICATION_NAME: &str = "pg_durable:backend:duroxide";
+pub(crate) const BACKEND_MONITORING_APPLICATION_NAME: &str = "pg_durable:backend:monitoring";
+pub(crate) const BACKEND_NEW_TRANSACTION_APPLICATION_NAME: &str =
+    "pg_durable:backend:new-transaction";
+
 // ============================================================================
 // Configuration Functions
 // ============================================================================
@@ -155,6 +164,19 @@ pub fn postgres_connection_string() -> String {
     build_connection_url(&user, &host, port, &database)
 }
 
+pub(crate) fn postgres_connection_string_with_application_name(application_name: &str) -> String {
+    connection_url_with_application_name(&postgres_connection_string(), application_name)
+}
+
+pub(crate) fn connection_url_with_application_name(
+    database_url: &str,
+    application_name: &str,
+) -> String {
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let encoded = utf8_percent_encode(application_name, NON_ALPHANUMERIC);
+    format!("{database_url}{separator}application_name={encoded}")
+}
+
 /// Build the worker's `postgres://` connection URL.
 ///
 /// A Unix-socket `host` (one starting with `/`) is percent-encoded so the URL
@@ -234,6 +256,22 @@ pub async fn connect_as_user(
     user: &str,
     database: Option<&str>,
 ) -> Result<sqlx::postgres::PgConnection, String> {
+    connect_as_user_with_application_name(user, database, WORKER_WORKFLOW_SQL_APPLICATION_NAME)
+        .await
+}
+
+pub(crate) async fn connect_as_user_for_new_transaction(
+    user: &str,
+) -> Result<sqlx::postgres::PgConnection, String> {
+    connect_as_user_with_application_name(user, None, BACKEND_NEW_TRANSACTION_APPLICATION_NAME)
+        .await
+}
+
+async fn connect_as_user_with_application_name(
+    user: &str,
+    database: Option<&str>,
+    application_name: &str,
+) -> Result<sqlx::postgres::PgConnection, String> {
     use sqlx::postgres::PgConnectOptions;
     use sqlx::Connection;
 
@@ -246,7 +284,8 @@ pub async fn connect_as_user(
     let mut options = PgConnectOptions::new()
         .username(normalized_user.as_ref())
         .database(db)
-        .port(get_port());
+        .port(get_port())
+        .application_name(application_name);
 
     let host = get_host();
     if !host.is_empty() {
@@ -364,7 +403,10 @@ pub fn backend_provider_config(
     database_url: &str,
     schema_name: &str,
 ) -> duroxide_pg::ProviderConfig {
-    let mut config = duroxide_pg::ProviderConfig::url(database_url);
+    let mut config = duroxide_pg::ProviderConfig::url(connection_url_with_application_name(
+        database_url,
+        BACKEND_DUROXIDE_APPLICATION_NAME,
+    ));
     config.schema_name = Some(schema_name.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::VerifyOnly;
     config
@@ -394,7 +436,10 @@ pub fn worker_provider_config(
     database_url: &str,
     schema_name: &str,
 ) -> duroxide_pg::ProviderConfig {
-    let mut config = duroxide_pg::ProviderConfig::url(database_url);
+    let mut config = duroxide_pg::ProviderConfig::url(connection_url_with_application_name(
+        database_url,
+        WORKER_DUROXIDE_APPLICATION_NAME,
+    ));
     config.schema_name = Some(schema_name.to_string());
     config.migration_policy = duroxide_pg::MigrationPolicy::ApplyAll;
     config
@@ -2021,6 +2066,77 @@ mod tests {
             Some(path.to_string()),
         );
         assert_ne!(opts.get_host(), "evil.com");
+    }
+
+    #[test]
+    fn connection_url_application_name_is_encoded() {
+        let url = connection_url_with_application_name(
+            "postgres://worker@localhost/app",
+            WORKER_DUROXIDE_APPLICATION_NAME,
+        );
+        let opts = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("URL with application_name should parse");
+
+        assert_eq!(
+            opts.get_application_name(),
+            Some(WORKER_DUROXIDE_APPLICATION_NAME)
+        );
+    }
+
+    #[test]
+    fn connection_url_application_name_preserves_existing_parameters() {
+        let url = connection_url_with_application_name(
+            "postgres://worker@localhost/app?sslmode=disable",
+            BACKEND_DUROXIDE_APPLICATION_NAME,
+        );
+        let opts = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("URL with existing parameters should parse");
+
+        assert_eq!(
+            opts.get_application_name(),
+            Some(BACKEND_DUROXIDE_APPLICATION_NAME)
+        );
+    }
+
+    #[test]
+    fn application_names_are_valid_postgresql_names() {
+        for application_name in [
+            WORKER_MANAGEMENT_APPLICATION_NAME,
+            WORKER_POLL_APPLICATION_NAME,
+            WORKER_DUROXIDE_APPLICATION_NAME,
+            WORKER_WORKFLOW_SQL_APPLICATION_NAME,
+            BACKEND_DUROXIDE_APPLICATION_NAME,
+            BACKEND_MONITORING_APPLICATION_NAME,
+            BACKEND_NEW_TRANSACTION_APPLICATION_NAME,
+        ] {
+            assert!(application_name.is_ascii());
+            assert!(application_name.len() < 64);
+        }
+    }
+
+    fn assert_provider_application_name(config: duroxide_pg::ProviderConfig, expected: &str) {
+        let duroxide_pg::ConnectionConfig::Url(url) = config.connection else {
+            panic!("provider should use URL connection configuration");
+        };
+        let opts =
+            sqlx::postgres::PgConnectOptions::from_str(&url).expect("provider URL should parse");
+        assert_eq!(opts.get_application_name(), Some(expected));
+    }
+
+    #[test]
+    fn backend_provider_uses_backend_application_name() {
+        assert_provider_application_name(
+            backend_provider_config("postgres://worker@localhost/app", "_duroxide"),
+            BACKEND_DUROXIDE_APPLICATION_NAME,
+        );
+    }
+
+    #[test]
+    fn worker_provider_uses_worker_application_name() {
+        assert_provider_application_name(
+            worker_provider_config("postgres://worker@localhost/app", "_duroxide"),
+            WORKER_DUROXIDE_APPLICATION_NAME,
+        );
     }
 
     // ============================================================================

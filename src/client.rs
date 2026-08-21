@@ -17,7 +17,8 @@ use pgrx::prelude::*;
 use tokio::runtime::Runtime;
 
 use crate::types::{
-    backend_duroxide_schema, connect_as_user, new_backend_provider, postgres_connection_string,
+    backend_duroxide_schema, connect_as_user_for_new_transaction, new_backend_provider,
+    postgres_connection_string,
 };
 
 /// Cached tokio runtime for client operations.
@@ -278,11 +279,6 @@ async fn start_on_new_session(
         .await
         .map_err(|e| format!("failed to clear df.in_workflow on new-transaction session: {e}"))?;
 
-    sqlx::query("SET application_name = 'pg_durable:new-transaction-start'")
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("failed to tag new-transaction start session: {e}"))?;
-
     // Bound both the lock wait and the statement itself. See
     // NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS for why this is not optional. Two
     // statements because sqlx prepares every query, and the extended protocol
@@ -353,7 +349,7 @@ pub fn start_in_new_transaction(
         // holding the `df` tables this backend writes through SPI. The `database`
         // argument is forwarded to the inner `df.start()`, which records it as an
         // instance property for the worker to execute against.
-        let mut conn = connect_as_user(&user, None).await?;
+        let mut conn = connect_as_user_for_new_transaction(&user).await?;
 
         let result = start_on_new_session(&mut conn, &fut, &label, &database).await;
 
