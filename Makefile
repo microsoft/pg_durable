@@ -171,12 +171,13 @@ endif
 DEFAULT_PGRX_PACKAGE_DIR = $(CURDIR)/target/release/pg_durable-pg$(PG_MAJOR)
 PGRX_PACKAGE_DIR ?= $(DEFAULT_PGRX_PACKAGE_DIR)
 PGRX_PACKAGE_MARKER = $(PGRX_PACKAGE_DIR).pg_durable-owned
+PG_DLSUFFIX ?= $(if $(filter Darwin,$(shell uname -s)),.dylib,.so)
 
 ifeq ($(filter installcheck,$(REQUESTED_GOALS)),)
 
 PG_PKGLIBDIR = $(shell "$(PG_CONFIG)" --pkglibdir)
 PG_EXTENSION_DIR = $(shell "$(PG_CONFIG)" --sharedir)/extension
-PACKAGE_LIBRARY = $(PGRX_PACKAGE_DIR)$(PG_PKGLIBDIR)/pg_durable.so
+PACKAGE_LIBRARY = $(PGRX_PACKAGE_DIR)$(PG_PKGLIBDIR)/pg_durable$(PG_DLSUFFIX)
 PACKAGE_EXTENSION_DIR = $(PGRX_PACKAGE_DIR)$(PG_EXTENSION_DIR)
 # Same directories relative to the package root, for auditing the packaged tree.
 PG_PKGLIBDIR_REL = $(patsubst /%,%,$(PG_PKGLIBDIR))
@@ -191,7 +192,7 @@ install:
 	set -- "$$package_extension_dir"/pg_durable--*.sql; \
 	test -f "$$1" || { echo "missing packaged SQL files; run 'make package' first" >&2; exit 1; }; \
 	unexpected="$$(cd "$(PGRX_PACKAGE_DIR)" && find . -type f \
-	    ! -path "./$(PG_PKGLIBDIR_REL)/pg_durable.so" \
+	    ! -path "./$(PG_PKGLIBDIR_REL)/pg_durable$(PG_DLSUFFIX)" \
 	    ! -path "./$(PG_EXTENSION_DIR_REL)/pg_durable.control" \
 	    ! -path "./$(PG_EXTENSION_DIR_REL)/pg_durable--*.sql")"; \
 	test -z "$$unexpected" || { \
@@ -200,7 +201,7 @@ install:
 	    echo "the Debian package ships the whole tree, so a source install would silently differ from it; extend the install and uninstall recipes or exclude these files" >&2; \
 	    exit 1; }; \
 	install -d -m 0755 "$(DESTDIR)$(PG_PKGLIBDIR)" "$(DESTDIR)$(PG_EXTENSION_DIR)"; \
-	install -m 0755 "$$package_library" "$(DESTDIR)$(PG_PKGLIBDIR)/pg_durable.so"; \
+	install -m 0755 "$$package_library" "$(DESTDIR)$(PG_PKGLIBDIR)/pg_durable$(PG_DLSUFFIX)"; \
 	install -m 0644 "$$package_extension_dir/pg_durable.control" "$$@" "$(DESTDIR)$(PG_EXTENSION_DIR)/"
 
 # `pgxn uninstall` runs this target directly, without building first, so it must
@@ -209,7 +210,7 @@ install:
 uninstall:
 	@set -eu; \
 	extension_dir="$(DESTDIR)$(PG_EXTENSION_DIR)"; \
-	library="$(DESTDIR)$(PG_PKGLIBDIR)/pg_durable.so"; \
+	library="$(DESTDIR)$(PG_PKGLIBDIR)/pg_durable$(PG_DLSUFFIX)"; \
 	removed=0; \
 	if test -e "$$library"; then rm -f "$$library"; removed=1; fi; \
 	if test -e "$$extension_dir/pg_durable.control"; then rm -f "$$extension_dir/pg_durable.control"; removed=1; fi; \

@@ -8,6 +8,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
 
+file_mode() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
 create_pg_config() {
     local major="$1"
     local path="$TEST_DIR/pg_config-$major"
@@ -73,7 +77,7 @@ done
 pkglibdir="$($pg_config --pkglibdir)"
 extension_dir="$($pg_config --sharedir)/extension"
 mkdir -p "$out_dir$pkglibdir" "$out_dir$extension_dir"
-printf 'shared library\n' > "$out_dir$pkglibdir/pg_durable.so"
+printf 'shared library\n' > "$out_dir$pkglibdir/pg_durable${PG_DLSUFFIX:-.so}"
 printf "default_version = '0.2.6'\n" > "$out_dir$extension_dir/pg_durable.control"
 printf 'install sql\n' > "$out_dir$extension_dir/pg_durable--0.2.6.sql"
 printf 'upgrade sql\n' > "$out_dir$extension_dir/pg_durable--0.2.5--0.2.6.sql"
@@ -95,26 +99,31 @@ fi
 grep -F "refusing to replace unowned package directory" "$TEST_DIR/unowned.out" > /dev/null
 test -f "$unowned_dir/unrelated-file"
 
-for major in 17 18; do
+for test_case in 17:.so 18:.so 17:.dylib 18:.dylib; do
+    major="${test_case%%:*}"
+    dlsuffix="${test_case#*:}"
     pg_config_variable="PG_CONFIG_$major"
     pg_config="${!pg_config_variable}"
-    package_dir="$TEST_DIR/package $major"
-    stage_dir="$TEST_DIR/stage-$major"
+    suffix_label="${dlsuffix#.}"
+    package_dir="$TEST_DIR/package $major-$suffix_label"
+    stage_dir="$TEST_DIR/stage-$major-$suffix_label"
 
     : > "$CARGO_LOG"
-    if [[ "$major" == "17" ]]; then
+    if [[ "$test_case" == "17:.so" ]]; then
         make --no-print-directory package \
             PG_CONFIG="$pg_config" \
             CARGO="$FAKE_CARGO" \
             PGRX_PACKAGE_DIR="$package_dir" \
+            PG_DLSUFFIX="$dlsuffix" \
             EXTRA_FEATURES=http-allow-azure-domains
         grep -F -- "--features pg17\\ http-allow-azure-domains" "$CARGO_LOG" > /dev/null
     else
         make --no-print-directory \
-            PG_VERSION=pg18 \
+            PG_VERSION="pg$major" \
             CARGO="$FAKE_CARGO" \
-            PGRX_PACKAGE_DIR="$package_dir"
-        grep -F -- "--features pg18" "$CARGO_LOG" > /dev/null
+            PGRX_PACKAGE_DIR="$package_dir" \
+            PG_DLSUFFIX="$dlsuffix"
+        grep -F -- "--features pg$major" "$CARGO_LOG" > /dev/null
     fi
     cargo_calls="$(wc -l < "$CARGO_LOG")"
 
@@ -123,16 +132,17 @@ for major in 17 18; do
         CARGO=/missing/cargo \
         PGXS=/caller/supplied/pgxs.mk \
         PGRX_PACKAGE_DIR="$package_dir" \
+        PG_DLSUFFIX="$dlsuffix" \
         DESTDIR="$stage_dir" > /dev/null
 
     test "$(wc -l < "$CARGO_LOG")" -eq "$cargo_calls"
-    test -f "$stage_dir/usr/lib/postgresql/$major/lib/pg_durable.so"
+    test -f "$stage_dir/usr/lib/postgresql/$major/lib/pg_durable$dlsuffix"
     test -f "$stage_dir/usr/share/postgresql/$major/extension/pg_durable.control"
     test -f "$stage_dir/usr/share/postgresql/$major/extension/pg_durable--0.2.6.sql"
     test -f "$stage_dir/usr/share/postgresql/$major/extension/pg_durable--0.2.5--0.2.6.sql"
-    test "$(stat -c %a "$stage_dir/usr/lib/postgresql/$major/lib/pg_durable.so")" = "755"
-    test "$(stat -c %a "$stage_dir/usr/share/postgresql/$major/extension/pg_durable.control")" = "644"
-    test "$(stat -c %a "$stage_dir/usr/share/postgresql/$major/extension/pg_durable--0.2.6.sql")" = "644"
+    test "$(file_mode "$stage_dir/usr/lib/postgresql/$major/lib/pg_durable$dlsuffix")" = "755"
+    test "$(file_mode "$stage_dir/usr/share/postgresql/$major/extension/pg_durable.control")" = "644"
+    test "$(file_mode "$stage_dir/usr/share/postgresql/$major/extension/pg_durable--0.2.6.sql")" = "644"
 
     printf 'unrelated library\n' > "$stage_dir/usr/lib/postgresql/$major/lib/other_extension.so"
     printf 'unrelated control\n' > "$stage_dir/usr/share/postgresql/$major/extension/other_extension.control"
@@ -149,10 +159,11 @@ for major in 17 18; do
         CARGO=/missing/cargo \
         PGXS=/caller/supplied/pgxs.mk \
         PGRX_PACKAGE_DIR="$TEST_DIR/missing-package" \
+        PG_DLSUFFIX="$dlsuffix" \
         DESTDIR="$stage_dir" > /dev/null
 
     test "$(wc -l < "$CARGO_LOG")" -eq "$cargo_calls"
-    test ! -e "$stage_dir/usr/lib/postgresql/$major/lib/pg_durable.so"
+    test ! -e "$stage_dir/usr/lib/postgresql/$major/lib/pg_durable$dlsuffix"
     test ! -e "$stage_dir/usr/share/postgresql/$major/extension/pg_durable.control"
     test -z "$(find "$stage_dir/usr/share/postgresql/$major/extension" -name 'pg_durable--*.sql')"
     test -f "$stage_dir/usr/lib/postgresql/$major/lib/other_extension.so"
@@ -162,6 +173,7 @@ for major in 17 18; do
     # Removing twice is not an error; a partial install must always be cleanable.
     make --no-print-directory uninstall \
         PG_CONFIG="$pg_config" \
+        PG_DLSUFFIX="$dlsuffix" \
         DESTDIR="$stage_dir" > "$TEST_DIR/uninstall-again-$major.out"
     grep -F "nothing to remove" "$TEST_DIR/uninstall-again-$major.out" > /dev/null
 done
@@ -183,7 +195,7 @@ grep -F "run 'make package' first" "$TEST_DIR/missing.out" > /dev/null
 
 for artifact in control sql; do
     partial_dir="$TEST_DIR/partial-$artifact"
-    cp -a "$TEST_DIR/package 17" "$partial_dir"
+    cp -a "$TEST_DIR/package 17-so" "$partial_dir"
     if [[ "$artifact" == "control" ]]; then
         rm "$partial_dir/usr/share/postgresql/17/extension/pg_durable.control"
         expected_error="missing packaged control file"
@@ -212,7 +224,7 @@ grep -F "run 'make install' or 'make uninstall' and 'make installcheck' as separ
 # set of files, so an unexpected artifact must fail loudly rather than be dropped
 # silently from source installs.
 stray_dir="$TEST_DIR/stray-package"
-cp -a "$TEST_DIR/package 17" "$stray_dir"
+cp -a "$TEST_DIR/package 17-so" "$stray_dir"
 printf 'bitcode\n' > "$stray_dir/usr/lib/postgresql/17/lib/pg_durable.bc"
 if make --no-print-directory install \
     PG_CONFIG="$PG_CONFIG_17" \

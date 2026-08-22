@@ -156,10 +156,11 @@ export RUSTFLAGS="-C instrument-coverage"
 
 cargo pgrx install --pg-config="$PG_CONFIG" 2>&1 | grep -v "^warning:" || true
 
-# Find the installed .so
-SO_FILE=$(ls "$HOME"/.pgrx/"$PG_VERSION".*/pgrx-install/lib/postgresql/pg_durable.so 2>/dev/null | head -1)
+# Find the installed extension library.
+DLSUFFIX=$([[ "$(uname -s)" == "Darwin" ]] && printf '.dylib' || printf '.so')
+SO_FILE=$(ls "$HOME"/.pgrx/"$PG_VERSION".*/pgrx-install/lib/postgresql/pg_durable"$DLSUFFIX" 2>/dev/null | head -1)
 if [ -z "$SO_FILE" ]; then
-    echo -e "${RED}Error: pg_durable.so not found after install${NC}"
+    echo -e "${RED}Error: pg_durable$DLSUFFIX not found after install${NC}"
     exit 1
 fi
 echo "  Instrumented binary: $SO_FILE"
