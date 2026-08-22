@@ -65,7 +65,8 @@ cd "$PROJECT_DIR"
 if [ "$BUILD_MODE" = "auto" ]; then
     PKGLIBDIR=$("$PG_CONFIG" --pkglibdir)
     SHAREDIR=$("$PG_CONFIG" --sharedir)
-    if [ -f "$PKGLIBDIR/pg_durable.so" ] && [ -f "$SHAREDIR/extension/pg_durable.control" ]; then
+    DLSUFFIX=$([[ "$(uname -s)" == "Darwin" ]] && printf '.dylib' || printf '.so')
+    if [ -f "$PKGLIBDIR/pg_durable$DLSUFFIX" ] && [ -f "$SHAREDIR/extension/pg_durable.control" ]; then
         BUILD_MODE="skip"
         echo -e "\033[0;33mExisting pg_durable install detected for PG${PG_MAJOR}; skipping build/install. Use --build to force.\033[0m"
     else

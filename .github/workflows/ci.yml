@@ -53,6 +53,66 @@ jobs:
       - name: Test Makefile source installation
         run: ./scripts/test-make-install.sh
 
+  macos_source_install:
+    name: macOS Source Install (PG17)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install PostgreSQL and cargo-pgrx
+        run: |
+          brew install postgresql@17
+          cargo install cargo-pgrx --version 0.16.1 --locked
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config"
+          cargo pgrx init --pg17 "$PG_CONFIG"
+          echo "PG_CONFIG=$PG_CONFIG" >> "$GITHUB_ENV"
+
+      - name: Test source package installation
+        run: |
+          ./scripts/test-make-install.sh
+          make package PG_CONFIG="$PG_CONFIG"
+
+          stage_dir="$RUNNER_TEMP/pg-durable-stage"
+          make install PG_CONFIG="$PG_CONFIG" DESTDIR="$stage_dir"
+          pkglibdir="$($PG_CONFIG --pkglibdir)"
+          extension_dir="$($PG_CONFIG --sharedir)/extension"
+          test -f "$stage_dir$pkglibdir/pg_durable.dylib"
+          test -f "$stage_dir$extension_dir/pg_durable.control"
+          make uninstall PG_CONFIG="$PG_CONFIG" DESTDIR="$stage_dir"
+          test ! -e "$stage_dir$pkglibdir/pg_durable.dylib"
+          test ! -e "$stage_dir$extension_dir/pg_durable.control"
+          test -z "$(find "$stage_dir$extension_dir" -name 'pg_durable--*.sql' -print -quit)"
+
+          make install PG_CONFIG="$PG_CONFIG"
+          bindir="$($PG_CONFIG --bindir)"
+          data_dir="$RUNNER_TEMP/pg-durable-data"
+          cleanup() {
+            "$bindir/pg_ctl" -D "$data_dir" -m immediate stop >/dev/null 2>&1 || true
+            make uninstall PG_CONFIG="$PG_CONFIG" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          "$bindir/initdb" -D "$data_dir" --no-locale --encoding=UTF8
+          cat >> "$data_dir/postgresql.conf" <<EOF
+          shared_preload_libraries = 'pg_durable'
+          port = 55432
+          unix_socket_directories = '$RUNNER_TEMP'
+          EOF
+          "$bindir/pg_ctl" -D "$data_dir" -l "$RUNNER_TEMP/postgresql.log" start
+          "$bindir/psql" -h "$RUNNER_TEMP" -p 55432 -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE EXTENSION pg_durable;' \
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable';"
+          "$bindir/pg_ctl" -D "$data_dir" -m fast stop
+          make uninstall PG_CONFIG="$PG_CONFIG"
+          trap - EXIT
+          test ! -e "$pkglibdir/pg_durable.dylib"
+          test ! -e "$extension_dir/pg_durable.control"
+          test -z "$(find "$extension_dir" -name 'pg_durable--*.sql' -print -quit)"
+
   format:
     name: Format Check
     runs-on: ubuntu-latest

@@ -151,9 +151,10 @@ make PG_CONFIG="$PG_CONFIG"
 sudo make install PG_CONFIG="$PG_CONFIG"
 ```
 
-PostgreSQL 17 and 18 are supported. Set `EXTRA_FEATURES` on the build command
-to enable an HTTP policy feature. `DESTDIR` may be set on `make install` when
-staging files for a package.
+Source installation is supported on Linux and macOS for PostgreSQL 17 and 18.
+Windows source installation is not currently supported. Set `EXTRA_FEATURES`
+on the build command to enable an HTTP policy feature. `DESTDIR` may be set on
+`make install` when staging files for a package.
 
 `sudo make uninstall PG_CONFIG="$PG_CONFIG"` removes the installed files again.
 It needs no build, so it also works from an unbuilt source tree.
