@@ -36,9 +36,9 @@ EOF
 
 FAKE_CARGO="$TEST_DIR/cargo"
 CARGO_LOG="$TEST_DIR/cargo.log"
-PG_CONFIG_17="$(create_pg_config 17)"
-PG_CONFIG_18="$(create_pg_config 18)"
-export CARGO_LOG PG_CONFIG_17 PG_CONFIG_18
+TEST_PG_CONFIG_17="$(create_pg_config 17)"
+TEST_PG_CONFIG_18="$(create_pg_config 18)"
+export CARGO_LOG TEST_PG_CONFIG_17 TEST_PG_CONFIG_18
 
 cat > "$FAKE_CARGO" <<'EOF'
 #!/usr/bin/env bash
@@ -49,8 +49,8 @@ printf '\n' >> "$CARGO_LOG"
 
 if [[ "${1:-}" == "pgrx" && "${2:-}" == "info" && "${3:-}" == "pg-config" ]]; then
     case "${4:-}" in
-        pg17) printf '%s\n' "$PG_CONFIG_17" ;;
-        pg18) printf '%s\n' "$PG_CONFIG_18" ;;
+        pg17) printf '%s\n' "$TEST_PG_CONFIG_17" ;;
+        pg18) printf '%s\n' "$TEST_PG_CONFIG_18" ;;
         *) exit 1 ;;
     esac
     exit 0
@@ -90,7 +90,7 @@ unowned_dir="$TEST_DIR/unowned-package"
 mkdir -p "$unowned_dir"
 printf 'keep\n' > "$unowned_dir/unrelated-file"
 if make --no-print-directory package \
-    PG_CONFIG="$PG_CONFIG_17" \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
     CARGO=false \
     PGRX_PACKAGE_DIR="$unowned_dir" > "$TEST_DIR/unowned.out" 2>&1; then
     echo "package unexpectedly replaced an unowned directory" >&2
@@ -102,7 +102,7 @@ test -f "$unowned_dir/unrelated-file"
 for test_case in 17:.so 18:.so 17:.dylib 18:.dylib; do
     major="${test_case%%:*}"
     dlsuffix="${test_case#*:}"
-    pg_config_variable="PG_CONFIG_$major"
+    pg_config_variable="TEST_PG_CONFIG_$major"
     pg_config="${!pg_config_variable}"
     suffix_label="${dlsuffix#.}"
     package_dir="$TEST_DIR/package $major-$suffix_label"
@@ -186,7 +186,7 @@ fi
 grep -F "pg_durable supports PostgreSQL 17 and 18" "$TEST_DIR/pg16.out" > /dev/null
 
 if make --no-print-directory install \
-    PG_CONFIG="$PG_CONFIG_17" \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
     PGRX_PACKAGE_DIR="$TEST_DIR/missing-package" > "$TEST_DIR/missing.out" 2>&1; then
     echo "install unexpectedly succeeded without packaged artifacts" >&2
     exit 1
@@ -205,7 +205,7 @@ for artifact in control sql; do
     fi
 
     if make --no-print-directory install \
-        PG_CONFIG="$PG_CONFIG_17" \
+        PG_CONFIG="$TEST_PG_CONFIG_17" \
         PGRX_PACKAGE_DIR="$partial_dir" > "$TEST_DIR/partial-$artifact.out" 2>&1; then
         echo "install unexpectedly accepted a package without $artifact files" >&2
         exit 1
@@ -214,7 +214,7 @@ for artifact in control sql; do
 done
 
 if make --no-print-directory -n install installcheck \
-    PG_CONFIG="$PG_CONFIG_17" > "$TEST_DIR/mixed-goals.out" 2>&1; then
+    PG_CONFIG="$TEST_PG_CONFIG_17" > "$TEST_DIR/mixed-goals.out" 2>&1; then
     echo "install and installcheck were unexpectedly accepted together" >&2
     exit 1
 fi
@@ -227,7 +227,7 @@ stray_dir="$TEST_DIR/stray-package"
 cp -a "$TEST_DIR/package 17-so" "$stray_dir"
 printf 'bitcode\n' > "$stray_dir/usr/lib/postgresql/17/lib/pg_durable.bc"
 if make --no-print-directory install \
-    PG_CONFIG="$PG_CONFIG_17" \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
     PGRX_PACKAGE_DIR="$stray_dir" \
     DESTDIR="$TEST_DIR/stray-stage" > "$TEST_DIR/stray.out" 2>&1; then
     echo "install unexpectedly accepted an unrecognized packaged file" >&2
@@ -239,7 +239,7 @@ grep -F "pg_durable.bc" "$TEST_DIR/stray.out" > /dev/null
 # `pgxn check` calls installcheck directly, with PG_CONFIG on the command line
 # and no wrapper, so that invocation shape must still resolve PGXS.
 make --no-print-directory -n installcheck \
-    PG_CONFIG="$PG_CONFIG_17" \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
     CONTRIB_TESTDB=contrib_regression > "$TEST_DIR/installcheck.out" 2>&1
 grep -F "pgxs installcheck" "$TEST_DIR/installcheck.out" > /dev/null
 
@@ -247,14 +247,14 @@ grep -F "pgxs installcheck" "$TEST_DIR/installcheck.out" > /dev/null
 # to run installcheck when PostgreSQL is not registered with cargo-pgrx.
 path_bin="$TEST_DIR/path-pg17"
 mkdir -p "$path_bin"
-ln -s "$PG_CONFIG_17" "$path_bin/pg_config"
+ln -s "$TEST_PG_CONFIG_17" "$path_bin/pg_config"
 PATH="$path_bin:/usr/bin:/bin" make --no-print-directory -n installcheck \
     CARGO=/missing/cargo \
     CONTRIB_TESTDB=contrib_regression > "$TEST_DIR/installcheck-path.out" 2>&1
 grep -F "pgxs installcheck" "$TEST_DIR/installcheck-path.out" > /dev/null
 
 if make --no-print-directory -n uninstall installcheck \
-    PG_CONFIG="$PG_CONFIG_17" > "$TEST_DIR/mixed-uninstall.out" 2>&1; then
+    PG_CONFIG="$TEST_PG_CONFIG_17" > "$TEST_DIR/mixed-uninstall.out" 2>&1; then
     echo "uninstall and installcheck were unexpectedly accepted together" >&2
     exit 1
 fi
