@@ -4,24 +4,31 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.6] - Unreleased
+## [0.2.6] - 2026-08-23
+
+### Added
+
+- **PGXN source distribution (#344):** added PGXN metadata and a reproducible source archive for installing `pg_durable` through PGXN.
 
 ### Fixed
 
-- **Deep workflow composition (#327):** workflow graphs deeper than serde_json's 127-level recursion limit no longer silently collapse into SQL text. Nested children are deserialized one graph level at a time, and `df.explain()` now enforces the configured graph-depth limit before traversal.
-- **Silent Durofut envelope corruption (follow-up to #327):** `Durofut::ensure()` now fails loudly when a JSON object carrying a `node_type` cannot be deserialized (e.g. a non-object child) instead of silently wrapping the raw envelope as a SQL node that only fails at execution time. `df.explain()` no longer panics on an undeserializable child, raising a clean PostgreSQL error consistent with `df.start()`.
+- **Variable substitution determinism (#320):** replacements are now resolved once from left to right, so placeholder-like text inside a variable value is not rescanned and cannot produce replay-dependent results.
+- **Worker shutdown (#321, #326):** graceful PostgreSQL stops no longer hang on background-worker pool cleanup or pay the runtime's fixed no-drain delay.
+- **Reconciler child classification (#323):** named sub-orchestrations are no longer mistaken for root instances, and failed children can no longer consume the reclaim batch limit and starve orphan cleanup.
+- **Deep workflow composition (#331, #328):** deeply nested graphs no longer hit `serde_json`'s recursion limit, and malformed workflow envelopes now raise a clean error instead of silently becoming SQL nodes or panicking in `df.explain()`.
+- **Extension recreation race (#336):** the worker now detects when `DROP EXTENSION` / `CREATE EXTENSION` replaces the extension while the runtime is initializing, preventing a stale runtime from being marked ready.
+- **Source installation (#345, #349):** `make install` now builds before privilege escalation, supports conventional `pg_config` discovery and `DESTDIR`, and works on macOS without relying on GNU-only `readlink -f`.
 
 ### Changed
 
-- **Conditional operators:** `?>` / `!>` now delegate operand normalization to `df.if()`, matching the function-call syntax and removing the duplicated internal `df.ensure_durofut()` validator.
+- **Independent-start admission control (#322):** concurrent `df.start(..., transaction_mode => 'new')` launches are cluster-wide limited to two by default. Configure the limit and wait time with `pg_durable.max_new_transaction_starts` and `pg_durable.new_transaction_start_timeout`; excess launches fail without leaving partial work.
+- **Workflow graph materialization (#334, #335, #337):** nested graph configuration is represented as first-class children, flattened iteratively, and inserted in bounded batches. This removes parser-depth and recursive-traversal limits while reducing SPI round trips. The transient `Durofut` JSON envelope changes; persisted `df.nodes` rows and in-flight instances are unaffected.
+- **PostgreSQL connection visibility (#347):** worker, workflow, monitoring, and internal backend connections now use stable `application_name` values for operational inspection.
+- **HTTP allowlist preset (#341):** `http-allow-azure-domains` now permits `api.github.com`, which Azure services use for supported GitHub integrations.
 
 ### Removed
 
-- **`df.ensure_durofut(text)`:** removed this undocumented internal helper. The `0.2.5 -> 0.2.6` upgrade replaces its operator callers before dropping it with `RESTRICT`; customer-owned dependent objects must be changed or removed before upgrading.
-
-### Changed
-
-- **Workflow graph envelope:** IF/LOOP conditions and additional JOIN branches are now first-class opaque children instead of JSON embedded inside the `query` string. This removes the remaining parser-depth limit and repeated escaping for config-nested graphs. The transient `Durofut` JSON representation changes; persisted `df.nodes` rows and in-flight instances are unaffected. Applications must not store this internal envelope for replay across an upgrade or downgrade.
+- **`df.ensure_durofut(text)` (#332):** removed this undocumented internal helper after conditional operators moved to `df.if()` normalization. The upgrade replaces built-in operator dependencies before dropping the helper with `RESTRICT`; change or remove customer-owned dependent objects before upgrading.
 
 ## [0.2.5] - 2026-07-30
 
