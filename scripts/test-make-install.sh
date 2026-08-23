@@ -8,6 +8,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
 
+# Some cases verify Makefile discovery, so they must not inherit a real pg_config.
+unset PG_CONFIG
+
 file_mode() {
     stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
