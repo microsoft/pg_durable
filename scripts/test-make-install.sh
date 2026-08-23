@@ -210,6 +210,7 @@ for artifact in control sql; do
 
     if make --no-print-directory install \
         PG_CONFIG="$TEST_PG_CONFIG_17" \
+        PG_DLSUFFIX=.so \
         PGRX_PACKAGE_DIR="$partial_dir" > "$TEST_DIR/partial-$artifact.out" 2>&1; then
         echo "install unexpectedly accepted a package without $artifact files" >&2
         exit 1
@@ -232,6 +233,7 @@ cp -a "$TEST_DIR/package 17-so" "$stray_dir"
 printf 'bitcode\n' > "$stray_dir/usr/lib/postgresql/17/lib/pg_durable.bc"
 if make --no-print-directory install \
     PG_CONFIG="$TEST_PG_CONFIG_17" \
+    PG_DLSUFFIX=.so \
     PGRX_PACKAGE_DIR="$stray_dir" \
     DESTDIR="$TEST_DIR/stray-stage" > "$TEST_DIR/stray.out" 2>&1; then
     echo "install unexpectedly accepted an unrecognized packaged file" >&2
