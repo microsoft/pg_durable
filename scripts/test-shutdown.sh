@@ -55,8 +55,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-PG_PORT="$((28800 + PG_VERSION))"
-PGRX_HOME="$HOME/.pgrx"
+PG_PORT="${PG_PORT:-$((28800 + PG_VERSION))}"
+PGRX_HOME="${PGRX_HOME:-$HOME/.pgrx}"
 DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 

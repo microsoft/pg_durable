@@ -167,6 +167,15 @@ buffered until consumed, and unconsumed events survive `continue_as_new` (up to
 100, past which the oldest are dropped with a warning). `schedule_wait` would
 discard both.
 
+A third property makes the loop safe to write naively. Every iteration creates a
+subscription that may never be awaited: the one created before a predicate that
+returns true is dropped at `break`, and the one that loses `select2` to the
+timer is dropped too. Neither loses a buffered notification.
+`DurableFuture::drop` marks the token cancelled, and duroxide skips cancelled
+subscriptions when matching arrivals to subscriptions in FIFO order, so an
+arrival passes to the next iteration's subscription instead of being consumed
+and discarded.
+
 One loss window remains: a notification sent while the worker is reconnecting
 is gone before duroxide sees it. So the contract is the backstop. The condition
 fires within `max_check_interval` of becoming true, which is the latency to set

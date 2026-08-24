@@ -1714,6 +1714,15 @@ async fn execute_wait_condition_node(
     let interval_secs = config["max_check_interval_secs"]
         .as_i64()
         .ok_or_else(|| "WAIT_CONDITION missing max_check_interval_secs".to_string())?;
+    // df.wait_for_condition() already rejects sub-second intervals, but a graph
+    // can also be hand-written as raw node JSON. Fail loudly rather than let a
+    // negative value widen into an effectively infinite timer via `as u64`.
+    if interval_secs < 1 {
+        return Err(format!(
+            "WAIT_CONDITION max_check_interval_secs must be at least 1, got {interval_secs}"
+        )
+        .into());
+    }
     let notify_key = config["notify_key"].as_str();
 
     let substituted = substitute_all(condition, results, &exec_ctx.vars, sys_vars)?;
@@ -1738,7 +1747,9 @@ async fn execute_wait_condition_node(
         .await?;
     }
 
-    let queue = notify_key.map(|k| format!("df:condition:{k}"));
+    // Must agree with the listener's enqueue_event target; both go through
+    // types::condition_queue_name so the two can never drift apart.
+    let queue = notify_key.map(crate::types::condition_queue_name);
     let interval = Duration::from_secs(interval_secs as u64);
     let predicate_input = serde_json::json!({
         "query": predicate_sql,
@@ -1762,6 +1773,12 @@ async fn execute_wait_condition_node(
         // its action when the future is created, and it is a mailbox, so an
         // event that arrives while nothing is parked is buffered rather than
         // dropped.
+        //
+        // Dropping this future unawaited (on `break`, or as select2's loser) is
+        // safe: DurableFuture::drop marks the token cancelled, and duroxide
+        // skips cancelled subscriptions when matching arrivals to subscriptions
+        // in FIFO order. A buffered notification is therefore handed to the next
+        // iteration's subscription rather than consumed and lost.
         let event_fut = queue.as_ref().map(|q| ctx.dequeue_event(q.clone()));
 
         let raw = ctx
