@@ -39,23 +39,24 @@ SELECT df.start(
 ```
 
 **Parameters:**
-- `max_attempts` - Tries per node, including the first. Defaults to `5`.
+- `max_attempts` - Tries per node, including the first. Defaults to `1`.
 - `max_backoff` - Cap on the delay between tries. Defaults to `'16s'`. Taken as
   an `interval` and converted with pgrx's `Interval::as_micros()`, which counts
   a month as 30 days, so the conversion is deterministic.
 - `on_failure` - What to do once the tries are spent. `'continue'` or
-  `'fail'`. Defaults to `'continue'`.
+  `'fail'`. Defaults to `'fail'`.
 
-These are the defaults, so the example above is equivalent to omitting all
-three.
+The defaults reproduce the pre-0.2.7 behavior — one try, then fail the instance
+— so the feature is opt-in and upgrading changes nothing. The example above
+therefore has to name all three.
 
 ## Behavior
 
 A failing `df.sql()`, `df.http()`, or `df.http_multipart()` node is retried
 with exponential backoff, capped at `max_backoff`, up to `max_attempts` tries.
-At the defaults that's four delays (1s, 2s, 4s, 8s), and the cap doesn't bind
-until `max_attempts` goes past 5. Succeed on any try and the workflow proceeds
-normally.
+With `max_attempts => 5` that's four delays (1s, 2s, 4s, 8s), and the cap
+doesn't bind until `max_attempts` goes past 5. Succeed on any try and the
+workflow proceeds normally.
 
 When the tries run out, `'continue'` abandons the rest of the current loop
 iteration and starts the next one. That's `continue` in the ordinary
@@ -107,8 +108,21 @@ after that guard, so it doesn't bound the rate of anything; it just sets an
 expiry. A loop that busy-spins is already rate-limited, and a loop that
 legitimately runs forever gets killed with a message telling the operator to
 call `df.break()`. A genuinely runaway workflow is better served by
-`df.cancel()` and by watching `df.instances`, both of which work from the first
+`df.cancel()` and by watching activity, both of which work from the first
 iteration rather than 27 hours in.
+
+Watching `df.instances` alone isn't enough, though. Its `status` reads
+`'running'` for a healthy eternal loop, for one blocked on a signal that never
+arrives, and for one retrying a broken node forever — and `'continue'` makes
+that last case reachable. So this design also adds `df.instance_activity()`, a
+`LANGUAGE SQL STABLE` function over `df.instances` and `df.nodes` returning, for
+each non-terminal instance, the timestamp of its last node transition, the
+seconds since, its running and failed node counts, and its most recent node
+error. `df.instance_activity('10 minutes')` is then "show me what has stopped
+moving". It is a function rather than a view because view-level RLS
+pass-through needs `security_invoker`, which is PostgreSQL 15+, while this
+extension supports 13; an ordinary SECURITY INVOKER function inherits the
+existing policies on both tables.
 
 `loop_iteration` stays in `FunctionInput` and `SubtreeInput`. It still
 increments and is still carried across `continue_as_new`, and it remains useful
@@ -122,14 +136,27 @@ failed graph load) fail the instance immediately under both policies. Retrying
 a malformed graph can't succeed, and looping on it forever would hide the
 defect.
 
-Within those three node types the retry is unconditional: duroxide retries on
-any activity error, so a permission denial, an SSRF-allowlist rejection, or a
-syntax error is retried the same as a deadlock. Discriminating would mean
-classifying error strings from PostgreSQL and from the HTTP stack, which is
-brittle and, for the `'continue'` case, unnecessary — a permanently failing
-node keeps failing visibly in `df.instance_nodes()` either way. The cost is
-bounded: at the defaults a doomed node burns four backoffs (15s) per
-iteration.
+Within those three node types the retry is *nearly* unconditional. Errors that
+are a property of the statement rather than of the moment are not retried at
+all, because a retry reproduces them byte for byte: SQLSTATE classes 42 (syntax
+or access rule violation), 23 (integrity constraint violation), 28 (invalid
+authorization), 3D (invalid catalog name), and 3F (invalid schema name). These
+fail on the first try however high `max_attempts` is, and `on_failure` then
+applies as usual.
+
+Everything else is retried: classes 40, 08, 53, 57, anything unclassified, and
+every `df.http()` / `df.http_multipart()` error, which carries no SQLSTATE at
+all. Class 22 (data exception, e.g. division by zero) is retried deliberately —
+it describes the *data*, which another node can change between tries.
+
+Classification is by SQLSTATE, not by error text. `execute_sql` reads
+`sqlx::Error::as_database_error()?.code()` and stamps `[SQLSTATE xxxxx]` into
+the message before it is stringified into the activity error; the orchestration
+matches on the two-character class. duroxide's
+`schedule_activity_with_retry` retries every error with no predicate hook, so
+the retry loop is hand-rolled — it emits the identical sequence of durable
+operations (one `schedule_activity` per try, a timer between) but can break out
+early. That equivalence is what preserves replay compatibility.
 
 ### Relation to df.break()
 
@@ -137,6 +164,21 @@ Both unwind to the nearest enclosing loop: `df.break()` exits it, a continue
 starts the next iteration. The unwind passes through compound nodes, so a
 failure in one branch of `df.join()` continues the iteration containing the
 join.
+
+Two consequences of routing a continue through a parallel node are worth
+stating, since both are deterministic and neither is a replay hazard:
+
+- **`df.join()` honours the first branch that carries a continue.** Branch
+  results are inspected in fixed input order, so if an earlier branch returns a
+  continue and a later one returns a genuine failure (a malformed graph, say),
+  the iteration is abandoned and the failure is not surfaced that iteration. It
+  reappears the moment the earlier branch stops continuing.
+- **`df.race()` treats an exhausted branch as a completed one.** A branch whose
+  retries ran out under `'continue'` returns *successfully* with a continue
+  marker, so it can win the race and abandon the iteration even though the
+  other branch might have succeeded; the loser is cancelled as usual. Under
+  `'continue'` this is benign — the next iteration retries both — but it means
+  a fast-failing branch can starve a slow-succeeding one.
 
 ### Validation
 
@@ -287,11 +329,13 @@ which only exists on a 0.2.7+ schema — issues
 `df.start($1, $2, $3, 'caller', $4, $5, $6)`.
 
 **Instances started after an upgrade:** a caller who upgrades and keeps using
-the four-argument `df.start()` picks up both new defaults, so a workflow that
-used to fail on its first error now retries five times and, inside a loop,
-keeps running afterwards. That is the intended default, but it changes existing
-workflows without any change on the caller's part, so it belongs in the release
-notes. `on_failure => 'fail', max_attempts => 1` restores the old behavior.
+the four-argument `df.start()` resolves to the new function but picks up
+defaults of `max_attempts => 1, on_failure => 'fail'`, which is exactly what
+the four-argument function did. Nothing changes without an explicit opt-in.
+This is deliberate: silently converting every existing workflow's fail-fast
+semantics into retry-and-continue is not a change a caller should discover in
+production. It is also why the existing E2E suite needed no edits — the five
+tests that assert a node failure still see one.
 
 **Replay of in-flight instances:** the new `FunctionInput` and `SubtreeInput`
 fields are `#[serde(default)]`, defaulting to `'fail'` with
@@ -299,7 +343,26 @@ fields are `#[serde(default)]`, defaulting to `'fail'` with
 behavior. The first attempt of `schedule_activity_with_retry` records the same
 history operation as `schedule_activity` (duroxide's retry helper simply calls
 `schedule_activity` in a loop, adding a timer only between attempts), so
-existing histories replay unchanged.
+existing activity histories replay unchanged.
+
+A serde default alone is *not* sufficient, and the first draft of this design
+got that wrong. A default only governs deserialization; the field is still
+written on the way out, so the `execute-subtree` envelope a 0.2.7 parent emits
+would no longer be byte-equal to the one a 0.2.6 parent recorded. duroxide
+matches a sub-orchestration schedule with `name == en && input == ei`
+(`replay_engine::action_matches_event_kind`), so that mismatch would have
+failed every in-flight JOIN branch, RACE branch, and non-root loop child with a
+nondeterminism error — precisely the break `docs/upgrade-testing.md` records for
+v0.2.4 → v0.2.5, where adding `instance_id`, `vars`, `label`, and `iteration` to
+the same envelope broke in-flight parallel branches unconditionally.
+
+Both fields are therefore also declared
+`skip_serializing_if = "RetryPolicySpec::is_legacy"`, so an instance carrying
+the legacy policy serializes to exactly the pre-0.2.7 shape. The predicate keys
+off the legacy value rather than `Default`, because an instance started under
+0.2.7 with a real policy must still carry it into its subtrees. Two unit tests
+pin both directions: a legacy envelope must contain no `retry` key, and a
+non-legacy one must round-trip its policy.
 
 Removing the iteration cap is safe on replay because it only ever turned a
 continuation into a failure. An in-flight loop past 100,000 iterations would
@@ -339,8 +402,17 @@ flight):
    `df.instance_nodes()` reports the node failed.
 4. **Fail.** `on_failure => 'fail', max_attempts => 1` inside a loop fails the
    instance after exactly one attempt.
-5. **Validation.** `max_attempts => 0`, a negative `max_backoff`, and an
+5. **Defaults are legacy.** A plain `df.start()` with no policy arguments, on a
+   loop whose body always fails, fails the instance after exactly one attempt —
+   pinning "upgrading changes nothing" as a test rather than a claim.
+6. **Validation.** `max_attempts => 0`, a negative `max_backoff`, and an
    unrecognised `on_failure` are each rejected by `df.start()`.
+
+Plus `tests/e2e/sql/69_instance_activity.sql` for the monitoring function: a
+busy instance is listed with a live `last_activity_at`; the `idle_for` argument
+filters; a loop wedged under `'continue'` surfaces a non-zero
+`failed_node_count` and its `last_error` while still reporting `'running'`;
+terminal instances are excluded; and a second role sees none of it.
 
 Attempts are counted with a **sequence**, not a counter table: the failing
 attempt's transaction rolls back, taking any row it inserted with it, whereas

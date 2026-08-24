@@ -338,9 +338,9 @@ Starts a durable function.
 | `label` | TEXT | ❌ Literal | (Optional) Human-readable label |
 | `database` | TEXT | ❌ Literal | (Optional) Target database on the cluster |
 | `transaction_mode` | TEXT | ❌ Literal | (Optional) `'caller'` (default) or `'new'` |
-| `max_attempts` | INT | ❌ Literal | (Optional) Attempts per failing node, including the first (default `5`, minimum `1`) |
+| `max_attempts` | INT | ❌ Literal | (Optional) Attempts per failing node, including the first (default `1`, minimum `1`) |
 | `max_backoff` | INTERVAL | ❌ Literal | (Optional) Upper bound on the wait between attempts (default `'16 seconds'`) |
-| `on_failure` | TEXT | ❌ Literal | (Optional) `'continue'` (default) or `'fail'` |
+| `on_failure` | TEXT | ❌ Literal | (Optional) `'fail'` (default) or `'continue'` |
 
 ```sql
 df.start('SELECT 1')                      -- auto-wrapped
@@ -391,27 +391,38 @@ An unrecognised value raises an error rather than falling back to the default.
 Control what happens when a node that reaches outside the workflow —
 `df.sql()`, `df.http()`, or `df.http_multipart()` — fails.
 
+The defaults (`max_attempts => 1`, `on_failure => 'fail'`) are the behaviour
+pg_durable had before 0.2.7: one attempt, and a failing node fails the instance.
+The policy is opt-in, so upgrading changes nothing for an existing workflow.
+
 A failing node is retried up to `max_attempts` times in total, waiting 1 second
 before the second attempt and doubling thereafter until the wait reaches
-`max_backoff`. With the defaults a node is attempted at 0s, 1s, 3s, 7s, and 15s.
-The wait is a durable timer: it holds no connection and survives a restart.
+`max_backoff`. With `max_attempts => 5` a node is attempted at 0s, 1s, 3s, 7s,
+and 15s. The wait is a durable timer: it holds no connection and survives a
+restart. `max_backoff` is only reached once `max_attempts` exceeds 5 — five
+attempts use waits of 1s, 2s, 4s, and 8s.
 
 Once the attempts are spent, `on_failure` decides:
 
-- `'continue'` (default) — abandon the rest of the current loop iteration and
-  start the next one. Nodes downstream of the failure are skipped, and so is the
-  loop's `while` condition, which usually reads results the abandoned iteration
-  never produced.
-- `'fail'` — fail the instance.
+- `'fail'` (default) — fail the instance.
+- `'continue'` — abandon the rest of the current loop iteration and start the
+  next one. Nodes downstream of the failure are skipped, and so is the loop's
+  `while` condition, which usually reads results the abandoned iteration never
+  produced.
 
 Outside a loop there is no next iteration, so both settings fail the instance.
 
 ```sql
--- Recurring work that should survive a bad batch (the default).
-df.start(df.loop('CALL compact()' ~> df.wait_for_schedule('*/5 * * * *')), 'compactor')
+-- One-shot work that must not be retried and must surface its error (default).
+df.start('CALL migrate_tenant(42)', 'migrate')
 
--- One-shot work that must not be retried and must surface its error.
-df.start('CALL migrate_tenant(42)', 'migrate', max_attempts => 1, on_failure => 'fail')
+-- Recurring work that should survive a bad batch.
+df.start(
+    df.loop('CALL compact()' ~> df.wait_for_schedule('*/5 * * * *')),
+    'compactor',
+    max_attempts => 5,
+    on_failure => 'continue'
+)
 ```
 
 `max_attempts < 1`, a negative `max_backoff`, and an unrecognised `on_failure`
@@ -419,15 +430,23 @@ each raise an error.
 
 The policy covers node execution only. A malformed graph, an unknown node type,
 or a failure to start a sub-orchestration fails the instance immediately.
-Retries are otherwise unconditional — a permission or syntax error is retried
-like any other, since pg_durable cannot reliably tell a permanently denied
-statement from one whose grant is seconds away, and the cost is bounded by
-`max_attempts`.
+
+A failure that is a property of the statement rather than of the moment is also
+not retried, whatever `max_attempts` says. SQLSTATE classes 42 (syntax or access
+rule violation), 23 (integrity constraint violation), 28 (invalid authorization),
+3D (invalid catalog name) and 3F (invalid schema name) fail on the first attempt,
+because a retry would reproduce the identical error. Classes 40 (serialization
+failure, deadlock), 08 (connection exception), 53 (insufficient resources) and
+57 (operator intervention) are retried, as is any failure without a SQLSTATE —
+which includes every `df.http()` and `df.http_multipart()` error. Class 22 (data
+exception, e.g. division by zero) is retried deliberately: it describes the data,
+which another node can change between attempts.
 
 > **Note:** attempts are not individually visible through `df.instance_nodes()`
 > or `df.explain()`, which report a node's status once its attempts have
 > settled. A node being retried reads as still running; the individual failures
-> are in the worker log.
+> are in the worker log. Use `df.instance_activity()` to see whether an instance
+> is making progress at all.
 
 ---
 
@@ -541,6 +560,46 @@ Gets instance result (for completed instances).
 
 ```sql
 SELECT df.result('a1b2c3d4');
+```
+
+---
+
+### df.instance_activity([idle_for])
+
+Returns one row per **non-terminal** instance with a measure of whether it is
+making progress. `status` alone cannot separate a healthy eternal loop, an
+instance blocked on a signal that will never arrive, and a loop retrying a
+broken node — all three read `'running'`.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `idle_for` | INTERVAL | ❌ Literal | (Optional) Report only instances idle at least this long (default `'0 seconds'`, i.e. all) |
+
+Return columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `instance_id` | VARCHAR(8) | Instance id |
+| `label` | TEXT | Label given at `df.start()`, or `NULL` |
+| `status` | TEXT | Stored instance status |
+| `last_activity_at` | TIMESTAMPTZ | When a node of this instance last changed state |
+| `idle_for_seconds` | DOUBLE PRECISION | Seconds since `last_activity_at` |
+| `running_node_count` | BIGINT | Nodes currently executing |
+| `failed_node_count` | BIGINT | Nodes that ended in failure |
+| `last_error` | TEXT | Most recent node error, or `NULL` |
+
+Completed, failed, and cancelled instances are never returned — the question
+only applies to work in progress. Results are row-level-security filtered to the
+calling user's own instances.
+
+```sql
+-- Everything in flight, quietest first.
+SELECT * FROM df.instance_activity() ORDER BY idle_for_seconds DESC;
+
+-- Loops that are running but only producing failures.
+SELECT instance_id, label, failed_node_count, last_error
+FROM df.instance_activity()
+WHERE failed_node_count > 0 AND running_node_count = 0;
 ```
 
 ---

@@ -236,26 +236,62 @@ decide how hard to try and what to do when trying is over:
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `max_attempts` | `5` | Total attempts for a failing node, including the first. `1` disables retrying. |
+| `max_attempts` | `1` | Total attempts for a failing node, including the first. `1` disables retrying. |
 | `max_backoff` | `'16 seconds'` | Upper bound on the wait between attempts. |
-| `on_failure` | `'continue'` | What to do once the attempts are spent: `'continue'` or `'fail'`. |
+| `on_failure` | `'fail'` | What to do once the attempts are spent: `'continue'` or `'fail'`. |
+
+**The defaults are the behaviour pg_durable has always had**: one attempt, and
+a failing node fails the instance. The policy is entirely opt-in, so upgrading
+to 0.2.7 cannot change how an existing workflow handles a failure. Ask for
+retries when you want them:
+
+```sql
+-- Retry a flaky endpoint five times, then fail the instance as usual.
+SELECT df.start(
+    df.http('POST', 'https://api.example.com/sync'),
+    'sync',
+    max_attempts => 5
+);
+```
 
 Retries back off exponentially, starting at 1 second and doubling until they
-reach `max_backoff`. With the defaults a node is tried at 0s, 1s, 3s, 7s, and
-15s before its policy decides. The delay is a durable timer, so it costs no
-connection and survives a restart.
+reach `max_backoff`. With `max_attempts => 5` a node is tried at 0s, 1s, 3s,
+7s, and 15s before its policy decides. The delay is a durable timer, so it
+costs no connection and survives a restart. Note that `max_backoff` only binds
+once `max_attempts` exceeds 5: five attempts use waits of 1s, 2s, 4s, and 8s,
+none of which reach the 16-second default cap.
+
+A failure that is a property of the statement rather than of the moment is
+**not** retried, however many attempts you allow. An undefined table, a syntax
+error, a permission denied, or a constraint violation (SQLSTATE classes 42, 23,
+28, 3D and 3F) fails immediately, because the next attempt would produce the
+identical error. Deadlocks and serialization failures (class 40), connection
+errors (08), resource limits (53), operator intervention (57), and anything
+without a SQLSTATE — including every `df.http()` failure — are retried. Division
+by zero and other data exceptions (class 22) are retried on purpose: the data
+they complain about can change between attempts.
 
 Once the attempts are spent, `on_failure` chooses between two outcomes:
 
-- `'continue'` (the default) abandons the **rest of the current loop
-  iteration** and starts the next one. Nodes downstream of the failure are
-  skipped — a failed extract does not run its load — and the loop's `while`
-  condition is skipped too, since it usually reads results the abandoned
-  iteration never produced.
-- `'fail'` fails the whole instance, which is the pre-0.2.7 behaviour.
+- `'fail'` (the default) fails the whole instance, which is what pg_durable has
+  always done.
+- `'continue'` abandons the **rest of the current loop iteration** and starts
+  the next one. Nodes downstream of the failure are skipped — a failed extract
+  does not run its load — and the loop's `while` condition is skipped too,
+  since it usually reads results the abandoned iteration never produced.
 
 Outside a loop there is no next iteration to continue into, so both settings
 fail the instance. `'continue'` is a statement about *recurring* work.
+
+> **Write loop bodies to be idempotent.** Each `df.sql()` node commits on its
+> own autocommit connection, so "abandon the rest of the iteration" does not
+> roll anything back. If node A inserts and node B then fails, A's insert is
+> already durable and the next iteration starts over on top of it. The same
+> applies within a single node: a retry re-runs the statement, and a statement
+> that committed server-side but lost its connection before returning will run
+> twice. Guard side effects with `ON CONFLICT`, an idempotency key, or a check
+> against the state the previous attempt would have written — or set
+> `on_failure => 'fail'` so a human reconciles instead.
 
 ```sql
 -- A compactor that must survive a bad batch: skip it and pick up the next tick.
@@ -263,24 +299,27 @@ SELECT df.start(
     df.loop(
         'CALL compact_next_partition()' ~> df.wait_for_schedule('*/5 * * * *')
     ),
-    'compactor'
+    'compactor',
+    max_attempts => 5,
+    on_failure => 'continue'
 );
 
 -- A one-shot migration that must not be retried and must surface its error.
+-- This is the default, so it is also what a plain df.start() does.
 SELECT df.start(
     'CALL migrate_tenant(42)',
-    'migrate-42',
-    max_attempts => 1,
-    on_failure => 'fail'
+    'migrate-42'
 );
 ```
 
 The policy covers node execution only. A malformed graph, an unknown node type,
 or a failure to start a sub-orchestration is not a transient condition and fails
-the instance immediately, whatever the policy says. Retries are otherwise
-unconditional: a permission error is retried like any other, because pg_durable
-cannot reliably tell a permanently denied statement from one whose grant is
-seconds away. The cost is bounded by `max_attempts`.
+the instance immediately, whatever the policy says.
+
+A loop running under `on_failure => 'continue'` never reaches a terminal status
+on its own: it keeps starting iterations, so its instance stays `running` even
+when every iteration fails. Use `df.instance_activity()` (below) to tell that
+apart from healthy work, and `df.cancel()` to stop it.
 
 Attempts are not individually visible through `df.instance_nodes()` or
 `df.explain()`, which report a node's status once its attempts have settled. A
@@ -1888,6 +1927,51 @@ WHERE n.node_type = 'SLEEP'
 ```
 
 This is useful for dashboards and operational queries that need to understand why a running instance is not making progress.
+
+---
+
+### Is Anything Actually Happening?
+
+`status` alone cannot distinguish a workflow that is working from one that is
+stuck: a healthy eternal loop, an instance blocked on a signal that will never
+arrive, and a loop retrying a broken node all read `'running'`.
+`df.instance_activity()` answers the operational question directly — when did
+this instance last transition a node, and is anything failing right now?
+
+```sql
+-- Every non-terminal instance, quietest first.
+SELECT * FROM df.instance_activity() ORDER BY idle_for_seconds DESC;
+
+-- Only instances that have done nothing for ten minutes.
+SELECT instance_id, label, idle_for_seconds, last_error
+FROM df.instance_activity('10 minutes');
+```
+
+| Column | Meaning |
+|---|---|
+| `instance_id` / `label` / `status` | Identity, as in `df.list_instances()`. |
+| `last_activity_at` | When a node of this instance last changed state. |
+| `idle_for_seconds` | Seconds since then. A large value on a workflow that should be busy is the signal to investigate. |
+| `running_node_count` | Nodes currently executing. Zero with a large `idle_for_seconds` means nothing is in flight. |
+| `failed_node_count` | Nodes that ended in failure. Non-zero on a `running` instance means a loop is failing and continuing. |
+| `last_error` | The most recent node error, so you do not have to join to `df.instance_nodes()` to see why. |
+
+The argument filters to instances idle for at least that long; it defaults to
+zero, which reports them all. Terminal instances (`completed`, `failed`,
+`cancelled`) are never reported — the question only applies to work in
+progress. Results are row-level-security filtered, so you see only your own
+instances.
+
+A loop under `on_failure => 'continue'` is the case this exists for. It stays
+`running` indefinitely by design, so a rising `failed_node_count` with a
+repeating `last_error` is how you spot one that will never succeed:
+
+```sql
+-- Loops that are running but only producing failures.
+SELECT instance_id, label, failed_node_count, last_error
+FROM df.instance_activity()
+WHERE failed_node_count > 0 AND running_node_count = 0;
+```
 
 ---
 
