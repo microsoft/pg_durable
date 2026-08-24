@@ -28,7 +28,9 @@ SELECT df.start(
     'INSERT INTO test_loop_child_start_log VALUES (1)'
     ~> df.sleep(3)
     ~> df.loop('SELECT 1', 'SELECT false'),
-    'test-loop-child-start-failure'
+    'test-loop-child-start-failure',
+    max_attempts => 1,
+    on_failure => 'fail'
 );
 RESET SESSION AUTHORIZATION;
 

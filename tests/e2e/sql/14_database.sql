@@ -341,12 +341,16 @@ SELECT dblink_exec(
 SET SESSION AUTHORIZATION df_e2e_user;
 
 CREATE TEMP TABLE _test_state4 (instance_id TEXT);
+-- This test asserts the failure itself, so it opts out of the default retry
+-- policy: one attempt, then fail (which also overrides the in-loop 'continue').
 INSERT INTO _test_state4 SELECT df.start(
     df.loop(
         'INSERT INTO drop_test (id) VALUES (DEFAULT)' ~> df.sleep(2)
     ),
     'test-drop-db-loop',
-    '_test_drop_db'
+    '_test_drop_db',
+    max_attempts => 1,
+    on_failure => 'fail'
 );
 
 RESET SESSION AUTHORIZATION;
