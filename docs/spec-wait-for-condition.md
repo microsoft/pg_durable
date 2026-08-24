@@ -3,7 +3,7 @@
 **Status:** Proposal
 **Date:** 2026-08-19
 **Target version:** 0.2.6 (unreleased)
-**Related:** `2026-08-19-failure-policy-design.md`
+**Related:** [spec-failure-policy.md](spec-failure-policy.md)
 
 ## Overview
 
