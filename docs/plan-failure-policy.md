@@ -16,7 +16,7 @@ like `NodeError::Break` and is caught by the nearest enclosing loop.
 **Tech Stack:** Rust, pgrx 0.16.1, duroxide 0.1.30 (`RetryPolicy` / `BackoffStrategy`),
 PostgreSQL 17, SQL E2E tests.
 
-**Spec:** `docs/superpowers/specs/2026-08-19-failure-policy-design.md`
+**Spec:** `docs/spec-failure-policy.md`
 
 ## Global Constraints
 
@@ -425,7 +425,7 @@ git commit -m "Retry node activities and unwind exhausted nodes to the enclosing
 
 - [ ] **Step 2: Verify nothing else refers to it**
 
-Run: `grep -rn "MAX_LOOP_ITERATIONS" src/ tests/ docs/ | grep -v superpowers`
+Run: `grep -rn "MAX_LOOP_ITERATIONS" src/ tests/ docs/`
 Expected: no output.
 
 - [ ] **Step 3: Build clean**

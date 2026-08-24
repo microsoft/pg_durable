@@ -1,11 +1,11 @@
 # Node Failure Policy Specification
 
-**Status:** Proposal
+**Status:** Implemented in 0.2.7
 **Date:** 2026-08-19 (revised 2026-08-23 against the code)
 **Target version:** 0.2.7 (unreleased). The design was written against an
 unreleased 0.2.6; that version shipped on 2026-08-23 (tag `v0.2.6`), so the
 work lands in 0.2.7 and every "0.2.6" boundary below reads 0.2.7.
-**Related:** #155 (resilience gap); `2026-08-19-wait-for-condition-design.md`
+**Related:** #155 (resilience gap); the wait-for-condition design
 
 ## Overview
 
