@@ -167,7 +167,7 @@ The extension is also distributed on [PGXN](https://pgxn.org/dist/pg_durable/), 
 
 - PostgreSQL 17 or 18
 - Rust (stable)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19.2
 
 ### GitHub Codespace
 
