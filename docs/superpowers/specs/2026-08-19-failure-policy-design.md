@@ -229,6 +229,17 @@ The unit test at the bottom of `execute_function_graph.rs` that asserts on
 `NodeError::Break` matches with a catch-all `other =>` arm and compiles
 unchanged; it is not one of the six.
 
+`run_loop_iteration` needs no signature change. It already returns
+`Result<Option<...>>`, where `Ok(None)` means "run the next iteration", so a
+`Continue` is handled by tracing a warning and returning `Ok(None)` from both
+arms. The while-condition is deliberately *skipped* when the body continues,
+rather than being evaluated against a half-finished iteration: the condition
+typically reads named results (`$extracted.count`) that the abandoned iteration
+never produced, so evaluating it would replace a clear "this iteration failed"
+with an unrelated substitution error. The consequence, which the Observability
+section states outright, is that a `while` loop whose body fails on every
+iteration never terminates.
+
 `MAX_LOOP_ITERATIONS` and the `next_iteration >= MAX_LOOP_ITERATIONS` check in
 `execute_loop_node` are deleted. The constant has no other reader, so it goes
 with the check rather than being left behind unused. The doc comment on
@@ -297,10 +308,14 @@ old code continued and the new code doesn't.
 
 ## Testing
 
-**Unit** (`./scripts/test-unit.sh`):
+**Unit** (`cargo test --features pg17 --no-default-features --lib`, and
+`./scripts/test-unit.sh` for anything needing a live backend):
 - Argument validation: `max_attempts < 1`, non-positive `max_backoff`, unknown
-  `on_failure`. These run as `#[pg_test]`s calling `df.start()`, since
-  validation lives behind the pgrx entry point.
+  `on_failure`. Validation is factored into a plain `parse_retry_policy()` that
+  returns `Result<RetryPolicySpec, String>`, so these are ordinary `#[test]`s;
+  `df.start()` only turns the `Err` into `pgrx::error!`. This follows the
+  repository's existing split — `pgrx::error!` paths themselves are asserted
+  from SQL (see `55_start_transaction_mode.sql`), not with `should_panic`.
 - Backoff sequence derivation, including the `max_backoff` cap. This asserts on
   duroxide's `BackoffStrategy::delay_for_attempt`, pinning the sequence this
   design promises (1s, 2s, 4s, 8s) to the policy we actually construct.
@@ -311,42 +326,46 @@ old code continued and the new code doesn't.
 - Round-trip: a `RetryPolicySpec` survives serialization into `FunctionInput`
   and back, so `continue_as_new` cannot silently reset the policy.
 
-**E2E** (`tests/e2e/sql/67_failure_policy.sql`, the next free number):
-1. **Transient recovery.** A node backed by a counter table fails twice, then
-   succeeds. Instance completes, attempt count is 3.
-2. **Continue.** A loop body that always fails. Instance stays `running`,
-   failed nodes show up in `df.instance_nodes()`, later iterations still run.
+**E2E** (`tests/e2e/sql/68_failure_policy.sql` — 67 was taken by a branch in
+flight):
+1. **Transient recovery.** A node fails twice, then succeeds; the instance
+   completes and the attempt count is exactly 3.
+2. **Continue.** A loop whose body fails through the first iteration and
+   succeeds in the second. The instance completes, the attempt count shows the
+   abandoned iteration's tries, and the node downstream of the failure ran only
+   once — proving the rest of the failing iteration was skipped.
 3. **No enclosing loop.** A one-shot under `'continue'` runs out of tries and
-   fails.
-4. **Fail.** `on_failure => 'fail', max_attempts => 1` fails on the first
-   error.
-5. **Graph error.** Under `'continue'`, an unknown node type fails
-   immediately, with no retries.
-6. **Loop past the old cap.** Start a loop whose body carries a
-   `loop_iteration` at the old ceiling and confirm it continues instead of
-   failing. Nothing covers the cap today, and no E2E can reach 100,000
-   iterations honestly: at the one-second floor that is over 27 hours, so the
-   test seeds the counter rather than counting to it.
+   fails, the original SQL error surfaces in the instance output, and
+   `df.instance_nodes()` reports the node failed.
+4. **Fail.** `on_failure => 'fail', max_attempts => 1` inside a loop fails the
+   instance after exactly one attempt.
+5. **Validation.** `max_attempts => 0`, a negative `max_backoff`, and an
+   unrecognised `on_failure` are each rejected by `df.start()`.
 
-Retries cost wall clock, and the E2E polling helper in these tests gives up
-after 30s. At the defaults, exhausting five tries spends 15s in backoff before
-the policy even applies, so each case pins `max_attempts` explicitly (2 or 3)
-and, where it only needs the count, `max_backoff => '1s'`. Case 6 cannot use
-`df.start()` to seed `loop_iteration`; it is exercised from the Rust side
-instead, since `loop_iteration` is an orchestration-input field with no SQL
-surface.
-1. **Transient recovery.** A node backed by a counter table fails twice, then
-   succeeds. Instance completes, attempt count is 3.
-2. **Continue.** A loop body that always fails. Instance stays `running`,
-   failed nodes show up in `df.instance_nodes()`, later iterations still run.
-3. **No enclosing loop.** A one-shot under `'continue'` runs out of tries and
-   fails.
-4. **Fail.** `on_failure => 'fail', max_attempts => 1` fails on the first
-   error.
-5. **Graph error.** Under `'continue'`, an unknown node type fails
-   immediately, with no retries.
-6. **Loop past the old cap.** Start a loop whose body carries a
-   `loop_iteration` at the old ceiling and confirm it continues instead of
-   failing. Nothing covers the cap today, and no E2E can reach 100,000
-   iterations honestly: at the one-second floor that is over 27 hours, so the
-   test seeds the counter rather than counting to it.
+Attempts are counted with a **sequence**, not a counter table: the failing
+attempt's transaction rolls back, taking any row it inserted with it, whereas
+`nextval()` is non-transactional and survives. `SELECT 1 / (CASE WHEN
+nextval('s') >= 3 THEN 1 ELSE 0 END)` both counts the attempt and decides
+whether it fails, and `last_value` afterwards is an exact attempt count.
+
+Retries cost wall clock and the E2E await helper gives up well before the
+defaults would finish, so every case pins `max_attempts` (1, 2, or 5) and
+`max_backoff => '1 second'`.
+
+Two cases from the original plan are **not** covered by E2E. A graph-level
+error (unknown node type) cannot be constructed through the DSL — the
+`nodes_node_type_chk` constraint rejects it — so the "not retried" guarantee
+for graph errors rests on where `NodeError::Continue` is produced (only the
+three activity call sites) rather than on a test. The old iteration cap
+likewise has no E2E: `loop_iteration` is an orchestration-input field with no
+SQL surface, and its removal is a deletion with nothing left to assert against.
+
+**Existing tests that assert a failure must opt out of the new default.** Five
+E2E tests (`13_user_isolation`, `14_database`, `45_connection_limit_timeout`,
+`61_loop_child_start_failure`, `64_loop_branch_failure`) were written when the
+first node error was fatal. Under the new defaults they either time out waiting
+for a failure that is still being retried, loop forever under `'continue'`, or
+— in the connection-limit case — succeed on the retry. Each now passes
+`max_attempts => 1, on_failure => 'fail'`, which is both the correct expression
+of what they test and the first real use of the escape hatch the release notes
+recommend.
