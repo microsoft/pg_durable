@@ -19,7 +19,7 @@ use duroxide::OrchestrationContext;
 use crate::activities;
 use crate::types::{
     evaluate_condition, string_map_to_json, substitute_all, substitute_all_raw, FunctionGraph,
-    FunctionInput, FunctionNode, SystemVars,
+    FunctionInput, FunctionNode, RetryPolicySpec, SystemVars,
 };
 
 /// Orchestration name for ExecuteFunctionGraph
@@ -43,6 +43,9 @@ struct ExecutionContext {
     subtree_root: String,
     /// Shape of the input this orchestration re-enters itself with on loop `continue_as_new`.
     continuation: Continuation,
+    /// Retry and failure policy recorded at `df.start()`, inherited by every node this
+    /// orchestration executes and by every subtree it spawns.
+    retry: RetryPolicySpec,
 }
 
 /// Which input envelope an inline loop must rebuild when it calls `continue_as_new`.
@@ -84,6 +87,10 @@ struct SubtreeInput {
     label: Option<String>,
     #[serde(default)]
     iteration: u64,
+    /// Inherited failure policy. Defaults to the pre-0.2.7 behavior so a subtree spawned by
+    /// an older binary replays as it was recorded.
+    #[serde(default = "RetryPolicySpec::legacy")]
+    retry: RetryPolicySpec,
 }
 
 /// Control-flow-aware error type returned by every node handler.
@@ -248,6 +255,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         loop_iteration: input.loop_iteration,
         subtree_root: graph.root_node_id.clone(),
         continuation: Continuation::Root,
+        retry: input.retry,
     };
 
     let function_outcome =
@@ -370,6 +378,7 @@ pub async fn execute_subtree(
         loop_iteration: input.iteration,
         subtree_root: input.node_id.clone(),
         continuation: Continuation::Subtree,
+        retry: input.retry,
     };
 
     // Build the envelope carrying the result, the updated named-results map, and a typed
@@ -438,6 +447,7 @@ fn build_subtree_input(
         ),
         label: exec_ctx.label.clone(),
         iteration: 0,
+        retry: exec_ctx.retry,
     };
     serde_json::to_string(&input).map_err(|e| format!("Failed to serialize subtree input: {e}"))
 }
@@ -992,7 +1002,7 @@ async fn execute_loop_node(
                 vars: exec_ctx.vars.clone(),
                 loop_iteration: next_iteration,
                 graph: Some(graph_json),
-                retry: crate::types::RetryPolicySpec::legacy(),
+                retry: exec_ctx.retry,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1010,6 +1020,7 @@ async fn execute_loop_node(
                 ),
                 label: exec_ctx.label.clone(),
                 iteration: next_iteration,
+                retry: exec_ctx.retry,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1764,6 +1775,48 @@ async fn execute_signal_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtree_input_without_retry_defaults_to_legacy() {
+        // A JOIN/RACE branch or non-root loop spawned by a pre-0.2.7 binary recorded no
+        // retry field; replaying it under this binary must keep the old semantics.
+        let json = r#"{"instance_id":"i","node_id":"n","graph":"{}","results":"{}"}"#;
+
+        let input: SubtreeInput = serde_json::from_str(json).unwrap();
+
+        assert_eq!(input.retry.max_attempts, 1);
+        assert_eq!(input.retry.on_failure, crate::types::OnFailure::Fail);
+    }
+
+    #[test]
+    fn subtree_input_carries_the_parents_policy() {
+        // A sub-orchestration must inherit the instance's policy: a node inside a JOIN
+        // branch is no less retryable than the same node in the trunk.
+        let graph = FunctionGraph {
+            instance_id: "inst1234".to_string(),
+            root_node_id: "root".to_string(),
+            nodes: std::collections::BTreeMap::new(),
+        };
+        let retry = crate::types::RetryPolicySpec {
+            max_attempts: 4,
+            max_backoff_micros: 2_000_000,
+            on_failure: crate::types::OnFailure::Continue,
+        };
+        let exec_ctx = ExecutionContext {
+            vars: HashMap::new(),
+            label: None,
+            loop_iteration: 0,
+            subtree_root: "root".to_string(),
+            continuation: Continuation::Root,
+            retry,
+        };
+
+        let json =
+            build_subtree_input(&graph, "child", &HashMap::new(), &exec_ctx).expect("built input");
+        let input: SubtreeInput = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(input.retry, retry);
+    }
 
     /// Build an envelope JSON string the way `execute_subtree` serializes a `SubtreeEnvelope`.
     /// When `control` is `None` the field is omitted entirely, reproducing an envelope recorded
