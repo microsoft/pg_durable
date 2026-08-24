@@ -167,14 +167,22 @@ buffered until consumed, and unconsumed events survive `continue_as_new` (up to
 100, past which the oldest are dropped with a warning). `schedule_wait` would
 discard both.
 
-A third property makes the loop safe to write naively. Every iteration creates a
-subscription that may never be awaited: the one created before a predicate that
-returns true is dropped at `break`, and the one that loses `select2` to the
-timer is dropped too. Neither loses a buffered notification.
-`DurableFuture::drop` marks the token cancelled, and duroxide skips cancelled
-subscriptions when matching arrivals to subscriptions in FIFO order, so an
-arrival passes to the next iteration's subscription instead of being consumed
-and discarded.
+A third property decides how the loop holds its subscription. Naively,
+recreating the subscription each iteration also works: the one created before a
+predicate that returns true is dropped at `break`, and the one that loses
+`select2` to the timer is dropped too, and neither loses a buffered
+notification, because `DurableFuture::drop` marks the token cancelled and
+duroxide skips cancelled subscriptions when matching arrivals in FIFO order.
+But it's the wrong shape. Each recreation writes a subscribe/cancel pair to
+history, and duroxide computes an arrival index by scanning every prior
+subscription for that name, so a long wait becomes quadratic in the number of
+checks. Instead the node holds one subscription across iterations and recreates
+it only after it has actually delivered. Measured over 34 checks, that takes a
+condition wait from 6 history events per check to 4 and from 35 subscriptions
+to 1.
+
+`DurableFuture` is `Unpin`, so `&mut fut` is itself a future and the
+subscription survives the `select2` that borrows it.
 
 One loss window remains: a notification sent while the worker is reconnecting
 is gone before duroxide sees it. So the contract is the backstop. The condition
@@ -348,9 +356,13 @@ against a changed activity input.
    `notify_key`. The waiter row appears while parked, a `pg_notify` completes
    the instance in seconds — proving the notification path fired rather than
    the backstop — and the waiter row is gone afterwards.
-4. **Writing predicate.** A condition containing `INSERT` fails the node rather
+4. **Second notification.** The same shape, but the first `pg_notify` arrives
+   with the predicate still false. The instance must stay parked, then complete
+   on a second `pg_notify` — the case that fails if the node consumes its
+   subscription without recreating it.
+5. **Writing predicate.** A condition containing `INSERT` fails the node rather
    than writing a row.
-5. **Non-boolean predicate.** `SELECT count(*)` fails the node rather than
+6. **Non-boolean predicate.** `SELECT count(*)` fails the node rather than
    being coerced the way `df.if()` would coerce it.
 
 The producer's write and its `pg_notify` have to be their own top-level

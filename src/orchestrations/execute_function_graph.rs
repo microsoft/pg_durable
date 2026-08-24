@@ -1758,19 +1758,26 @@ async fn execute_wait_condition_node(
     ));
 
     let mut checks: u64 = 0;
+    // One subscription is held across iterations and only recreated once it has
+    // actually delivered. Recreating it every iteration would work — a dropped
+    // DurableFuture is marked cancelled and duroxide skips cancelled
+    // subscriptions when matching arrivals in FIFO order, so nothing is lost —
+    // but it writes a QueueSubscribed/QueueSubscriptionCancelled pair per check.
+    // On a wait that polls for hours that churn dominates history, and duroxide
+    // rescans every prior subscription to compute an arrival index, making the
+    // wait quadratic in the number of checks.
+    let mut event_fut = queue.as_ref().map(|q| ctx.dequeue_event(q.clone()));
     loop {
         // The subscription must exist before the predicate runs, otherwise a
         // notification landing during evaluation is lost. dequeue_event emits
         // its action when the future is created, and it is a mailbox, so an
         // event that arrives while nothing is parked is buffered rather than
         // dropped.
-        //
-        // Dropping this future unawaited (on `break`, or as select2's loser) is
-        // safe: DurableFuture::drop marks the token cancelled, and duroxide
-        // skips cancelled subscriptions when matching arrivals to subscriptions
-        // in FIFO order. A buffered notification is therefore handed to the next
-        // iteration's subscription rather than consumed and lost.
-        let event_fut = queue.as_ref().map(|q| ctx.dequeue_event(q.clone()));
+        if event_fut.is_none() {
+            if let Some(q) = queue.as_ref() {
+                event_fut = Some(ctx.dequeue_event(q.clone()));
+            }
+        }
 
         let raw = ctx
             .schedule_activity(activities::execute_sql::NAME, predicate_input.clone())
@@ -1789,10 +1796,17 @@ async fn execute_wait_condition_node(
         }
 
         let timer_fut = ctx.schedule_timer(interval);
-        match event_fut {
+        match event_fut.as_mut() {
+            // select2 polls in argument order, so a notification that is already
+            // buffered wins over a timer that fired in the same turn.
             Some(event) => match ctx.select2(event, timer_fut).await {
-                duroxide::Either2::First(_) => ctx.trace_info("Condition notified; re-evaluating"),
+                duroxide::Either2::First(_) => {
+                    // Consumed. The next iteration subscribes again.
+                    event_fut = None;
+                    ctx.trace_info("Condition notified; re-evaluating");
+                }
                 duroxide::Either2::Second(()) => {
+                    // The subscription is untouched and stays live.
                     ctx.trace_info("Condition check interval elapsed; re-evaluating")
                 }
             },

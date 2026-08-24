@@ -4,13 +4,14 @@
 -- Test: df.wait_for_condition()
 -- Verifies that a predicate that is already true fires immediately, that one
 -- that becomes true later fires on the interval backstop, that a pg_notify on
--- the declared notify_key beats a long backstop, that the waiter registry is
+-- the declared notify_key beats a long backstop, that a second notification is
+-- still delivered after the first one was consumed, that the waiter registry is
 -- populated while parked and cleared afterwards, and that a predicate with
 -- side effects fails instead of writing.
 
 DROP TABLE IF EXISTS test_cond_gate;
 CREATE TABLE test_cond_gate (name TEXT PRIMARY KEY, ready BOOLEAN NOT NULL);
-INSERT INTO test_cond_gate VALUES ('already', true), ('later', false), ('notified', false);
+INSERT INTO test_cond_gate VALUES ('already', true), ('later', false), ('notified', false), ('twice', false);
 
 DROP TABLE IF EXISTS test_cond_done;
 CREATE TABLE test_cond_done (name TEXT PRIMARY KEY);
@@ -198,7 +199,100 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 4. A predicate with side effects fails the node instead of writing.
+-- 4. A second notification is still delivered after the first was consumed.
+--    The node parks on one subscription, wakes on notification #1 with the
+--    predicate still false, and must re-subscribe so notification #2 lands.
+--    The backstop is 5 minutes, so only the notification path can complete it.
+-- ---------------------------------------------------------------------------
+INSERT INTO _cond_state (name, instance_id)
+SELECT 'twice', df.start(
+    df.wait_for_condition(
+        'SELECT ready FROM test_cond_gate WHERE name = ''twice''',
+        '5min',
+        notify_key => 'test_cond_key2'
+    ) ~> 'INSERT INTO test_cond_done VALUES (''twice'')',
+    'test-cond-twice'
+);
+
+DO $$
+DECLARE
+    inst_id  TEXT;
+    attempts INT := 0;
+    waiters  INT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _cond_state WHERE name = 'twice';
+
+    LOOP
+        SELECT count(*) INTO waiters
+          FROM df.condition_waiters
+         WHERE notify_key = 'test_cond_key2'
+           AND split_part(instance_id, '::', 1) = inst_id;
+        EXIT WHEN waiters > 0 OR attempts > 200;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF waiters = 0 THEN
+        RAISE EXCEPTION 'TEST FAILED (twice): no waiter row registered for %', inst_id;
+    END IF;
+END $$;
+
+-- Notification #1: the gate is still false, so this only burns the node's
+-- current subscription.
+SELECT pg_notify('pg_durable_condition', 'test_cond_key2');
+
+-- Give the node time to consume #1, re-check, and re-subscribe. This also
+-- clears the listener's per-key suppression window so #2 is not deduplicated.
+SELECT pg_sleep(3);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status  TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _cond_state WHERE name = 'twice';
+    SELECT s INTO status FROM df.status(inst_id) s;
+    IF lower(status) != 'running' THEN
+        RAISE EXCEPTION 'TEST FAILED (twice): woke early on notification #1, status = %', status;
+    END IF;
+END $$;
+
+-- Notification #2, now with the predicate satisfiable.
+UPDATE test_cond_gate SET ready = true WHERE name = 'twice';
+SELECT pg_notify('pg_durable_condition', 'test_cond_key2');
+
+DO $$
+DECLARE
+    inst_id  TEXT;
+    status   TEXT;
+    started  TIMESTAMPTZ := clock_timestamp();
+    attempts INT := 0;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _cond_state WHERE name = 'twice';
+
+    LOOP
+        SELECT s INTO status FROM df.status(inst_id) s;
+        EXIT WHEN lower(status) IN ('completed', 'failed', 'cancelled') OR attempts > 300;
+        PERFORM pg_sleep(0.1);
+        attempts := attempts + 1;
+    END LOOP;
+
+    IF lower(status) != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED (twice): status = %', status;
+    END IF;
+
+    IF extract(epoch FROM clock_timestamp() - started) > 30 THEN
+        RAISE EXCEPTION 'TEST FAILED (twice): took % seconds, notification #2 was not delivered',
+            extract(epoch FROM clock_timestamp() - started);
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM test_cond_done WHERE name = 'twice') THEN
+        RAISE EXCEPTION 'TEST FAILED (twice): body did not run';
+    END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 5. A predicate with side effects fails the node instead of writing.
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS test_cond_sideeffect;
 CREATE TABLE test_cond_sideeffect (n INT);
@@ -236,7 +330,7 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 5. A non-boolean predicate is rejected rather than coerced.
+-- 6. A non-boolean predicate is rejected rather than coerced.
 -- ---------------------------------------------------------------------------
 CREATE TEMP TABLE _cond_count AS
 SELECT df.start(
