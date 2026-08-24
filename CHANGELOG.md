@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [0.2.7] - Unreleased
+
+### Added
+
+- **Node failure policy on `df.start()`:** three new arguments — `max_attempts` (default `5`), `max_backoff` (default `'16 seconds'`), and `on_failure` (default `'continue'`) — control what happens when a `df.sql()`, `df.http()`, or `df.http_multipart()` node fails. The node is retried with exponential backoff starting at 1 second and doubling up to `max_backoff`; the wait is a durable timer, so it holds no connection and survives a restart. Once the attempts are spent, `on_failure => 'continue'` abandons the rest of the current loop iteration and starts the next one, while `on_failure => 'fail'` fails the instance. Outside a loop there is no next iteration, so both settings fail the instance. Graph-level errors (malformed graph, unknown node type, failure to start a sub-orchestration) are not transient and still fail immediately.
+
+### Changed
+
+- **`df.start()` now retries failing nodes by default.** A workflow that previously failed on its first node error now makes up to five attempts and, inside a loop, continues with the next iteration afterwards. Pass `max_attempts => 1, on_failure => 'fail'` to restore the previous behaviour. Note that under `'continue'` a `while` loop whose body always fails never re-evaluates its condition and therefore never ends.
+- **The 100,000-iteration `df.loop()` cap was removed.** It was never a meaningful storage bound — a large carried result exhausts storage long before the count trips — and it gave a workflow meant to run indefinitely, such as a compactor on a five-minute schedule, an arbitrary expiry date.
+- **`df.start()` signature:** the four-argument `df.start(text, text, text, text)` is replaced by `df.start(text, text, text, text, int, interval, text)`. Un-upgraded schemas keep resolving to the previous function with its previous behaviour; see [docs/upgrade-testing.md](docs/upgrade-testing.md).
+
 ## [0.2.6] - 2026-08-23
 
 ### Added
