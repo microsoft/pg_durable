@@ -1011,7 +1011,7 @@ test_b2_grant_usage_after_upgrade() {
     out=$(run_sql_capture "SELECT df.grant_usage('${probe_role}');") || { echo "$out"; return 1; }
 
     # ... and a representative privilege was actually granted.
-    assert_sql_equals "SELECT has_function_privilege('${probe_role}', 'df.start(text, text, text, text)', 'EXECUTE');" "t" || return 1
+    assert_sql_equals "SELECT has_function_privilege('${probe_role}', 'df.start(text, text, text, text, int, interval, text)', 'EXECUTE');" "t" || return 1
 
     # Clean up the probe role.
     run_sql_capture "DROP OWNED BY ${probe_role}; DROP ROLE IF EXISTS ${probe_role};" >/dev/null 2>&1 || true

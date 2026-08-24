@@ -15,7 +15,7 @@ use crate::client::start_durable_function;
 use crate::types::{
     flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
-    MaterializedNode,
+    MaterializedNode, OnFailure, RetryPolicySpec,
 };
 
 /// Check if we're running inside a workflow context (background worker connection).
@@ -941,6 +941,50 @@ fn acquire_new_transaction_start_slot() -> Result<NewTransactionStartAdmissionGu
     }
 }
 
+/// Validate the three failure-policy arguments of `df.start()` into a `RetryPolicySpec`.
+///
+/// Returns `Err` with a message naming the offending argument; the caller raises it. The
+/// bounds are enforced here rather than in the orchestration because the orchestration is
+/// replayed: an out-of-range value recorded in history would be re-read on every replay,
+/// and duroxide's `RetryPolicy::new` panics on `max_attempts == 0`.
+fn parse_retry_policy(
+    max_attempts: i32,
+    max_backoff: pgrx::datum::Interval,
+    on_failure: &str,
+) -> Result<RetryPolicySpec, String> {
+    if max_attempts < 1 {
+        return Err(format!(
+            "invalid max_attempts {max_attempts} for df.start(): must be at least 1 \
+             (1 disables retries)"
+        ));
+    }
+
+    // as_micros() counts a month as 30 days, so the conversion is a pure function of the
+    // interval and cannot vary with the calendar between replays.
+    let micros = max_backoff.as_micros();
+    if micros <= 0 {
+        return Err("invalid max_backoff for df.start(): must be a positive interval".to_string());
+    }
+    let max_backoff_micros = i64::try_from(micros)
+        .map_err(|_| "invalid max_backoff for df.start(): interval is too large".to_string())?;
+
+    let on_failure = if on_failure.eq_ignore_ascii_case("continue") {
+        OnFailure::Continue
+    } else if on_failure.eq_ignore_ascii_case("fail") {
+        OnFailure::Fail
+    } else {
+        return Err(format!(
+            "invalid on_failure \"{on_failure}\" for df.start(): expected 'continue' or 'fail'"
+        ));
+    };
+
+    Ok(RetryPolicySpec {
+        max_attempts: max_attempts as u32,
+        max_backoff_micros,
+        on_failure,
+    })
+}
+
 /// Starts a durable SQL function.
 ///
 /// The fut argument can be either Durofut JSON or plain SQL string (auto-wrapped).
@@ -963,20 +1007,74 @@ fn acquire_new_transaction_start_slot() -> Result<NewTransactionStartAdmissionGu
 /// `'new'` the `df.vars` snapshot captured for the instance reflects only
 /// **committed** variables — anything set with `df.setvar()` earlier in the
 /// caller's open transaction is not visible to it.
+/// `max_attempts`, `max_backoff`, and `on_failure` set the per-instance failure policy: a
+/// failing `df.sql()` / `df.http()` / `df.http_multipart()` node is retried with exponential
+/// backoff (1s, doubling, capped at `max_backoff`) up to `max_attempts` tries, and once those
+/// are spent `on_failure` decides between abandoning the current loop iteration
+/// (`'continue'`) and failing the instance (`'fail'`). Without an enclosing loop there is no
+/// next iteration, so both settings fail the instance.
 #[pg_extern(name = "start", schema = "df")]
-pub fn start_v2(
+#[allow(clippy::too_many_arguments)]
+pub fn start_v3(
     fut: &str,
     label: default!(Option<&str>, "NULL"),
     database: default!(Option<&str>, "NULL"),
     transaction_mode: default!(&str, "'caller'"),
+    max_attempts: default!(i32, "5"),
+    max_backoff: default!(pgrx::datum::Interval, "'16 seconds'"),
+    on_failure: default!(&str, "'continue'"),
+) -> String {
+    let retry = match parse_retry_policy(max_attempts, max_backoff, on_failure) {
+        Ok(spec) => spec,
+        Err(e) => pgrx::error!("{}", e),
+    };
+    start_dispatch(fut, label, database, transaction_mode, retry, Some(retry))
+}
+
+/// Legacy four-argument `df.start()`, retained for binary compatibility only.
+///
+/// Schemas from before the failure policy existed declare `df.start(text, text, text, text)`
+/// against this symbol, so it must keep taking exactly four arguments. Instances started
+/// through it run the pre-policy behavior (one attempt, then fail). It also passes `None` for
+/// the loopback policy, so `transaction_mode => 'new'` keeps issuing the three-positional
+/// inner `df.start()` that resolves on those older schemas.
+#[pg_extern(sql = false)]
+pub fn start_v2(
+    fut: &str,
+    label: Option<&str>,
+    database: Option<&str>,
+    transaction_mode: &str,
+) -> String {
+    start_dispatch(
+        fut,
+        label,
+        database,
+        transaction_mode,
+        RetryPolicySpec::legacy(),
+        None,
+    )
+}
+
+/// Shared body of every `df.start()` entry point: validate the transaction mode and branch.
+///
+/// `loopback_retry` is `Some` only when the caller reached us through a schema that declares
+/// the failure-policy arguments, which is what lets `transaction_mode => 'new'` forward them
+/// without breaking argument resolution on older schemas.
+fn start_dispatch(
+    fut: &str,
+    label: Option<&str>,
+    database: Option<&str>,
+    transaction_mode: &str,
+    retry: RetryPolicySpec,
+    loopback_retry: Option<RetryPolicySpec>,
 ) -> String {
     // Reject anything we do not recognise. Silently treating a typo as the
     // default would hand back an instance id for a start the caller believes
     // survives their rollback, and which quietly does not.
     if transaction_mode.eq_ignore_ascii_case(TXN_MODE_CALLER) {
-        start_in_caller_transaction(fut, label, database)
+        start_in_caller_transaction(fut, label, database, retry)
     } else if transaction_mode.eq_ignore_ascii_case(TXN_MODE_NEW) {
-        start_in_new_transaction(fut, label, database)
+        start_in_new_transaction(fut, label, database, loopback_retry)
     } else {
         pgrx::error!(
             "invalid transaction_mode \"{}\" for df.start(): expected '{}' or '{}'",
@@ -997,11 +1095,16 @@ pub fn start_v2(
 /// four-argument `df.start()` above and no ambiguous overload exists.
 #[pg_extern(sql = false)]
 pub fn start(fut: &str, label: Option<&str>, database: Option<&str>) -> String {
-    start_in_caller_transaction(fut, label, database)
+    start_in_caller_transaction(fut, label, database, RetryPolicySpec::legacy())
 }
 
 /// `df.start()` under `transaction_mode => 'new'`.
-fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&str>) -> String {
+fn start_in_new_transaction(
+    fut: &str,
+    label: Option<&str>,
+    database: Option<&str>,
+    retry: Option<RetryPolicySpec>,
+) -> String {
     // Inside a workflow this mode is pure cost. A df.sql() node is executed as
     // a single statement on an autocommit connection, so a plain df.start()
     // there already commits on its own and cannot be rolled back by the
@@ -1032,7 +1135,7 @@ fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&st
         Err(e) => pgrx::error!("{e}"),
     };
 
-    match crate::client::start_in_new_transaction(fut, label, database, &user_name) {
+    match crate::client::start_in_new_transaction(fut, label, database, &user_name, retry) {
         Ok(id) => id,
         Err(e) => pgrx::error!("{}", e),
     }
@@ -1040,7 +1143,12 @@ fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&st
 
 /// `df.start()` under `transaction_mode => 'caller'`: build and persist the
 /// graph through SPI, so it lives or dies with the caller's transaction.
-fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<&str>) -> String {
+fn start_in_caller_transaction(
+    fut: &str,
+    label: Option<&str>,
+    database: Option<&str>,
+    retry: RetryPolicySpec,
+) -> String {
     let durofut = match Durofut::ensure_strict(fut) {
         Ok(d) => d,
         Err(e) => pgrx::error!("Invalid durable function: {}", e),
@@ -1280,6 +1388,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         // Generation 0 loads the graph from df.nodes; only a root loop continuing as new
         // carries it inline.
         graph: None,
+        retry,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 
@@ -1488,7 +1597,67 @@ pub fn wait_for_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::{node_insert_sql, parse_semver, pick_id_with_retry};
+    use super::{node_insert_sql, parse_retry_policy, parse_semver, pick_id_with_retry};
+    use crate::types::OnFailure;
+    use pgrx::datum::Interval;
+
+    fn seconds(secs: i64) -> Interval {
+        Interval::new(0, 0, secs * 1_000_000).unwrap()
+    }
+
+    #[test]
+    fn parse_retry_policy_accepts_the_documented_defaults() {
+        let spec = parse_retry_policy(5, seconds(16), "continue").unwrap();
+
+        assert_eq!(spec.max_attempts, 5);
+        assert_eq!(spec.max_backoff(), std::time::Duration::from_secs(16));
+        assert_eq!(spec.on_failure, OnFailure::Continue);
+    }
+
+    #[test]
+    fn parse_retry_policy_accepts_fail_case_insensitively() {
+        let spec = parse_retry_policy(1, seconds(1), "FAIL").unwrap();
+
+        assert_eq!(spec.on_failure, OnFailure::Fail);
+    }
+
+    #[test]
+    fn parse_retry_policy_rejects_max_attempts_below_one() {
+        let err = parse_retry_policy(0, seconds(16), "continue").unwrap_err();
+
+        assert!(err.contains("max_attempts"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn parse_retry_policy_rejects_non_positive_max_backoff() {
+        for interval in [seconds(0), seconds(-5)] {
+            let err = parse_retry_policy(5, interval, "continue").unwrap_err();
+            assert!(err.contains("max_backoff"), "unhelpful message: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_retry_policy_rejects_unknown_on_failure() {
+        let err = parse_retry_policy(5, seconds(16), "explode").unwrap_err();
+
+        assert!(err.contains("on_failure"), "unhelpful message: {err}");
+        assert!(
+            err.contains("explode"),
+            "message should quote the input: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_retry_policy_accepts_a_month_valued_backoff_as_thirty_days() {
+        // Interval::as_micros() counts a month as 30 days, which keeps the conversion
+        // deterministic (a replayed orchestration cannot land on a different month length).
+        let spec = parse_retry_policy(2, Interval::new(1, 0, 0).unwrap(), "fail").unwrap();
+
+        assert_eq!(
+            spec.max_backoff(),
+            std::time::Duration::from_secs(30 * 24 * 60 * 60)
+        );
+    }
 
     #[test]
     fn test_node_insert_sql_uses_current_schema_columns_and_numbered_parameters() {

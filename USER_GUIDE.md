@@ -227,6 +227,73 @@ executed as a single statement on an autocommit connection, so a plain
 `df.start()` there is already independent of any caller transaction; `'new'`
 would buy nothing and consume an extra backend.
 
+### Node Failure Policy
+
+Nodes that reach outside the workflow — `df.sql()`, `df.http()`, and
+`df.http_multipart()` — fail for transient reasons: a deadlock, a dropped
+connection, a rate-limited endpoint. `df.start()` takes three arguments that
+decide how hard to try and what to do when trying is over:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `max_attempts` | `5` | Total attempts for a failing node, including the first. `1` disables retrying. |
+| `max_backoff` | `'16 seconds'` | Upper bound on the wait between attempts. |
+| `on_failure` | `'continue'` | What to do once the attempts are spent: `'continue'` or `'fail'`. |
+
+Retries back off exponentially, starting at 1 second and doubling until they
+reach `max_backoff`. With the defaults a node is tried at 0s, 1s, 3s, 7s, and
+15s before its policy decides. The delay is a durable timer, so it costs no
+connection and survives a restart.
+
+Once the attempts are spent, `on_failure` chooses between two outcomes:
+
+- `'continue'` (the default) abandons the **rest of the current loop
+  iteration** and starts the next one. Nodes downstream of the failure are
+  skipped — a failed extract does not run its load — and the loop's `while`
+  condition is skipped too, since it usually reads results the abandoned
+  iteration never produced.
+- `'fail'` fails the whole instance, which is the pre-0.2.7 behaviour.
+
+Outside a loop there is no next iteration to continue into, so both settings
+fail the instance. `'continue'` is a statement about *recurring* work.
+
+```sql
+-- A compactor that must survive a bad batch: skip it and pick up the next tick.
+SELECT df.start(
+    df.loop(
+        'CALL compact_next_partition()' ~> df.wait_for_schedule('*/5 * * * *')
+    ),
+    'compactor'
+);
+
+-- A one-shot migration that must not be retried and must surface its error.
+SELECT df.start(
+    'CALL migrate_tenant(42)',
+    'migrate-42',
+    max_attempts => 1,
+    on_failure => 'fail'
+);
+```
+
+The policy covers node execution only. A malformed graph, an unknown node type,
+or a failure to start a sub-orchestration is not a transient condition and fails
+the instance immediately, whatever the policy says. Retries are otherwise
+unconditional: a permission error is retried like any other, because pg_durable
+cannot reliably tell a permanently denied statement from one whose grant is
+seconds away. The cost is bounded by `max_attempts`.
+
+Attempts are not individually visible through `df.instance_nodes()` or
+`df.explain()`, which report a node's status once its attempts have settled. A
+node being retried reads as still running; the individual failures are in the
+worker log.
+
+> **Note for workflows written before 0.2.7:** the defaults changed. A workflow
+> that used to fail on its first node error now retries five times and, inside a
+> loop, keeps running afterwards. Pass `max_attempts => 1, on_failure => 'fail'`
+> to restore the old behaviour. In particular, a `while` loop whose body always
+> fails under `'continue'` never re-evaluates its condition and so never ends;
+> use `'fail'`, or bound the work with `df.break()`.
+
 ---
 
 ## DSL Reference
@@ -258,6 +325,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
 | `df.start(func, label, database, transaction_mode)` | Start function in its own transaction when `transaction_mode => 'new'` (survives caller rollback) | `df.start('INSERT INTO audit ...', 'audit', transaction_mode => 'new')` |
+| `df.start(..., max_attempts, max_backoff, on_failure)` | Retry a failing node and choose what happens once the attempts are spent | `df.start('CALL sync()', 'sync', max_attempts => 1, on_failure => 'fail')` |
 | `df.cancel(id, reason)` | Cancel function | `df.cancel('a1b2c3d4', 'Done')` |
 | `df.status(id)` | Get status by instance_id (not label) | `df.status('a1b2c3d4')` |
 | `df.result(id)` | Get result by instance_id (not label) | `df.result('a1b2c3d4')` |

@@ -266,6 +266,7 @@ async fn start_on_new_session(
     fut: &str,
     label: &Option<String>,
     database: &Option<String>,
+    retry: Option<crate::types::RetryPolicySpec>,
 ) -> Result<String, String> {
     use sqlx::Row;
 
@@ -295,16 +296,40 @@ async fn start_on_new_session(
 
     // Three positional arguments on purpose: this must also resolve on schemas
     // predating `transaction_mode`, where `df.start` takes exactly three. On
-    // current schemas it resolves to the four-argument `df.start` and defaults
+    // current schemas it resolves to the newest `df.start` and defaults
     // to 'caller', which is what we want — the separate session is already the
     // new transaction, so it must not recurse.
-    let row = sqlx::query("SELECT df.start($1, $2, $3) AS id")
-        .bind(fut)
-        .bind(label)
-        .bind(database)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(classify_new_transaction_start_error)?;
+    //
+    // `retry` is `Some` only when the caller reached df.start() through a schema that
+    // declares the failure-policy arguments, so forwarding them cannot break resolution on
+    // an older schema (which would have entered through the four-argument symbol and passed
+    // `None`). The interval is bound as a microsecond string rather than an interval type so
+    // no extra sqlx type mapping is needed.
+    let row = match retry {
+        Some(spec) => {
+            sqlx::query("SELECT df.start($1, $2, $3, 'caller', $4, $5::interval, $6) AS id")
+                .bind(fut)
+                .bind(label)
+                .bind(database)
+                .bind(spec.max_attempts as i32)
+                .bind(format!("{} microseconds", spec.max_backoff_micros))
+                .bind(match spec.on_failure {
+                    crate::types::OnFailure::Continue => "continue",
+                    crate::types::OnFailure::Fail => "fail",
+                })
+                .fetch_one(&mut *conn)
+                .await
+        }
+        None => {
+            sqlx::query("SELECT df.start($1, $2, $3) AS id")
+                .bind(fut)
+                .bind(label)
+                .bind(database)
+                .fetch_one(&mut *conn)
+                .await
+        }
+    }
+    .map_err(classify_new_transaction_start_error)?;
 
     row.try_get("id")
         .map_err(|e| format!("df.start() on new transaction returned no instance id: {e}"))
@@ -333,6 +358,7 @@ pub fn start_in_new_transaction(
     label: Option<&str>,
     database: Option<&str>,
     user: &str,
+    retry: Option<crate::types::RetryPolicySpec>,
 ) -> Result<String, String> {
     use sqlx::Connection;
 
@@ -351,7 +377,7 @@ pub fn start_in_new_transaction(
         // instance property for the worker to execute against.
         let mut conn = connect_as_user_for_new_transaction(&user).await?;
 
-        let result = start_on_new_session(&mut conn, &fut, &label, &database).await;
+        let result = start_on_new_session(&mut conn, &fut, &label, &database, retry).await;
 
         // Close explicitly so the extra backend exits promptly rather than
         // lingering until the server notices a dropped socket.

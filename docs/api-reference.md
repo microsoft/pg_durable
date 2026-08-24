@@ -328,7 +328,7 @@ Returns the same envelope as `df.http()`.
 
 ## Control Functions
 
-### df.start(fut [, label] [, database] [, transaction_mode])
+### df.start(fut [, label] [, database] [, transaction_mode] [, max_attempts] [, max_backoff] [, on_failure])
 
 Starts a durable function.
 
@@ -338,6 +338,9 @@ Starts a durable function.
 | `label` | TEXT | ❌ Literal | (Optional) Human-readable label |
 | `database` | TEXT | ❌ Literal | (Optional) Target database on the cluster |
 | `transaction_mode` | TEXT | ❌ Literal | (Optional) `'caller'` (default) or `'new'` |
+| `max_attempts` | INT | ❌ Literal | (Optional) Attempts per failing node, including the first (default `5`, minimum `1`) |
+| `max_backoff` | INTERVAL | ❌ Literal | (Optional) Upper bound on the wait between attempts (default `'16 seconds'`) |
+| `on_failure` | TEXT | ❌ Literal | (Optional) `'continue'` (default) or `'fail'` |
 
 ```sql
 df.start('SELECT 1')                      -- auto-wrapped
@@ -382,6 +385,49 @@ An unrecognised value raises an error rather than falling back to the default.
 > validated them against that admission cap, and make target operations
 > idempotent because a connection failure can make launch outcome uncertain. See
 > the Transaction Semantics section of `USER_GUIDE.md` for details.
+
+#### max_attempts, max_backoff, on_failure
+
+Control what happens when a node that reaches outside the workflow —
+`df.sql()`, `df.http()`, or `df.http_multipart()` — fails.
+
+A failing node is retried up to `max_attempts` times in total, waiting 1 second
+before the second attempt and doubling thereafter until the wait reaches
+`max_backoff`. With the defaults a node is attempted at 0s, 1s, 3s, 7s, and 15s.
+The wait is a durable timer: it holds no connection and survives a restart.
+
+Once the attempts are spent, `on_failure` decides:
+
+- `'continue'` (default) — abandon the rest of the current loop iteration and
+  start the next one. Nodes downstream of the failure are skipped, and so is the
+  loop's `while` condition, which usually reads results the abandoned iteration
+  never produced.
+- `'fail'` — fail the instance.
+
+Outside a loop there is no next iteration, so both settings fail the instance.
+
+```sql
+-- Recurring work that should survive a bad batch (the default).
+df.start(df.loop('CALL compact()' ~> df.wait_for_schedule('*/5 * * * *')), 'compactor')
+
+-- One-shot work that must not be retried and must surface its error.
+df.start('CALL migrate_tenant(42)', 'migrate', max_attempts => 1, on_failure => 'fail')
+```
+
+`max_attempts < 1`, a negative `max_backoff`, and an unrecognised `on_failure`
+each raise an error.
+
+The policy covers node execution only. A malformed graph, an unknown node type,
+or a failure to start a sub-orchestration fails the instance immediately.
+Retries are otherwise unconditional — a permission or syntax error is retried
+like any other, since pg_durable cannot reliably tell a permanently denied
+statement from one whose grant is seconds away, and the cost is bounded by
+`max_attempts`.
+
+> **Note:** attempts are not individually visible through `df.instance_nodes()`
+> or `df.explain()`, which report a node's status once its attempts have
+> settled. A node being retried reads as still running; the individual failures
+> are in the worker log.
 
 ---
 

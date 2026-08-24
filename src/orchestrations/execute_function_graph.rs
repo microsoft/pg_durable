@@ -19,7 +19,7 @@ use duroxide::OrchestrationContext;
 use crate::activities;
 use crate::types::{
     evaluate_condition, string_map_to_json, substitute_all, substitute_all_raw, FunctionGraph,
-    FunctionInput, FunctionNode, SystemVars,
+    FunctionInput, FunctionNode, RetryPolicySpec, SystemVars,
 };
 
 /// Orchestration name for ExecuteFunctionGraph
@@ -43,6 +43,9 @@ struct ExecutionContext {
     subtree_root: String,
     /// Shape of the input this orchestration re-enters itself with on loop `continue_as_new`.
     continuation: Continuation,
+    /// Retry and failure policy recorded at `df.start()`, inherited by every node this
+    /// orchestration executes and by every subtree it spawns.
+    retry: RetryPolicySpec,
 }
 
 /// Which input envelope an inline loop must rebuild when it calls `continue_as_new`.
@@ -84,6 +87,10 @@ struct SubtreeInput {
     label: Option<String>,
     #[serde(default)]
     iteration: u64,
+    /// Inherited failure policy. Defaults to the pre-0.2.7 behavior so a subtree spawned by
+    /// an older binary replays as it was recorded.
+    #[serde(default = "RetryPolicySpec::legacy")]
+    retry: RetryPolicySpec,
 }
 
 /// Control-flow-aware error type returned by every node handler.
@@ -97,6 +104,14 @@ struct SubtreeInput {
 enum NodeError {
     /// A `df.break()` signal carrying its (already-stringified) value, caught by the loop.
     Break(String),
+    /// A node whose retries were exhausted under `on_failure => 'continue'`, carrying the
+    /// node's last error. Like `Break` this is control flow, not a failure: it unwinds to
+    /// the nearest enclosing `execute_loop_node`, which abandons the rest of the iteration
+    /// and starts the next one. Unwinding the whole iteration (rather than skipping just the
+    /// failed node) is what keeps a downstream node from running on a named result its
+    /// producer never computed. With no enclosing loop there is nowhere to continue to, so
+    /// the top level turns it back into a failure.
+    Continue(String),
     /// A real failure; propagates to the orchestration's `Err` result.
     Failure(String),
 }
@@ -132,6 +147,9 @@ type NodeResult = Result<String, NodeError>;
 enum SubtreeControl {
     Normal,
     Break,
+    /// A `NodeError::Continue` raised inside the subtree, so the parent can re-raise it and
+    /// let it unwind to the loop that contains the join/race/loop node.
+    Continue,
 }
 
 /// Envelope returned by `execute_subtree` containing the SQL result and the updated
@@ -148,6 +166,49 @@ struct SubtreeEnvelope {
     result: String,
     #[serde(serialize_with = "crate::types::serialize_string_map")]
     results: HashMap<String, String>,
+}
+
+/// Translate the per-instance policy into duroxide's retry policy.
+///
+/// `RetryPolicy::new()` asserts `max_attempts >= 1` and would panic inside the
+/// orchestration, so the struct is built literally and clamped; `df.start()` already rejects
+/// zero, and a history recorded by some future binary must not be able to abort a replay.
+fn build_retry_policy(spec: &RetryPolicySpec) -> duroxide::RetryPolicy {
+    duroxide::RetryPolicy {
+        max_attempts: spec.max_attempts.max(1),
+        backoff: duroxide::BackoffStrategy::Exponential {
+            base: Duration::from_secs(1),
+            multiplier: 2.0,
+            max: spec.max_backoff(),
+        },
+        // Per-attempt timeouts are not retried by duroxide, so enabling one here would turn
+        // a slow node into an un-retried failure. Node-level time limits are the activity's
+        // own concern (statement_timeout, HTTP timeouts).
+        timeout: None,
+    }
+}
+
+/// Decide what an exhausted node's error means for the workflow.
+fn classify_exhausted_activity(error: String, spec: &RetryPolicySpec) -> NodeError {
+    match spec.on_failure {
+        crate::types::OnFailure::Continue => NodeError::Continue(error),
+        crate::types::OnFailure::Fail => NodeError::Failure(error),
+    }
+}
+
+/// Schedule a retryable node activity (SQL / HTTP / multipart) under the instance's policy.
+///
+/// This is the only place the policy is applied, so all three node types retry identically
+/// and an exhausted node lands on the same control-flow decision.
+async fn schedule_node_activity(
+    ctx: &OrchestrationContext,
+    name: &str,
+    input: String,
+    exec_ctx: &ExecutionContext,
+) -> NodeResult {
+    ctx.schedule_activity_with_retry(name, input, build_retry_policy(&exec_ctx.retry))
+        .await
+        .map_err(|e| classify_exhausted_activity(e, &exec_ctx.retry))
 }
 
 /// Execute a complete function graph — the entry point for a durable function.
@@ -248,6 +309,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
         loop_iteration: input.loop_iteration,
         subtree_root: graph.root_node_id.clone(),
         continuation: Continuation::Root,
+        retry: input.retry,
     };
 
     let function_outcome =
@@ -261,6 +323,9 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     let function_result: Result<String, String> = match function_outcome {
         Ok(result) => Ok(result),
         Err(NodeError::Failure(err)) => Err(err),
+        // A continue that reaches the top level had no enclosing loop to unwind to, so the
+        // instance fails with the node's own error — the documented "no loop, no continue".
+        Err(NodeError::Continue(err)) => Err(err),
         Err(NodeError::Break(_)) => Err(
             "df.break() was called outside of a loop. df.break() may only be used inside df.loop()."
                 .to_string(),
@@ -370,6 +435,7 @@ pub async fn execute_subtree(
         loop_iteration: input.iteration,
         subtree_root: input.node_id.clone(),
         continuation: Continuation::Subtree,
+        retry: input.retry,
     };
 
     // Build the envelope carrying the result, the updated named-results map, and a typed
@@ -408,6 +474,17 @@ pub async fn execute_subtree(
                 results,
             }
         }
+        Err(NodeError::Continue(error)) => {
+            ctx.trace_info(format!(
+                "ExecuteSubtree: node {} exhausted its retries (continuing)",
+                input.node_id
+            ));
+            SubtreeEnvelope {
+                control: Some(SubtreeControl::Continue),
+                result: error,
+                results,
+            }
+        }
         Err(NodeError::Failure(e)) => return Err(e),
     };
 
@@ -438,6 +515,7 @@ fn build_subtree_input(
         ),
         label: exec_ctx.label.clone(),
         iteration: 0,
+        retry: exec_ctx.retry,
     };
     serde_json::to_string(&input).map_err(|e| format!("Failed to serialize subtree input: {e}"))
 }
@@ -525,6 +603,9 @@ async fn execute_function_node_with_vars(
     let (status, status_result) = match &execute_result {
         Ok(result) => ("completed", result.as_str()),
         Err(NodeError::Break(value)) => ("completed", value.as_str()),
+        // An abandoned node is a failed node even though the instance keeps running: this
+        // is the only record that the iteration lost work, so monitoring can find it.
+        Err(NodeError::Continue(err)) => ("failed", err.as_str()),
         Err(NodeError::Failure(err)) => ("failed", err.as_str()),
     };
     let status_input = serde_json::json!({
@@ -604,9 +685,13 @@ async fn execute_sql_node(
         "database": node.database,
     });
 
-    let result = ctx
-        .schedule_activity(activities::execute_sql::NAME, input.to_string())
-        .await?;
+    let result = schedule_node_activity(
+        ctx,
+        activities::execute_sql::NAME,
+        input.to_string(),
+        exec_ctx,
+    )
+    .await?;
 
     if let Some(name) = &node.result_name {
         ctx.trace_info(format!("Storing result as ${name}"));
@@ -747,11 +832,6 @@ async fn execute_wait_schedule_node(
 /// deficit so an empty-bodied loop can't busy-spin via continue_as_new.
 const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
 
-/// Maximum loop iterations before the orchestration is forcibly terminated.
-/// This prevents runaway infinite loops from consuming resources indefinitely.
-/// At the minimum 1-second rate limit, this allows ~27 hours of looping.
-const MAX_LOOP_ITERATIONS: u64 = 100_000;
-
 /// Stamp a loop node's status from its *parent* orchestration.
 ///
 /// A non-root loop node is the root of its own child instance, so the child normally owns
@@ -827,6 +907,12 @@ async fn fail_loop_child_future(
 /// Returns `Ok(Some(final_result))` when the loop should exit (a `df.break()` in the body,
 /// or the while-condition evaluating false), `Ok(None)` when another iteration is needed,
 /// and `Err` when the body or condition fails.
+///
+/// This is also where `NodeError::Continue` is caught. An abandoned iteration is reported as
+/// `Ok(None)`: the rest of the body — including the while-condition — is skipped, and the
+/// next iteration starts at the top of the body. Skipping the condition is deliberate. It is
+/// evaluated from the same named results the body populates, so running it after a failed
+/// body would decide the loop's fate from a result its producer never computed.
 async fn run_loop_iteration(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
@@ -848,6 +934,12 @@ async fn run_loop_iteration(
                 ));
                 store_named_result(ctx, node, &break_value, results, "LOOP");
                 return Ok(Some(break_value));
+            }
+            Err(NodeError::Continue(error)) => {
+                ctx.trace_warn(format!(
+                    "Loop iteration abandoned after a node exhausted its retries: {error}"
+                ));
+                return Ok(None);
             }
             Err(NodeError::Failure(e)) => return Err(e),
         };
@@ -874,6 +966,12 @@ async fn run_loop_iteration(
                 Err(NodeError::Break(break_value)) => {
                     store_named_result(ctx, node, &break_value, results, "LOOP");
                     return Ok(Some(break_value));
+                }
+                Err(NodeError::Continue(error)) => {
+                    ctx.trace_warn(format!(
+                        "Loop condition abandoned after a node exhausted its retries: {error}"
+                    ));
+                    return Ok(None);
                 }
                 Err(NodeError::Failure(e)) => return Err(e),
             };
@@ -945,14 +1043,12 @@ async fn execute_loop_node(
 
     ctx.trace_info("Continuing as new for next loop iteration");
 
-    // M7: Enforce maximum iteration count to prevent runaway infinite loops
+    // There is deliberately no iteration ceiling. A workflow that legitimately runs
+    // indefinitely (a scheduled compactor, a poller) must not acquire an expiry date, and
+    // LOOP_MIN_ITER_DURATION below already bounds the *rate* of a runaway loop. An actually
+    // runaway instance is handled by df.cancel() and by watching df.instances, both of which
+    // work from the first iteration rather than 27 hours in.
     let next_iteration = exec_ctx.loop_iteration + 1;
-    if next_iteration >= MAX_LOOP_ITERATIONS {
-        return Err(NodeError::Failure(format!(
-            "Loop exceeded maximum iteration count of {MAX_LOOP_ITERATIONS}. \
-             Use df.break() to exit the loop or restructure the workflow."
-        )));
-    }
 
     // Enforce a minimum per-iteration wall-clock duration to prevent
     // busy-looping (e.g. `df.loop(df.sleep(0))`).  Compute the elapsed time
@@ -992,6 +1088,7 @@ async fn execute_loop_node(
                 vars: exec_ctx.vars.clone(),
                 loop_iteration: next_iteration,
                 graph: Some(graph_json),
+                retry: exec_ctx.retry,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1009,6 +1106,7 @@ async fn execute_loop_node(
                 ),
                 label: exec_ctx.label.clone(),
                 iteration: next_iteration,
+                retry: exec_ctx.retry,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1254,6 +1352,9 @@ fn parse_subtree_envelope(
     parent_results.extend(envelope.results);
     match envelope.control {
         Some(SubtreeControl::Break) => Err(NodeError::Break(envelope.result)),
+        // Re-raise the subtree's continue so it keeps unwinding toward the enclosing loop,
+        // exactly as a break does.
+        Some(SubtreeControl::Continue) => Err(NodeError::Continue(envelope.result)),
         // A new binary always writes an explicit `control`, so `Some(Normal)` is a genuine
         // normal result and must NOT be run through the legacy sentinel check: otherwise a
         // branch whose real SQL result happens to be shaped like `{"__break__": true, ...}`
@@ -1569,9 +1670,8 @@ async fn execute_http_node(
     let method = config["method"].as_str().unwrap_or("POST");
     ctx.trace_info(format!("Executing HTTP {method} {url}"));
 
-    let result = ctx
-        .schedule_activity(activities::execute_http::NAME, final_config)
-        .await?;
+    let result =
+        schedule_node_activity(ctx, activities::execute_http::NAME, final_config, exec_ctx).await?;
 
     // Store result if named
     if let Some(name) = &node.result_name {
@@ -1668,9 +1768,13 @@ async fn execute_http_multipart_node(
     let method = config["method"].as_str().unwrap_or("POST");
     ctx.trace_info(format!("Executing HTTP_MULTIPART {method} {url}"));
 
-    let result = ctx
-        .schedule_activity(activities::execute_multipart::NAME, final_config)
-        .await?;
+    let result = schedule_node_activity(
+        ctx,
+        activities::execute_multipart::NAME,
+        final_config,
+        exec_ctx,
+    )
+    .await?;
 
     // Store result if named
     if let Some(name) = &node.result_name {
@@ -1763,6 +1867,130 @@ async fn execute_signal_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtree_input_without_retry_defaults_to_legacy() {
+        // A JOIN/RACE branch or non-root loop spawned by a pre-0.2.7 binary recorded no
+        // retry field; replaying it under this binary must keep the old semantics.
+        let json = r#"{"instance_id":"i","node_id":"n","graph":"{}","results":"{}"}"#;
+
+        let input: SubtreeInput = serde_json::from_str(json).unwrap();
+
+        assert_eq!(input.retry.max_attempts, 1);
+        assert_eq!(input.retry.on_failure, crate::types::OnFailure::Fail);
+    }
+
+    #[test]
+    fn subtree_input_carries_the_parents_policy() {
+        // A sub-orchestration must inherit the instance's policy: a node inside a JOIN
+        // branch is no less retryable than the same node in the trunk.
+        let graph = FunctionGraph {
+            instance_id: "inst1234".to_string(),
+            root_node_id: "root".to_string(),
+            nodes: std::collections::BTreeMap::new(),
+        };
+        let retry = crate::types::RetryPolicySpec {
+            max_attempts: 4,
+            max_backoff_micros: 2_000_000,
+            on_failure: crate::types::OnFailure::Continue,
+        };
+        let exec_ctx = ExecutionContext {
+            vars: HashMap::new(),
+            label: None,
+            loop_iteration: 0,
+            subtree_root: "root".to_string(),
+            continuation: Continuation::Root,
+            retry,
+        };
+
+        let json =
+            build_subtree_input(&graph, "child", &HashMap::new(), &exec_ctx).expect("built input");
+        let input: SubtreeInput = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(input.retry, retry);
+    }
+
+    #[test]
+    fn retry_policy_backoff_is_one_second_doubling_capped_at_max_backoff() {
+        // The documented sequence at the df.start() defaults: 1s, 2s, 4s, 8s between five
+        // tries, with the cap only binding beyond that.
+        let spec = crate::types::RetryPolicySpec {
+            max_attempts: 5,
+            max_backoff_micros: 16_000_000,
+            on_failure: crate::types::OnFailure::Continue,
+        };
+
+        let policy = build_retry_policy(&spec);
+
+        assert_eq!(policy.max_attempts, 5);
+        assert!(
+            policy.timeout.is_none(),
+            "per-attempt timeouts are not retried"
+        );
+        let delays: Vec<u64> = (1..=6)
+            .map(|attempt| policy.backoff.delay_for_attempt(attempt).as_secs())
+            .collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 16]);
+    }
+
+    #[test]
+    fn retry_policy_honors_a_backoff_cap_below_the_first_delay() {
+        let spec = crate::types::RetryPolicySpec {
+            max_attempts: 3,
+            max_backoff_micros: 500_000,
+            on_failure: crate::types::OnFailure::Fail,
+        };
+
+        let policy = build_retry_policy(&spec);
+
+        assert_eq!(policy.backoff.delay_for_attempt(1).as_millis(), 500);
+    }
+
+    #[test]
+    fn exhausted_node_under_continue_becomes_a_continue_error() {
+        let spec = crate::types::RetryPolicySpec {
+            max_attempts: 2,
+            max_backoff_micros: 1_000_000,
+            on_failure: crate::types::OnFailure::Continue,
+        };
+
+        match classify_exhausted_activity("relation does not exist".to_string(), &spec) {
+            NodeError::Continue(e) => assert_eq!(e, "relation does not exist"),
+            other => panic!("expected NodeError::Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exhausted_node_under_fail_becomes_a_failure() {
+        let spec = crate::types::RetryPolicySpec {
+            max_attempts: 2,
+            max_backoff_micros: 1_000_000,
+            on_failure: crate::types::OnFailure::Fail,
+        };
+
+        match classify_exhausted_activity("boom".to_string(), &spec) {
+            NodeError::Failure(e) => assert_eq!(e, "boom"),
+            other => panic!("expected NodeError::Failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_crosses_the_subtree_boundary() {
+        // A branch that exhausts its tries under 'continue' must unwind the loop containing
+        // the join, not complete the branch with an error string as its value.
+        let envelope = envelope_json(
+            Some("Continue"),
+            "relation does not exist",
+            serde_json::json!({}),
+        );
+
+        let result = parse_subtree_envelope(&envelope, "JOIN branch", &mut HashMap::new());
+
+        match result {
+            Err(NodeError::Continue(e)) => assert_eq!(e, "relation does not exist"),
+            other => panic!("expected NodeError::Continue, got {other:?}"),
+        }
+    }
 
     /// Build an envelope JSON string the way `execute_subtree` serializes a `SubtreeEnvelope`.
     /// When `control` is `None` the field is omitted entirely, reproducing an envelope recorded
