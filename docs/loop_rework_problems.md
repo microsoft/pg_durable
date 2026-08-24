@@ -24,7 +24,7 @@ Ordered by severity.
 | 5 | [Parent fallback stamps assume child generation 1](#5-parent-fallback-stamps-assume-child-generation-1) | cancelled or failed loop children | 🟡 Medium | Open |
 | 6 | [Composed child ids block orphan reclamation](#6-composed-child-ids-block-orphan-reclamation) | loop and parallel children | 🟡 Medium | Resolved in #323 |
 | 7 | [Stamp validation fails open](#7-stamp-validation-fails-open) | status write fence and inference | 🟡 Medium | Open |
-| 8 | [Nested loops have no cumulative iteration budget](#8-nested-loops-have-no-cumulative-iteration-budget) | nested loops | 🟡 Medium | Open |
+| 8 | [Nested loops have no cumulative iteration budget](#8-nested-loops-have-no-cumulative-iteration-budget) | nested loops | 🟡 Medium | Open — the per-instance cap was removed in 0.2.7 |
 | 9 | [Signals inherit the sub-orchestration startup race](#9-signals-inherit-the-sub-orchestration-startup-race) | non-root loops | 🟡 Medium | Open |
 | 10 | [The 0.2.5 drain guidance is not an executable runbook](#10-the-025-drain-guidance-is-not-an-executable-runbook) | 0.2.4 → 0.2.5 upgrade | 🟡 Medium | Open |
 | 11 | [The status-write fence holds a row lock across round trips](#11-the-status-write-fence-holds-a-row-lock-across-round-trips) | schemas with `status_details` | 🟢 Low | Open — measure before changing |
@@ -54,9 +54,10 @@ let new_input = SubtreeInput {
 
 The graph snapshot is also copied into every JOIN/RACE child input. A large
 graph or named result is therefore persisted repeatedly across loop generations
-and child histories. `MAX_LOOP_ITERATIONS` limits generations to 100,000, but
-that is not a meaningful byte bound: a 1 MB carried result can still produce
-storage measured in tens of gigabytes before the iteration guard trips.
+and child histories. Nothing bounds this: the 100,000-generation cap was never a
+meaningful byte bound (a 1 MB carried result could still produce storage measured
+in tens of gigabytes before it tripped), and 0.2.7 removed it outright so that a
+workflow meant to run indefinitely is not given an expiry date.
 
 Child engine records also remain until the root instance is retired. A nested
 loop can create a child under each outer generation, so the retained child
@@ -255,11 +256,12 @@ between parent and descendant stamps at equal generations.
 
 **Severity: 🟡 Medium — applies to nested loops.**
 
-`MAX_LOOP_ITERATIONS` is enforced per orchestration instance. A non-root inner
-loop starts in its own child and receives its own counter, while an outer loop
-can spawn a new inner child under every outer generation. Two loops that each
-stay under the 100,000-iteration cap can therefore produce a combinatorial
-amount of work and retained child state.
+There is no iteration budget at all as of 0.2.7, which removed the per-instance
+100,000-generation cap (see the node failure policy design). Even while it
+existed it was per orchestration instance: a non-root inner loop starts in its
+own child with its own counter, and an outer loop can spawn a new inner child
+under every outer generation, so two loops that each stayed under the cap could
+still produce a combinatorial amount of work and retained child state.
 
 The one-second floor limits the rate of each individual loop but does not place
 a workflow-wide bound on nested work. The existing nested-loop E2E test proves

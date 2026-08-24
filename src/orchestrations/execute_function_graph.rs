@@ -832,11 +832,6 @@ async fn execute_wait_schedule_node(
 /// deficit so an empty-bodied loop can't busy-spin via continue_as_new.
 const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
 
-/// Maximum loop iterations before the orchestration is forcibly terminated.
-/// This prevents runaway infinite loops from consuming resources indefinitely.
-/// At the minimum 1-second rate limit, this allows ~27 hours of looping.
-const MAX_LOOP_ITERATIONS: u64 = 100_000;
-
 /// Stamp a loop node's status from its *parent* orchestration.
 ///
 /// A non-root loop node is the root of its own child instance, so the child normally owns
@@ -1048,14 +1043,12 @@ async fn execute_loop_node(
 
     ctx.trace_info("Continuing as new for next loop iteration");
 
-    // M7: Enforce maximum iteration count to prevent runaway infinite loops
+    // There is deliberately no iteration ceiling. A workflow that legitimately runs
+    // indefinitely (a scheduled compactor, a poller) must not acquire an expiry date, and
+    // LOOP_MIN_ITER_DURATION below already bounds the *rate* of a runaway loop. An actually
+    // runaway instance is handled by df.cancel() and by watching df.instances, both of which
+    // work from the first iteration rather than 27 hours in.
     let next_iteration = exec_ctx.loop_iteration + 1;
-    if next_iteration >= MAX_LOOP_ITERATIONS {
-        return Err(NodeError::Failure(format!(
-            "Loop exceeded maximum iteration count of {MAX_LOOP_ITERATIONS}. \
-             Use df.break() to exit the loop or restructure the workflow."
-        )));
-    }
 
     // Enforce a minimum per-iteration wall-clock duration to prevent
     // busy-looping (e.g. `df.loop(df.sleep(0))`).  Compute the elapsed time
