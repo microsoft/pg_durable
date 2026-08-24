@@ -39,13 +39,9 @@ END $$;
 -- Now start a second workflow. With max_user_connections=1, its SQL node
 -- cannot acquire the semaphore and should time out after ~2s.
 INSERT INTO _test_state
--- The victim must observe the connection-limit failure rather than retrying
--- past it, so it opts out of the default retry policy.
 SELECT df.start(
     'SELECT 1',
-    'test-timeout-victim',
-    max_attempts => 1,
-    on_failure => 'fail'
+    'test-timeout-victim'
 ), 'victim';
 
 DO $$

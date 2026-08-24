@@ -88,8 +88,13 @@ struct SubtreeInput {
     #[serde(default)]
     iteration: u64,
     /// Inherited failure policy. Defaults to the pre-0.2.7 behavior so a subtree spawned by
-    /// an older binary replays as it was recorded.
-    #[serde(default = "RetryPolicySpec::legacy")]
+    /// an older binary replays as it was recorded, and is omitted from the wire entirely
+    /// when it holds that value so the envelope stays byte-identical to what that binary
+    /// recorded -- duroxide matches a sub-orchestration schedule on the exact input string.
+    #[serde(
+        default = "RetryPolicySpec::legacy",
+        skip_serializing_if = "RetryPolicySpec::is_legacy"
+    )]
     retry: RetryPolicySpec,
 }
 
@@ -168,6 +173,51 @@ struct SubtreeEnvelope {
     results: HashMap<String, String>,
 }
 
+/// Marker `execute_sql` stamps onto a failure that carries a PostgreSQL SQLSTATE.
+///
+/// The activity boundary is `Result<String, String>`, so the code has to survive as text.
+/// It is read back by `error_is_retryable` from a string that was *recorded in history*,
+/// which is what keeps the retry decision deterministic across replay.
+const SQLSTATE_MARKER: &str = "[SQLSTATE ";
+
+/// SQLSTATE classes whose failures are a property of the statement, not of the moment.
+///
+/// 42 (syntax error or access rule violation), 23 (integrity constraint violation),
+/// 28 (invalid authorization specification), 3D (invalid catalog name) and 3F (invalid
+/// schema name) all describe a statement that is simply wrong for the database it was sent
+/// to. Retrying one spends the whole backoff budget to arrive at the identical error.
+///
+/// Class 22 (data exception, e.g. division by zero) is deliberately *absent*: it is a
+/// statement about the data, and another node or an outside writer can change that between
+/// attempts. Everything not listed here -- notably 40 (serialization/deadlock), 08
+/// (connection), 53 (insufficient resources) and 57 (operator intervention) -- is retried.
+const PERMANENT_SQLSTATE_CLASSES: [&str; 5] = ["42", "23", "28", "3D", "3F"];
+
+/// Whether a failed activity is worth another attempt.
+///
+/// Anything without a well-formed marker is retryable. That is the conservative default and
+/// it is also what keeps HTTP nodes, pg_durable's own pre-execution failures (connection
+/// limit, role resolution), and histories recorded before the marker existed behaving as
+/// they did before.
+fn error_is_retryable(error: &str) -> bool {
+    let Some((_, rest)) = error.split_once(SQLSTATE_MARKER) else {
+        return true;
+    };
+    let Some((code, _)) = rest.split_once(']') else {
+        return true;
+    };
+    // A SQLSTATE is exactly five characters. `get` rather than slicing: the code is parsed
+    // from a recorded string and must not be trusted to be ASCII, and a char-boundary panic
+    // inside orchestration code would abort a replay.
+    if code.len() != 5 {
+        return true;
+    }
+    match code.get(..2) {
+        Some(class) => !PERMANENT_SQLSTATE_CLASSES.contains(&class),
+        None => true,
+    }
+}
+
 /// Translate the per-instance policy into duroxide's retry policy.
 ///
 /// `RetryPolicy::new()` asserts `max_attempts >= 1` and would panic inside the
@@ -200,15 +250,51 @@ fn classify_exhausted_activity(error: String, spec: &RetryPolicySpec) -> NodeErr
 ///
 /// This is the only place the policy is applied, so all three node types retry identically
 /// and an exhausted node lands on the same control-flow decision.
+///
+/// The loop deliberately mirrors `duroxide::schedule_activity_with_retry` -- one
+/// `schedule_activity` per attempt with a timer in between -- rather than calling it, because
+/// that helper retries every error and offers no hook to opt out of one. Recording the same
+/// durable operations in the same order is what lets a history written before the policy
+/// existed replay unchanged. `ctx.trace_*` is log-only (duroxide suppresses it while
+/// replaying), so the extra tracing here adds nothing to history.
 async fn schedule_node_activity(
     ctx: &OrchestrationContext,
     name: &str,
     input: String,
     exec_ctx: &ExecutionContext,
 ) -> NodeResult {
-    ctx.schedule_activity_with_retry(name, input, build_retry_policy(&exec_ctx.retry))
-        .await
-        .map_err(|e| classify_exhausted_activity(e, &exec_ctx.retry))
+    let policy = build_retry_policy(&exec_ctx.retry);
+    let mut last_error = String::new();
+
+    for attempt in 1..=policy.max_attempts {
+        match ctx.schedule_activity(name, input.as_str()).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let retryable = error_is_retryable(&e);
+                last_error = e;
+
+                if !retryable {
+                    ctx.trace_info(format!(
+                        "Activity '{name}' failed with a non-retryable error, not retrying: {last_error}"
+                    ));
+                    break;
+                }
+
+                if attempt < policy.max_attempts {
+                    ctx.trace_warn(format!(
+                        "Activity '{name}' attempt {attempt}/{} failed: {last_error}. Retrying...",
+                        policy.max_attempts
+                    ));
+                    let delay = policy.backoff.delay_for_attempt(attempt);
+                    if !delay.is_zero() {
+                        ctx.schedule_timer(delay).await;
+                    }
+                }
+            }
+        }
+    }
+
+    Err(classify_exhausted_activity(last_error, &exec_ctx.retry))
 }
 
 /// Execute a complete function graph — the entry point for a durable function.
@@ -1881,6 +1967,65 @@ mod tests {
     }
 
     #[test]
+    fn legacy_subtree_input_serializes_to_the_pre_0_2_7_envelope() {
+        // duroxide matches a sub-orchestration schedule by exact equality on the serialized
+        // input (replay_engine::action_matches_event_kind). A JOIN/RACE branch or non-root
+        // loop recorded by a pre-0.2.7 binary carries no retry field, so re-emitting one
+        // during replay is a nondeterminism error that bricks the instance -- the same break
+        // documented for v0.2.4 -> v0.2.5. A legacy policy must therefore serialize away.
+        let input = SubtreeInput {
+            instance_id: "i".to_string(),
+            node_id: "n".to_string(),
+            graph: "{}".to_string(),
+            results: "{}".to_string(),
+            vars: None,
+            label: None,
+            iteration: 0,
+            retry: crate::types::RetryPolicySpec::legacy(),
+        };
+
+        let json = serde_json::to_string(&input).unwrap();
+
+        assert!(
+            !json.contains("retry"),
+            "legacy envelope must not emit retry: {json}"
+        );
+    }
+
+    #[test]
+    fn non_legacy_subtree_input_still_serializes_its_policy() {
+        // The suppression above must key off the legacy value specifically: an instance
+        // started under 0.2.7 with a real policy has to propagate it into its subtrees.
+        let input = SubtreeInput {
+            instance_id: "i".to_string(),
+            node_id: "n".to_string(),
+            graph: "{}".to_string(),
+            results: "{}".to_string(),
+            vars: None,
+            label: None,
+            iteration: 0,
+            retry: crate::types::RetryPolicySpec {
+                max_attempts: 5,
+                max_backoff_micros: 16_000_000,
+                on_failure: crate::types::OnFailure::Continue,
+            },
+        };
+
+        let json = serde_json::to_string(&input).unwrap();
+        let round_tripped: SubtreeInput = serde_json::from_str(&json).unwrap();
+
+        assert!(
+            json.contains("retry"),
+            "a real policy must be carried: {json}"
+        );
+        assert_eq!(round_tripped.retry.max_attempts, 5);
+        assert_eq!(
+            round_tripped.retry.on_failure,
+            crate::types::OnFailure::Continue
+        );
+    }
+
+    #[test]
     fn subtree_input_carries_the_parents_policy() {
         // A sub-orchestration must inherit the instance's policy: a node inside a JOIN
         // branch is no less retryable than the same node in the trunk.
@@ -1908,6 +2053,72 @@ mod tests {
         let input: SubtreeInput = serde_json::from_str(&json).unwrap();
 
         assert_eq!(input.retry, retry);
+    }
+
+    #[test]
+    fn deterministic_sqlstate_classes_are_not_retried() {
+        // A statement that failed because it is wrong will fail identically on every
+        // attempt. Retrying it just spends the caller's backoff budget before reporting the
+        // same error, and for an integrity violation it can actively mislead: a unique
+        // violation on attempt two is what a committed-but-disconnected insert looks like.
+        for code in [
+            "42P01", // undefined_table
+            "42601", // syntax_error
+            "42501", // insufficient_privilege
+            "23505", // unique_violation
+            "23503", // foreign_key_violation
+            "28P01", // invalid_password
+            "3D000", // invalid_catalog_name
+            "3F000", // invalid_schema_name
+        ] {
+            let error = format!("SQL execution failed [SQLSTATE {code}]: boom");
+            assert!(!error_is_retryable(&error), "{code} should not be retried");
+        }
+    }
+
+    #[test]
+    fn transient_and_unclassified_sqlstate_classes_are_retried() {
+        // Class 40/08/53/57 are the textbook transient failures. Class 22 (data exception,
+        // e.g. division by zero) stays retryable on purpose: it is a statement about the
+        // *data*, which another node or an outside writer can change between attempts.
+        for code in [
+            "40001", // serialization_failure
+            "40P01", // deadlock_detected
+            "08006", // connection_failure
+            "53300", // too_many_connections
+            "57P01", // admin_shutdown
+            "22012", // division_by_zero
+            "XX000", // internal_error
+        ] {
+            let error = format!("SQL execution failed [SQLSTATE {code}]: boom");
+            assert!(error_is_retryable(&error), "{code} should be retried");
+        }
+    }
+
+    #[test]
+    fn errors_without_a_sqlstate_are_retried() {
+        // HTTP and multipart nodes carry no SQLSTATE, and neither do pg_durable's own
+        // pre-execution failures (connection limit, role resolution). Retrying is the
+        // conservative default, and it is what histories recorded before this marker
+        // existed replay as.
+        assert!(error_is_retryable("connection limit reached"));
+        assert!(error_is_retryable(
+            "HTTP request failed: 503 Service Unavailable"
+        ));
+        assert!(error_is_retryable(
+            "SQL execution failed: some older message"
+        ));
+    }
+
+    #[test]
+    fn a_malformed_sqlstate_marker_is_retried() {
+        // The marker is parsed from a recorded string, so it must not be trusted to be
+        // well-formed; anything unparseable falls back to the retryable default.
+        assert!(error_is_retryable("SQL execution failed [SQLSTATE ]: boom"));
+        assert!(error_is_retryable(
+            "SQL execution failed [SQLSTATE 4]: boom"
+        ));
+        assert!(error_is_retryable("[SQLSTATE"));
     }
 
     #[test]

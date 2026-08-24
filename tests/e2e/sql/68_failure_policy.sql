@@ -15,12 +15,18 @@ DROP SEQUENCE IF EXISTS test_fp_transient_seq;
 DROP SEQUENCE IF EXISTS test_fp_loop_seq;
 DROP SEQUENCE IF EXISTS test_fp_no_loop_seq;
 DROP SEQUENCE IF EXISTS test_fp_fail_seq;
+DROP SEQUENCE IF EXISTS test_fp_default_seq;
 
 CREATE TABLE test_fp_loop_log (id SERIAL PRIMARY KEY, note TEXT);
-CREATE SEQUENCE test_fp_transient_seq;
-CREATE SEQUENCE test_fp_loop_seq;
-CREATE SEQUENCE test_fp_no_loop_seq;
-CREATE SEQUENCE test_fp_fail_seq;
+-- Attempts are counted with sequences rather than tables: a failed attempt's transaction
+-- rolls back and would take an inserted row with it, whereas nextval() is non-transactional
+-- and survives. CACHE 1 is the default but is stated explicitly, because a larger cache
+-- would let last_value run ahead of the number of nextval() calls and break the count.
+CREATE SEQUENCE test_fp_transient_seq CACHE 1;
+CREATE SEQUENCE test_fp_loop_seq CACHE 1;
+CREATE SEQUENCE test_fp_no_loop_seq CACHE 1;
+CREATE SEQUENCE test_fp_fail_seq CACHE 1;
+CREATE SEQUENCE test_fp_default_seq CACHE 1;
 
 -- ---------------------------------------------------------------------------
 -- Case 1: a transient failure is retried until it succeeds.
@@ -55,9 +61,9 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- Case 2: on_failure => 'continue' (the default) abandons the rest of the
--- failing iteration and runs the next one. The body fails through iteration 1
--- (attempts 1-2) and the first attempt of iteration 2, then succeeds.
+-- Case 2: on_failure => 'continue' abandons the rest of the failing iteration
+-- and runs the next one. The body fails through iteration 1 (attempts 1-2) and
+-- the first attempt of iteration 2, then succeeds.
 -- ---------------------------------------------------------------------------
 CREATE TEMP TABLE _fp_loop AS
 SELECT df.start(
@@ -68,7 +74,8 @@ SELECT df.start(
     ),
     'test-failure-policy-loop-continue',
     max_attempts => 2,
-    max_backoff => '1 second'
+    max_backoff => '1 second',
+    on_failure => 'continue'
 ) AS instance_id;
 
 DO $$
@@ -190,7 +197,41 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- Case 5: argument validation is rejected at df.start() time.
+-- Case 5: the defaults are the pre-0.2.7 behaviour. A df.start() that passes no
+-- policy arguments must still fail on the first node error, even inside a loop,
+-- so upgrading to 0.2.7 cannot silently change an existing workflow. This is the
+-- same shape as case 4 with the arguments omitted rather than spelled out.
+-- ---------------------------------------------------------------------------
+CREATE TEMP TABLE _fp_default AS
+SELECT df.start(
+    df.loop(
+        $$SELECT 1 / (CASE WHEN nextval('test_fp_default_seq') < 0 THEN 1 ELSE 0 END)$$,
+        'SELECT true'
+    ),
+    'test-failure-policy-default'
+) AS instance_id;
+
+DO $$
+DECLARE
+    instance_id TEXT;
+    final_status TEXT;
+    attempts BIGINT;
+BEGIN
+    SELECT i.instance_id INTO instance_id FROM _fp_default i;
+    SELECT df.await_instance(instance_id, 60) INTO final_status;
+
+    IF final_status IS DISTINCT FROM 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED [default]: expected failed, got %', final_status;
+    END IF;
+
+    SELECT last_value INTO attempts FROM test_fp_default_seq;
+    IF attempts IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'TEST FAILED [default]: expected exactly 1 attempt under the defaults, got %', attempts;
+    END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- Case 6: argument validation is rejected at df.start() time.
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -231,10 +272,12 @@ DROP TABLE _fp_transient;
 DROP TABLE _fp_loop;
 DROP TABLE _fp_no_loop;
 DROP TABLE _fp_fail;
+DROP TABLE _fp_default;
 DROP TABLE test_fp_loop_log;
 DROP SEQUENCE test_fp_transient_seq;
 DROP SEQUENCE test_fp_loop_seq;
 DROP SEQUENCE test_fp_no_loop_seq;
 DROP SEQUENCE test_fp_fail_seq;
+DROP SEQUENCE test_fp_default_seq;
 RESET SESSION AUTHORIZATION;
 SELECT 'TEST PASSED' AS result;

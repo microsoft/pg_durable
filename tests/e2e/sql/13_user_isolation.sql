@@ -355,14 +355,7 @@ CREATE TABLE _test_state_7_persistent (instance_id TEXT);
 GRANT INSERT ON _test_state_7_persistent TO iso_ephemeral;
 
 SET SESSION AUTHORIZATION iso_ephemeral;
--- This test asserts the failure itself, so it opts out of the default retry
--- policy: one attempt, then fail.
-INSERT INTO _test_state_7_persistent SELECT df.start(
-    df.sleep(3) ~> df.sql('SELECT 1'),
-    'ephemeral-test',
-    max_attempts => 1,
-    on_failure => 'fail'
-);
+INSERT INTO _test_state_7_persistent SELECT df.start(df.sleep(3) ~> df.sql('SELECT 1'), 'ephemeral-test');
 RESET SESSION AUTHORIZATION;
 
 DO $$

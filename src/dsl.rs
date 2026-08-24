@@ -1020,9 +1020,9 @@ pub fn start_v3(
     label: default!(Option<&str>, "NULL"),
     database: default!(Option<&str>, "NULL"),
     transaction_mode: default!(&str, "'caller'"),
-    max_attempts: default!(i32, "5"),
+    max_attempts: default!(i32, "1"),
     max_backoff: default!(pgrx::datum::Interval, "'16 seconds'"),
-    on_failure: default!(&str, "'continue'"),
+    on_failure: default!(&str, "'fail'"),
 ) -> String {
     let retry = match parse_retry_policy(max_attempts, max_backoff, on_failure) {
         Ok(spec) => spec,

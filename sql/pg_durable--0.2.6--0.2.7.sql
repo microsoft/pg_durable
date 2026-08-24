@@ -51,10 +51,95 @@ CREATE  FUNCTION df."start"(
 	"label" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"database" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"transaction_mode" TEXT DEFAULT 'caller', /* &str */
-	"max_attempts" INT DEFAULT 5, /* i32 */
+	"max_attempts" INT DEFAULT 1, /* i32 */
 	"max_backoff" interval DEFAULT '16 seconds', /* pgrx::datum::interval::Interval */
-	"on_failure" TEXT DEFAULT 'continue' /* &str */
+	"on_failure" TEXT DEFAULT 'fail' /* &str */
 ) RETURNS TEXT /* alloc::string::String */
 
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'start_v3_wrapper';
+
+-- ============================================================================
+-- df.instance_activity(): report whether an instance is making progress.
+--
+-- New in 0.2.7. Definition kept byte-identical to the fresh-install block in
+-- src/lib.rs (extension_sql! name = "instance_activity") so the Scenario A
+-- schema comparison matches.
+-- ============================================================================
+
+-- df.instance_activity(): is this workflow actually doing anything?
+--
+-- A long-running instance and a wedged one both read 'running', so status alone
+-- cannot tell them apart. This reports when each non-terminal instance last
+-- transitioned a node, how long it has been quiet since, and whether any node is
+-- currently failing -- which is what a retrying-and-abandoning loop looks like
+-- from the outside.
+--
+-- SECURITY INVOKER (the default) so the row-level security policies on
+-- df.instances and df.nodes apply: a caller sees only their own instances.
+-- Deliberately a function rather than a view, because view-level RLS
+-- pass-through (security_invoker) requires PostgreSQL 15 and this extension
+-- supports 13.
+--
+-- p_idle_for filters to instances quiet for at least that long. The default of
+-- zero reports every non-terminal instance, so the common call is simply
+--   SELECT * FROM df.instance_activity() ORDER BY idle_for_seconds DESC;
+--
+-- Idle time is measured against clock_timestamp(), not now(). now() is the
+-- calling transaction's start time, and the worker keeps writing node
+-- timestamps after that, so a busy instance's last activity can be *later*
+-- than now() -- which would make its idle time negative and drop it below any
+-- threshold, including zero. Reading a moving clock makes the function
+-- VOLATILE, which is honest: two calls in one transaction can legitimately
+-- differ.
+--
+-- GREATEST and EXTRACT are parser constructs and cannot be schema-qualified;
+-- the pinned search_path resolves the remaining names to pg_catalog.
+CREATE OR REPLACE FUNCTION df.instance_activity(p_idle_for interval DEFAULT '0 seconds')
+RETURNS TABLE (
+    instance_id VARCHAR(8),
+    label TEXT,
+    status TEXT,
+    last_activity_at TIMESTAMPTZ,
+    idle_for_seconds DOUBLE PRECISION,
+    running_node_count BIGINT,
+    failed_node_count BIGINT,
+    last_error TEXT
+)
+LANGUAGE SQL
+VOLATILE
+SET search_path = pg_catalog, df, pg_temp
+AS $fn$
+    SELECT
+        i.id,
+        i.label,
+        i.status,
+        activity.last_activity_at,
+        GREATEST(0, EXTRACT(EPOCH FROM pg_catalog.clock_timestamp() - activity.last_activity_at))::double precision,
+        activity.running_node_count,
+        activity.failed_node_count,
+        activity.last_error
+    FROM df.instances i
+    CROSS JOIN LATERAL (
+        SELECT
+            -- GREATEST ignores NULLs, so an instance whose nodes have never
+            -- transitioned still reports its own updated_at.
+            GREATEST(i.updated_at, max(n.updated_at)) AS last_activity_at,
+            count(*) FILTER (WHERE n.status = 'running') AS running_node_count,
+            count(*) FILTER (WHERE n.status = 'failed') AS failed_node_count,
+            -- A failed node's message is written to df.nodes.result, not to
+            -- df.nodes.error, which nothing writes. #>> '{}' unwraps the JSONB
+            -- scalar so the caller gets the message, not a quoted JSON string.
+            (array_agg(n.result #>> '{}' ORDER BY n.updated_at DESC)
+                FILTER (WHERE n.status = 'failed' AND n.result IS NOT NULL))[1] AS last_error
+        FROM df.nodes n
+        WHERE n.instance_id = i.id
+    ) AS activity
+    WHERE (i.status IS NULL OR i.status NOT IN ('completed', 'failed', 'cancelled'))
+      AND pg_catalog.clock_timestamp() - activity.last_activity_at >= p_idle_for;
+$fn$;
+
+COMMENT ON FUNCTION df.instance_activity(interval) IS
+    'Non-terminal instances with their last node transition, how long they have been idle, '
+    'and any current node failure. Use to tell a working workflow from a wedged one, which '
+    'status alone cannot show. RLS-filtered to the calling user.';

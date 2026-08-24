@@ -254,7 +254,15 @@ pub async fn execute(
             Ok(result.to_string())
         }
         Err(e) => {
-            let err_msg = format!("SQL execution failed: {e}");
+            // Stamp the SQLSTATE so the orchestration can tell a statement that is simply
+            // wrong (undefined table, syntax error, constraint violation) from one that
+            // failed because of the moment (deadlock, dropped connection, resource limit)
+            // and skip the retries that cannot help. The code has to travel as text because
+            // the activity boundary is `Result<String, String>`.
+            let err_msg = match e.as_database_error().and_then(|db| db.code()) {
+                Some(code) => format!("SQL execution failed [SQLSTATE {code}]: {e}"),
+                None => format!("SQL execution failed: {e}"),
+            };
             ctx.trace_info(&err_msg);
             Err(err_msg)
         }

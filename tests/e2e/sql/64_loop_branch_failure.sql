@@ -23,9 +23,7 @@ SELECT df.start(
         )
     )
     & 'INSERT INTO test_loop_branch_failure_sibling VALUES (1)',
-    'test-loop-branch-failure',
-    max_attempts => 1,
-    on_failure => 'fail'
+    'test-loop-branch-failure'
 ) AS instance_id;
 
 DO $$

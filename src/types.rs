@@ -1283,8 +1283,13 @@ pub struct FunctionInput {
     /// Retry and failure policy chosen at `df.start()`.
     ///
     /// Missing in histories recorded before the policy existed, which is why the default is
-    /// the pre-policy behavior rather than the `df.start()` default.
-    #[serde(default = "RetryPolicySpec::legacy")]
+    /// the pre-policy behavior rather than the `df.start()` default. Omitted from the wire
+    /// when it holds that legacy value, so a `continue_as_new` generation of a pre-0.2.7
+    /// instance re-emits the input shape that instance was started with.
+    #[serde(
+        default = "RetryPolicySpec::legacy",
+        skip_serializing_if = "RetryPolicySpec::is_legacy"
+    )]
     pub retry: RetryPolicySpec,
     /// Serialized `FunctionGraph`, carried across `continue_as_new` generations.
     ///
@@ -1336,22 +1341,23 @@ impl RetryPolicySpec {
         }
     }
 
-    /// The defaults a new `df.start()` gets when the caller says nothing.
-    pub fn default_for_start() -> Self {
-        Self {
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            max_backoff_micros: DEFAULT_MAX_BACKOFF_MICROS,
-            on_failure: OnFailure::Continue,
-        }
+    /// Whether this is the pre-0.2.7 policy, in which case it is omitted from serialized
+    /// input entirely.
+    ///
+    /// duroxide matches a recorded sub-orchestration schedule by exact equality on the
+    /// serialized input, so emitting a field a pre-0.2.7 binary never wrote turns every
+    /// in-flight JOIN branch, RACE branch, and non-root loop into a nondeterminism error.
+    /// Suppressing the legacy value keeps those envelopes byte-identical. This deliberately
+    /// keys off the legacy value rather than `Default`: an instance started under 0.2.7 with
+    /// a real policy must still carry it.
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::legacy()
     }
 
     pub fn max_backoff(&self) -> std::time::Duration {
         std::time::Duration::from_micros(self.max_backoff_micros.max(0) as u64)
     }
 }
-
-/// Default `max_attempts` for `df.start()`, including the first try.
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 
 /// Default `max_backoff` for `df.start()`: 16 seconds.
 pub const DEFAULT_MAX_BACKOFF_MICROS: i64 = 16_000_000;
@@ -1843,6 +1849,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_function_input_serializes_without_the_retry_field() {
+        // A pre-0.2.7 instance that reaches a continue_as_new under this binary must re-emit
+        // the input shape it was started with, so its later generations stay consistent with
+        // the history the old binary recorded.
+        let input = FunctionInput {
+            instance_id: "abc12345".to_string(),
+            label: None,
+            vars: std::collections::HashMap::new(),
+            loop_iteration: 7,
+            graph: None,
+            retry: RetryPolicySpec::legacy(),
+        };
+
+        let encoded = serde_json::to_string(&input).unwrap();
+        let decoded: FunctionInput = serde_json::from_str(&encoded).unwrap();
+
+        assert!(
+            !encoded.contains("retry"),
+            "legacy input must not emit retry: {encoded}"
+        );
+        assert!(decoded.retry.is_legacy());
+    }
+
+    #[test]
     fn retry_policy_max_backoff_converts_micros_to_duration() {
         let spec = RetryPolicySpec {
             max_attempts: 5,
@@ -1855,11 +1885,13 @@ mod tests {
 
     #[test]
     fn retry_policy_defaults_match_the_documented_start_defaults() {
-        let spec = RetryPolicySpec::default_for_start();
+        // df.start() defaults to the pre-0.2.7 behavior: the policy is entirely opt-in, so
+        // upgrading cannot change how an existing workflow handles a failing node.
+        let spec = RetryPolicySpec::legacy();
 
-        assert_eq!(spec.max_attempts, 5);
+        assert_eq!(spec.max_attempts, 1);
         assert_eq!(spec.max_backoff(), std::time::Duration::from_secs(16));
-        assert_eq!(spec.on_failure, OnFailure::Continue);
+        assert_eq!(spec.on_failure, OnFailure::Fail);
     }
 
     #[test]
