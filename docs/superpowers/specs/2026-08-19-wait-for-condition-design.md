@@ -334,6 +334,10 @@ against a changed activity input.
 - Notification suppression: the first notification for a key wakes, a repeat
   inside the window does not, a repeat after it does, keys are independent, and
   stale entries are evicted.
+- The check interval rejects zero and negative values, which a hand-written
+  node could carry and which would otherwise widen into an infinite timer.
+- `condition_met` reads the wrapped boolean and rejects a missing, null, or
+  non-boolean value, since `(<condition>) IS TRUE` can never produce one.
 
 **E2E** (`tests/e2e/sql/67_wait_for_condition.sql`):
 1. **Already true.** The predicate is true at start. The node completes without

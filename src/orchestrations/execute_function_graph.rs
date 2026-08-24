@@ -1714,15 +1714,7 @@ async fn execute_wait_condition_node(
     let interval_secs = config["max_check_interval_secs"]
         .as_i64()
         .ok_or_else(|| "WAIT_CONDITION missing max_check_interval_secs".to_string())?;
-    // df.wait_for_condition() already rejects sub-second intervals, but a graph
-    // can also be hand-written as raw node JSON. Fail loudly rather than let a
-    // negative value widen into an effectively infinite timer via `as u64`.
-    if interval_secs < 1 {
-        return Err(format!(
-            "WAIT_CONDITION max_check_interval_secs must be at least 1, got {interval_secs}"
-        )
-        .into());
-    }
+    let interval = check_interval(interval_secs)?;
     let notify_key = config["notify_key"].as_str();
 
     let substituted = substitute_all(condition, results, &exec_ctx.vars, sys_vars)?;
@@ -1750,7 +1742,6 @@ async fn execute_wait_condition_node(
     // Must agree with the listener's enqueue_event target; both go through
     // types::condition_queue_name so the two can never drift apart.
     let queue = notify_key.map(crate::types::condition_queue_name);
-    let interval = Duration::from_secs(interval_secs as u64);
     let predicate_input = serde_json::json!({
         "query": predicate_sql,
         "submitted_by": node.submitted_by,
@@ -1819,6 +1810,20 @@ async fn execute_wait_condition_node(
         results.insert(name.clone(), result.clone());
     }
     Ok(result)
+}
+
+/// Validate a `WAIT_CONDITION` check interval and convert it to a `Duration`.
+///
+/// `df.wait_for_condition()` already rejects sub-second intervals, but a graph
+/// can also be hand-written as raw node JSON. Rejecting here keeps a negative
+/// value from widening through `as u64` into an effectively infinite timer.
+fn check_interval(secs: i64) -> Result<Duration, String> {
+    if secs < 1 {
+        return Err(format!(
+            "WAIT_CONDITION max_check_interval_secs must be at least 1, got {secs}"
+        ));
+    }
+    Ok(Duration::from_secs(secs as u64))
 }
 
 /// Read the single `condition_met` boolean out of an `execute_sql` result.
@@ -1917,6 +1922,37 @@ async fn execute_signal_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_interval_accepts_one_second_and_above() {
+        assert_eq!(check_interval(1).unwrap(), Duration::from_secs(1));
+        assert_eq!(check_interval(300).unwrap(), Duration::from_secs(300));
+    }
+
+    /// A hand-written node could carry a negative interval, which `as u64`
+    /// would widen into an effectively infinite timer.
+    #[test]
+    fn check_interval_rejects_zero_and_negative() {
+        assert!(check_interval(0).is_err());
+        assert!(check_interval(-1).is_err());
+        assert!(check_interval(i64::MIN).is_err());
+    }
+
+    #[test]
+    fn condition_met_reads_the_wrapped_boolean() {
+        assert!(condition_met(r#"{"rows":[{"condition_met":true}]}"#).unwrap());
+        assert!(!condition_met(r#"{"rows":[{"condition_met":false}]}"#).unwrap());
+    }
+
+    /// `(<condition>) IS TRUE` never yields NULL or an empty result, so anything
+    /// else means the predicate did not go through the wrapper.
+    #[test]
+    fn condition_met_rejects_a_missing_or_non_boolean_value() {
+        assert!(condition_met(r#"{"rows":[]}"#).is_err());
+        assert!(condition_met(r#"{"rows":[{"condition_met":null}]}"#).is_err());
+        assert!(condition_met(r#"{"rows":[{"count":1}]}"#).is_err());
+        assert!(condition_met("not json").is_err());
+    }
 
     /// Build an envelope JSON string the way `execute_subtree` serializes a `SubtreeEnvelope`.
     /// When `control` is `None` the field is omitted entirely, reproducing an envelope recorded
