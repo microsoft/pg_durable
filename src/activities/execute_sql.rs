@@ -64,6 +64,19 @@ pub struct ExecuteSqlInput {
     /// Target database (None = extension database)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    /// Run the statement with `default_transaction_read_only` so it cannot
+    /// perform writes. Used by `df.wait_for_condition()` predicates, which are
+    /// re-evaluated indefinitely and must not have side effects.
+    ///
+    /// Skipped when false so the serialized activity input is byte-identical to
+    /// what pre-`read_only` binaries recorded, keeping in-flight histories
+    /// replayable.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Decode a single column value from a PostgreSQL row into a `serde_json::Value`.
@@ -226,6 +239,13 @@ pub async fn execute(
 
     let mut conn = connect_as_user(&input.submitted_by, input.database.as_deref()).await?;
 
+    if input.read_only {
+        sqlx::query("SET default_transaction_read_only = on")
+            .execute(&mut conn)
+            .await
+            .map_err(|e| format!("SET default_transaction_read_only failed: {e}"))?;
+    }
+
     // SECURITY: Dynamic SQL is intentional. The query is authored by the submitting
     // user via df.sql() and executes under their own role via connect_as_user().
     // This is equivalent to the user running SQL directly.
@@ -258,5 +278,44 @@ pub async fn execute(
             ctx.trace_info(&err_msg);
             Err(err_msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Replay safety: histories written before `read_only` existed serialized
+    /// the input without the field. Emitting it unconditionally would change
+    /// the recorded activity input and break replay of in-flight instances.
+    #[test]
+    fn read_only_is_omitted_when_false() {
+        let input = ExecuteSqlInput {
+            query: "SELECT 1".to_string(),
+            submitted_by: "alice".to_string(),
+            database: None,
+            read_only: false,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert_eq!(json, r#"{"query":"SELECT 1","submitted_by":"alice"}"#);
+    }
+
+    #[test]
+    fn read_only_is_emitted_when_true() {
+        let input = ExecuteSqlInput {
+            query: "SELECT true".to_string(),
+            submitted_by: "alice".to_string(),
+            database: None,
+            read_only: true,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains(r#""read_only":true"#), "got {json}");
+    }
+
+    #[test]
+    fn read_only_defaults_to_false_when_absent() {
+        let input: ExecuteSqlInput =
+            serde_json::from_str(r#"{"query":"SELECT 1","submitted_by":"alice"}"#).unwrap();
+        assert!(!input.read_only);
     }
 }

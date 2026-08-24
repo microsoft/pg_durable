@@ -1000,6 +1000,14 @@ async fn run_until_extension_dropped_or_shutdown(
 
     let client = Client::new(duroxide_store.clone());
 
+    // Wakes df.wait_for_condition() waiters on NOTIFY. Purely an accelerator:
+    // if it dies, every waiter still fires within its max_check_interval.
+    let condition_listener = tokio::spawn(crate::condition_listener::run(
+        postgres_connection_string(),
+        Arc::new(maintenance_pool.clone()),
+        client.clone(),
+    ));
+
     let mut drop_check = tokio::time::interval(drop_poll_interval);
     drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -1083,11 +1091,45 @@ async fn run_until_extension_dropped_or_shutdown(
                     Ok(_) => {}
                     Err(e) => log!("pg_durable: reclaiming orphaned engine records failed: {e}"),
                 }
+
+                sweep_condition_waiters(maintenance_pool).await;
             }
         }
     }
 
+    condition_listener.abort();
     teardown_runtime(duroxide_runtime, duroxide_store).await;
+}
+
+/// Delete waiter rows whose df instance is no longer active.
+///
+/// A cancelled or crashed instance never runs its unregister activity, so
+/// without this the row would leak. The stored id is the duroxide instance id;
+/// its first `::` segment is the df instance id for both root and subtree
+/// instances, since `subtree_instance_id` composes onto the parent's id.
+async fn sweep_condition_waiters(pool: &sqlx::PgPool) {
+    let result = sqlx::query(
+        "DELETE FROM df.condition_waiters w \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM df.instances i \
+             WHERE i.id = pg_catalog.split_part(w.instance_id, '::', 1) \
+               AND i.status IN ('pending', 'running') \
+         )",
+    )
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            log!(
+                "pg_durable: removed {} orphaned condition waiter row(s)",
+                r.rows_affected()
+            );
+        }
+        Ok(_) => {}
+        // Absent on a schema older than 0.2.6 (Scenario B1); nothing to sweep.
+        Err(e) => log!("pg_durable: sweeping condition waiters failed: {e}"),
+    }
 }
 
 /// Shut down a duroxide runtime and close its store pool.

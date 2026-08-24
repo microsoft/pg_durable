@@ -59,8 +59,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # pgrx settings
-PGRX_HOME="$HOME/.pgrx"
-PG_PORT="$((28800 + PG_VERSION))"
+PGRX_HOME="${PGRX_HOME:-$HOME/.pgrx}"
+PG_PORT="${PG_PORT:-$((28800 + PG_VERSION))}"
 
 # Find pgrx binaries
 PGRX_BIN=$(ls -d "$PGRX_HOME/$PG_VERSION."*/pgrx-install/bin 2>/dev/null | head -1)

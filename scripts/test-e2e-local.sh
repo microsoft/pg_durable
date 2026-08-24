@@ -76,7 +76,7 @@ ALL_PHASES=(
     "http-allow-all"
 )
 
-PGRX_HOME="$HOME/.pgrx"
+PGRX_HOME="${PGRX_HOME:-$HOME/.pgrx}"
 PG_USER="postgres"
 PG_DB="postgres"
 E2E_USER="df_e2e_user"
@@ -262,7 +262,7 @@ if ! [[ "$REPEAT_COUNT" =~ ^[0-9]+$ ]] || [ "$REPEAT_COUNT" -lt 1 ]; then
     exit 1
 fi
 
-PG_PORT="$((28800 + PG_VERSION))"
+PG_PORT="${PG_PORT:-$((28800 + PG_VERSION))}"
 DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 CONF_FILE="$DATA_DIR/postgresql.conf"

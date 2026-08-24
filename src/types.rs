@@ -447,6 +447,25 @@ pub fn evaluate_condition(result: &str) -> Result<bool, String> {
     Ok(is_truthy(&serde_json::Value::String(result.to_string())))
 }
 
+/// Wrap a user predicate so it is evaluated with SQL's own truth rules.
+///
+/// The predicate becomes a scalar subquery tested with `IS TRUE`, which gives
+/// PostgreSQL's existing semantics for free: exactly one column, zero rows or
+/// NULL read as false, and more than one row is a cardinality error. It also
+/// constrains the predicate to a single `SELECT`, since nothing else parses in
+/// subquery position.
+pub fn wrap_condition_sql(condition: &str) -> String {
+    let trimmed = condition.trim().trim_end_matches(';').trim_end();
+    format!("SELECT ({trimmed}) IS TRUE AS condition_met")
+}
+
+/// The duroxide queue a `df.wait_for_condition()` node subscribes to for a
+/// given `notify_key`. Shared by the orchestration and the NOTIFY listener so
+/// the two cannot drift.
+pub fn condition_queue_name(notify_key: &str) -> String {
+    format!("df:condition:{notify_key}")
+}
+
 pub fn is_truthy(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Bool(b) => *b,
@@ -1329,6 +1348,7 @@ pub const VALID_NODE_TYPES: &[&str] = &[
     "RACE",
     "SLEEP",
     "WAIT_SCHEDULE",
+    "WAIT_CONDITION",
     "HTTP",
     "HTTP_MULTIPART",
     "SIGNAL",
@@ -1695,6 +1715,14 @@ impl Durofut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn condition_queue_name_is_namespaced() {
+        assert_eq!(
+            condition_queue_name("segments:docs_idx"),
+            "df:condition:segments:docs_idx"
+        );
+    }
 
     #[test]
     fn durofut_raw_children_preserve_wire_format() {

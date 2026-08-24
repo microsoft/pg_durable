@@ -53,6 +53,7 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 | **Conditional Logic** | Branch with `?>` `!>` operators or `df.if()` |
 | **Timers & Delays** | Sleep with `df.sleep()` |
 | **Cron Scheduling** | Schedule with `df.wait_for_schedule()` |
+| **Condition Triggers** | Wait for a SQL predicate with `df.wait_for_condition()` |
 | **Eternal Loops** | Create forever-running jobs with `@>` operator or `df.loop()` |
 | **Signals** | Wait for external events with `df.wait_for_signal()` |
 | **Variable Substitution** | Pass results between steps using `$name` |
@@ -247,6 +248,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 |----------|-------------|---------|
 | `df.sleep(seconds)` | Pause for N seconds | `df.sleep(60)` |
 | `df.wait_for_schedule(cron)` | Wait until cron matches | `df.wait_for_schedule('0 * * * *')` |
+| `df.wait_for_condition(condition, max_check_interval, notify_key)` | Wait until a SQL predicate is true | `df.wait_for_condition('SELECT count(*) > 8 FROM segments', '1min')` |
 | `df.http(url, method, body, headers, timeout)` | Make HTTP request | `df.http('https://api.example.com', 'POST', '{"key": "value"}')` |
 | `df.join(a, b)` | Execute in parallel, wait for all | `df.join('SELECT 1', 'SELECT 2')` |
 | `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
@@ -403,6 +405,7 @@ SELECT df.result('a1b2c3d4')::jsonb->'rows'->0->>'answer';
 - A SQL query returning no rows produces: `{"rows": [], "row_count": 0}`
 - `df.sleep()` returns a top-level JSON object like `{"slept": true, "seconds": 60}`
 - `df.wait_for_schedule()` returns a top-level JSON object: `{"scheduled": true}`
+- `df.wait_for_condition()` returns a top-level JSON object: `{"condition_met": true}`
 - `df.http()` and `df.http_multipart()` return a top-level JSON object with `status`, `body`, `encoding`, `headers`, `ok`, and `duration_ms` fields
 - `df.break('value')` stores the literal value as the loop result (not wrapped in `rows`)
 
@@ -1223,6 +1226,59 @@ SELECT df.start(
     'weekday-morning-report'
 );
 ```
+
+### Condition-Based Triggering
+
+`df.wait_for_condition()` blocks until a SQL predicate is true. Use it when the
+work is driven by the state of your data rather than by the clock.
+
+```sql
+-- Compact whenever the segment count crosses a threshold.
+SELECT df.start(
+    @> (
+        df.wait_for_condition(
+            'SELECT count(*) > 8 FROM playground.segments',
+            '1min'
+        )
+        ~> 'SELECT playground.compact_segments()'
+    ),
+    'segment-compactor'
+);
+```
+
+The predicate is evaluated as `(<condition>) IS TRUE`, so ordinary scalar
+subquery rules apply: it must produce a single boolean column, no rows or NULL
+read as false, and more than one row is an error. Use `SELECT EXISTS (...)` for
+existence checks. It runs read-only, so a condition with side effects fails
+rather than performing them repeatedly.
+
+`max_check_interval` is required and has a one-second floor. It is the worst
+case latency between the condition becoming true and the workflow noticing.
+
+Add a `notify_key` to be woken sooner. The producer of the data notifies the
+fixed channel `pg_durable_condition` with the key as the payload:
+
+```sql
+SELECT df.start(
+    @> (
+        df.wait_for_condition(
+            'SELECT count(*) > 8 FROM playground.segments',
+            '5min',
+            notify_key => 'segments_changed'
+        )
+        ~> 'SELECT playground.compact_segments()'
+    ),
+    'segment-compactor'
+);
+
+-- In the writer, after committing new segments:
+SELECT pg_notify('pg_durable_condition', 'segments_changed');
+```
+
+The interval remains the guarantee; the notification is only an accelerator, so
+a missed notification costs latency rather than correctness. `notify_key` is
+not a permission — any role can send any payload, and the worst that does is
+re-evaluate a predicate early.
 
 ### While Loops
 

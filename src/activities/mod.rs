@@ -11,5 +11,7 @@ pub mod execute_multipart;
 pub mod execute_sql;
 pub mod http_response;
 pub mod load_function_graph;
+pub mod register_condition_waiter;
+pub mod unregister_condition_waiter;
 pub mod update_instance_status;
 pub mod update_node_status;

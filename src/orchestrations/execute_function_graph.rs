@@ -564,6 +564,9 @@ async fn execute_node_inner(
         "then" => execute_then_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "sleep" => execute_sleep_node(ctx, node, node_id).await,
         "wait_schedule" => execute_wait_schedule_node(ctx, node, node_id).await,
+        "wait_condition" => {
+            execute_wait_condition_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await
+        }
         "loop" => execute_loop_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "if" => execute_if_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "join" => execute_join_node(ctx, graph, node, node_id, results, exec_ctx).await,
@@ -1679,6 +1682,140 @@ async fn execute_http_multipart_node(
     }
 
     Ok(result)
+}
+
+/// Maximum predicate evaluations in a single `df.wait_for_condition()` node
+/// before it warns about unbounded history growth.
+///
+/// The design calls for abandoning the loop iteration here so `continue_as_new`
+/// truncates history. That unwind arrives with the failure-policy work; until
+/// then the node keeps waiting and only traces.
+const CONDITION_CHECK_WARN_THRESHOLD: u64 = 100;
+
+async fn execute_wait_condition_node(
+    ctx: &OrchestrationContext,
+    node: &FunctionNode,
+    node_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+    sys_vars: &SystemVars,
+) -> NodeResult {
+    let config_str = node
+        .query
+        .as_ref()
+        .ok_or_else(|| format!("WAIT_CONDITION node {node_id} has no config"))?;
+
+    let config: serde_json::Value = serde_json::from_str(config_str)
+        .map_err(|e| format!("Invalid WAIT_CONDITION config: {e}"))?;
+
+    let condition = config["condition"]
+        .as_str()
+        .ok_or_else(|| "WAIT_CONDITION missing condition".to_string())?;
+    let interval_secs = config["max_check_interval_secs"]
+        .as_i64()
+        .ok_or_else(|| "WAIT_CONDITION missing max_check_interval_secs".to_string())?;
+    let notify_key = config["notify_key"].as_str();
+
+    let substituted = substitute_all(condition, results, &exec_ctx.vars, sys_vars)?;
+    let predicate_sql = crate::types::wrap_condition_sql(&substituted);
+
+    let instance_id = ctx.instance_id();
+    let waiter_input = serde_json::json!({
+        "instance_id": instance_id,
+        "node_id": node_id,
+        "notify_key": notify_key,
+    })
+    .to_string();
+
+    // Register before the first evaluation so the two overlap: the evaluation
+    // catches anything already true, the subscription catches anything from
+    // then on, and nothing falls between them.
+    if notify_key.is_some() {
+        ctx.schedule_activity(
+            activities::register_condition_waiter::NAME,
+            waiter_input.clone(),
+        )
+        .await?;
+    }
+
+    let queue = notify_key.map(|k| format!("df:condition:{k}"));
+    let interval = Duration::from_secs(interval_secs as u64);
+    let predicate_input = serde_json::json!({
+        "query": predicate_sql,
+        "submitted_by": node.submitted_by,
+        "database": node.database,
+        "read_only": true,
+    })
+    .to_string();
+
+    ctx.trace_info(format!(
+        "Waiting for condition (max_check_interval: {interval_secs}s{}): {predicate_sql}",
+        notify_key
+            .map(|k| format!(", notify_key: {k}"))
+            .unwrap_or_default()
+    ));
+
+    let mut checks: u64 = 0;
+    loop {
+        // The subscription must exist before the predicate runs, otherwise a
+        // notification landing during evaluation is lost. dequeue_event emits
+        // its action when the future is created, and it is a mailbox, so an
+        // event that arrives while nothing is parked is buffered rather than
+        // dropped.
+        let event_fut = queue.as_ref().map(|q| ctx.dequeue_event(q.clone()));
+
+        let raw = ctx
+            .schedule_activity(activities::execute_sql::NAME, predicate_input.clone())
+            .await?;
+        checks += 1;
+
+        if condition_met(&raw)? {
+            break;
+        }
+
+        if checks == CONDITION_CHECK_WARN_THRESHOLD {
+            ctx.trace_info(format!(
+                "Condition node {node_id} has evaluated {checks} times without firing; \
+                 history will keep growing until the iteration unwinds"
+            ));
+        }
+
+        let timer_fut = ctx.schedule_timer(interval);
+        match event_fut {
+            Some(event) => match ctx.select2(event, timer_fut).await {
+                duroxide::Either2::First(_) => ctx.trace_info("Condition notified; re-evaluating"),
+                duroxide::Either2::Second(()) => {
+                    ctx.trace_info("Condition check interval elapsed; re-evaluating")
+                }
+            },
+            None => timer_fut.await,
+        }
+    }
+
+    if notify_key.is_some() {
+        ctx.schedule_activity(activities::unregister_condition_waiter::NAME, waiter_input)
+            .await?;
+    }
+
+    let result = r#"{"condition_met": true}"#.to_string();
+    if let Some(name) = &node.result_name {
+        results.insert(name.clone(), result.clone());
+    }
+    Ok(result)
+}
+
+/// Read the single `condition_met` boolean out of an `execute_sql` result.
+///
+/// The predicate is wrapped as `SELECT (<condition>) IS TRUE AS condition_met`,
+/// so PostgreSQL has already reduced every case to one boolean row: no rows and
+/// NULL are false, more than one row and a non-boolean expression are errors
+/// raised before we get here.
+fn condition_met(raw: &str) -> Result<bool, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid condition result: {e}"))?;
+    parsed["rows"][0]["condition_met"]
+        .as_bool()
+        .ok_or_else(|| format!("Condition predicate returned no boolean condition_met: {raw}"))
 }
 
 async fn execute_signal_node(

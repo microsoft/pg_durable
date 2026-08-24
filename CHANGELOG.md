@@ -6,6 +6,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.6] - Unreleased
 
+### Added
+
+- **`df.wait_for_condition(condition, max_check_interval, notify_key)`:** wait until a SQL predicate is true instead of on a cron schedule. The predicate is evaluated as `(<condition>) IS TRUE` under `default_transaction_read_only`, so ordinary scalar-subquery rules apply and a condition with side effects fails rather than performing them repeatedly. `max_check_interval` is required (one-second floor) and is the guaranteed worst-case latency. An optional `notify_key` lets a producer `pg_notify('pg_durable_condition', key)` to be picked up sooner; the interval remains the guarantee, so a missed notification costs latency, not correctness.
+
 ### Fixed
 
 - **Deep workflow composition (#327):** workflow graphs deeper than serde_json's 127-level recursion limit no longer silently collapse into SQL text. Nested children are deserialized one graph level at a time, and `df.explain()` now enforces the configured graph-depth limit before traversal.

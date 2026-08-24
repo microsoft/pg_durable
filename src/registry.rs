@@ -20,6 +20,8 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
     let node_status_pool = pool.clone();
     let http_pool = pool.clone();
     let multipart_pool = pool.clone();
+    let register_pool = pool.clone();
+    let unregister_pool = pool.clone();
 
     ActivityRegistry::builder()
         .register(activities::execute_sql::NAME, move |ctx: ActivityContext, input_json: String| {
@@ -45,6 +47,14 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
         .register(activities::execute_multipart::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = multipart_pool.clone();
             async move { activities::execute_multipart::execute(ctx, pool, config_json).await }
+        })
+        .register(activities::register_condition_waiter::NAME, move |ctx: ActivityContext, input_json: String| {
+            let pool = register_pool.clone();
+            async move { activities::register_condition_waiter::execute(ctx, pool, input_json).await }
+        })
+        .register(activities::unregister_condition_waiter::NAME, move |ctx: ActivityContext, input_json: String| {
+            let pool = unregister_pool.clone();
+            async move { activities::unregister_condition_waiter::execute(ctx, pool, input_json).await }
         })
         .build()
 }

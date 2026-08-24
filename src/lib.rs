@@ -54,6 +54,7 @@ pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(3600);
 // Module declarations
 pub mod activities;
 pub mod client;
+pub mod condition_listener;
 pub mod dsl;
 pub mod explain;
 pub mod monitoring;
@@ -361,6 +362,23 @@ CREATE TABLE df._worker_epoch (
     last_seen_at TIMESTAMPTZ DEFAULT pg_catalog.now()
 );
 
+-- Registry of orchestration nodes currently blocked in df.wait_for_condition().
+-- The background worker's NOTIFY listener joins incoming payloads against
+-- notify_key to decide which waiters to wake early.
+--
+-- instance_id is the *duroxide* instance id, not the 8-char df instance id: a
+-- node inside a loop body runs in a subtree child instance whose id is the
+-- composite "{parent}::{execution}::{root_node}".
+CREATE TABLE df.condition_waiters (
+    instance_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    notify_key TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+    PRIMARY KEY (instance_id, node_id)
+);
+
+CREATE INDEX idx_condition_waiters_notify_key ON df.condition_waiters(notify_key);
+
 ALTER TABLE df.instances
     ADD CONSTRAINT instances_id_format_chk
         -- Operators (OPERATOR(pg_catalog.<op>)) and functions (e.g. pg_catalog.now)
@@ -391,7 +409,7 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_right_node_format_chk
         CHECK (right_node IS NULL OR right_node OPERATOR(pg_catalog.~) '^[0-9a-f]{8}$') NOT VALID,
     ADD CONSTRAINT nodes_node_type_chk
-        CHECK (node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL'])) NOT VALID,
+        CHECK (node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'THEN', 'IF', 'JOIN', 'LOOP', 'BREAK', 'RACE', 'SLEEP', 'WAIT_SCHEDULE', 'WAIT_CONDITION', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL'])) NOT VALID,
     ADD CONSTRAINT nodes_result_name_chk
         CHECK (result_name IS NULL OR result_name OPERATOR(pg_catalog.~) '^[A-Za-z_][A-Za-z0-9_]*$') NOT VALID,
     ADD CONSTRAINT nodes_status_chk
@@ -401,7 +419,7 @@ ALTER TABLE df.nodes
     ADD CONSTRAINT nodes_structure_chk
         CHECK (
             CASE
-                WHEN node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'SLEEP', 'WAIT_SCHEDULE', 'BREAK', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL'])
+                WHEN node_type OPERATOR(pg_catalog.=) ANY (ARRAY['SQL', 'SLEEP', 'WAIT_SCHEDULE', 'WAIT_CONDITION', 'BREAK', 'HTTP', 'HTTP_MULTIPART', 'SIGNAL'])
                     THEN left_node IS NULL AND right_node IS NULL AND query IS NOT NULL
                 WHEN node_type OPERATOR(pg_catalog.=) 'THEN'
                     THEN left_node IS NOT NULL AND right_node IS NOT NULL AND query IS NULL
@@ -1428,6 +1446,109 @@ mod tests {
         let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
         assert_eq!(config["signal_name"], "test_signal");
         assert_eq!(config["timeout_seconds"], 60);
+    }
+
+    // ========================================================================
+    // df.wait_for_condition()
+    // ========================================================================
+
+    #[pg_test]
+    fn test_wait_for_condition_via_sql() {
+        let result = Spi::get_one::<String>(
+            "SELECT df.wait_for_condition('SELECT count(*) > 8 FROM t', '1min')",
+        )
+        .unwrap()
+        .unwrap();
+        let fut = Durofut::from_json(&result);
+        assert_eq!(fut.node_type, "WAIT_CONDITION");
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["condition"], "SELECT count(*) > 8 FROM t");
+        assert_eq!(config["max_check_interval_secs"], 60);
+        assert!(
+            config.get("notify_key").is_none(),
+            "notify_key must be absent when not supplied"
+        );
+    }
+
+    #[pg_test]
+    fn test_wait_for_condition_with_notify_key_via_sql() {
+        let result = Spi::get_one::<String>(
+            "SELECT df.wait_for_condition('SELECT true', '30s', 'seg_changed')",
+        )
+        .unwrap()
+        .unwrap();
+        let fut = Durofut::from_json(&result);
+
+        let config: serde_json::Value = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
+        assert_eq!(config["max_check_interval_secs"], 30);
+        assert_eq!(config["notify_key"], "seg_changed");
+    }
+
+    #[pg_test(error = "max_check_interval must be at least 1 second")]
+    fn test_wait_for_condition_rejects_sub_second_interval() {
+        Spi::get_one::<String>("SELECT df.wait_for_condition('SELECT true', '500ms')").ok();
+    }
+
+    #[pg_test(error = "Condition must not be empty")]
+    fn test_wait_for_condition_rejects_empty_condition() {
+        Spi::get_one::<String>("SELECT df.wait_for_condition('   ', '1min')").ok();
+    }
+
+    #[pg_test]
+    fn test_wait_for_condition_wraps_predicate_as_is_true() {
+        // The raw predicate is stored unwrapped; wrapping happens at execution
+        // time so df.nodes stays readable and EXPLAIN shows what the user wrote.
+        let wrapped = crate::types::wrap_condition_sql("SELECT count(*) > 8 FROM t");
+        assert_eq!(
+            wrapped,
+            "SELECT (SELECT count(*) > 8 FROM t) IS TRUE AS condition_met"
+        );
+    }
+
+    #[pg_test]
+    fn test_wait_for_condition_in_sequence() {
+        let cond = Spi::get_one::<String>("SELECT df.wait_for_condition('SELECT true', '1min')")
+            .unwrap()
+            .unwrap();
+        let sql_node = crate::dsl::sql("SELECT 1");
+        let seq = crate::dsl::then_fn(&cond, &sql_node);
+        let fut = Durofut::from_json(&seq);
+        assert_eq!(fut.node_type, "THEN");
+        assert!(fut.left_node.is_some());
+    }
+
+    #[pg_test]
+    fn test_condition_waiters_table_shape() {
+        // instance_id holds the duroxide instance id, which for a loop subtree is
+        // a composite like "{parent}::{execution}::{node}", so it cannot be the
+        // 8-char df instance id type used elsewhere.
+        let cols = Spi::get_one::<String>(
+            "SELECT pg_catalog.string_agg(
+                        a.attname || ':' || pg_catalog.format_type(a.atttypid, a.atttypmod),
+                        ',' ORDER BY a.attnum)
+             FROM pg_catalog.pg_attribute a
+             WHERE a.attrelid = 'df.condition_waiters'::pg_catalog.regclass
+               AND a.attnum > 0 AND NOT a.attisdropped",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cols,
+            "instance_id:text,node_id:text,notify_key:text,created_at:timestamp with time zone"
+        );
+    }
+
+    #[pg_test]
+    fn test_condition_waiters_indexed_by_notify_key() {
+        let n = Spi::get_one::<i64>(
+            "SELECT pg_catalog.count(*) FROM pg_catalog.pg_indexes
+             WHERE schemaname = 'df' AND tablename = 'condition_waiters'
+               AND indexdef LIKE '%notify_key%'",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(n >= 1, "expected an index on notify_key, found {n}");
     }
 
     #[pg_test]

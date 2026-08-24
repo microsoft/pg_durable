@@ -306,6 +306,51 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
     .to_json()
 }
 
+/// Creates a wait-for-condition node that waits until a SQL predicate is true.
+///
+/// The predicate is re-evaluated on `max_check_interval`, and, when a
+/// `notify_key` is supplied, sooner if a matching `pg_notify` arrives on the
+/// `pg_durable_condition` channel. Only the raw predicate is stored; it is
+/// wrapped in `IS TRUE` at execution time so `df.nodes` shows what the user
+/// wrote.
+#[pg_extern(schema = "df")]
+pub fn wait_for_condition(
+    condition: &str,
+    max_check_interval: pgrx::datum::Interval,
+    notify_key: default!(Option<&str>, "NULL"),
+) -> String {
+    if condition.trim().is_empty() {
+        pgrx::error!("Condition must not be empty");
+    }
+
+    // Reject sub-second intervals: LOOP_MIN_ITER_DURATION already holds a loop
+    // iteration to a second, so anything shorter buys no responsiveness.
+    let micros = max_check_interval.as_micros();
+    if micros < 1_000_000 {
+        pgrx::error!("max_check_interval must be at least 1 second");
+    }
+    let secs = (micros / 1_000_000) as i64;
+
+    let mut config = serde_json::json!({
+        "condition": condition,
+        "max_check_interval_secs": secs,
+    });
+
+    if let Some(key) = notify_key {
+        if key.trim().is_empty() {
+            pgrx::error!("notify_key must not be empty when supplied");
+        }
+        config["notify_key"] = serde_json::Value::String(key.to_string());
+    }
+
+    Durofut {
+        node_type: "WAIT_CONDITION".to_string(),
+        query: Some(config.to_string()),
+        ..Default::default()
+    }
+    .to_json()
+}
+
 /// Creates a loop node.
 ///
 /// With one argument: repeats the body indefinitely (infinite loop).

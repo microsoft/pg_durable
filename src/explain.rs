@@ -445,6 +445,7 @@ fn build_tree_recursive(
                     && seq_node.node_type != "SQL"
                     && seq_node.node_type != "SLEEP"
                     && seq_node.node_type != "WAIT_SCHEDULE"
+                    && seq_node.node_type != "WAIT_CONDITION"
                     && seq_node.node_type != "HTTP"
                     && seq_node.node_type != "HTTP_MULTIPART"
                 {
@@ -665,6 +666,25 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .and_then(|cfg| cfg["cron_expr"].as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "?".to_string());
             format!("WAIT '{cron}'{name_suffix}")
+        }
+        "WAIT_CONDITION" => {
+            let cfg = node
+                .query
+                .as_ref()
+                .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let condition = cfg["condition"].as_str().unwrap_or("?");
+            let truncated = if condition.len() > 40 {
+                format!("{}...", &condition[..37])
+            } else {
+                condition.to_string()
+            };
+            let key = cfg["notify_key"]
+                .as_str()
+                .map(|k| format!(", notify_key: {k}"))
+                .unwrap_or_default();
+            let interval = cfg["max_check_interval_secs"].as_i64().unwrap_or(0);
+            format!("WAIT UNTIL {truncated} (every {interval}s{key}){name_suffix}")
         }
         "HTTP" | "HTTP_MULTIPART" => {
             // Parse config to get method and URL
