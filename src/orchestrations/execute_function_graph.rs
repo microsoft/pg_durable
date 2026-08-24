@@ -992,6 +992,7 @@ async fn execute_loop_node(
                 vars: exec_ctx.vars.clone(),
                 loop_iteration: next_iteration,
                 graph: Some(graph_json),
+                retry: crate::types::RetryPolicySpec::legacy(),
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?

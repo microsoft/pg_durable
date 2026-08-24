@@ -1277,9 +1277,15 @@ pub struct FunctionInput {
     #[serde(default, serialize_with = "serialize_string_map")]
     pub vars: std::collections::HashMap<String, String>,
     /// Loop iteration counter, incremented on each `continue_as_new`.
-    /// Used to enforce a maximum iteration safeguard.
+    /// Carried across generations for tracing; nothing reads it for control flow.
     #[serde(default)]
     pub loop_iteration: u64,
+    /// Retry and failure policy chosen at `df.start()`.
+    ///
+    /// Missing in histories recorded before the policy existed, which is why the default is
+    /// the pre-policy behavior rather than the `df.start()` default.
+    #[serde(default = "RetryPolicySpec::legacy")]
+    pub retry: RetryPolicySpec,
     /// Serialized `FunctionGraph`, carried across `continue_as_new` generations.
     ///
     /// `df.start()` leaves this `None`, so generation 0 loads the graph from the database.
@@ -1288,6 +1294,67 @@ pub struct FunctionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<String>,
 }
+
+/// What a workflow does with a node whose retries are exhausted.
+///
+/// Serialized in orchestration input, so the spellings must stay stable: they are the same
+/// strings `df.start(on_failure => ...)` accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnFailure {
+    /// Abandon the rest of the current loop iteration and start the next one. With no
+    /// enclosing loop there is nowhere to continue to, so the instance fails.
+    Continue,
+    /// Fail the instance as soon as the tries are spent.
+    Fail,
+}
+
+/// Per-instance retry and failure policy.
+///
+/// This travels in the orchestration input rather than being read from a GUC: orchestration
+/// code is replayed, and a setting read at execution time would produce different durable
+/// operations on replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPolicySpec {
+    /// Tries per node, including the first. Always >= 1 (validated at `df.start()`).
+    pub max_attempts: u32,
+    /// Cap on the delay between tries, in microseconds. Always > 0.
+    pub max_backoff_micros: i64,
+    pub on_failure: OnFailure,
+}
+
+impl RetryPolicySpec {
+    /// The behavior of instances started before the policy existed: one try, then fail.
+    ///
+    /// This is the serde default for the input fields, so an in-flight instance whose
+    /// history predates this feature replays with exactly the semantics it started under.
+    pub fn legacy() -> Self {
+        Self {
+            max_attempts: 1,
+            max_backoff_micros: DEFAULT_MAX_BACKOFF_MICROS,
+            on_failure: OnFailure::Fail,
+        }
+    }
+
+    /// The defaults a new `df.start()` gets when the caller says nothing.
+    pub fn default_for_start() -> Self {
+        Self {
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            max_backoff_micros: DEFAULT_MAX_BACKOFF_MICROS,
+            on_failure: OnFailure::Continue,
+        }
+    }
+
+    pub fn max_backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_micros(self.max_backoff_micros.max(0) as u64)
+    }
+}
+
+/// Default `max_attempts` for `df.start()`, including the first try.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// Default `max_backoff` for `df.start()`: 16 seconds.
+pub const DEFAULT_MAX_BACKOFF_MICROS: i64 = 16_000_000;
 
 pub(crate) fn serialize_string_map<S>(
     map: &std::collections::HashMap<String, String>,
@@ -1742,6 +1809,72 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn function_input_without_retry_defaults_to_legacy() {
+        // An instance started by a pre-0.2.7 binary recorded no retry field. It must keep
+        // the old behavior on replay: one attempt, then fail.
+        let json = r#"{"instance_id":"abc12345","label":"test","vars":{},"loop_iteration":0}"#;
+        let input: FunctionInput = serde_json::from_str(json).unwrap();
+
+        assert_eq!(input.retry.max_attempts, 1);
+        assert_eq!(input.retry.on_failure, OnFailure::Fail);
+    }
+
+    #[test]
+    fn retry_policy_survives_function_input_round_trip() {
+        // continue_as_new re-serializes FunctionInput every generation, so a loop must not
+        // silently lose the policy it started with.
+        let input = FunctionInput {
+            instance_id: "abc12345".to_string(),
+            label: None,
+            vars: std::collections::HashMap::new(),
+            loop_iteration: 7,
+            graph: None,
+            retry: RetryPolicySpec {
+                max_attempts: 5,
+                max_backoff_micros: 16_000_000,
+                on_failure: OnFailure::Continue,
+            },
+        };
+
+        let encoded = serde_json::to_string(&input).unwrap();
+        let decoded: FunctionInput = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.retry, input.retry);
+    }
+
+    #[test]
+    fn retry_policy_max_backoff_converts_micros_to_duration() {
+        let spec = RetryPolicySpec {
+            max_attempts: 5,
+            max_backoff_micros: 16_000_000,
+            on_failure: OnFailure::Fail,
+        };
+
+        assert_eq!(spec.max_backoff(), std::time::Duration::from_secs(16));
+    }
+
+    #[test]
+    fn retry_policy_defaults_match_the_documented_start_defaults() {
+        let spec = RetryPolicySpec::default_for_start();
+
+        assert_eq!(spec.max_attempts, 5);
+        assert_eq!(spec.max_backoff(), std::time::Duration::from_secs(16));
+        assert_eq!(spec.on_failure, OnFailure::Continue);
+    }
+
+    #[test]
+    fn on_failure_serializes_as_lowercase_sql_spelling() {
+        assert_eq!(
+            serde_json::to_string(&OnFailure::Continue).unwrap(),
+            r#""continue""#
+        );
+        assert_eq!(
+            serde_json::to_string(&OnFailure::Fail).unwrap(),
+            r#""fail""#
+        );
+    }
+
+    #[test]
     fn durofut_raw_children_preserve_wire_format() {
         let json = r#"{"node_type":"THEN","left_node":{"node_type":"SQL","query":"SELECT 1"},"right_node":{"node_type":"SQL","query":"SELECT 2"}}"#;
 
@@ -2171,6 +2304,7 @@ mod tests {
             vars: forward,
             loop_iteration: 0,
             graph: None,
+            retry: RetryPolicySpec::legacy(),
         };
         let reverse_input = FunctionInput {
             instance_id: "instance".to_string(),
@@ -2178,6 +2312,7 @@ mod tests {
             vars: reverse,
             loop_iteration: 0,
             graph: None,
+            retry: RetryPolicySpec::legacy(),
         };
         assert_eq!(
             serde_json::to_string(&forward_input).unwrap(),

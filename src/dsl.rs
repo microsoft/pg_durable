@@ -15,7 +15,7 @@ use crate::client::start_durable_function;
 use crate::types::{
     flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
-    MaterializedNode,
+    MaterializedNode, RetryPolicySpec,
 };
 
 /// Check if we're running inside a workflow context (background worker connection).
@@ -1280,6 +1280,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         // Generation 0 loads the graph from df.nodes; only a root loop continuing as new
         // carries it inline.
         graph: None,
+        retry: RetryPolicySpec::legacy(),
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 
