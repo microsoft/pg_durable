@@ -50,6 +50,99 @@ The defaults reproduce the pre-0.2.7 behavior — one try, then fail the instanc
 — so the feature is opt-in and upgrading changes nothing. The example above
 therefore has to name all three.
 
+## Alternatives: where the policy attaches
+
+This design puts the policy on `df.start()`, which is the coarsest of several
+options. That choice was inherited from the first draft rather than argued for,
+so it is set out here against the alternatives.
+
+The DSL builds a tree: leaves are operations (`df.sql()`, `df.http()`,
+`df.http_multipart()`), interior nodes are composition (`~>`, `df.loop()`,
+`df.join()`), and the root is the instance. A policy can attach at any of the
+three.
+
+**A. Root — the instance. What this design implements.**
+
+One policy set once and inherited by every node, propagated through
+`ExecutionContext.retry` and `SubtreeInput.retry`. There is one place to look
+and nothing to thread through the DSL. The cost is a single lever for the whole
+graph: a flaky vendor API and a local `INSERT` are treated identically, and
+nested loops cannot differ from each other.
+
+**B. Leaf — the individual node.**
+
+```sql
+df.http('https://vendor.example/api', max_attempts => 10)
+  ~> df.sql($$INSERT INTO local ...$$, max_attempts => 1)
+```
+
+The policy sits on the thing that actually fails, which is where the knowledge
+lives. Two costs. Auto-wrap means the idiomatic form of a SQL node is a bare
+string, so configuring one forces the explicit `df.sql(...)` call and gives up
+the terser form. And a graph with thirty SQL nodes that should all retry has to
+say so thirty times. Only the three node types that perform I/O would take the
+arguments; the other nine are control flow, sleep, and signal, and a
+`max_attempts` on `df.sleep()` would mean nothing.
+
+**C. Interior — a scoped region.**
+
+A wrapper setting the policy for everything beneath it:
+
+```sql
+df.loop(
+    df.retry($$CALL fetch_from_vendor()$$ ~> $$CALL parse_response()$$,
+             max_attempts => 10, max_backoff => '1 minute')
+    ~> $$CALL store_locally()$$,        -- outside the region, not retried
+    'SELECT more_work()'
+)
+```
+
+This is the most native to a composition DSL. It reads in the same direction as
+`~>`, has the shape of a `try`/`with` block, and expresses "retry this *phase*"
+without annotating every leaf. It is also cheap to build: the policy is already
+threaded down the tree in `ExecutionContext.retry`, so a scope node replaces
+that value for its subtree and changes nothing else. Its cost is a new node type
+and a third place a reader must look to know what policy a node runs under.
+
+**D. No knobs — classify and fix the schedule.**
+
+Retry on transient errors, never on permanent ones, with a single built-in
+backoff. The SQLSTATE rules under "What does not retry" are already half of
+this. The argument for going further is that most callers cannot pick good
+numbers, and every knob is a way to get it wrong.
+
+### These compose
+
+A, B, and C are a cascade, not a contest: the instance sets a default, a region
+overrides it, a node overrides that — the relationship a GUC has with a
+per-statement `SET`. **A can therefore ship first without foreclosing the
+others.** Adding C or B later is additive, because a narrower scope only
+overrides a default that already exists, and a graph that names neither behaves
+exactly as it does today.
+
+One caveat if either is added later: a per-node or per-region policy lives in
+the graph, and the graph is serialized into `FunctionInput` and `SubtreeInput`.
+That is the same replay break class described under "Upgrade & Migration" — the
+new fields must be omitted from the serialized form when they hold the inherited
+value, or in-flight instances fail with a nondeterminism error.
+
+### `on_failure` is a separate question
+
+`max_attempts` and `max_backoff` answer "how hard do I try this operation",
+which is a property of the operation. `on_failure` answers "what happens to the
+enclosing iteration when it gives up", which is a property of the **loop**.
+Fusing them onto one object is why `on_failure` has no effect outside a loop,
+where the instance fails either way — recorded under "Behavior" below as a
+consequence, but really a sign that the argument is attached to the wrong
+thing. `df.loop(body, condition,
+on_failure => 'continue')` would put it where it applies, and would let an outer
+loop over batches fail while an inner loop over items skips a bad one, which A
+cannot express at all.
+
+Unlike the retry scope, this one does not compose. Moving `on_failure` from
+`df.start()` to `df.loop()` after release is a breaking change to a shipped
+argument, so it is worth settling before 0.2.7 rather than after.
+
 ## Behavior
 
 A failing `df.sql()`, `df.http()`, or `df.http_multipart()` node is retried
