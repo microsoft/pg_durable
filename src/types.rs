@@ -87,6 +87,11 @@ pub fn get_reconcile_interval() -> Duration {
     Duration::from_secs(crate::RECONCILE_INTERVAL.get() as u64)
 }
 
+/// Returns `true` when the SQL text of a workflow node may be written to the log.
+pub fn log_workflow_sql_enabled() -> bool {
+    crate::LOG_WORKFLOW_SQL.get()
+}
+
 /// Returns `true` when superuser-submitted instances are permitted.
 pub fn superuser_instances_enabled() -> bool {
     crate::ENABLE_SUPERUSER_INSTANCES.get()

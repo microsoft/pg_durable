@@ -269,6 +269,8 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
 
     match &function_result {
         Ok(result) => {
+            // FIXME: This might be tracing sensitive data. Should it be fixed?
+            // It's a larger behavioral change than the rest of this work.
             ctx.trace_info(format!("Function completed with result: {result}"));
             let status_input = serde_json::json!({
                 "instance_id": input.instance_id,
@@ -596,7 +598,10 @@ async fn execute_sql_node(
         .ok_or_else(|| format!("SQL node {node_id} has no query"))?;
 
     let final_query = substitute_all(query, results, &exec_ctx.vars, sys_vars)?;
-    ctx.trace_info(format!("Executing SQL: {final_query}"));
+    // The substituted text is not traced here: the execute_sql activity logs it
+    // under pg_durable.log_workflow_sql, and an orchestration must not read a
+    // GUC to decide what to emit.
+    ctx.trace_info(format!("Executing SQL node {node_id}"));
 
     let input = serde_json::json!({
         "query": final_query,
@@ -1567,7 +1572,12 @@ async fn execute_http_node(
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");
     let method = config["method"].as_str().unwrap_or("POST");
-    ctx.trace_info(format!("Executing HTTP {method} {url}"));
+    // Substitution has already run, so `url` may carry a SAS token or api-key.
+    // redact_url is pure, so tracing it stays replay-deterministic.
+    ctx.trace_info(format!(
+        "Executing HTTP {method} {}",
+        crate::redact::redact_url(url)
+    ));
 
     let result = ctx
         .schedule_activity(activities::execute_http::NAME, final_config)
@@ -1666,7 +1676,10 @@ async fn execute_http_multipart_node(
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");
     let method = config["method"].as_str().unwrap_or("POST");
-    ctx.trace_info(format!("Executing HTTP_MULTIPART {method} {url}"));
+    ctx.trace_info(format!(
+        "Executing HTTP_MULTIPART {method} {}",
+        crate::redact::redact_url(url)
+    ));
 
     let result = ctx
         .schedule_activity(activities::execute_multipart::NAME, final_config)
