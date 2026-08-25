@@ -588,6 +588,11 @@ Sets a workflow variable for the current user (before `df.start()`). Each user h
 SELECT df.setvar('api_url', 'https://api.example.com');
 ```
 
+> **Not for credentials.** Values are stored as plaintext in `df.vars`, and `df.start()` copies
+> every variable you own into durable execution history. Using `{varname}` keeps the value out of
+> `df.nodes.query` but not out of history. See
+> [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
 ---
 
 ### df.getvar(name)
@@ -684,7 +689,7 @@ SELECT df.revoke_usage('app_role');
 
 ## Server Configuration (GUCs)
 
-These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf` and take effect after `SELECT pg_reload_conf()` (no restart required).
+These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. When they take effect depends on the context listed for each one: `SUSET` settings apply after `SELECT pg_reload_conf()`, while `POSTMASTER` settings require a server restart. GUCs read by the background worker are `POSTMASTER`, because the worker does not process a configuration reload.
 
 ---
 
@@ -749,3 +754,28 @@ SELECT pg_reload_conf();
 ```
 
 > **Behavior change (v0.2.4):** prior to v0.2.4, `df.list_instances()` silently truncated `limit_count` to 10000. It now raises an error when `limit_count` exceeds this GUC (default 1000). Callers that previously requested very large pages should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`).
+
+---
+
+### pg_durable.log_workflow_sql
+
+Controls whether the background worker writes the SQL text of an executed workflow node to the PostgreSQL server log.
+
+| Property | Value |
+|----------|-------|
+| Type | `boolean` |
+| Default | `on` |
+| Context | `POSTMASTER` (set in `postgresql.conf`; requires restart) |
+
+The SQL is logged *after* variable substitution, so a credential held in a `df.vars` variable and spliced into a query reaches the server log in cleartext. Unlike a URL query string — which pg_durable redacts unconditionally — SQL cannot be masked heuristically, because a substituted value is indistinguishable from the surrounding statement. This GUC is therefore an on/off switch.
+
+```ini
+# postgresql.conf
+pg_durable.log_workflow_sql = off
+```
+
+The value is read by the background worker, which does not process a configuration reload, so a restart is required — the same as `pg_durable.retention_days` and the connection-limit GUCs.
+
+Turning it off keeps the role, database and node identity in the log but drops the statement text. That also removes the primary record of what workflows executed, which is usually the first thing an incident investigation looks for — prefer keeping credentials out of SQL over disabling the log. See [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
+The trace runs on the worker's own connections, so it is independent of `log_statement`.
