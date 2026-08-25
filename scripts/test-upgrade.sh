@@ -62,9 +62,23 @@ done
 PGRX_HOME="$HOME/.pgrx"
 PG_PORT="$((28800 + PG_VERSION))"
 
-# Find pgrx binaries
-PGRX_BIN=$(ls -d "$PGRX_HOME/$PG_VERSION."*/pgrx-install/bin 2>/dev/null | head -1)
+# Find pgrx binaries. config.toml is authoritative: it is what cargo pgrx builds
+# the extension against, and it may point at an externally installed PostgreSQL
+# (pgenv, a distro package) with no directory under ~/.pgrx. Fall back to the
+# pgrx-built layout when the entry is missing.
+PGRX_BIN=""
+if [ -f "$PGRX_HOME/config.toml" ]; then
+    PG_CONFIG_PATH=$(grep -E "^pg${PG_VERSION}[[:space:]]*=[[:space:]]*\"" "$PGRX_HOME/config.toml" | head -1 | cut -d'"' -f2)
+    if [ -n "$PG_CONFIG_PATH" ]; then
+        PGRX_BIN="$(dirname "$PG_CONFIG_PATH")"
+    fi
+fi
+
 if [ -z "$PGRX_BIN" ]; then
+    PGRX_BIN=$(ls -d "$PGRX_HOME/$PG_VERSION."*/pgrx-install/bin 2>/dev/null | head -1)
+fi
+
+if [ -z "$PGRX_BIN" ] || [ ! -x "$PGRX_BIN/pg_ctl" ]; then
     echo "Error: pgrx PostgreSQL $PG_VERSION not installed"
     echo "Run: cargo pgrx init"
     exit 1
@@ -76,6 +90,10 @@ PG_ISREADY="$PGRX_BIN/pg_isready"
 PG_CONFIG="$PGRX_BIN/pg_config"
 DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
+
+# A developer ~/.psqlrc echoes each \pset it runs, which corrupts the exact-match
+# assertions below. Point psql at an empty rc file instead.
+export PSQLRC=/dev/null
 EXTENSION_DIR=$("$PG_CONFIG" --sharedir)/extension
 
 # Version detection: read current version from Cargo.toml

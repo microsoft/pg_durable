@@ -276,20 +276,40 @@ DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 CONF_FILE="$DATA_DIR/postgresql.conf"
 
-shopt -s nullglob
-PGRX_CANDIDATES=("$PGRX_HOME"/"$PG_VERSION".*/pgrx-install/bin)
-shopt -u nullglob
-if [ "${#PGRX_CANDIDATES[@]}" -eq 0 ]; then
+# config.toml is authoritative: it is what cargo pgrx builds the extension
+# against, and it may point at an externally installed PostgreSQL (pgenv, a
+# distro package) that has no directory under ~/.pgrx. Fall back to the
+# pgrx-built layout when the entry is missing.
+PGRX_BIN=""
+if [ -f "$PGRX_HOME/config.toml" ]; then
+    PG_CONFIG_PATH=$(grep -E "^pg${PG_VERSION}[[:space:]]*=[[:space:]]*\"" "$PGRX_HOME/config.toml" | head -1 | cut -d'"' -f2)
+    if [ -n "$PG_CONFIG_PATH" ]; then
+        PGRX_BIN="$(dirname "$PG_CONFIG_PATH")"
+    fi
+fi
+
+if [ -z "$PGRX_BIN" ]; then
+    shopt -s nullglob
+    PGRX_CANDIDATES=("$PGRX_HOME"/"$PG_VERSION".*/pgrx-install/bin)
+    shopt -u nullglob
+    if [ "${#PGRX_CANDIDATES[@]}" -gt 0 ]; then
+        PGRX_BIN="${PGRX_CANDIDATES[0]}"
+    fi
+fi
+
+if [ -z "$PGRX_BIN" ] || [ ! -x "$PGRX_BIN/pg_ctl" ]; then
     echo "Error: pgrx PostgreSQL $PG_VERSION not installed"
     echo "Run: cargo pgrx init"
     exit 1
 fi
 
-PGRX_BIN="${PGRX_CANDIDATES[0]}"
 PSQL="$PGRX_BIN/psql"
 PG_CTL="$PGRX_BIN/pg_ctl"
 PG_ISREADY="$PGRX_BIN/pg_isready"
 PG_CONFIG="$PGRX_BIN/pg_config"
+
+# Keep a developer ~/.psqlrc out of test output, so local runs match CI.
+export PSQLRC=/dev/null
 
 stop_server() {
     if [ -d "$DATA_DIR" ] && "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
