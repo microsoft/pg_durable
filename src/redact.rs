@@ -14,6 +14,8 @@
 //! Redaction is deliberately lossy and fails closed: anything that cannot be
 //! parsed as a URL is replaced wholesale rather than echoed back.
 
+use url::Url;
+
 /// Stand-in for any elided value. Deliberately not a fixed-width mask, so the
 /// length of the original is not disclosed.
 pub const REDACTED: &str = "<redacted>";
@@ -25,9 +27,8 @@ const SAFE_QUERY_PARAMS: &[&str] = &["api-version", "apiversion", "comp", "resty
 /// Characters that cannot appear inside a URL, used to find where an embedded
 /// URL ends when scanning free-form text.
 ///
-/// `{` and `}` are deliberately absent: `${secret:name}` markers and `{var}`
-/// placeholders appear in unsubstituted URLs and are not credentials, so
-/// keeping them intact makes the redacted output far easier to read.
+/// `{` and `}` are deliberately absent so that a URL still carrying a `{var}`
+/// placeholder is scanned as a single token rather than being cut in half.
 const URL_TERMINATORS: &[char] = &['"', '\'', '<', '>', '\\', '^', '`', '|', '(', ')', ','];
 
 fn is_safe_query_param(name: &str) -> bool {
@@ -36,84 +37,78 @@ fn is_safe_query_param(name: &str) -> bool {
         .any(|safe| name.eq_ignore_ascii_case(safe))
 }
 
+/// Redact the values in a raw query string, preserving parameter names.
+///
+/// This splits on `&` and `=` rather than using [`Url::query_pairs`], because
+/// `query_pairs` follows the form-urlencoded rules and reports a bare token
+/// (`?SEKRIT`, no `=`) as the *name* of a valueless parameter. Emitting that
+/// would publish the token verbatim. Here a bare token is elided whole, since a
+/// lone token is indistinguishable from a name.
+fn redact_query(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+
+    for (i, pair) in query.split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        match pair.split_once('=') {
+            // An empty value has nothing to elide, and leaving it alone is what
+            // makes redaction idempotent: re-redacting `sig=<redacted>` must not
+            // append a second marker.
+            Some((_, "")) => out.push_str(pair),
+            Some((name, _)) if is_safe_query_param(name) => out.push_str(pair),
+            Some((name, _)) => {
+                out.push_str(name);
+                out.push('=');
+                out.push_str(REDACTED);
+            }
+            None => out.push_str(REDACTED),
+        }
+    }
+
+    out
+}
+
 /// Redact the credential-bearing parts of a single URL.
 ///
 /// Preserved: scheme, host, port, path. Elided: userinfo, every query-parameter
 /// value except [`SAFE_QUERY_PARAMS`], and the fragment.
 ///
-/// Parameter *names* are preserved — `sig`, `code` and friends are not secret,
-/// and keeping them makes a redacted log line diagnosable. A bare parameter with
-/// no `=` is elided whole, because a lone token is indistinguishable from a name.
+/// The output is rebuilt from the parsed components rather than by mutating the
+/// [`Url`], because the setters percent-encode `<` and `>` and would turn the
+/// marker into `%3Credacted%3E`.
 pub fn redact_url(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        // Not a URL shape we recognise — never echo it back.
+    let Ok(parsed) = Url::parse(url) else {
+        // Not parseable — never echo it back.
         return REDACTED.to_string();
     };
 
-    // The authority ends at the first '/', '?' or '#'. Splitting on all three
-    // matters: `https://host?x=1` and `https://host#f` have no path at all.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let after_authority = &rest[authority_end..];
-
     let mut out = String::with_capacity(url.len());
-    out.push_str(scheme);
+    out.push_str(parsed.scheme());
     out.push_str("://");
 
-    // userinfo may be `user:password`; keep only the fact that one was present.
-    // rfind, not find: a password may itself contain an encoded '@'.
-    match authority.rfind('@') {
-        Some(at) => {
-            out.push_str(REDACTED);
-            out.push('@');
-            out.push_str(&authority[at + 1..]);
-        }
-        None => out.push_str(authority),
+    // Keep only the fact that credentials were present, not which.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        out.push_str(REDACTED);
+        out.push('@');
     }
 
-    let path_end = after_authority
-        .find(['?', '#'])
-        .unwrap_or(after_authority.len());
-    out.push_str(&after_authority[..path_end]);
-
-    let tail = &after_authority[path_end..];
-    let mut query = "";
-    let mut has_fragment = false;
-    if let Some(after_question) = tail.strip_prefix('?') {
-        match after_question.find('#') {
-            Some(hash) => {
-                query = &after_question[..hash];
-                has_fragment = true;
-            }
-            None => query = after_question,
-        }
-    } else if tail.starts_with('#') {
-        has_fragment = true;
+    if let Some(host) = parsed.host_str() {
+        out.push_str(host);
+    }
+    if let Some(port) = parsed.port() {
+        out.push(':');
+        out.push_str(&port.to_string());
     }
 
-    if !query.is_empty() {
+    out.push_str(parsed.path());
+
+    if let Some(query) = parsed.query().filter(|q| !q.is_empty()) {
         out.push('?');
-        for (i, pair) in query.split('&').enumerate() {
-            if i > 0 {
-                out.push('&');
-            }
-            match pair.split_once('=') {
-                // An empty value has nothing to elide, and leaving it alone is
-                // what makes redaction idempotent: re-redacting `sig=<redacted>`
-                // must not append a second marker.
-                Some((_, "")) => out.push_str(pair),
-                Some((name, _)) if is_safe_query_param(name) => out.push_str(pair),
-                Some((name, _)) => {
-                    out.push_str(name);
-                    out.push('=');
-                    out.push_str(REDACTED);
-                }
-                None => out.push_str(REDACTED),
-            }
-        }
+        out.push_str(&redact_query(query));
     }
 
-    if has_fragment {
+    if parsed.fragment().is_some() {
         out.push('#');
         out.push_str(REDACTED);
     }
@@ -126,6 +121,11 @@ pub fn redact_url(url: &str) -> String {
 /// Needed because `reqwest::Error`'s `Display` interpolates the request URL, so
 /// wrapping a transport error without scrubbing it would reintroduce the very
 /// query string [`redact_url`] was applied to remove.
+///
+/// Locating a URL inside prose is necessarily heuristic — a parser can validate
+/// a candidate but cannot tell you where one ends in surrounding text. So this
+/// only delimits candidates; [`redact_url`] does the parsing, and a candidate it
+/// rejects is replaced wholesale.
 pub fn redact_urls_in(text: &str) -> String {
     if !text.contains("://") {
         return text.to_string();
@@ -237,9 +237,10 @@ mod tests {
 
     #[test]
     fn handles_authority_only_urls() {
-        assert_eq!(redact_url("https://host"), "https://host");
-        assert_eq!(redact_url("https://host?k=v"), "https://host?k=<redacted>");
-        assert_eq!(redact_url("https://host#f"), "https://host#<redacted>");
+        // An empty path normalizes to "/" per the WHATWG URL spec.
+        assert_eq!(redact_url("https://host"), "https://host/");
+        assert_eq!(redact_url("https://host?k=v"), "https://host/?k=<redacted>");
+        assert_eq!(redact_url("https://host#f"), "https://host/#<redacted>");
         assert_eq!(redact_url("https://host/"), "https://host/");
     }
 
@@ -264,11 +265,28 @@ mod tests {
     }
 
     #[test]
-    fn leaves_placeholders_readable() {
+    fn keeps_unsubstituted_placeholders_legible() {
+        // A URL whose {var} placeholders were never substituted still reaches
+        // redaction. Nothing is lost: the host keeps its placeholder verbatim
+        // and the path is percent-encoded, so the mistake is still diagnosable.
         assert_eq!(
             redact_url("https://{kv_host}/secrets/{name}?api-version=7.4"),
-            "https://{kv_host}/secrets/{name}?api-version=7.4"
+            "https://{kv_host}/secrets/%7Bname%7D?api-version=7.4"
         );
+    }
+
+    #[test]
+    fn bare_query_token_is_not_treated_as_a_parameter_name() {
+        // Url::query_pairs follows the form-urlencoded rules and reports a bare
+        // token as the NAME of a valueless parameter. Rebuilding the query from
+        // those pairs would publish the token verbatim, which is why
+        // redact_query splits on '&'/'=' itself. Pin the hazard so a future
+        // refactor to query_pairs fails loudly here.
+        let parsed = Url::parse("https://h/p?SEKRIT").unwrap();
+        let names: Vec<_> = parsed.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        assert_eq!(names, vec!["SEKRIT".to_string()]);
+
+        assert_eq!(redact_url("https://h/p?SEKRIT"), "https://h/p?<redacted>");
     }
 
     #[test]
