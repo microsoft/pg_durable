@@ -20,6 +20,8 @@ pub static WORKER_ROLE: GucSetting<Option<CString>> =
 pub static DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
 
+pub static HOST: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+
 pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
@@ -103,6 +105,15 @@ pub extern "C-unwind" fn _PG_init() {
         &DATABASE,
         GucContext::Postmaster,
         GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_durable.host",
+        c"PostgreSQL host used by pg_durable connections",
+        c"Overrides the PGHOST environment variable when set. Requires a server restart to change.",
+        &HOST,
+        GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY,
     );
 
     GucRegistry::define_int_guc(
@@ -2940,6 +2951,28 @@ mod tests {
             get_new_transaction_start_timeout(),
             std::time::Duration::from_secs(5)
         );
+    }
+
+    #[pg_test]
+    fn test_host_guc_boot_default_is_unset() {
+        let boot_val = Spi::get_one::<String>(
+            "SELECT boot_val FROM pg_catalog.pg_settings \
+             WHERE name = 'pg_durable.host'",
+        )
+        .unwrap()
+        .expect("GUC should exist in pg_settings");
+        assert_eq!(boot_val, "");
+    }
+
+    #[pg_test]
+    fn test_host_guc_context_is_postmaster() {
+        let context = Spi::get_one::<String>(
+            "SELECT context FROM pg_catalog.pg_settings \
+             WHERE name = 'pg_durable.host'",
+        )
+        .unwrap()
+        .expect("GUC should exist in pg_settings");
+        assert_eq!(context, "postmaster");
     }
 
     // ========================================================================

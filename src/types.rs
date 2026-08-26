@@ -156,7 +156,7 @@ pub fn short_id() -> String {
 
 /// PostgreSQL connection string for the background worker and Duroxide runtime
 pub fn postgres_connection_string() -> String {
-    let host = std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let host = get_host();
     let port = unsafe { pgrx::pg_sys::PostPortNumber };
     let user = get_worker_role();
     let database = get_database();
@@ -191,9 +191,20 @@ fn build_connection_url(user: &str, host: &str, port: i32, database: &str) -> St
     }
 }
 
-/// Get the PostgreSQL host for connections
+fn resolve_host(configured_host: Option<String>, environment_host: Option<String>) -> String {
+    configured_host
+        .filter(|host| !host.is_empty())
+        .or(environment_host)
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+/// Get the PostgreSQL host for connections.
+/// `pg_durable.host` takes precedence over `PGHOST` when configured.
 pub fn get_host() -> String {
-    std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+    let configured_host = crate::HOST
+        .get()
+        .map(|host| host.to_string_lossy().into_owned());
+    resolve_host(configured_host, std::env::var("PGHOST").ok())
 }
 
 /// Get the PostgreSQL port for connections
@@ -1979,6 +1990,41 @@ mod tests {
     fn normalize_role_name_rejects_malformed_quoted_identifier() {
         let err = normalize_role_name_for_connection("\"bad\"name\"").unwrap_err();
         assert!(err.contains("Invalid quoted role name"));
+    }
+
+    #[test]
+    fn configured_host_takes_precedence_over_pghost() {
+        assert_eq!(
+            resolve_host(
+                Some("configured.example.com".to_string()),
+                Some("environment.example.com".to_string()),
+            ),
+            "configured.example.com"
+        );
+    }
+
+    #[test]
+    fn pghost_is_used_when_host_guc_is_unset() {
+        assert_eq!(
+            resolve_host(None, Some("environment.example.com".to_string())),
+            "environment.example.com"
+        );
+    }
+
+    #[test]
+    fn pghost_is_used_when_host_guc_is_empty() {
+        assert_eq!(
+            resolve_host(
+                Some(String::new()),
+                Some("environment.example.com".to_string()),
+            ),
+            "environment.example.com"
+        );
+    }
+
+    #[test]
+    fn host_defaults_to_loopback_when_guc_and_pghost_are_unset() {
+        assert_eq!(resolve_host(None, None), "127.0.0.1");
     }
 
     #[test]

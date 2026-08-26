@@ -2200,6 +2200,16 @@ SELECT df.grant_usage('app_role');
 
 pg_durable uses multiple PostgreSQL connections for different purposes. Four GUCs let you control the connection budget to match your deployment's resources.
 
+### Connection Host
+
+Set `pg_durable.host` in `postgresql.conf` to override the host for every PostgreSQL connection created by pg_durable:
+
+```ini
+pg_durable.host = '/var/run/postgresql'
+```
+
+This postmaster setting requires a PostgreSQL restart. When it is empty or unset, pg_durable uses `PGHOST`, falling back to `127.0.0.1` when `PGHOST` is also unset.
+
 ### Connection Architecture
 
 The background worker maintains three categories of connections, and

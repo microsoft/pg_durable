@@ -115,13 +115,14 @@ pg_durable does not use token-based authentication. All identity is PostgreSQL r
 |---|---|---|---|
 | `pg_durable.worker_role` | "postgres" | Postmaster | Determines background worker's PostgreSQL identity; must be superuser |
 | `pg_durable.database` | "postgres" | Postmaster | Target database for extension operations |
+| `pg_durable.host` | unset | Postmaster | Overrides `PGHOST` for all connections created by pg_durable |
 | `df.in_workflow` | unset | Session | Custom GUC set on worker connections; prevents variable mutation during execution |
 
 ### Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PGHOST` | "127.0.0.1" | PostgreSQL host for worker connections |
+| `PGHOST` | "127.0.0.1" | PostgreSQL host when `pg_durable.host` is unset |
 | `RUST_LOG` | (unset) | Controls tracing verbosity for worker process |
 
 ---
