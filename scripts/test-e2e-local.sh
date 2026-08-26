@@ -56,6 +56,7 @@ declare -a ACTIVE_PHASES=()
 DEFAULT_BUILD_PHASES=(
     "no-preload"
     "standard"
+    "host-guc"
     "superuser-guc-off"
     "connlimit-backpressure"
     "connlimit-timeout"
@@ -67,6 +68,7 @@ DEFAULT_BUILD_PHASES=(
 ALL_PHASES=(
     "no-preload"
     "standard"
+    "host-guc"
     "superuser-guc-off"
     "connlimit-backpressure"
     "connlimit-timeout"
@@ -137,6 +139,9 @@ phase_label() {
         standard)
             echo "standard suite"
             ;;
+        host-guc)
+            echo "pg_durable.host precedence"
+            ;;
         connlimit-backpressure)
             echo "connection limit backpressure"
             ;;
@@ -171,6 +176,9 @@ phase_for_test() {
             ;;
         17_superuser_guc)
             echo "superuser-guc-off"
+            ;;
+        67_host_guc)
+            echo "host-guc"
             ;;
         44_connection_limit_backpressure)
             echo "connlimit-backpressure"
@@ -350,7 +358,11 @@ wait_for_server() {
 restart_server() {
     stop_server
     echo -e "${YELLOW}Starting PostgreSQL...${NC}"
-    "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    if [ -n "${SERVER_PGHOST:-}" ]; then
+        PGHOST="$SERVER_PGHOST" "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    else
+        "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    fi
     wait_for_server
 }
 
@@ -458,11 +470,14 @@ configure_phase() {
     local phase="$1"
 
     ensure_data_dir
+    SERVER_PGHOST=""
     # Clear stale ALTER SYSTEM overrides from prior phases/runs.
     : > "$DATA_DIR/postgresql.auto.conf"
     set_conf_line "port" "$PG_PORT"
     clear_connlimit_gucs
     remove_conf_key "log_connections"
+    remove_conf_key "pg_durable.host"
+    remove_conf_key "unix_socket_directories"
 
     case "$phase" in
         no-preload)
@@ -474,6 +489,15 @@ configure_phase() {
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "log_connections" "on"
+            ;;
+        host-guc)
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.host" "'$PGRX_HOME'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
+            SERVER_PGHOST="does-not-resolve.invalid"
             ;;
         superuser-guc-off)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -550,7 +574,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
+        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -600,7 +624,7 @@ prepare_phase() {
                 wait_for_worker_ready
             fi
             ;;
-        connlimit-backpressure|connlimit-timeout)
+        host-guc|connlimit-backpressure|connlimit-timeout)
             ensure_e2e_role
             wait_for_worker_ready
             ;;
