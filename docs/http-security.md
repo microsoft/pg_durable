@@ -360,13 +360,20 @@ is applied before any URL reaches a log line or an error string.
 
 | Component | Treatment |
 |-----------|-----------|
-| Scheme, host, port, path | Preserved |
+| Scheme, host, port, path | Preserved, normalized per the WHATWG URL spec (host lowercased, default port dropped, empty path rendered as `/`) |
 | Query parameter *names* | Preserved — `sig` and `code` are not themselves secret, and keeping them makes a redacted line diagnosable |
 | Query parameter *values* | Replaced with `<redacted>`, except an allowlist of benign parameters (`api-version`, `comp`, `restype`) |
 | Bare query token with no `=` | Replaced whole — indistinguishable from a name |
 | `userinfo@` | Replaced with `<redacted>@`, keeping the host |
 | Fragment | Replaced whole |
 | Unparseable input | Replaced whole — redaction fails closed and never echoes back a string it could not parse |
+
+Parsing uses the `url` crate rather than hand-rolled string splitting, so IPv6
+authorities, percent-encoding, default ports and userinfo edge cases follow the
+spec. The query string is the one part still split on `&` and `=` directly:
+`Url::query_pairs` follows the form-urlencoded rules and reports a bare token
+(`?SEKRIT`) as the *name* of a valueless parameter, so rebuilding the query from
+those pairs would publish the token verbatim.
 
 The same redaction is applied to the HTTP client's own error text, which
 interpolates the request URL into messages such as
