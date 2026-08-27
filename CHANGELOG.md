@@ -6,6 +6,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.7] - Unreleased
 
+### Added
+
+- **`pg_durable.host` (#360):** a postmaster GUC that selects the PostgreSQL host used by every connection pg_durable creates. When empty or unset, `PGHOST` is used, falling back to `127.0.0.1`.
+
 ## [0.2.6] - 2026-08-23
 
 ### Added

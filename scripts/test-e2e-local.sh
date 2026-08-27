@@ -477,7 +477,9 @@ configure_phase() {
     clear_connlimit_gucs
     remove_conf_key "log_connections"
     remove_conf_key "pg_durable.host"
-    remove_conf_key "unix_socket_directories"
+    # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
+    # directory for `make installcheck` after an E2E run.
+    set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
 
     case "$phase" in
         no-preload)
@@ -496,7 +498,6 @@ configure_phase() {
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.host" "'$PGRX_HOME'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
-            set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
             SERVER_PGHOST="does-not-resolve.invalid"
             ;;
         superuser-guc-off)

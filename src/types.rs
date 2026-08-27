@@ -177,20 +177,39 @@ pub(crate) fn connection_url_with_application_name(
     format!("{database_url}{separator}application_name={encoded}")
 }
 
+/// Whether `host` can be placed in a `postgres://` URL verbatim.
+///
+/// Plain hostnames, IPv4 addresses, and bracketed IPv6 literals are safe. Anything
+/// else (Unix-socket paths, or a `pg_durable.host` / `PGHOST` value carrying URL
+/// metacharacters) must be percent-encoded so it cannot inject a different host or
+/// extra connection parameters.
+fn host_is_url_safe(host: &str) -> bool {
+    if host.starts_with('[') {
+        return host.ends_with(']');
+    }
+
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
 /// Build the worker's `postgres://` connection URL.
 ///
-/// A Unix-socket `host` (one starting with `/`) is percent-encoded so the URL
-/// parser keeps the whole path as the host; sqlx percent-decodes it and
-/// connects over the socket. TCP addresses and hostnames are used verbatim.
+/// Hosts that are not plain names or addresses are percent-encoded so the URL
+/// parser keeps the whole value inside the host component. sqlx decodes socket
+/// paths back out, so Unix sockets still connect; a host carrying URL
+/// metacharacters stays inert and fails to resolve instead of injecting a
+/// different host or extra connection parameters.
 fn build_connection_url(user: &str, host: &str, port: i32, database: &str) -> String {
-    if host.starts_with('/') {
+    if host_is_url_safe(host) {
+        format!("postgres://{user}@{host}:{port}/{database}")
+    } else {
         let encoded = utf8_percent_encode(host, NON_ALPHANUMERIC).to_string();
         format!("postgres://{user}@{encoded}:{port}/{database}")
-    } else {
-        format!("postgres://{user}@{host}:{port}/{database}")
     }
 }
 
+/// An empty `PGHOST` is deliberately preserved as an empty host so sqlx applies its
+/// own default; only `pg_durable.host` treats empty as "not configured".
 fn resolve_host(configured_host: Option<String>, environment_host: Option<String>) -> String {
     configured_host
         .filter(|host| !host.is_empty())
@@ -2112,6 +2131,45 @@ mod tests {
             Some(path.to_string()),
         );
         assert_ne!(opts.get_host(), "evil.com");
+    }
+
+    #[test]
+    fn build_connection_url_tcp_host_with_query_is_opaque() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        // A configured host carrying URL metacharacters must stay inside the host
+        // component; it must not split off and apply connection parameters.
+        let url = build_connection_url(
+            "postgres",
+            "db.example.com?sslmode=disable",
+            5432,
+            "postgres",
+        );
+        let opts = PgConnectOptions::from_str(&url).expect("TCP URL should parse");
+        assert_ne!(opts.get_host(), "db.example.com");
+        assert!(matches!(
+            opts.get_ssl_mode(),
+            sqlx::postgres::PgSslMode::Prefer
+        ));
+    }
+
+    #[test]
+    fn build_connection_url_tcp_host_with_userinfo_is_opaque() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let url = build_connection_url("postgres", "x@evil.com", 5432, "postgres");
+        let opts = PgConnectOptions::from_str(&url).expect("TCP URL should parse");
+        assert_ne!(opts.get_host(), "evil.com");
+    }
+
+    #[test]
+    fn build_connection_url_ipv6_host_unchanged() {
+        assert_eq!(
+            build_connection_url("postgres", "[::1]", 5432, "postgres"),
+            "postgres://postgres@[::1]:5432/postgres"
+        );
     }
 
     #[test]

@@ -113,7 +113,7 @@ pub extern "C-unwind" fn _PG_init() {
         c"Overrides the PGHOST environment variable when set. Requires a server restart to change.",
         &HOST,
         GucContext::Postmaster,
-        GucFlags::SUPERUSER_ONLY,
+        GucFlags::default(),
     );
 
     GucRegistry::define_int_guc(

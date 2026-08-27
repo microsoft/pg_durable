@@ -23,10 +23,11 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 13. [Visualizing Functions](#visualizing-functions)
 14. [Monitoring](#monitoring)
 15. [User Isolation & Privileges](#user-isolation--privileges)
-16. [Connection Limits](#connection-limits)
-17. [Troubleshooting](#troubleshooting)
-18. [Quick Reference Card](#quick-reference-card)
-19. [Appendix: Test Data Setup](#appendix-test-data-setup)
+16. [Connection Host](#connection-host)
+17. [Connection Limits](#connection-limits)
+18. [Troubleshooting](#troubleshooting)
+19. [Quick Reference Card](#quick-reference-card)
+20. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -2196,11 +2197,7 @@ SELECT df.grant_usage('app_role');
 
 ---
 
-## Connection Limits
-
-pg_durable uses multiple PostgreSQL connections for different purposes. Four GUCs let you control the connection budget to match your deployment's resources.
-
-### Connection Host
+## Connection Host
 
 Set `pg_durable.host` in `postgresql.conf` to override the host for every PostgreSQL connection created by pg_durable:
 
@@ -2209,6 +2206,12 @@ pg_durable.host = '/var/run/postgresql'
 ```
 
 This postmaster setting requires a PostgreSQL restart. When it is empty or unset, pg_durable uses `PGHOST`, falling back to `127.0.0.1` when `PGHOST` is also unset.
+
+---
+
+## Connection Limits
+
+pg_durable uses multiple PostgreSQL connections for different purposes. Four GUCs let you control the connection budget to match your deployment's resources.
 
 ### Connection Architecture
 
