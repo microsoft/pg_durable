@@ -14,6 +14,7 @@
 --   3. Forgery caught by load_function_graph (instance-level rejection).
 --   4. Forgery caught by execute_sql (node-level rejection, post-cache tamper).
 --   5. Cross-iteration forgery neutralized by the frozen graph snapshot.
+--   6. A literal quoted catalog role cannot authenticate as postgres.
 --
 -- "GUC on + superuser succeeds" is implicitly covered by every other E2E test
 -- (standard phase runs as postgres with enable_superuser_instances = on).
@@ -340,6 +341,80 @@ BEGIN
 END $$;
 
 DROP TABLE _su_guc_t5;
+
+-- ============================================================
+-- Test 6: Quoted catalog role names cannot authenticate as another role
+--
+-- PostgreSQL permits a role whose literal name is "postgres" (including
+-- quote bytes). The worker must pass that catalog name unchanged to libpq.
+-- Normalizing it as regrole display text would authenticate this workflow as
+-- the real postgres superuser and write the protected sentinel.
+-- ============================================================
+DROP TABLE IF EXISTS su_guc_quoted_role_sentinel;
+CREATE TABLE su_guc_quoted_role_sentinel (marker TEXT);
+
+DO $setup_quoted_role$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = chr(34) || 'postgres' || chr(34)) THEN
+        EXECUTE 'DROP OWNED BY """postgres"""';
+        EXECUTE 'DROP ROLE """postgres"""';
+    END IF;
+END $setup_quoted_role$;
+CREATE ROLE """postgres""" NOLOGIN;
+
+DROP TABLE IF EXISTS _su_guc_t6;
+CREATE TABLE _su_guc_t6 (instance_id TEXT);
+GRANT ALL ON _su_guc_t6 TO df_e2e_user, su_guc_forger;
+
+SET SESSION AUTHORIZATION df_e2e_user;
+INSERT INTO _su_guc_t6
+SELECT df.start(
+    'INSERT INTO su_guc_quoted_role_sentinel VALUES (''unexpected superuser identity'')',
+    'su-guc-test6-quoted-role-identity'
+);
+RESET SESSION AUTHORIZATION;
+
+SET SESSION AUTHORIZATION su_guc_forger;
+DO $forge_quoted_role$
+DECLARE
+    inst TEXT;
+BEGIN
+    SELECT instance_id INTO inst FROM _su_guc_t6;
+    UPDATE df.instances
+    SET submitted_by = (
+        SELECT oid::regrole FROM pg_roles WHERE rolname = chr(34) || 'postgres' || chr(34)
+    )
+    WHERE id = inst;
+    UPDATE df.nodes
+    SET submitted_by = (
+        SELECT oid::regrole FROM pg_roles WHERE rolname = chr(34) || 'postgres' || chr(34)
+    )
+    WHERE instance_id = inst;
+END $forge_quoted_role$;
+RESET SESSION AUTHORIZATION;
+
+DO $assert_quoted_role$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _su_guc_t6;
+    SELECT df.await_instance(inst_id, 30) INTO status;
+
+    IF lower(status) != 'failed' THEN
+        RAISE EXCEPTION 'TEST 6 FAILED: expected quoted-role workflow to fail, got: %', status;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM su_guc_quoted_role_sentinel) THEN
+        RAISE EXCEPTION 'TEST 6 FAILED: quoted catalog role authenticated as postgres';
+    END IF;
+
+    RAISE NOTICE 'TEST 6 PASSED: quoted catalog role did not authenticate as postgres';
+END $assert_quoted_role$;
+
+DROP TABLE _su_guc_t6;
+DROP TABLE su_guc_quoted_role_sentinel;
+DROP ROLE """postgres""";
 
 -- ============================================================
 -- Cleanup

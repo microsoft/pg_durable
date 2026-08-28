@@ -9,7 +9,6 @@ use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -238,49 +237,6 @@ pub fn target_database() -> String {
     get_database()
 }
 
-fn normalize_role_name_for_connection(user: &str) -> Result<Cow<'_, str>, String> {
-    if !user.starts_with('"') {
-        if user.ends_with('"') {
-            return Err(format!(
-                "Invalid role name '{}': unexpected trailing double quote in connection username",
-                user
-            ));
-        }
-        return Ok(Cow::Borrowed(user));
-    }
-
-    if !user.ends_with('"') || user.len() < 2 {
-        return Err(format!(
-            "Invalid role name '{}': unterminated quoted identifier in connection username",
-            user
-        ));
-    }
-
-    let inner = &user[1..user.len() - 1];
-    let mut normalized = String::with_capacity(inner.len());
-    let mut chars = inner.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch != '"' {
-            normalized.push(ch);
-            continue;
-        }
-
-        if chars.peek() == Some(&'"') {
-            normalized.push('"');
-            chars.next();
-            continue;
-        }
-
-        return Err(format!(
-            "Invalid quoted role name '{}': expected doubled double quotes inside identifier",
-            user
-        ));
-    }
-
-    Ok(Cow::Owned(normalized))
-}
-
 /// Create a single PostgreSQL connection authenticated as `user`.
 pub async fn connect_as_user(
     user: &str,
@@ -308,11 +264,10 @@ async fn connect_as_user_with_application_name(
     /// Connection timeout for per-user SQL connections (seconds).
     const CONNECT_TIMEOUT_SECS: u64 = 30;
 
-    let normalized_user = normalize_role_name_for_connection(user)?;
     let default_db = target_database();
     let db = database.unwrap_or(&default_db);
     let mut options = PgConnectOptions::new()
-        .username(normalized_user.as_ref())
+        .username(user)
         .database(db)
         .port(get_port())
         .application_name(application_name);
@@ -328,17 +283,13 @@ async fn connect_as_user_with_application_name(
         .map_err(|_| {
             format!(
                 "Connection to database '{}' as '{}' timed out after {}s",
-                db,
-                normalized_user.as_ref(),
-                CONNECT_TIMEOUT_SECS
+                db, user, CONNECT_TIMEOUT_SECS
             )
         })?
         .map_err(|e| {
             format!(
                 "Failed to connect to database '{}' as '{}'. Error: {}",
-                db,
-                normalized_user.as_ref(),
-                e
+                db, user, e
             )
         })?;
 
@@ -1979,36 +1930,6 @@ mod tests {
                 "evaluate_condition raw fallback failed for: {input}"
             );
         }
-    }
-
-    #[test]
-    fn normalize_role_name_keeps_raw_rolname() {
-        let normalized = normalize_role_name_for_connection("plain_role").unwrap();
-        assert_eq!(normalized.as_ref(), "plain_role");
-    }
-
-    #[test]
-    fn normalize_role_name_keeps_mixed_case_rolname() {
-        let normalized = normalize_role_name_for_connection("labUser").unwrap();
-        assert_eq!(normalized.as_ref(), "labUser");
-    }
-
-    #[test]
-    fn normalize_role_name_unquotes_regrole_text_output() {
-        let normalized = normalize_role_name_for_connection("\"Role Name\"").unwrap();
-        assert_eq!(normalized.as_ref(), "Role Name");
-    }
-
-    #[test]
-    fn normalize_role_name_unescapes_embedded_quotes() {
-        let normalized = normalize_role_name_for_connection("\"Role \"\"Name\"\"\"").unwrap();
-        assert_eq!(normalized.as_ref(), "Role \"Name\"");
-    }
-
-    #[test]
-    fn normalize_role_name_rejects_malformed_quoted_identifier() {
-        let err = normalize_role_name_for_connection("\"bad\"name\"").unwrap_err();
-        assert!(err.contains("Invalid quoted role name"));
     }
 
     #[test]
