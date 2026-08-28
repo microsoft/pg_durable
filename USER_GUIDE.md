@@ -1058,8 +1058,8 @@ These read-only variables are automatically available during durable function ex
 
 ### Variables and secrets
 
-Reaching for `df.setvar()` to hold an API key is a natural move, and it is only a partial
-mitigation. Here is exactly what it does and does not protect, so you can make an informed
+Using `df.setvar()` to hold an API key is a natural move, and it genuinely helps — but only in
+one place. Here is exactly what it does and does not protect, so you can make an informed
 choice.
 
 Given this pattern:
@@ -1082,7 +1082,7 @@ SELECT df.start(df.http('https://api.example.com/users', 'GET', NULL,
 Writing the credential directly into `df.http(...)` instead of using a variable is strictly
 worse: it adds `df.nodes.query` to that list without removing anything from it.
 
-Practical guidance today:
+Practical guidance:
 
 - Prefer credentials that are short-lived and narrowly scoped, so history exposure is bounded.
 - Treat `df.vars` as configuration — hostnames, table names, batch sizes, API versions.
@@ -2112,7 +2112,7 @@ different security boundary from the database: RLS does not apply to it, it is n
 | SQL nodes | The submitting role and target database, plus the fully-substituted SQL text when `pg_durable.log_workflow_sql` is on. |
 | Workflow result | The final return value is logged on completion. For a workflow ending in an HTTP step this includes the response body. |
 
-`pg_durable.log_workflow_sql` (default `on`) controls the last of these. SQL cannot be
+`pg_durable.log_workflow_sql` (default `on`) is what gates the SQL text. SQL cannot be
 redacted heuristically — a variable value spliced into a query is indistinguishable from the
 query itself — so this is an on/off switch rather than a masking rule. It is read by the
 background worker, so like the other worker GUCs it is Postmaster-context and needs a restart:

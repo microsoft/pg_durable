@@ -689,7 +689,7 @@ SELECT df.revoke_usage('app_role');
 
 ## Server Configuration (GUCs)
 
-These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. When they take effect depends on the context listed for each one: `SUSET` settings apply after `SELECT pg_reload_conf()`, while `POSTMASTER` settings require a server restart. GUCs read by the background worker are `POSTMASTER`, because the worker does not process a configuration reload.
+These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. Each one lists its context: `SUSET` settings take effect after `SELECT pg_reload_conf()`, while `POSTMASTER` settings require a restart. Every GUC read by the background worker is `POSTMASTER`, because the worker does not process a configuration reload.
 
 ---
 
@@ -776,6 +776,6 @@ pg_durable.log_workflow_sql = off
 
 The value is read by the background worker, which does not process a configuration reload, so a restart is required — the same as `pg_durable.retention_days` and the connection-limit GUCs.
 
-Turning it off keeps the role, database and node identity in the log but drops the statement text. That also removes the primary record of what workflows executed, which is usually the first thing an incident investigation looks for — prefer keeping credentials out of SQL over disabling the log. See [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+Turning it off keeps the submitting role and target database in the log but drops the statement text. That also removes the primary record of what workflows executed, which is usually the first thing an incident investigation looks for — prefer keeping credentials out of SQL over disabling the log. See [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
 
-The trace runs on the worker's own connections, so it is independent of `log_statement`.
+This trace is written by the background worker's own logging, not by PostgreSQL statement logging, so `log_statement` neither enables nor suppresses it.
