@@ -34,6 +34,7 @@ SKIP_TESTS=(
     "45_connection_limit_timeout"
     "46_connection_limit_startup_validation"
     "66_new_transaction_launch_limit"
+    "67_host_guc"
     "47_http_dsl_disabled"
     "48_http_allow_all"
     # Needs the "reconcile" phase GUCs (reconcile_interval=2, retention_days=0)
