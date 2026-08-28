@@ -174,17 +174,17 @@ issues a `REVOKE`. Call `df.revoke_usage()` first to downgrade a role.
 
 `df.grant_usage()` and `df.revoke_usage()` are admin-only functions.
 `EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, so only
-superusers — and roles granted `with_grant => true` — can call them.
+superusers can call them — plus any role an admin delegated to with
+`df.grant_usage(role, with_grant => true)`.
 
 `df.grant_usage()` issues a specific set of grants: `USAGE ON SCHEMA df`,
-column-scoped table privileges, and `EXECUTE` on `df.http()` /
-`df.http_multipart()` only when `include_http => true`. Every other `df.*`
-function keeps PostgreSQL's default `EXECUTE` to `PUBLIC`, so **schema `USAGE`
-is the real access gate**. Granting `USAGE ON SCHEMA df` by hand therefore
-exposes the whole DSL surface at once; prefer `df.grant_usage()`.
-
-> **Note:** prior to v0.2.4 this helper ran a per-function grant loop over an
-> allowlist. That loop was removed in v0.2.4 (#242) as redundant.
+column-scoped table privileges, `EXECUTE` on `df.http()` / `df.http_multipart()`
+when `include_http => true`, and `EXECUTE` on `df.grant_usage()`,
+`df.revoke_usage()` and `df.metrics()` when `with_grant => true`. Those five
+functions are the only ones with `PUBLIC` `EXECUTE` revoked at install; every
+other `df.*` function keeps PostgreSQL's default, so **schema `USAGE` is the
+real access gate**. Granting `USAGE ON SCHEMA df` by hand therefore exposes the
+whole DSL surface at once; prefer `df.grant_usage()`.
 
 ### 3.5 Feature-flag interaction
 
@@ -360,20 +360,16 @@ is applied before any URL reaches a log line or an error string.
 
 | Component | Treatment |
 |-----------|-----------|
-| Scheme, host, port, path | Preserved, normalized per the WHATWG URL spec (host lowercased, default port dropped, empty path rendered as `/`) |
+| Scheme, host, port, path | Preserved. The URL is reparsed, so a logged line may be normalized (host lowercased, default port dropped) relative to what the workflow supplied. |
 | Query parameter *names* | Preserved — `sig` and `code` are not themselves secret, and keeping them makes a redacted line diagnosable |
-| Query parameter *values* | Replaced with `<redacted>`, except an allowlist of benign parameters (`api-version`, `comp`, `restype`) |
+| Query parameter *values* | Replaced with `<redacted>`, except an allowlist of benign parameters (`api-version`, `apiversion`, `comp`, `restype`) |
 | Bare query token with no `=` | Replaced whole — indistinguishable from a name |
 | `userinfo@` | Replaced with `<redacted>@`, keeping the host |
 | Fragment | Replaced whole |
 | Unparseable input | Replaced whole — redaction fails closed and never echoes back a string it could not parse |
 
-Parsing uses the `url` crate rather than hand-rolled string splitting, so IPv6
-authorities, percent-encoding, default ports and userinfo edge cases follow the
-spec. The query string is the one part still split on `&` and `=` directly:
-`Url::query_pairs` follows the form-urlencoded rules and reports a bare token
-(`?SEKRIT`) as the *name* of a valueless parameter, so rebuilding the query from
-those pairs would publish the token verbatim.
+Parsing uses the `url` crate, so IPv6 authorities, percent-encoding, default
+ports and userinfo follow the spec rather than ad-hoc string splitting.
 
 The same redaction is applied to the HTTP client's own error text, which
 interpolates the request URL into messages such as
