@@ -14,6 +14,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 - **Restricted HTTP transport (#342):** restricted allow-list builds now require HTTPS so credentials and request bodies cannot be sent over plaintext HTTP; development-only `http-allow-all` builds continue to permit HTTP.
 
+### Security
+
+- **HTTP allow-list URL parsing:** request URLs are now parsed once and the same canonical URL is used for validation and transport, preventing parser differences from approving a different host than the request targets.
+
 ## [0.2.6] - 2026-08-23
 
 ### Added

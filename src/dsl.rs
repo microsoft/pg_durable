@@ -497,7 +497,7 @@ pub fn http(
     // Skip the check when the URL contains variable placeholders ({...}) —
     // substitution happens at execution time so the scheme is not yet known.
     if !url.contains('{') {
-        if let Err(e) = crate::ssrf::validate_url_scheme(url) {
+        if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
             pgrx::error!("{}", e);
         }
     }
@@ -578,7 +578,7 @@ pub fn http_multipart(
     // Validate URL scheme at DSL time (skip when URL contains variable
     // placeholders — substitution happens at execution time). Mirrors df.http.
     if !url.contains('{') {
-        if let Err(e) = crate::ssrf::validate_url_scheme(url) {
+        if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
             pgrx::error!("{}", e);
         }
     }

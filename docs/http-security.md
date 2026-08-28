@@ -49,7 +49,7 @@ df.http() is disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature
 
 Because `df.nodes` rows can be inserted by hand (bypassing the DSL), the same
 block is enforced again at execution time inside `execute_http.rs` via
-`validate_url_allowlist`.
+`validate_allowlist`.
 
 ---
 
@@ -225,6 +225,11 @@ The SSRF-safe DNS resolver (`SsrfSafeResolver`) wraps the system resolver and
 filters blocked IPs **inline** — the same IP that passes the check is the one
 used for the TCP connection.  There is no window for a rebinding attack.
 
+Restricted builds disable reqwest's system and environment proxy discovery.
+An HTTP proxy resolves the destination itself, outside `SsrfSafeResolver`, so
+inheriting `HTTP_PROXY`, `HTTPS_PROXY`, or platform proxy settings would bypass
+the destination-IP check.
+
 Only the single IP address that `reqwest` actually connects to is checked.  If
 DNS returns multiple A/AAAA records, the others are not checked because they
 are never used.  This is intentional, not a gap — checking unused addresses
@@ -234,7 +239,7 @@ would create false positives without any security benefit.
 
 Bare IP literals in URLs (e.g. `http://169.254.169.254/...`) bypass DNS
 entirely — `reqwest` connects directly without calling the resolver.
-`validate_url_allowlist` blocks all bare IPs unconditionally, so these never
+`validate_allowlist` blocks all bare IPs unconditionally, so these never
 reach the resolver.
 
 ---
@@ -285,10 +290,27 @@ Matched exactly — subdomains and lookalikes are rejected.
 
 ### 5.4 Bare IP rejection
 
-All bare IPv4 and IPv6 addresses are rejected by `validate_url_allowlist`
+All bare IPv4 and IPv6 addresses are rejected by `validate_allowlist`
 regardless of feature flag — even under `http-allow-azure-domains`.
 Because the allowlist blocks all bare IPs, there is no separate IP-literal
 check; the allowlist is the definitive gate for IP-literal URLs.
+
+### 5.4 One parse, one URL
+
+The host judged by the allow-list is read from the `url::Url` that is then
+handed to `reqwest`, never from the caller's string. Comparing a separately
+parsed host against the allow-list would let the two parsers disagree: WHATWG
+ends the authority of an `http(s)` URL at `\`, so in
+`https://evil.example\@acct.blob.core.windows.net/` the host is
+`evil.example` and the allow-listed name is merely path. A scan that read the
+name after the last `@` would approve a request aimed elsewhere — and with an
+IP literal in that position it would also clear the bare-IP rule, the only
+gate for targets that skip DNS.
+
+Judging the parsed host means the allow-list follows canonicalisation as
+`reqwest` performs it: percent-encoded host characters are decoded,
+non-dotted IPv4 notation (`http://2130706433/`) becomes an IP literal, and
+internationalised names are compared in their Punycode form.
 
 ---
 

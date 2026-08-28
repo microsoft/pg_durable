@@ -1218,6 +1218,55 @@ END $$;
 
 DROP TABLE _test_ssrf11c;
 
+-- Test 12: A backslash cannot smuggle an allow-listed name past the allow-list.
+-- WHATWG ends the authority of an http(s) URL at '\', so each URL below reaches
+-- evil.example / 169.254.169.254 while the allow-listed name is only path. The
+-- IP-literal vector is the sharpest: such targets skip DNS, so the allow-list is
+-- the only gate they ever meet.
+CREATE TEMP TABLE _test_ssrf12 (vector TEXT, expected TEXT, instance_id TEXT);
+
+INSERT INTO _test_ssrf12 VALUES
+    ('exact test domain', 'not in the allowed',
+     df.start(df.http('https://evil.example\@api.github.com/repos', 'GET'),
+              'test-ssrf-backslash-exact')),
+    ('allowed suffix', 'not in the allowed',
+     df.start(df.http('https://evil.example\@testaccount.blob.core.windows.net/c', 'GET'),
+              'test-ssrf-backslash-suffix')),
+    ('ip literal', 'bare IP',
+        df.start(df.http('https://169.254.169.254\@api.github.com/../metadata/instance', 'GET'),
+              'test-ssrf-backslash-ip'));
+
+DO $$
+DECLARE
+    r           RECORD;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    FOR r IN SELECT * FROM _test_ssrf12 LOOP
+        RAISE NOTICE 'Testing backslash bypass (%): %', r.vector, r.instance_id;
+
+        SELECT df.await_instance(r.instance_id) INTO status;
+
+        IF status != 'failed' THEN
+            RAISE EXCEPTION 'TEST FAILED: backslash bypass (%) should be blocked, got status = %',
+                r.vector, status;
+        END IF;
+
+        SELECT result::text INTO node_result
+        FROM df.nodes
+        WHERE instance_id = r.instance_id AND node_type = 'HTTP';
+
+        IF node_result IS NULL OR node_result NOT ILIKE '%' || r.expected || '%' THEN
+            RAISE EXCEPTION 'TEST FAILED: expected "%" for backslash bypass (%), got: %',
+                r.expected, r.vector, node_result;
+        END IF;
+    END LOOP;
+
+    RAISE NOTICE 'TEST PASSED: ssrf_backslash_authority_bypass_blocked';
+END $$;
+
+DROP TABLE _test_ssrf12;
+
 RESET SESSION AUTHORIZATION;
 
 -- ============================================================================

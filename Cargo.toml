@@ -60,6 +60,11 @@ chrono = "0.4"
 # stays on native-tls with no rustls/ring/aws-lc in the tree.
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart"] }
 
+# Canonical URL parsing for SSRF validation. Semver-compatible with reqwest's own
+# url dependency, so Cargo unifies them and `url::Url` is `reqwest::Url` — the
+# validated URL and the sent URL are the same value.
+url = "2.5"
+
 # For df.http_multipart() — base64-decodes part payloads carried in the config JSON.
 base64 = "0.22"
 

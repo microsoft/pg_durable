@@ -108,8 +108,15 @@ pub async fn execute(
             ));
         })?;
 
+    let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP_MULTIPART BLOCKED (malformed) url={} submitted_by={audit_user}",
+            config.url
+        ));
+    })?;
+
     // --- Scheme validation (always enforced) ---
-    crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (scheme) url={} submitted_by={audit_user}",
             config.url
@@ -117,7 +124,7 @@ pub async fn execute(
     })?;
 
     // --- Azure endpoint allow-list ---
-    crate::ssrf::validate_url_allowlist(&config.url).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (allowlist) url={} submitted_by={audit_user}",
             config.url
@@ -139,9 +146,9 @@ pub async fn execute(
     // body-carrying methods; the DSL guard restricts to POST/PUT/PATCH and we
     // defend in depth here.
     let mut request = match config.method.as_str() {
-        "POST" => client.post(&config.url),
-        "PUT" => client.put(&config.url),
-        "PATCH" => client.patch(&config.url),
+        "POST" => client.post(request_url),
+        "PUT" => client.put(request_url),
+        "PATCH" => client.patch(request_url),
         _ => {
             return Err(format!(
                 "Unsupported HTTP method for multipart: {}",

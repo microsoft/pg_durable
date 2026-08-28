@@ -15,7 +15,12 @@
 //!
 //! The blocklist and allow-list are hardcoded and cannot be bypassed by any
 //! database user, including superusers.  See docs/http-security.md for details.
+//!
+//! Every check that inspects a URL runs on the [`Url`] produced by
+//! [`parse_request_url`], and that same value is handed to reqwest.  A second,
+//! independent parser would reintroduce the differential described there.
 
+use reqwest::Url;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 // ---------------------------------------------------------------------------
@@ -152,19 +157,24 @@ fn check_blocked_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
     }
 }
 
-/// Validate a URL scheme against the build's outbound HTTP policy.
-/// Restricted allow-list builds require HTTPS; development-only `http-allow-all`
-/// builds retain plaintext HTTP support. Builds without HTTP support accept both
-/// schemes here so the feature-specific disabled error remains authoritative.
-pub fn validate_url_scheme(url: &str) -> Result<(), String> {
+/// DSL-time scheme pre-check, so `df.http('file:///etc/passwd')` fails at
+/// definition time instead of at execution time.
+///
+/// This is advisory only — it runs on a raw string that may still contain
+/// unsubstituted variables. [`validate_scheme`] is the enforcing check.
+pub fn precheck_url_scheme(url: &str) -> Result<(), String> {
     let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
+    validate_scheme_value(&scheme)
+}
+
+fn validate_scheme_value(scheme: &str) -> Result<(), String> {
     let allows_plaintext = cfg!(feature = "http-allow-all")
         || !cfg!(any(
             feature = "http-allow-azure-domains",
             feature = "http-allow-test-domains"
         ));
 
-    match scheme.as_str() {
+    match scheme {
         "https" => Ok(()),
         "http" if allows_plaintext => Ok(()),
         "http" => Err(
@@ -185,10 +195,35 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical URL parsing
+// ---------------------------------------------------------------------------
+
+/// Parse `url` into the exact value that will be handed to reqwest.
+///
+/// Callers must validate *this* value and then send *this* value. Validating
+/// the raw string with a second parser opens a parser differential: WHATWG
+/// treats `\` as a path separator for http(s), so in
+/// `https://evil.example\@acct.blob.core.windows.net/` the authority is
+/// `evil.example` and the rest is path — while a hand-rolled authority scan
+/// reads the trailing allow-listed name and approves the request.
+pub fn parse_request_url(url: &str) -> Result<Url, String> {
+    Url::parse(url).map_err(|e| format!("Blocked: malformed URL ({e})."))
+}
+
+/// Validate the scheme of a canonically parsed URL against the build's
+/// outbound HTTP policy.
+pub fn validate_scheme(url: &Url) -> Result<(), String> {
+    validate_scheme_value(url.scheme())
+}
+
+// ---------------------------------------------------------------------------
 // Endpoint allow-list validation
 // ---------------------------------------------------------------------------
 
-/// Validate a URL against the endpoint allow-list.
+/// Validate a canonically parsed URL against the endpoint allow-list.
+///
+/// Takes the parsed [`Url`] rather than a string so the host checked here is
+/// the host reqwest will connect to.
 ///
 /// Behaviour depends on Cargo features (most to least restrictive):
 ///
@@ -198,7 +233,7 @@ pub fn validate_url_scheme(url: &str) -> Result<(), String> {
 /// * `http-allow-test-domains` — same as above **plus** `httpbingo.org`
 ///   (for E2E tests).
 /// * `http-allow-all` — allow-list check is skipped entirely; all domains pass.
-pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
+pub fn validate_allowlist(url: &Url) -> Result<(), String> {
     // http-allow-all: skip all domain checks.
     #[cfg(feature = "http-allow-all")]
     {
@@ -226,17 +261,20 @@ pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
             feature = "http-allow-test-domains",
         ))]
         {
-            let host = extract_host(url)
-                .ok_or_else(|| "Blocked: unable to extract hostname from URL.".to_string())?;
+            // Matching on Host (rather than inspecting the host string) keeps
+            // the IP-literal case total: WHATWG canonicalises decimal, octal and
+            // IPv4-mapped forms into these variants before we ever see them.
+            let host = match url.host() {
+                Some(url::Host::Domain(domain)) => domain,
+                Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+                    return Err("Blocked: requests to bare IP addresses are not permitted. \
+                         Use an approved service hostname instead."
+                        .to_string());
+                }
+                None => return Err("Blocked: unable to extract hostname from URL.".to_string()),
+            };
 
             let host_lower = host.to_ascii_lowercase();
-
-            // Block ALL bare IP addresses (IPv4 and IPv6).
-            if host_lower.parse::<IpAddr>().is_ok() {
-                return Err("Blocked: requests to bare IP addresses are not permitted. \
-                     Use an approved Azure service hostname instead."
-                    .to_string());
-            }
 
             // Check Azure suffixes (always present when either azure or test feature is on).
             for suffix in AZURE_DOMAIN_SUFFIXES {
@@ -267,53 +305,6 @@ pub fn validate_url_allowlist(url: &str) -> Result<(), String> {
             ))
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Host extraction helper
-// ---------------------------------------------------------------------------
-
-/// Extract the hostname (without port or brackets) from a URL.
-///
-/// Returns `None` for malformed URLs or URLs without a `://` scheme separator.
-#[cfg(any(
-    feature = "http-allow-azure-domains",
-    feature = "http-allow-test-domains"
-))]
-fn extract_host(url: &str) -> Option<String> {
-    // Strip scheme
-    let after_scheme = url.find("://").map(|i| &url[i + 3..])?;
-    // Strip path, query, and fragment — isolate authority (host + optional port).
-    // Per RFC 3986 / WHATWG URL, the authority is terminated by '/', '?', or '#'.
-    // Splitting only on '/' would let an attacker embed '?' or '#' to smuggle a
-    // fake suffix past our allowlist while reqwest connects to the real host.
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    // Strip userinfo (user:pass@)
-    let host_port = match authority.rfind('@') {
-        Some(i) => &authority[i + 1..],
-        None => authority,
-    };
-    // Extract host, handling bracketed IPv6 like [::1]:8080
-    let host = if host_port.starts_with('[') {
-        // IPv6 literal in brackets
-        let end = host_port.find(']')?;
-        &host_port[1..end]
-    } else {
-        // IPv4 or hostname — strip port
-        match host_port.rfind(':') {
-            Some(i) => &host_port[..i],
-            None => host_port,
-        }
-    };
-
-    if host.is_empty() {
-        return None;
-    }
-
-    Some(host.to_string())
 }
 
 // Keep this marker in sync with the error message in SsrfSafeResolver::resolve().
@@ -573,23 +564,31 @@ mod tests {
     #[cfg(not(feature = "http-allow-all"))]
     #[test]
     fn restricted_builds_require_https() {
-        assert!(validate_url_scheme("https://example.com").is_ok());
-        assert!(validate_url_scheme("HTTPS://example.com").is_ok());
-        assert!(validate_url_scheme("http://example.com")
+        assert!(precheck_url_scheme("https://example.com").is_ok());
+        assert!(precheck_url_scheme("HTTPS://example.com").is_ok());
+        assert!(precheck_url_scheme("http://example.com")
             .unwrap_err()
             .contains("HTTPS is required"));
-        assert!(validate_url_scheme("HTTP://EXAMPLE.COM")
+        assert!(precheck_url_scheme("HTTP://EXAMPLE.COM")
             .unwrap_err()
             .contains("HTTPS is required"));
+        assert!(validate_scheme(&parse_request_url("https://example.com").unwrap()).is_ok());
+        assert!(
+            validate_scheme(&parse_request_url("http://example.com").unwrap())
+                .unwrap_err()
+                .contains("HTTPS is required")
+        );
     }
 
     #[cfg(feature = "http-allow-all")]
     #[test]
     fn allow_all_builds_accept_http_and_https() {
-        assert!(validate_url_scheme("http://example.com").is_ok());
-        assert!(validate_url_scheme("https://example.com").is_ok());
-        assert!(validate_url_scheme("HTTP://EXAMPLE.COM").is_ok());
-        assert!(validate_url_scheme("HTTPS://example.com").is_ok());
+        assert!(precheck_url_scheme("http://example.com").is_ok());
+        assert!(precheck_url_scheme("https://example.com").is_ok());
+        assert!(precheck_url_scheme("HTTP://EXAMPLE.COM").is_ok());
+        assert!(precheck_url_scheme("HTTPS://example.com").is_ok());
+        assert!(validate_scheme(&parse_request_url("http://example.com").unwrap()).is_ok());
+        assert!(validate_scheme(&parse_request_url("HTTPS://example.com").unwrap()).is_ok());
     }
 
     #[cfg(not(any(
@@ -599,93 +598,69 @@ mod tests {
     )))]
     #[test]
     fn disabled_builds_defer_http_rejection_to_feature_policy() {
-        assert!(validate_url_scheme("http://example.com").is_ok());
-        assert!(validate_url_scheme("https://example.com").is_ok());
+        assert!(precheck_url_scheme("http://example.com").is_ok());
+        assert!(precheck_url_scheme("https://example.com").is_ok());
     }
 
     #[test]
     fn blocks_file_scheme() {
-        assert!(validate_url_scheme("file:///etc/passwd").is_err());
+        assert!(precheck_url_scheme("file:///etc/passwd").is_err());
+        assert!(validate_scheme(&parse_request_url("file:///etc/passwd").unwrap()).is_err());
     }
 
     #[test]
     fn blocks_ftp_scheme() {
-        assert!(validate_url_scheme("ftp://ftp.example.com").is_err());
+        assert!(precheck_url_scheme("ftp://ftp.example.com").is_err());
+        assert!(validate_scheme(&parse_request_url("ftp://ftp.example.com").unwrap()).is_err());
     }
 
     #[test]
     fn blocks_gopher_scheme() {
-        assert!(validate_url_scheme("gopher://evil.com").is_err());
+        assert!(precheck_url_scheme("gopher://evil.com").is_err());
+        assert!(validate_scheme(&parse_request_url("gopher://evil.com").unwrap()).is_err());
     }
 
     #[test]
     fn blocks_empty_and_malformed() {
-        assert!(validate_url_scheme("").is_err());
-        assert!(validate_url_scheme("no-scheme").is_err());
+        assert!(precheck_url_scheme("").is_err());
+        assert!(precheck_url_scheme("no-scheme").is_err());
     }
 
-    // --- extract_host helper ---
+    // --- Canonical URL parsing ---
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains"
-    ))]
-    #[test]
-    fn extract_host_basic() {
-        assert_eq!(
-            extract_host("http://example.com/path"),
-            Some("example.com".into())
-        );
-        assert_eq!(
-            extract_host("https://foo.blob.core.windows.net/c"),
-            Some("foo.blob.core.windows.net".into())
-        );
-        assert_eq!(extract_host("http://host:8080/p"), Some("host".into()));
-        assert_eq!(extract_host("http://[::1]:80/p"), Some("::1".into()));
-        assert_eq!(extract_host("http://user:pass@host/p"), Some("host".into()));
+    // Tests drive the allow-list through the same parse-then-validate path the
+    // activities use, so an unparseable URL is a rejection like any other.
+    #[cfg(not(feature = "http-allow-all"))]
+    fn validate_url_allowlist(url: &str) -> Result<(), String> {
+        validate_allowlist(&parse_request_url(url)?)
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains"
-    ))]
     #[test]
-    fn extract_host_query_and_fragment() {
-        // Query-only URL (no path slash after authority)
+    fn parse_request_url_canonicalises_authority() {
+        let u = parse_request_url("http://user:pass@Host:8080/p").unwrap();
+        assert_eq!(u.host_str(), Some("host"));
+        assert_eq!(u.port(), Some(8080));
         assert_eq!(
-            extract_host("https://myaccount.blob.core.windows.net?comp=list"),
-            Some("myaccount.blob.core.windows.net".into())
-        );
-        // Fragment-only URL
-        assert_eq!(
-            extract_host("https://example.com#section"),
-            Some("example.com".into())
-        );
-        // Query before path — authority must stop at '?'
-        assert_eq!(
-            extract_host("https://evil.com?.blob.core.windows.net/exfil"),
-            Some("evil.com".into())
-        );
-        // Fragment before path
-        assert_eq!(
-            extract_host("https://evil.com#.blob.core.windows.net"),
-            Some("evil.com".into())
-        );
-        // Userinfo confusion via query — '@' is in the query, not the authority
-        assert_eq!(
-            extract_host("https://evil.com?@myaccount.blob.core.windows.net"),
-            Some("evil.com".into())
+            parse_request_url("https://myaccount.blob.core.windows.net?comp=list")
+                .unwrap()
+                .host_str(),
+            Some("myaccount.blob.core.windows.net")
         );
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains"
-    ))]
     #[test]
-    fn extract_host_none_cases() {
-        assert_eq!(extract_host("no-scheme"), None);
-        assert_eq!(extract_host(""), None);
+    fn parse_request_url_treats_backslash_as_path_separator() {
+        // The authority ends at the backslash, so the '@' and everything after
+        // it are path — this is the differential the allow-list must not see.
+        let u = parse_request_url(r"https://evil.example\@api.github.com/repos").unwrap();
+        assert_eq!(u.host_str(), Some("evil.example"));
+        assert_eq!(u.path(), "/@api.github.com/repos");
+    }
+
+    #[test]
+    fn parse_request_url_rejects_malformed() {
+        assert!(parse_request_url("no-scheme").is_err());
+        assert!(parse_request_url("").is_err());
     }
 
     // --- Endpoint allow-list validation ---
@@ -855,11 +830,12 @@ mod tests {
         feature = "http-allow-test-domains"
     ))]
     #[test]
-    fn allowlist_blocks_percent_encoded_host() {
-        // %2E is a percent-encoded '.'; our parser does no decoding so the
-        // encoded form never matches the suffix — the request is blocked.
-        // This locks the safe current behavior against accidental URL decoding.
-        assert!(validate_url_allowlist("https://foo%2Eblob%2Ecore%2Ewindows%2Enet/c").is_err());
+    fn allowlist_follows_percent_decoded_host() {
+        // %2E is a percent-encoded '.'. WHATWG decodes it during host parsing,
+        // so the request really does go to the allow-listed host and the verdict must
+        // match that — the allow-list judges the host reqwest will connect to,
+        // never the spelling the caller used.
+        assert!(validate_url_allowlist("https://foo%2Eblob%2Ecore%2Ewindows%2Enet/c").is_ok());
         assert!(validate_url_allowlist("https://evil%2Ecom/steal").is_err());
     }
 
@@ -935,6 +911,55 @@ mod tests {
         );
     }
 
+    // --- Backslash authority-termination vectors ---
+    //
+    // WHATWG ends the authority of an http(s) URL at '\', so the allow-listed
+    // name after the backslash is path, not host. Any parser that misses this
+    // approves a request aimed somewhere else entirely.
+
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn allowlist_blocks_backslash_userinfo_bypass() {
+        assert!(
+            validate_url_allowlist(r"https://evil.example\@acct.blob.core.windows.net/c").is_err()
+        );
+        assert!(
+            validate_url_allowlist(r"https://evil.example\@acct.queue.core.windows.net/s").is_err()
+        );
+        assert!(
+            validate_url_allowlist(r"https://evil.example:443\@acct.file.core.windows.net/")
+                .is_err()
+        );
+        // No userinfo marker at all — the whole tail is path.
+        assert!(
+            validate_url_allowlist(r"https://evil.example\acct.blob.core.windows.net/").is_err()
+        );
+    }
+
+    // The bare-IP rule is the only gate for IP-literal targets: reqwest skips
+    // DNS for them, so SsrfSafeResolver never runs. These must never pass.
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn allowlist_blocks_backslash_ip_literal_bypass() {
+        assert!(validate_url_allowlist(
+            r"http://169.254.169.254\@acct.blob.core.windows.net/../metadata/instance"
+        )
+        .is_err());
+        assert!(
+            validate_url_allowlist(r"http://127.0.0.1:5432\@acct.queue.core.windows.net/").is_err()
+        );
+        assert!(validate_url_allowlist(r"http://[::1]\@acct.blob.core.windows.net/").is_err());
+    }
+
+    // Bare IPs written in non-dotted notation are canonicalised by WHATWG, so
+    // they reach the connector as IP literals and must be caught as such.
+    #[cfg(not(feature = "http-allow-all"))]
+    #[test]
+    fn allowlist_blocks_non_dotted_ip_notation() {
+        assert!(validate_url_allowlist("http://2130706433/").is_err());
+        assert!(validate_url_allowlist("http://0x7f.1/").is_err());
+    }
+
     // --- Test domains (only with http-allow-test-domains) ---
 
     #[cfg(feature = "http-allow-test-domains")]
@@ -948,6 +973,19 @@ mod tests {
     fn allowlist_still_blocks_arbitrary_domains() {
         assert!(validate_url_allowlist("https://example.com/path").is_err());
         assert!(validate_url_allowlist("https://evil.com/steal").is_err());
+    }
+
+    // The exact-match branch is no safer than the suffix branch when the host
+    // itself is taken from the wrong parse, so it gets the same coverage.
+    #[cfg(feature = "http-allow-test-domains")]
+    #[test]
+    fn allowlist_blocks_backslash_bypass_of_exact_domains() {
+        assert!(validate_url_allowlist(r"https://evil.example\@api.github.com/repos").is_err());
+        assert!(validate_url_allowlist(r"https://user\name@api.github.com/repos").is_err());
+        assert!(validate_url_allowlist(
+            r"http://169.254.169.254\@api.github.com/../metadata/instance"
+        )
+        .is_err());
     }
 
     // --- SsrfSafeResolver behavioral tests ---

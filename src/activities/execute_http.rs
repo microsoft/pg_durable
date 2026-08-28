@@ -58,6 +58,10 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 /// could host a 302 redirecting to `http://169.254.169.254/...`, and reqwest
 /// would follow it without calling our DNS resolver (since the target is an IP
 /// literal).
+///
+/// Restricted builds also disable environment/system proxies. A proxy resolves
+/// the destination itself, which would bypass `SsrfSafeResolver`'s check of the
+/// address reqwest ultimately reaches.
 pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
@@ -70,7 +74,7 @@ pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String>
         use crate::ssrf::{SsrfSafeResolver, SystemResolver};
         use std::sync::Arc;
         let resolver = SsrfSafeResolver::wrapping(Arc::new(SystemResolver));
-        builder.dns_resolver(Arc::new(resolver))
+        builder.no_proxy().dns_resolver(Arc::new(resolver))
     };
 
     builder
@@ -108,6 +112,9 @@ pub async fn execute(
     //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding — a hostname
     //                 that passes the allowlist but resolves to a private IP at
     //                 connect time.
+    //
+    // Steps 1 and 2 inspect the parsed URL that step 4 sends, so no parser
+    // differential can separate what we approve from what we request.
 
     // --- Privilege check (Layer 0): submitted_by must have EXECUTE on df.http() ---
     check_http_privilege(&pool, audit_user)
@@ -119,8 +126,15 @@ pub async fn execute(
             ));
         })?;
 
+    let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP BLOCKED (malformed) url={} submitted_by={audit_user}",
+            config.url
+        ));
+    })?;
+
     // --- Scheme validation (always enforced, regardless of feature flag) ---
-    crate::ssrf::validate_url_scheme(&config.url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (scheme) url={} submitted_by={audit_user}",
             config.url
@@ -128,7 +142,7 @@ pub async fn execute(
     })?;
 
     // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
-    crate::ssrf::validate_url_allowlist(&config.url).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (allowlist) url={} submitted_by={audit_user}",
             config.url
@@ -146,11 +160,11 @@ pub async fn execute(
 
     // Build request based on method
     let mut request = match config.method.as_str() {
-        "GET" => client.get(&config.url),
-        "POST" => client.post(&config.url),
-        "PUT" => client.put(&config.url),
-        "DELETE" => client.delete(&config.url),
-        "PATCH" => client.patch(&config.url),
+        "GET" => client.get(request_url),
+        "POST" => client.post(request_url),
+        "PUT" => client.put(request_url),
+        "DELETE" => client.delete(request_url),
+        "PATCH" => client.patch(request_url),
         _ => return Err(format!("Unsupported HTTP method: {}", config.method)),
     };
 
@@ -248,4 +262,90 @@ pub async fn execute(
     // Return response for all other cases (including 4xx)
     // 4xx are client errors - user should handle in workflow logic
     Ok(result.to_string())
+}
+
+#[cfg(all(test, not(feature = "http-allow-all")))]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    struct EnvGuard {
+        name: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, original }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restricted_builds_ignore_environment_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+
+        let _http_proxy_upper = EnvGuard::set("HTTP_PROXY", &proxy_url);
+        let _http_proxy_lower = EnvGuard::set("http_proxy", &proxy_url);
+        let _no_proxy_upper = EnvGuard::remove("NO_PROXY");
+        let _no_proxy_lower = EnvGuard::remove("no_proxy");
+
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let proxy_thread = std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0; 1024];
+                    let _ = stream.read(&mut request);
+                    stream
+                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                    return true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stop_rx.try_recv().is_ok() {
+                        return false;
+                    }
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("proxy listener failed: {error}"),
+            }
+        });
+
+        let client = build_client(Duration::from_secs(1)).unwrap();
+        let _ = client
+            .get("http://pg-durable-proxy-test.invalid/")
+            .send()
+            .await;
+        stop_tx.send(()).unwrap();
+        let proxy_was_used = proxy_thread.join().unwrap();
+
+        assert!(
+            !proxy_was_used,
+            "restricted HTTP modes must bypass system proxies"
+        );
+    }
 }
