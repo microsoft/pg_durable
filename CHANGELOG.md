@@ -10,6 +10,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 - **`pg_durable.host` (#360):** a postmaster GUC that selects the PostgreSQL host used by every connection pg_durable creates. When empty or unset, `PGHOST` is used, falling back to `127.0.0.1`.
 
+### Fixed
+
+- **Restricted HTTP transport (#342):** restricted allow-list builds now require HTTPS so credentials and request bodies cannot be sent over plaintext HTTP; development-only `http-allow-all` builds continue to permit HTTP.
+
 ## [0.2.6] - 2026-08-23
 
 ### Added

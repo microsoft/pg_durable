@@ -152,15 +152,35 @@ fn check_blocked_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
     }
 }
 
-/// Validate a URL scheme. Only `http` and `https` are permitted.
-/// Returns `Err` with a user-facing message if the scheme is disallowed.
+/// Validate a URL scheme against the build's outbound HTTP policy.
+/// Restricted allow-list builds require HTTPS; development-only `http-allow-all`
+/// builds retain plaintext HTTP support. Builds without HTTP support accept both
+/// schemes here so the feature-specific disabled error remains authoritative.
 pub fn validate_url_scheme(url: &str) -> Result<(), String> {
     let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
+    let allows_plaintext = cfg!(feature = "http-allow-all")
+        || !cfg!(any(
+            feature = "http-allow-azure-domains",
+            feature = "http-allow-test-domains"
+        ));
+
     match scheme.as_str() {
-        "http" | "https" => Ok(()),
-        other => Err(format!(
-            "Blocked: unsupported URL scheme '{other}'. Only http and https are allowed."
-        )),
+        "https" => Ok(()),
+        "http" if allows_plaintext => Ok(()),
+        "http" => Err(
+            "Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required."
+                .to_string(),
+        ),
+        other => {
+            let allowed = if allows_plaintext {
+                "http and https"
+            } else {
+                "https"
+            };
+            Err(format!(
+                "Blocked: unsupported URL scheme '{other}'. Only {allowed} is allowed."
+            ))
+        }
     }
 }
 
@@ -546,12 +566,41 @@ mod tests {
 
     // --- URL scheme validation ---
 
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    ))]
+    #[cfg(not(feature = "http-allow-all"))]
     #[test]
-    fn allows_http_https() {
+    fn restricted_builds_require_https() {
+        assert!(validate_url_scheme("https://example.com").is_ok());
+        assert!(validate_url_scheme("HTTPS://example.com").is_ok());
+        assert!(validate_url_scheme("http://example.com")
+            .unwrap_err()
+            .contains("HTTPS is required"));
+        assert!(validate_url_scheme("HTTP://EXAMPLE.COM")
+            .unwrap_err()
+            .contains("HTTPS is required"));
+    }
+
+    #[cfg(feature = "http-allow-all")]
+    #[test]
+    fn allow_all_builds_accept_http_and_https() {
         assert!(validate_url_scheme("http://example.com").is_ok());
         assert!(validate_url_scheme("https://example.com").is_ok());
         assert!(validate_url_scheme("HTTP://EXAMPLE.COM").is_ok());
         assert!(validate_url_scheme("HTTPS://example.com").is_ok());
+    }
+
+    #[cfg(not(any(
+        feature = "http-allow-all",
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains"
+    )))]
+    #[test]
+    fn disabled_builds_defer_http_rejection_to_feature_policy() {
+        assert!(validate_url_scheme("http://example.com").is_ok());
+        assert!(validate_url_scheme("https://example.com").is_ok());
     }
 
     #[test]

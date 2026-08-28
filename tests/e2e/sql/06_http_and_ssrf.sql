@@ -718,7 +718,7 @@ SELECT df.clearvars();
 CREATE TEMP TABLE _test_ssrf1 (instance_id TEXT);
 
 INSERT INTO _test_ssrf1 SELECT df.start(
-    df.http('http://169.254.169.254/latest/meta-data/', 'GET'),
+    df.http('https://169.254.169.254/latest/meta-data/', 'GET'),
     'test-ssrf-metadata'
 );
 
@@ -754,7 +754,7 @@ DROP TABLE _test_ssrf1;
 CREATE TEMP TABLE _test_ssrf2 (instance_id TEXT);
 
 INSERT INTO _test_ssrf2 SELECT df.start(
-    df.http('http://127.0.0.1:9999/probe', 'GET'),
+    df.http('https://127.0.0.1:9999/probe', 'GET'),
     'test-ssrf-localhost'
 );
 
@@ -785,6 +785,41 @@ BEGIN
 END $$;
 
 DROP TABLE _test_ssrf2;
+
+-- Test 2c: Restricted builds reject plaintext HTTP at DSL time for both APIs
+DO $$
+DECLARE
+    caught_http BOOLEAN := false;
+    caught_multipart BOOLEAN := false;
+BEGIN
+    BEGIN
+        PERFORM df.http('http://api.github.com/repos', 'GET');
+    EXCEPTION WHEN OTHERS THEN
+        caught_http := SQLERRM ILIKE '%HTTPS is required%';
+    END;
+
+    BEGIN
+        PERFORM df.http_multipart(
+            'http://api.github.com/repos',
+            'POST',
+            '[{"name":"field","value":"value"}]'::jsonb
+        );
+    EXCEPTION WHEN OTHERS THEN
+        caught_multipart := SQLERRM ILIKE '%HTTPS is required%';
+    END;
+
+    IF NOT caught_http THEN
+        RAISE EXCEPTION
+            'TEST FAILED: df.http() should require HTTPS in restricted builds';
+    END IF;
+
+    IF NOT caught_multipart THEN
+        RAISE EXCEPTION
+            'TEST FAILED: df.http_multipart() should require HTTPS in restricted builds';
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: restricted_http_requires_https_at_dsl_time';
+END $$;
 
 -- Test 3: Block unsupported URL scheme (file://) — DSL time and execution time
 DO $$
@@ -1108,6 +1143,80 @@ BEGIN
 END $$;
 
 DROP TABLE _test_ssrf11;
+
+-- Test 11b: Raw HTTP nodes cannot bypass restricted-build HTTPS enforcement
+CREATE TEMP TABLE _test_ssrf11b (instance_id TEXT);
+
+INSERT INTO _test_ssrf11b
+SELECT df.start(
+    '{"node_type":"HTTP","query":"{\"url\":\"http://api.github.com/repos\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+    'test-ssrf-plaintext-bypass'
+);
+
+DO $$
+DECLARE
+    inst_id     TEXT;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_ssrf11b;
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected status = failed, got %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%HTTPS is required%' THEN
+        RAISE EXCEPTION
+            'TEST FAILED: expected HTTPS-required error in node result, got: %',
+            node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: ssrf_plaintext_execution_time_rejection';
+END $$;
+
+DROP TABLE _test_ssrf11b;
+
+-- Test 11c: Raw multipart nodes use the same execution-time scheme policy
+CREATE TEMP TABLE _test_ssrf11c (instance_id TEXT);
+
+INSERT INTO _test_ssrf11c
+SELECT df.start(
+    '{"node_type":"HTTP_MULTIPART","query":"{\"url\":\"http://api.github.com/repos\",\"method\":\"POST\",\"parts\":[{\"name\":\"field\",\"data_b64\":\"dmFsdWU=\"}],\"headers\":null,\"timeout_seconds\":5}"}',
+    'test-ssrf-multipart-plaintext-bypass'
+);
+
+DO $$
+DECLARE
+    inst_id     TEXT;
+    status      TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_ssrf11c;
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected status = failed, got %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP_MULTIPART';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%HTTPS is required%' THEN
+        RAISE EXCEPTION
+            'TEST FAILED: expected HTTPS-required multipart error, got: %',
+            node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: ssrf_multipart_plaintext_execution_time_rejection';
+END $$;
+
+DROP TABLE _test_ssrf11c;
 
 RESET SESSION AUTHORIZATION;
 

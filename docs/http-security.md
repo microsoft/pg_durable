@@ -29,9 +29,9 @@ or SQL.
 | Feature | What is allowed | Use case |
 |---------|-----------------|----------|
 | *(none)* | Nothing — `df.http()` errors immediately at DSL time **and** at execution time | Deployments that don't need HTTP |
-| `http-allow-azure-domains` | Subdomains of the Azure allow-list plus `api.github.com`; bare IPs blocked; redirects blocked | Production |
-| `http-allow-test-domains` | Everything in `http-allow-azure-domains` **plus** `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
-| `http-allow-all` | All URLs; SSRF IP blocklist and allow-list are both disabled | Local development only |
+| `http-allow-azure-domains` | HTTPS to subdomains of the Azure allow-list plus `api.github.com`; bare IPs blocked; redirects blocked | Production |
+| `http-allow-test-domains` | HTTPS to everything in `http-allow-azure-domains` **plus** `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
+| `http-allow-all` | HTTP and HTTPS to all URLs; SSRF IP blocklist and allow-list are both disabled | Local development only |
 
 The scripts and CI use `http-allow-test-domains` so that the HTTP E2E tests
 pass — this includes the source-built `Dockerfile` used for local dev and CI.
@@ -296,9 +296,13 @@ check; the allowlist is the definitive gate for IP-literal URLs.
 
 ### 6.1 Scheme restriction
 
-Only `http://` and `https://` are accepted.  All other schemes (`file://`,
-`ftp://`, `gopher://`, etc.) are rejected before any DNS resolution or
-connection attempt.
+Restricted builds accept only `https://`. This prevents credentials and request
+bodies from being transmitted over plaintext connections. Plaintext `http://`
+is available only with the development-only `http-allow-all` feature.
+
+All other schemes (`file://`, `ftp://`, `gopher://`, etc.) are rejected before
+any DNS resolution or connection attempt. Scheme validation runs both when the
+DSL node is created and when the canonical parsed URL is executed.
 
 ### 6.2 Redirect blocking
 
@@ -329,7 +333,8 @@ leaking internal network topology to potentially malicious users.
 |----------|---------|
 | No EXECUTE privilege on df.http() | `Blocked: role '{role}' does not have EXECUTE privilege on df.http(). Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {role} to allow HTTP requests.` |
 | HTTP disabled (no feature) | `Blocked: outbound HTTP requests are disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them.` |
-| Unsupported scheme | `Blocked: unsupported URL scheme '{scheme}'. Only http and https are allowed.` |
+| Plaintext HTTP in a restricted build | `Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required.` |
+| Unsupported scheme | `Blocked: unsupported URL scheme '{scheme}'. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |
 | Bare IP address | `Blocked: requests to bare IP addresses are not permitted. Use an approved Azure service hostname instead.` |
 | Non-allowed domain | `Blocked: '{host}' is not in the allowed endpoint list. Only requests to approved Azure service domains are permitted.` |
 | Blocked IP (literal or DNS) | `Blocked: the resolved IP address for '{host}' is in a restricted range. df.http() cannot access private or internal network addresses.` |

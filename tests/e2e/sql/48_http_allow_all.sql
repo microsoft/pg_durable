@@ -15,7 +15,7 @@
 CREATE TEMP TABLE _test_allowall1 (instance_id TEXT);
 
 INSERT INTO _test_allowall1 SELECT df.start(
-    df.http('https://example.com/', 'GET'),
+    df.http('http://example.com/', 'GET'),
     'test-http-allow-all-non-azure'
 );
 
@@ -36,6 +36,10 @@ BEGIN
 
     IF node_result ILIKE '%not in the allowed%' THEN
         RAISE EXCEPTION 'TEST FAILED: allow-list should be bypassed under http-allow-all, got: %', node_result;
+    END IF;
+
+    IF node_result ILIKE '%HTTPS is required%' THEN
+        RAISE EXCEPTION 'TEST FAILED: plaintext HTTP should be allowed under http-allow-all, got: %', node_result;
     END IF;
 
     IF node_result ILIKE '%bare IP%' THEN
