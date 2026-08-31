@@ -25,6 +25,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install gh-aw extension
+        uses: github/gh-aw-actions/setup-cli@b6d1443e05b8716267fa19425b99aa4f12006b4a # v0.82.14
+        with:
+          version: v0.82.14
+
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
