@@ -203,6 +203,15 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.6 → v0.2.7
+
+#### Transaction-aware graph admission
+- **Runtime change (no DDL):** New caller-mode starts include the top-level PostgreSQL transaction ID in the root orchestration input. A versioned single-shot activity probes graph visibility and `pg_xact_status()`; the deterministic orchestration waits with capped backoff and periodically `continue_as_new`s to bound replay history.
+- **Rollback behavior:** A whole-transaction abort fails the df-less engine record without executing SQL. A committed origin transaction with no visible graph is reported distinctly as a likely savepoint rollback. Transient graph/pool errors return a retry state rather than terminally failing the orchestration.
+- **Replay compatibility:** Historical `FunctionInput` payloads deserialize with no origin transaction ID and schedule the original `pg_durable::activity::load-function-graph` activity with the same raw instance-ID input. Existing in-flight history therefore retains its operation name, order, and input bytes. The new activity name and input shape are used only for starts created by the new binary.
+- **Scenario A/B2 considerations:** No extension schema or persisted `df` data changes; no upgrade DDL is required.
+- **Scenario B1 considerations:** The new binary uses PostgreSQL's built-in `pg_current_xact_id()` / `pg_xact_status()` functions and existing `df.instances` / `df.nodes` columns, all available across the supported v0.2.2+ provider line. New starts work against old extension schemas without runtime schema detection.
+
 ### v0.2.5 → v0.2.6
 
 #### Remove `df.ensure_durofut()`

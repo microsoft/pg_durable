@@ -169,6 +169,13 @@ runs in. It changes nothing about the durable function that gets started:
 | `'caller'` (default) | Joins the caller's transaction; a `ROLLBACK` discards the durable function. |
 | `'new'` | Runs in its own transaction on a separate session; **survives a rollback of the caller's transaction**. |
 
+The caller transaction may remain open for an arbitrary amount of time after
+`df.start()` returns. The worker follows that transaction's outcome without
+holding an execution connection: it begins the workflow after commit and
+terminates the engine record without executing SQL after rollback. Rolling back
+only the savepoint that contains `df.start()` is also treated as a rollback even
+if the enclosing transaction later commits.
+
 `'new'` provides the same rollback-survival outcome as Oracle autonomous
 transactions and `REQUIRES_NEW` propagation for **asynchronously started work**.
 It is not a synchronous autonomous routine: only the durable launch has

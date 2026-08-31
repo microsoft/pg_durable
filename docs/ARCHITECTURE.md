@@ -452,6 +452,19 @@ pub async fn execute(
 }
 ```
 
+`df.start()` commits the duroxide start independently while its `df.instances`
+and `df.nodes` writes remain in the caller's transaction. New orchestration
+inputs therefore carry the originating top-level transaction ID. Graph
+admission uses a single-shot probe: load immediately when the graph is visible,
+otherwise inspect `pg_xact_status()`, then wait with deterministic durable
+timers while the transaction is in progress. An abort terminates the engine
+record without executing SQL; a committed transaction whose graph is still
+absent identifies a savepoint rollback. The wait periodically uses
+`continue_as_new` to bound replay history and never holds a management
+connection between probes. Historical orchestration inputs omit the transaction
+ID and continue scheduling the original load activity with its original input,
+preserving in-flight replay compatibility.
+
 ### Node Execution
 
 Internal node handlers return `NodeResult`, a `Result` whose error arm is a typed
@@ -809,4 +822,3 @@ SELECT df.start(
 2. **Phase 2 (Execution)**: Background worker's duroxide runtime picks up the orchestration. `LoadFunctionGraph` activity loads the graph. Orchestration walks the graph, scheduling activities for each step. Results flow between nodes via `$variable` substitution. Loops use `continue_as_new` for durability.
 
 The key insight is that **graph construction is synchronous** (in user transaction) while **execution is asynchronous and durable** (in background worker via duroxide replay).
-

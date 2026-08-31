@@ -1249,6 +1249,10 @@ pub struct FunctionGraph {
     pub nodes: std::collections::BTreeMap<String, FunctionNode>,
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Input structure passed to duroxide functions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionInput {
@@ -1268,6 +1272,19 @@ pub struct FunctionInput {
     /// once no matter how many iterations it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<String>,
+    /// Top-level transaction that owns the initial df.instances/df.nodes writes.
+    ///
+    /// New starts carry this so graph loading can distinguish a still-open caller
+    /// transaction from a rollback. Historical inputs omit it and retain the
+    /// legacy bounded graph-load activity for replay compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_xid: Option<String>,
+    /// Number of graph-admission polls already made for `origin_xid`.
+    ///
+    /// Kept separate from `loop_iteration`: admission can compact its history
+    /// with continue_as_new before user graph execution begins.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub graph_wait_attempt: u32,
 }
 
 pub(crate) fn serialize_string_map<S>(
@@ -2196,6 +2213,8 @@ mod tests {
             vars: forward,
             loop_iteration: 0,
             graph: None,
+            origin_xid: None,
+            graph_wait_attempt: 0,
         };
         let reverse_input = FunctionInput {
             instance_id: "instance".to_string(),
@@ -2203,11 +2222,49 @@ mod tests {
             vars: reverse,
             loop_iteration: 0,
             graph: None,
+            origin_xid: None,
+            graph_wait_attempt: 0,
         };
         assert_eq!(
             serde_json::to_string(&forward_input).unwrap(),
             serde_json::to_string(&reverse_input).unwrap()
         );
+    }
+
+    #[test]
+    fn function_input_origin_xid_is_backward_compatible() {
+        let legacy_json = r#"{"instance_id":"abc12345","label":null,"vars":{},"loop_iteration":0}"#;
+        let legacy: FunctionInput = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.origin_xid, None);
+        assert!(!serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("origin_xid"));
+
+        let current = FunctionInput {
+            instance_id: "abc12345".to_string(),
+            label: None,
+            vars: std::collections::HashMap::new(),
+            loop_iteration: 0,
+            graph: None,
+            origin_xid: Some("123456".to_string()),
+            graph_wait_attempt: 0,
+        };
+        let current_json = serde_json::to_string(&current).unwrap();
+        assert!(current_json.ends_with(r#","origin_xid":"123456"}"#));
+        assert_eq!(
+            serde_json::from_str::<FunctionInput>(&current_json)
+                .unwrap()
+                .origin_xid
+                .as_deref(),
+            Some("123456")
+        );
+
+        let compacted = FunctionInput {
+            graph_wait_attempt: 64,
+            ..current
+        };
+        let compacted_json = serde_json::to_string(&compacted).unwrap();
+        assert!(compacted_json.ends_with(r#","graph_wait_attempt":64}"#));
     }
 
     fn sys_vars() -> SystemVars {

@@ -72,6 +72,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `15_rls.sql` | RLS on `df.instances` / `df.nodes` / `df.vars` — per-user visibility, cross-user cancel/signal denied, column-level UPDATE, superuser bypass, per-user variable isolation |
 | `16_heartbeat.sql` | Worker heartbeat liveness — `df._worker_epoch.last_seen_at` advances over time |
 | `52_node_id_collision_across_instances.sql` | Cross-instance node-ID collision — two instances own the same 8-hex node id; asserts composite-PK coexistence, that `(instance_id, id)` addresses exactly one row, `df.result()` is instance-scoped, and a scoped `update_node_status`-style UPDATE affects exactly one row (issue #129) |
+| `68_long_caller_transaction.sql` | Caller-transaction handoff beyond five seconds, transient graph-probe failure, whole rollback, and savepoint rollback |
 
 ### Build-Phase Specific
 

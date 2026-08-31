@@ -17,6 +17,7 @@ use cron::Schedule as CronSchedule;
 use duroxide::OrchestrationContext;
 
 use crate::activities;
+use crate::activities::load_function_graph::{TransactionAwareLoadInput, TransactionGraphProbe};
 use crate::types::{
     evaluate_condition, string_map_to_json, substitute_all, substitute_all_raw, FunctionGraph,
     FunctionInput, FunctionNode, SystemVars,
@@ -121,6 +122,105 @@ impl From<&str> for NodeError {
 /// Result type for node handlers: `Ok` value string, or a typed control-flow/failure error.
 type NodeResult = Result<String, NodeError>;
 
+const INITIAL_TRANSACTION_POLL_MS: u64 = 100;
+const MAX_TRANSACTION_POLL_MS: u64 = 5_000;
+const GRAPH_WAIT_POLLS_PER_EXECUTION: u32 = 64;
+
+fn transaction_poll_delay(attempt: u32) -> Duration {
+    let multiplier = 1u64 << attempt.min(6);
+    Duration::from_millis(
+        INITIAL_TRANSACTION_POLL_MS
+            .saturating_mul(multiplier)
+            .min(MAX_TRANSACTION_POLL_MS),
+    )
+}
+
+fn should_compact_graph_wait(polls_in_execution: u32) -> bool {
+    polls_in_execution >= GRAPH_WAIT_POLLS_PER_EXECUTION
+}
+
+fn graph_wait_continuation(
+    input: &FunctionInput,
+    next_attempt: u32,
+) -> Result<String, serde_json::Error> {
+    let mut continuation = input.clone();
+    continuation.graph_wait_attempt = next_attempt;
+    serde_json::to_string(&continuation)
+}
+
+async fn load_initial_graph(
+    ctx: &OrchestrationContext,
+    input: &FunctionInput,
+) -> Result<String, String> {
+    let Some(origin_xid) = input.origin_xid.as_ref() else {
+        // Replay compatibility: historical FunctionInput payloads have no xid.
+        // They must schedule the original activity name with the exact original
+        // raw instance-id input bytes.
+        return ctx
+            .schedule_activity(
+                activities::load_function_graph::NAME,
+                input.instance_id.clone(),
+            )
+            .await;
+    };
+
+    let probe_input = serde_json::to_string(&TransactionAwareLoadInput {
+        instance_id: input.instance_id.clone(),
+        origin_xid: origin_xid.clone(),
+    })
+    .map_err(|e| format!("Failed to serialize transaction-aware graph probe: {e}"))?;
+
+    let mut attempt = input.graph_wait_attempt;
+    let mut polls_in_execution = 0u32;
+    loop {
+        let raw = ctx
+            .schedule_activity(
+                activities::load_function_graph::TRANSACTION_AWARE_NAME,
+                probe_input.clone(),
+            )
+            .await?;
+        let probe: TransactionGraphProbe = serde_json::from_str(&raw)
+            .map_err(|e| format!("Failed to parse transaction-aware graph probe result: {e}"))?;
+
+        match probe {
+            TransactionGraphProbe::Ready { graph } => return Ok(graph),
+            TransactionGraphProbe::InProgress | TransactionGraphProbe::Retry => {
+                let delay = transaction_poll_delay(attempt);
+                ctx.trace_info(format!(
+                    "Instance {} graph is waiting on origin transaction {}; retrying in {:?}",
+                    input.instance_id, origin_xid, delay
+                ));
+                ctx.schedule_timer(delay).await;
+                attempt = attempt.saturating_add(1);
+                polls_in_execution = polls_in_execution.saturating_add(1);
+
+                if should_compact_graph_wait(polls_in_execution) {
+                    let continuation_json = graph_wait_continuation(input, attempt)
+                        .map_err(|e| format!("Failed to serialize graph-wait continuation: {e}"))?;
+                    ctx.trace_info(format!(
+                        "Compacting graph-admission history for instance {} after {} polls",
+                        input.instance_id, polls_in_execution
+                    ));
+                    return ctx.continue_as_new(continuation_json).await;
+                }
+            }
+            TransactionGraphProbe::Aborted => {
+                return Err(format!(
+                    "Instance {} origin transaction {} aborted before its graph became visible",
+                    input.instance_id, origin_xid
+                ))
+            }
+            TransactionGraphProbe::CommittedMissing => {
+                return Err(format!(
+                    "Instance {} origin transaction {} committed but its instance graph is absent \
+                     (the start may have been rolled back to a savepoint)",
+                    input.instance_id, origin_xid
+                ))
+            }
+        }
+    }
+}
+
 /// Distinguishes a normal subtree result from one that unwound via `df.break()`.
 ///
 /// Stored as `Option<SubtreeControl>` in the envelope (see `SubtreeEnvelope::control`): a
@@ -190,13 +290,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     // instead of being ignored.
     let graph_json = match input.graph.clone() {
         Some(json) => json,
-        None => match ctx
-            .schedule_activity(
-                activities::load_function_graph::NAME,
-                input.instance_id.clone(),
-            )
-            .await
-        {
+        None => match load_initial_graph(&ctx, &input).await {
             Ok(json) => json,
             Err(e) => {
                 // load_function_graph failed (e.g., superuser blocked).
@@ -992,6 +1086,8 @@ async fn execute_loop_node(
                 vars: exec_ctx.vars.clone(),
                 loop_iteration: next_iteration,
                 graph: Some(graph_json),
+                origin_xid: None,
+                graph_wait_attempt: 0,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1801,6 +1897,46 @@ mod tests {
             Ok(v) => v,
             other => panic!("expected Ok, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn transaction_poll_backoff_is_deterministic_and_capped() {
+        assert_eq!(transaction_poll_delay(0), Duration::from_millis(100));
+        assert_eq!(transaction_poll_delay(1), Duration::from_millis(200));
+        assert_eq!(transaction_poll_delay(5), Duration::from_millis(3_200));
+        assert_eq!(transaction_poll_delay(6), Duration::from_millis(5_000));
+        assert_eq!(
+            transaction_poll_delay(u32::MAX),
+            Duration::from_millis(5_000)
+        );
+        assert!(!should_compact_graph_wait(
+            GRAPH_WAIT_POLLS_PER_EXECUTION - 1
+        ));
+        assert!(should_compact_graph_wait(GRAPH_WAIT_POLLS_PER_EXECUTION));
+        assert!(should_compact_graph_wait(u32::MAX));
+    }
+
+    #[test]
+    fn graph_wait_compaction_preserves_admission_state_only() {
+        let input = FunctionInput {
+            instance_id: "deadbeef".to_string(),
+            label: Some("waiting".to_string()),
+            vars: HashMap::from([("key".to_string(), "value".to_string())]),
+            loop_iteration: 7,
+            graph: None,
+            origin_xid: Some("12345".to_string()),
+            graph_wait_attempt: 63,
+        };
+
+        let json = graph_wait_continuation(&input, 64).unwrap();
+        let continued: FunctionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(continued.instance_id, input.instance_id);
+        assert_eq!(continued.label, input.label);
+        assert_eq!(continued.vars, input.vars);
+        assert_eq!(continued.loop_iteration, 7);
+        assert_eq!(continued.graph, None);
+        assert_eq!(continued.origin_xid.as_deref(), Some("12345"));
+        assert_eq!(continued.graph_wait_attempt, 64);
     }
 
     #[test]

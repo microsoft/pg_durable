@@ -16,6 +16,7 @@ use crate::orchestrations;
 pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) -> ActivityRegistry {
     let sql_semaphore = semaphore;
     let graph_pool = pool.clone();
+    let transaction_graph_pool = pool.clone();
     let status_pool = pool.clone();
     let node_status_pool = pool.clone();
     let http_pool = pool.clone();
@@ -30,6 +31,15 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
             let pool = graph_pool.clone();
             async move { activities::load_function_graph::execute(ctx, pool, instance_id).await }
         })
+        .register(
+            activities::load_function_graph::TRANSACTION_AWARE_NAME,
+            move |ctx: ActivityContext, input_json: String| {
+                let pool = transaction_graph_pool.clone();
+                async move {
+                    activities::load_function_graph::probe_transaction(ctx, pool, input_json).await
+                }
+            },
+        )
         .register(activities::update_instance_status::NAME, move |ctx: ActivityContext, input_json: String| {
             let pool = status_pool.clone();
             async move { activities::update_instance_status::execute(ctx, pool, input_json).await }

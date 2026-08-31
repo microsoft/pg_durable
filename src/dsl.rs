@@ -1271,6 +1271,14 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         vars
     });
 
+    // df.start() hands the orchestration to duroxide over a separately committed
+    // connection before this caller transaction commits. Carry the owning
+    // top-level xid so the worker can wait for its actual outcome instead of
+    // guessing that a transaction lasting more than a fixed timeout rolled back.
+    let origin_xid = Spi::get_one::<String>("SELECT pg_catalog.pg_current_xact_id()::text")
+        .unwrap_or_else(|e| pgrx::error!("failed to capture df.start() transaction id: {e}"))
+        .unwrap_or_else(|| pgrx::error!("df.start() transaction id is unavailable"));
+
     // Start the orchestration via duroxide
     let input = FunctionInput {
         instance_id: instance_id.clone(),
@@ -1280,6 +1288,8 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         // Generation 0 loads the graph from df.nodes; only a root loop continuing as new
         // carries it inline.
         graph: None,
+        origin_xid: Some(origin_xid),
+        graph_wait_attempt: 0,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 

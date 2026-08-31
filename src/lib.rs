@@ -3339,6 +3339,8 @@ mod tests {
             vars: std::collections::HashMap::new(),
             loop_iteration: 42,
             graph: None,
+            origin_xid: None,
+            graph_wait_attempt: 0,
         };
         let json = serde_json::to_string(&input).unwrap();
         let deserialized: FunctionInput = serde_json::from_str(&json).unwrap();
