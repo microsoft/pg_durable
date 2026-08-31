@@ -10,7 +10,7 @@ EXTRA_FEATURES ?=
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install pgxn-zip
+.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install pgxn-zip install-pgrx pgrx-init
 
 # Default target
 all: package
@@ -30,6 +30,15 @@ package:
 	    echo "refusing to replace unowned package directory: $(PGRX_PACKAGE_DIR)" >&2; \
 	    exit 1; \
 	fi
+	@set -eu; \
+	if test -f "$(PGRX_CONFIG)"; then exit 0; fi; \
+	if test "$(PGRX_AUTO_INIT)" = "0"; then \
+	    echo "cargo-pgrx is not initialized: $(PGRX_CONFIG) not found" >&2; \
+	    echo "run: $(MAKE) pgrx-init PG_CONFIG=\"$(PG_CONFIG)\"" >&2; \
+	    exit 1; \
+	fi; \
+	echo "cargo-pgrx is not initialized; running 'cargo pgrx init --pg$(PG_MAJOR)'"; \
+	$(CARGO) pgrx init --pg$(PG_MAJOR) "$(PG_CONFIG)"
 	rm -rf "$(PGRX_PACKAGE_DIR)"
 	$(CARGO) pgrx package --pg-config "$(PG_CONFIG)" \
 	    --out-dir "$(PGRX_PACKAGE_DIR)" \
@@ -102,6 +111,39 @@ help:
 	@echo "  uninstall     - Remove installed artifacts for the selected PostgreSQL"
 	@echo "  pg-install    - Install extension locally"
 	@echo "  pgxn-zip      - Build the PGXN release bundle (META.json + zip)"
+	@echo "  install-pgrx  - Install the cargo-pgrx release pinned in Cargo.toml"
+	@echo "  pgrx-init     - Register PG_CONFIG with cargo-pgrx (needed once per machine)"
+
+# ============================================================================
+# cargo-pgrx toolchain
+# ============================================================================
+# cargo-pgrx keeps its configuration in $PGRX_HOME (default ~/.pgrx) and refuses
+# to build without it, failing with "$PGRX_HOME does not exist" or
+# "config.toml not found". Only `cargo pgrx init` creates that file.
+#
+# Installers that drive this Makefile never run it: `pgxn install pg_durable`
+# runs `make all` and then `make install`, so on a machine that has PostgreSQL,
+# Rust and cargo-pgrx but has never initialized pgrx, `package` failed before
+# the guard in that target existed.
+#
+# Only the presence of config.toml matters. `package` always passes an explicit
+# --pg-config, so the entries recorded in that file are never consulted, and an
+# existing pgrx configuration naming a different PostgreSQL cannot redirect the
+# build.
+PGRX_VERSION = $(shell sed -nE 's/^pgrx[[:space:]]*=[[:space:]]*"=?([0-9][^"]*)".*/\1/p' Cargo.toml | head -1)
+PGRX_HOME_DIR = $(if $(PGRX_HOME),$(PGRX_HOME),$(HOME)/.pgrx)
+PGRX_CONFIG = $(PGRX_HOME_DIR)/config.toml
+
+# Install the cargo-pgrx release pinned in Cargo.toml, so the build tool and the
+# pgrx crate cannot drift apart.
+install-pgrx:
+	$(CARGO) install --locked cargo-pgrx --version "$(PGRX_VERSION)"
+
+# Register PG_CONFIG with cargo-pgrx. Passing an existing pg_config makes this a
+# validate-and-record step: cargo-pgrx does not download or build a PostgreSQL
+# of its own.
+pgrx-init:
+	$(CARGO) pgrx init --pg$(PG_MAJOR) "$(PG_CONFIG)"
 
 # ============================================================================
 # PGXN packaging
@@ -130,7 +172,7 @@ EXTENSION = pg_durable
 REGRESS = 00_init simple sequence variables parallel conditional
 
 REQUESTED_GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)
-PG_CONFIG_GOALS := all package install uninstall installcheck
+PG_CONFIG_GOALS := all package install uninstall installcheck pgrx-init
 
 ifneq ($(filter $(PG_CONFIG_GOALS),$(REQUESTED_GOALS)),)
 ifndef PG_CONFIG

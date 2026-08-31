@@ -44,12 +44,31 @@ TEST_PG_CONFIG_17="$(create_pg_config 17)"
 TEST_PG_CONFIG_18="$(create_pg_config 18)"
 export CARGO_LOG TEST_PG_CONFIG_17 TEST_PG_CONFIG_18
 
+# cargo-pgrx refuses to build without $PGRX_HOME/config.toml, and `package` now
+# creates it when it is absent. Point PGRX_HOME at the sandbox so these checks
+# neither depend on nor disturb the caller's pgrx installation. The auto-init
+# behaviour itself is covered explicitly at the end of this script.
+PGRX_HOME="$TEST_DIR/pgrx-home"
+mkdir -p "$PGRX_HOME"
+printf '[configs]\npg17 = "%s"\n' "$TEST_PG_CONFIG_17" > "$PGRX_HOME/config.toml"
+export PGRX_HOME
+
 cat > "$FAKE_CARGO" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 printf '%q ' "$@" >> "$CARGO_LOG"
 printf '\n' >> "$CARGO_LOG"
+
+if [[ "${1:-}" == "install" ]]; then
+    exit 0
+fi
+
+if [[ "${1:-}" == "pgrx" && "${2:-}" == "init" ]]; then
+    mkdir -p "$PGRX_HOME"
+    printf '[configs]\n' > "$PGRX_HOME/config.toml"
+    exit 0
+fi
 
 if [[ "${1:-}" == "pgrx" && "${2:-}" == "info" && "${3:-}" == "pg-config" ]]; then
     case "${4:-}" in
@@ -265,5 +284,62 @@ if make --no-print-directory -n uninstall installcheck \
     exit 1
 fi
 grep -F "as separate commands" "$TEST_DIR/mixed-uninstall.out" > /dev/null
+
+# `pgxn install` runs `make all` and then `make install`, and never runs
+# `cargo pgrx init`, so package must create the cargo-pgrx configuration itself
+# when none exists. Without this a first build on a clean machine fails with
+# "$PGRX_HOME does not exist".
+auto_init_home="$TEST_DIR/pgrx-auto"
+: > "$CARGO_LOG"
+PGRX_HOME="$auto_init_home" make --no-print-directory package \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
+    CARGO="$FAKE_CARGO" \
+    PGRX_PACKAGE_DIR="$TEST_DIR/auto-init-package" \
+    PG_DLSUFFIX=.so > "$TEST_DIR/auto-init.out" 2>&1
+grep -F "cargo-pgrx is not initialized" "$TEST_DIR/auto-init.out" > /dev/null
+grep -F "pgrx init --pg17" "$CARGO_LOG" > /dev/null
+test -f "$auto_init_home/config.toml"
+test -f "$TEST_DIR/auto-init-package/usr/lib/postgresql/17/lib/pg_durable.so"
+
+# An existing configuration is left alone: only its absence triggers init.
+: > "$CARGO_LOG"
+PGRX_HOME="$auto_init_home" make --no-print-directory package \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
+    CARGO="$FAKE_CARGO" \
+    PGRX_PACKAGE_DIR="$TEST_DIR/auto-init-package-again" \
+    PG_DLSUFFIX=.so > /dev/null 2>&1
+if grep -F "pgrx init" "$CARGO_LOG" > /dev/null; then
+    echo "package re-initialized cargo-pgrx despite an existing configuration" >&2
+    exit 1
+fi
+
+# PGRX_AUTO_INIT=0 opts out and must name the command to run instead.
+: > "$CARGO_LOG"
+if PGRX_HOME="$TEST_DIR/pgrx-optout" make --no-print-directory package \
+    PGRX_AUTO_INIT=0 \
+    PG_CONFIG="$TEST_PG_CONFIG_17" \
+    CARGO="$FAKE_CARGO" \
+    PGRX_PACKAGE_DIR="$TEST_DIR/optout-package" > "$TEST_DIR/optout.out" 2>&1; then
+    echo "package unexpectedly built without a cargo-pgrx configuration" >&2
+    exit 1
+fi
+grep -F "cargo-pgrx is not initialized" "$TEST_DIR/optout.out" > /dev/null
+grep -F "make pgrx-init PG_CONFIG=" "$TEST_DIR/optout.out" > /dev/null
+test ! -s "$CARGO_LOG"
+
+# pgrx-init derives the major version from pg_config rather than PG_VERSION.
+: > "$CARGO_LOG"
+make --no-print-directory pgrx-init \
+    PG_CONFIG="$TEST_PG_CONFIG_18" \
+    CARGO="$FAKE_CARGO" > /dev/null 2>&1
+grep -F "pgrx init --pg18" "$CARGO_LOG" > /dev/null
+
+# install-pgrx installs the cargo-pgrx release pinned in Cargo.toml, so the
+# build tool and the pgrx crate cannot drift apart.
+pgrx_version="$(sed -nE 's/^pgrx[[:space:]]*=[[:space:]]*"=?([0-9][^"]*)".*/\1/p' Cargo.toml | head -1)"
+test -n "$pgrx_version"
+: > "$CARGO_LOG"
+make --no-print-directory install-pgrx CARGO="$FAKE_CARGO" > /dev/null 2>&1
+grep -F "install --locked cargo-pgrx --version $pgrx_version" "$CARGO_LOG" > /dev/null
 
 echo "Makefile source installation checks passed"
