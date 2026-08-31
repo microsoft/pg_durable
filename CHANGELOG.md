@@ -4,20 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.7] - Unreleased
+## [0.2.7] - 2026-08-31
 
 ### Added
 
 - **`pg_durable.host` (#360):** a postmaster GUC that selects the PostgreSQL host used by every connection pg_durable creates. When empty or unset, `PGHOST` is used, falling back to `127.0.0.1`.
 
+### Changed
+
+- **Dependencies:** bumped `uuid` to 1.26.0 (#355, #366), `postgres-protocol` to 0.6.12 (#357), and `tokio-postgres` to 0.7.18 (#358).
+
 ### Fixed
 
-- **Worker connection role names:** catalog role names are now passed verbatim when opening workflow connections, preventing quote-wrapped names from being reinterpreted as a different role.
-- **Restricted HTTP transport (#342):** restricted allow-list builds now require HTTPS so credentials and request bodies cannot be sent over plaintext HTTP; development-only `http-allow-all` builds continue to permit HTTP.
+- **Worker connection role names (#364):** catalog role names are now passed verbatim when opening workflow connections, preventing quote-wrapped names from being reinterpreted as a different role.
+- **Restricted HTTP transport (#342, #363):** restricted allow-list builds now require HTTPS so credentials and request bodies cannot be sent over plaintext HTTP; development-only `http-allow-all` builds continue to permit HTTP.
 
 ### Security
 
-- **HTTP allow-list URL parsing:** request URLs are now parsed once and the same canonical URL is used for validation and transport, preventing parser differences from approving a different host than the request targets.
+- **HTTP allow-list URL parsing (#365):** request URLs are now parsed once and the same canonical URL is used for validation and transport, preventing parser differences from approving a different host than the request targets.
 
 ## [0.2.6] - 2026-08-23
 
