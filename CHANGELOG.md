@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [0.2.8] - Unreleased
+
 ## [0.2.7] - 2026-08-31
 
 ### Added
