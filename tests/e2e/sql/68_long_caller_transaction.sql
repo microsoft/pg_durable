@@ -105,7 +105,12 @@ DO $$
 DECLARE
     v_instance_id TEXT;
     engine_status TEXT;
-    target_pid INT;
+    first_pid INT;
+    first_query_start TIMESTAMPTZ;
+    second_pid INT;
+    second_query_start TIMESTAMPTZ;
+    third_pid INT;
+    third_query_start TIMESTAMPTZ;
     attempts INT := 0;
 BEGIN
     SELECT s.instance_id INTO v_instance_id
@@ -125,31 +130,121 @@ BEGIN
             engine_status;
     END IF;
 
+    -- Identify the graph-probe backend by the query it is actually running
+    -- (not just any lock-waiting management-pool backend, which could match
+    -- an unrelated query) so we can recognize a genuinely new attempt.
+    -- Match on the graph-probe's exact leading text ("SELECT root_node, ...
+    -- AS submitted_by") rather than the generic "FROM df.instances"
+    -- substring: the worker's periodic terminal-instance retention/cleanup
+    -- query also reads df.instances and also blocks on this same lock, so a
+    -- loose substring match can pick that unrelated backend instead.
+    --
+    -- We identify a genuinely NEW retry attempt by query_start advancing,
+    -- not by the backend pid changing: the management pool may legitimately
+    -- reuse the same physical connection across retries (a client-side
+    -- timeout abandons a query without necessarily evicting/reopening the
+    -- pooled connection), so requiring a different pid would wrongly fail
+    -- even when the retry path is working correctly. query_start is set
+    -- fresh each time a backend begins a new query - even one that
+    -- immediately blocks acquiring a lock - so an advancing query_start on a
+    -- matching row unambiguously proves a new attempt was submitted.
+    --
+    -- We key off state = 'active' rather than wait_event_type = 'Lock': a
+    -- backend parked in the heavyweight lock manager only reports
+    -- wait_event_type = 'Lock' for the brief instant it first enters the
+    -- wait - PostgreSQL's periodic deadlock-check wakeup clears it back to
+    -- NULL for most of the actual wait even though the backend is still
+    -- blocked making no progress (state stays 'active', the query text is
+    -- unchanged). Since our own transaction holds an ACCESS EXCLUSIVE lock
+    -- on df.instances for this whole scenario, no backend anywhere can be
+    -- genuinely, successfully executing this query against df.instances
+    -- while we hold it, so "state = active" plus matching application_name
+    -- and query text is an unambiguous, race-free signal that a backend is
+    -- blocked behind our lock.
+    -- pg_stat_activity's backing function takes a snapshot of all backend
+    -- statuses that is cached for the lifetime of the current transaction;
+    -- repeated reads within the same transaction (which this whole DO block
+    -- runs in, since it holds the ACCESS EXCLUSIVE lock throughout) would
+    -- otherwise silently return the same frozen point-in-time view forever.
+    -- pg_stat_clear_snapshot() must be called before every poll so each
+    -- iteration observes genuinely live backend state.
     attempts := 0;
     LOOP
-        SELECT pid INTO target_pid
+        PERFORM pg_stat_clear_snapshot();
+        SELECT pid, query_start INTO first_pid, first_query_start
         FROM pg_stat_activity
         WHERE application_name = 'pg_durable:worker:management'
-          AND wait_event_type = 'Lock'
-        ORDER BY pid
+          AND state = 'active'
+          AND query ILIKE 'SELECT root_node,%submitted_by%FROM df.instances%'
+        ORDER BY query_start
         LIMIT 1;
-        EXIT WHEN target_pid IS NOT NULL OR attempts >= 300;
+        EXIT WHEN first_pid IS NOT NULL OR attempts >= 400;
         PERFORM pg_sleep(0.05);
         attempts := attempts + 1;
     END LOOP;
-    IF target_pid IS NULL THEN
+    IF first_pid IS NULL THEN
         RAISE EXCEPTION
             'TEST FAILED [transient retry]: no blocked graph-probe backend found';
     END IF;
-    IF NOT pg_terminate_backend(target_pid) THEN
+    IF NOT pg_terminate_backend(first_pid) THEN
         RAISE EXCEPTION
             'TEST FAILED [transient retry]: could not terminate graph-probe backend %',
-            target_pid;
+            first_pid;
     END IF;
 
-    -- Leave time for the killed query to return Retry and the next lock-blocked
-    -- probe to hit its bounded query timeout before releasing the table lock.
-    PERFORM pg_sleep(3);
+    -- Prove the connection-failure retry path actually ran: a fresh attempt
+    -- with a later query_start must appear. Nothing else can make this
+    -- query progress while the ACCESS EXCLUSIVE lock is held, so a new
+    -- query_start can only appear because the terminated connection's error
+    -- was classified transient and retried by the orchestration - not
+    -- treated as a terminal activity failure.
+    attempts := 0;
+    LOOP
+        PERFORM pg_stat_clear_snapshot();
+        SELECT pid, query_start INTO second_pid, second_query_start
+        FROM pg_stat_activity
+        WHERE application_name = 'pg_durable:worker:management'
+          AND state = 'active'
+          AND query ILIKE 'SELECT root_node,%submitted_by%FROM df.instances%'
+          AND query_start > first_query_start
+        ORDER BY query_start
+        LIMIT 1;
+        EXIT WHEN second_pid IS NOT NULL OR attempts >= 400;
+        PERFORM pg_sleep(0.05);
+        attempts := attempts + 1;
+    END LOOP;
+    IF second_pid IS NULL THEN
+        RAISE EXCEPTION
+            'TEST FAILED [transient retry]: no retry attempt observed after terminating %; the connection-failure retry path did not execute',
+            first_pid;
+    END IF;
+
+    -- Prove the *timeout* path also runs, independent of our explicit kill:
+    -- nothing else can terminate the second attempt, so a third, later
+    -- query_start can only appear once that attempt's own bounded
+    -- client-side query timeout elapsed and the orchestration rescheduled
+    -- it - proof that the timeout-retry path (not just the kill-retry path)
+    -- actually executes before we release the lock.
+    attempts := 0;
+    LOOP
+        PERFORM pg_stat_clear_snapshot();
+        SELECT pid, query_start INTO third_pid, third_query_start
+        FROM pg_stat_activity
+        WHERE application_name = 'pg_durable:worker:management'
+          AND state = 'active'
+          AND query ILIKE 'SELECT root_node,%submitted_by%FROM df.instances%'
+          AND query_start > second_query_start
+        ORDER BY query_start
+        LIMIT 1;
+        EXIT WHEN third_pid IS NOT NULL OR attempts >= 400;
+        PERFORM pg_sleep(0.05);
+        attempts := attempts + 1;
+    END LOOP;
+    IF third_pid IS NULL THEN
+        RAISE EXCEPTION
+            'TEST FAILED [transient retry]: no timeout-driven retry observed after %; the bounded query-timeout path did not execute',
+            second_pid;
+    END IF;
 END
 $$;
 COMMIT;
@@ -241,6 +336,7 @@ BEGIN
     END LOOP;
 
     IF lower(COALESCE(engine_status, '')) != 'failed'
+       OR engine_output IS NULL
        OR engine_output NOT LIKE '%origin transaction%aborted%' THEN
         RAISE EXCEPTION
             'TEST FAILED [whole rollback]: engine status=%, output=%',
@@ -289,6 +385,7 @@ BEGIN
     END LOOP;
 
     IF lower(COALESCE(engine_status, '')) != 'failed'
+       OR engine_output IS NULL
        OR engine_output NOT LIKE '%committed%graph%absent%' THEN
         RAISE EXCEPTION
             'TEST FAILED [savepoint rollback]: engine status=%, output=%',

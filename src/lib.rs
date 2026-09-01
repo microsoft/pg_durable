@@ -3341,6 +3341,7 @@ mod tests {
             graph: None,
             origin_xid: None,
             graph_wait_attempt: 0,
+            graph_retry_attempt: 0,
         };
         let json = serde_json::to_string(&input).unwrap();
         let deserialized: FunctionInput = serde_json::from_str(&json).unwrap();

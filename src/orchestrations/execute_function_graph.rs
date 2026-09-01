@@ -125,6 +125,14 @@ type NodeResult = Result<String, NodeError>;
 const INITIAL_TRANSACTION_POLL_MS: u64 = 100;
 const MAX_TRANSACTION_POLL_MS: u64 = 5_000;
 const GRAPH_WAIT_POLLS_PER_EXECUTION: u32 = 64;
+/// Bound on how many transient `Retry` outcomes (DB errors, query timeouts,
+/// snapshot-visibility lag - see `probe_transaction`) a single graph admission
+/// will absorb before failing the orchestration outright. Unlike waiting on
+/// the caller's own open transaction (`InProgress`, legitimately unbounded),
+/// these retries indicate the worker's own machinery is unhealthy, and
+/// polling forever would hide a permanent problem behind misleading
+/// "waiting on transaction" logs.
+const MAX_GRAPH_RETRY_ATTEMPTS: u32 = 20;
 
 fn transaction_poll_delay(attempt: u32) -> Duration {
     let multiplier = 1u64 << attempt.min(6);
@@ -139,12 +147,21 @@ fn should_compact_graph_wait(polls_in_execution: u32) -> bool {
     polls_in_execution >= GRAPH_WAIT_POLLS_PER_EXECUTION
 }
 
+/// Whether the bounded transient-retry budget for graph admission has been
+/// exhausted. Pure so the boundary (`== MAX_GRAPH_RETRY_ATTEMPTS` vs `>`) has
+/// direct unit coverage.
+fn graph_retry_budget_exceeded(retry_attempt: u32) -> bool {
+    retry_attempt > MAX_GRAPH_RETRY_ATTEMPTS
+}
+
 fn graph_wait_continuation(
     input: &FunctionInput,
-    next_attempt: u32,
+    next_wait_attempt: u32,
+    next_retry_attempt: u32,
 ) -> Result<String, serde_json::Error> {
     let mut continuation = input.clone();
-    continuation.graph_wait_attempt = next_attempt;
+    continuation.graph_wait_attempt = next_wait_attempt;
+    continuation.graph_retry_attempt = next_retry_attempt;
     serde_json::to_string(&continuation)
 }
 
@@ -170,7 +187,8 @@ async fn load_initial_graph(
     })
     .map_err(|e| format!("Failed to serialize transaction-aware graph probe: {e}"))?;
 
-    let mut attempt = input.graph_wait_attempt;
+    let mut wait_attempt = input.graph_wait_attempt;
+    let mut retry_attempt = input.graph_retry_attempt;
     let mut polls_in_execution = 0u32;
     loop {
         let raw = ctx
@@ -184,19 +202,51 @@ async fn load_initial_graph(
 
         match probe {
             TransactionGraphProbe::Ready { graph } => return Ok(graph),
-            TransactionGraphProbe::InProgress | TransactionGraphProbe::Retry => {
-                let delay = transaction_poll_delay(attempt);
+            TransactionGraphProbe::InProgress => {
+                let delay = transaction_poll_delay(wait_attempt);
                 ctx.trace_info(format!(
                     "Instance {} graph is waiting on origin transaction {}; retrying in {:?}",
                     input.instance_id, origin_xid, delay
                 ));
                 ctx.schedule_timer(delay).await;
-                attempt = attempt.saturating_add(1);
+                wait_attempt = wait_attempt.saturating_add(1);
                 polls_in_execution = polls_in_execution.saturating_add(1);
 
                 if should_compact_graph_wait(polls_in_execution) {
-                    let continuation_json = graph_wait_continuation(input, attempt)
-                        .map_err(|e| format!("Failed to serialize graph-wait continuation: {e}"))?;
+                    let continuation_json =
+                        graph_wait_continuation(input, wait_attempt, retry_attempt).map_err(
+                            |e| format!("Failed to serialize graph-wait continuation: {e}"),
+                        )?;
+                    ctx.trace_info(format!(
+                        "Compacting graph-admission history for instance {} after {} polls",
+                        input.instance_id, polls_in_execution
+                    ));
+                    return ctx.continue_as_new(continuation_json).await;
+                }
+            }
+            TransactionGraphProbe::Retry => {
+                retry_attempt = retry_attempt.saturating_add(1);
+                if graph_retry_budget_exceeded(retry_attempt) {
+                    return Err(format!(
+                        "Instance {} graph admission for origin transaction {} failed: \
+                         exceeded {MAX_GRAPH_RETRY_ATTEMPTS} transient retries",
+                        input.instance_id, origin_xid
+                    ));
+                }
+                let delay = transaction_poll_delay(retry_attempt);
+                ctx.trace_info(format!(
+                    "Instance {} graph admission for origin transaction {} hit a transient \
+                     failure ({}/{MAX_GRAPH_RETRY_ATTEMPTS}); retrying in {:?}",
+                    input.instance_id, origin_xid, retry_attempt, delay
+                ));
+                ctx.schedule_timer(delay).await;
+                polls_in_execution = polls_in_execution.saturating_add(1);
+
+                if should_compact_graph_wait(polls_in_execution) {
+                    let continuation_json =
+                        graph_wait_continuation(input, wait_attempt, retry_attempt).map_err(
+                            |e| format!("Failed to serialize graph-wait continuation: {e}"),
+                        )?;
                     ctx.trace_info(format!(
                         "Compacting graph-admission history for instance {} after {} polls",
                         input.instance_id, polls_in_execution
@@ -1088,6 +1138,7 @@ async fn execute_loop_node(
                 graph: Some(graph_json),
                 origin_xid: None,
                 graph_wait_attempt: 0,
+                graph_retry_attempt: 0,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1926,9 +1977,10 @@ mod tests {
             graph: None,
             origin_xid: Some("12345".to_string()),
             graph_wait_attempt: 63,
+            graph_retry_attempt: 2,
         };
 
-        let json = graph_wait_continuation(&input, 64).unwrap();
+        let json = graph_wait_continuation(&input, 64, 3).unwrap();
         let continued: FunctionInput = serde_json::from_str(&json).unwrap();
         assert_eq!(continued.instance_id, input.instance_id);
         assert_eq!(continued.label, input.label);
@@ -1937,6 +1989,15 @@ mod tests {
         assert_eq!(continued.graph, None);
         assert_eq!(continued.origin_xid.as_deref(), Some("12345"));
         assert_eq!(continued.graph_wait_attempt, 64);
+        assert_eq!(continued.graph_retry_attempt, 3);
+    }
+
+    #[test]
+    fn graph_retry_budget_exceeded_allows_exactly_max_attempts() {
+        assert!(!graph_retry_budget_exceeded(0));
+        assert!(!graph_retry_budget_exceeded(MAX_GRAPH_RETRY_ATTEMPTS));
+        assert!(graph_retry_budget_exceeded(MAX_GRAPH_RETRY_ATTEMPTS + 1));
+        assert!(graph_retry_budget_exceeded(u32::MAX));
     }
 
     #[test]

@@ -1285,6 +1285,15 @@ pub struct FunctionInput {
     /// with continue_as_new before user graph execution begins.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub graph_wait_attempt: u32,
+    /// Number of transient graph-admission `Retry` outcomes already observed
+    /// for `origin_xid` (DB errors, query timeouts, snapshot-visibility lag).
+    ///
+    /// Tracked independently from `graph_wait_attempt`: waiting on the
+    /// caller's own open transaction (`InProgress`) is legitimately
+    /// unbounded, but waiting on the worker's own machinery is not, so it is
+    /// bounded separately (see `MAX_GRAPH_RETRY_ATTEMPTS`).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub graph_retry_attempt: u32,
 }
 
 pub(crate) fn serialize_string_map<S>(
@@ -2215,6 +2224,7 @@ mod tests {
             graph: None,
             origin_xid: None,
             graph_wait_attempt: 0,
+            graph_retry_attempt: 0,
         };
         let reverse_input = FunctionInput {
             instance_id: "instance".to_string(),
@@ -2224,6 +2234,7 @@ mod tests {
             graph: None,
             origin_xid: None,
             graph_wait_attempt: 0,
+            graph_retry_attempt: 0,
         };
         assert_eq!(
             serde_json::to_string(&forward_input).unwrap(),
@@ -2248,6 +2259,7 @@ mod tests {
             graph: None,
             origin_xid: Some("123456".to_string()),
             graph_wait_attempt: 0,
+            graph_retry_attempt: 0,
         };
         let current_json = serde_json::to_string(&current).unwrap();
         assert!(current_json.ends_with(r#","origin_xid":"123456"}"#));
@@ -2265,6 +2277,21 @@ mod tests {
         };
         let compacted_json = serde_json::to_string(&compacted).unwrap();
         assert!(compacted_json.ends_with(r#","graph_wait_attempt":64}"#));
+
+        let retry_compacted = FunctionInput {
+            graph_retry_attempt: 3,
+            ..compacted
+        };
+        let retry_compacted_json = serde_json::to_string(&retry_compacted).unwrap();
+        assert!(
+            retry_compacted_json.ends_with(r#","graph_wait_attempt":64,"graph_retry_attempt":3}"#)
+        );
+        assert_eq!(
+            serde_json::from_str::<FunctionInput>(&retry_compacted_json)
+                .unwrap()
+                .graph_retry_attempt,
+            3
+        );
     }
 
     fn sys_vars() -> SystemVars {

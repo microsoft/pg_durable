@@ -1290,6 +1290,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         graph: None,
         origin_xid: Some(origin_xid),
         graph_wait_attempt: 0,
+        graph_retry_attempt: 0,
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 
