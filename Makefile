@@ -31,14 +31,15 @@ package:
 	    exit 1; \
 	fi
 	@set -eu; \
-	if test -f "$(PGRX_CONFIG)"; then exit 0; fi; \
-	if test "$(PGRX_AUTO_INIT)" = "0"; then \
-	    echo "cargo-pgrx is not initialized: $(PGRX_CONFIG) not found" >&2; \
-	    echo "run: $(MAKE) pgrx-init PG_CONFIG=\"$(PG_CONFIG)\"" >&2; \
-	    exit 1; \
-	fi; \
-	echo "cargo-pgrx is not initialized; running 'cargo pgrx init --pg$(PG_MAJOR)'"; \
-	$(CARGO) pgrx init --pg$(PG_MAJOR) "$(PG_CONFIG)"
+	if test ! -f "$(PGRX_CONFIG)"; then \
+	    if test "$(PGRX_AUTO_INIT)" = "0"; then \
+	        echo "cargo-pgrx is not initialized: $(PGRX_CONFIG) not found" >&2; \
+	        echo "run: $(MAKE) pgrx-init PG_CONFIG=\"$(PG_CONFIG)\"" >&2; \
+	        exit 1; \
+	    fi; \
+	    echo "cargo-pgrx is not initialized; running 'cargo pgrx init --pg$(PG_MAJOR)'"; \
+	    $(CARGO) pgrx init --pg$(PG_MAJOR) "$(PG_CONFIG)"; \
+	fi
 	rm -rf "$(PGRX_PACKAGE_DIR)"
 	$(CARGO) pgrx package --pg-config "$(PG_CONFIG)" \
 	    --out-dir "$(PGRX_PACKAGE_DIR)" \

@@ -302,6 +302,8 @@ test -f "$auto_init_home/config.toml"
 test -f "$TEST_DIR/auto-init-package/usr/lib/postgresql/17/lib/pg_durable.so"
 
 # An existing configuration is left alone: only its absence triggers init.
+# Packaging must still run after the init guard; skipping init must not skip
+# `cargo pgrx package`.
 : > "$CARGO_LOG"
 PGRX_HOME="$auto_init_home" make --no-print-directory package \
     PG_CONFIG="$TEST_PG_CONFIG_17" \
@@ -312,6 +314,8 @@ if grep -F "pgrx init" "$CARGO_LOG" > /dev/null; then
     echo "package re-initialized cargo-pgrx despite an existing configuration" >&2
     exit 1
 fi
+grep -F "pgrx package" "$CARGO_LOG" > /dev/null
+test -f "$TEST_DIR/auto-init-package-again/usr/lib/postgresql/17/lib/pg_durable.so"
 
 # PGRX_AUTO_INIT=0 opts out and must name the command to run instead.
 : > "$CARGO_LOG"
