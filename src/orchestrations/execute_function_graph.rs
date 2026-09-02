@@ -134,6 +134,15 @@ const GRAPH_WAIT_POLLS_PER_EXECUTION: u32 = 64;
 /// "waiting on transaction" logs.
 const MAX_GRAPH_RETRY_ATTEMPTS: u32 = 20;
 
+/// Bound on how many times a *terminal* `df.instances` status write
+/// (`completed`/`failed`) is durably retried before the orchestration gives up.
+/// The engine execution is already terminal at these sites, so a dropped write
+/// would leave `df.status()` / `df.await_instance()` trusting a stale
+/// non-terminal row indefinitely. Retrying across durable timers lets a
+/// transient management-plane outage self-heal once the database recovers,
+/// while the bound still prevents an unhealthy worker from spinning forever.
+const MAX_STATUS_FINALIZE_ATTEMPTS: u32 = 20;
+
 fn transaction_poll_delay(attempt: u32) -> Duration {
     let multiplier = 1u64 << attempt.min(6);
     Duration::from_millis(
@@ -300,6 +309,58 @@ struct SubtreeEnvelope {
     results: HashMap<String, String>,
 }
 
+/// Durably drive a *terminal* `df.instances` status write to completion.
+///
+/// The engine execution is already terminal when this is called, so a
+/// best-effort write that is silently dropped on a transient database/pool
+/// failure would leave `df.status()` / `df.await_instance()` trusting a stale
+/// non-terminal (`pending`/`running`) row while the engine is finished — the
+/// two status surfaces diverging indefinitely. Retry the update activity across
+/// durable timers so a transient management-plane outage self-heals once the
+/// database recovers. The retry budget is bounded (`MAX_STATUS_FINALIZE_ATTEMPTS`)
+/// so a persistently unhealthy worker cannot spin forever; on exhaustion the
+/// divergence is at least surfaced in the trace rather than hidden.
+///
+/// This is deterministic: activity results and timer fires are recorded in
+/// history, so replay follows the same attempt sequence.
+async fn finalize_instance_status(ctx: &OrchestrationContext, instance_id: &str, status: &str) {
+    let status_input = serde_json::json!({
+        "instance_id": instance_id,
+        "status": status,
+    })
+    .to_string();
+
+    let mut attempt = 0u32;
+    loop {
+        match ctx
+            .schedule_activity(
+                activities::update_instance_status::NAME,
+                status_input.clone(),
+            )
+            .await
+        {
+            Ok(_) => return,
+            Err(e) => {
+                if attempt >= MAX_STATUS_FINALIZE_ATTEMPTS {
+                    ctx.trace_info(format!(
+                        "Instance {instance_id}: giving up finalizing status to '{status}' after \
+                         {MAX_STATUS_FINALIZE_ATTEMPTS} attempts; df.instances may remain \
+                         non-terminal while the engine execution is terminal: {e}"
+                    ));
+                    return;
+                }
+                let delay = transaction_poll_delay(attempt);
+                ctx.trace_info(format!(
+                    "Instance {instance_id}: finalizing status to '{status}' failed \
+                     (attempt {attempt}/{MAX_STATUS_FINALIZE_ATTEMPTS}); retrying in {delay:?}: {e}"
+                ));
+                ctx.schedule_timer(delay).await;
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// Execute a complete function graph — the entry point for a durable function.
 ///
 /// # Control flow
@@ -344,17 +405,11 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
             Ok(json) => json,
             Err(e) => {
                 // load_function_graph failed (e.g., superuser blocked).
-                // Mark the instance as failed before propagating.
-                let status_input = serde_json::json!({
-                    "instance_id": input.instance_id,
-                    "status": "failed"
-                });
-                let _ = ctx
-                    .schedule_activity(
-                        activities::update_instance_status::NAME,
-                        status_input.to_string(),
-                    )
-                    .await;
+                // Mark the instance as failed before propagating. The engine
+                // execution is about to end terminally, so this terminal write
+                // is retried durably rather than dropped — otherwise the row
+                // would stay non-terminal while the engine is failed.
+                finalize_instance_status(&ctx, &input.instance_id, "failed").await;
                 return Err(e);
             }
         },
@@ -414,29 +469,11 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     match &function_result {
         Ok(result) => {
             ctx.trace_info(format!("Function completed with result: {result}"));
-            let status_input = serde_json::json!({
-                "instance_id": input.instance_id,
-                "status": "completed"
-            });
-            let _ = ctx
-                .schedule_activity(
-                    activities::update_instance_status::NAME,
-                    status_input.to_string(),
-                )
-                .await;
+            finalize_instance_status(&ctx, &input.instance_id, "completed").await;
         }
         Err(err) => {
             ctx.trace_info(format!("Function failed with error: {err}"));
-            let status_input = serde_json::json!({
-                "instance_id": input.instance_id,
-                "status": "failed"
-            });
-            let _ = ctx
-                .schedule_activity(
-                    activities::update_instance_status::NAME,
-                    status_input.to_string(),
-                )
-                .await;
+            finalize_instance_status(&ctx, &input.instance_id, "failed").await;
         }
     }
 

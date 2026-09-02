@@ -39,6 +39,19 @@ const GRAPH_LOAD_STATEMENT_TIMEOUT_MS: u64 = 15_000;
 /// `55P03` (classified transient, see `classify_sqlstate`) rather than
 /// consuming the whole statement timeout waiting to even start.
 const GRAPH_LOAD_LOCK_TIMEOUT_MS: u64 = 5_000;
+/// Postgres-side `statement_timeout` applied to every cheap probe query
+/// (visibility, transaction-status, snapshot). Set below the 2s client-side
+/// `TRANSACTION_PROBE_QUERY_TIMEOUT` so the *server* cancels a stuck probe and
+/// hands the connection back to the pool cleanly, before the client-side
+/// `tokio::time::timeout` would drop the in-flight future and force the pool to
+/// drain (or discard) the connection — the failure mode that can otherwise
+/// exhaust the small management pool under a conflicting lock.
+const PROBE_STATEMENT_TIMEOUT_MS: u64 = 1_500;
+/// Postgres-side `lock_timeout` applied to every cheap probe query, so a probe
+/// blocked behind a conflicting lock (e.g. on `df.instances`) fails fast with
+/// `55P03` (classified transient) instead of occupying a management connection
+/// until the client deadline.
+const PROBE_LOCK_TIMEOUT_MS: u64 = 1_500;
 
 /// Retry configuration for waiting on uncommitted transactions
 pub const MAX_WAIT_SECS: u64 = 5;
@@ -145,14 +158,72 @@ const INSTANCE_QUERY: &str = "SELECT root_node, r.rolname AS submitted_by
     LEFT JOIN pg_catalog.pg_roles r ON r.oid = i.submitted_by::oid
     WHERE i.id = $1";
 
+/// Begin a transaction with server-side `statement_timeout` / `lock_timeout`
+/// applied via `SET LOCAL`, so every cheap probe query is cancelled by
+/// PostgreSQL before the client-side deadline fires. The timeouts are scoped to
+/// the transaction and discarded on rollback, so they never leak onto a pooled
+/// connection reused by unrelated work. Callers run their read against the
+/// returned transaction and roll it back (the probes are read-only, so the
+/// rollback vs. commit distinction is not observable).
+async fn begin_probe_tx(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(&format!(
+        "SET LOCAL statement_timeout = '{PROBE_STATEMENT_TIMEOUT_MS}ms'"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(&format!(
+        "SET LOCAL lock_timeout = '{PROBE_LOCK_TIMEOUT_MS}ms'"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    Ok(tx)
+}
+
 async fn find_visible_instance(
     pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query(INSTANCE_QUERY)
+    let mut tx = begin_probe_tx(pool).await?;
+    let row = sqlx::query(INSTANCE_QUERY)
         .bind(instance_id)
-        .fetch_optional(pool)
-        .await
+        .fetch_optional(&mut *tx)
+        .await;
+    // Read-only transaction: a rollback failure cannot change the result.
+    let _ = tx.rollback().await;
+    row
+}
+
+/// Probe the caller's origin transaction status (`pg_xact_status`) under
+/// server-enforced probe timeouts, so a blocked catalog read is cancelled by
+/// PostgreSQL rather than pinning a management connection.
+async fn probe_origin_transaction_status(
+    pool: &PgPool,
+    origin_xid: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut tx = begin_probe_tx(pool).await?;
+    let status = sqlx::query_scalar("SELECT pg_catalog.pg_xact_status($1::text::xid8)::text")
+        .bind(origin_xid)
+        .fetch_one(&mut *tx)
+        .await;
+    let _ = tx.rollback().await;
+    status
+}
+
+/// Probe whether the origin transaction is visible in a fresh snapshot, under
+/// server-enforced probe timeouts (see `begin_probe_tx`).
+async fn probe_snapshot_visible(pool: &PgPool, origin_xid: &str) -> Result<bool, sqlx::Error> {
+    let mut tx = begin_probe_tx(pool).await?;
+    let visible = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_catalog.pg_visible_in_snapshot($1::text::xid8, pg_catalog.pg_current_snapshot())",
+    )
+    .bind(origin_xid)
+    .fetch_one(&mut *tx)
+    .await;
+    let _ = tx.rollback().await;
+    visible
 }
 
 /// Fetch a graph's node rows with a real Postgres-side timeout backstop.
@@ -461,9 +532,7 @@ pub async fn probe_transaction(
 
     let transaction_status_query = tokio::time::timeout(
         TRANSACTION_PROBE_QUERY_TIMEOUT,
-        sqlx::query_scalar("SELECT pg_catalog.pg_xact_status($1::text::xid8)::text")
-            .bind(&input.origin_xid)
-            .fetch_one(pool.as_ref()),
+        probe_origin_transaction_status(pool.as_ref(), &input.origin_xid),
     )
     .await;
     let transaction_status: Option<String> = match transaction_status_query {
@@ -493,11 +562,7 @@ pub async fn probe_transaction(
             // misclassified as CommittedMissing during this narrow window.
             let snapshot_visible_query = tokio::time::timeout(
                 TRANSACTION_PROBE_QUERY_TIMEOUT,
-                sqlx::query_scalar::<_, bool>(
-                    "SELECT pg_catalog.pg_visible_in_snapshot($1::text::xid8, pg_catalog.pg_current_snapshot())",
-                )
-                .bind(&input.origin_xid)
-                .fetch_one(pool.as_ref()),
+                probe_snapshot_visible(pool.as_ref(), &input.origin_xid),
             )
             .await;
             let snapshot_visible = match snapshot_visible_query {

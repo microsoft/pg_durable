@@ -112,13 +112,34 @@ pub fn is_role_superuser_oid(role_oid: pgrx::pg_sys::Oid) -> Result<bool, String
 /// Returns `true` if the role identified by `role_name` is a PostgreSQL superuser.
 /// Issues a single async query against `pg_catalog.pg_roles` using the provided pool.
 /// Must be called from an async context (background worker).
+///
+/// The lookup runs inside a short-lived transaction that applies server-side
+/// `statement_timeout` / `lock_timeout`, so a probe that blocks (e.g. behind a
+/// conflicting lock on the role catalog) is cancelled by PostgreSQL and its
+/// connection returned cleanly to the pool, rather than pinning a management
+/// connection until a client-side deadline drops the in-flight future.
 pub async fn is_role_superuser_name(pool: &sqlx::PgPool, role_name: &str) -> Result<bool, String> {
-    sqlx::query_scalar::<_, bool>("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = $1")
-        .bind(role_name)
-        .fetch_optional(pool)
+    let err = |e: sqlx::Error| format!("superuser check failed for role '{}': {}", role_name, e);
+    let mut tx = pool.begin().await.map_err(err)?;
+    sqlx::query("SET LOCAL statement_timeout = '1500ms'")
+        .execute(&mut *tx)
         .await
-        .map_err(|e| format!("superuser check failed for role '{}': {}", role_name, e))
-        .and_then(|opt| opt.ok_or_else(|| format!("role '{}' not found in pg_roles", role_name)))
+        .map_err(err)?;
+    sqlx::query("SET LOCAL lock_timeout = '1500ms'")
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    let result = sqlx::query_scalar::<_, bool>(
+        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = $1",
+    )
+    .bind(role_name)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(err)
+    .and_then(|opt| opt.ok_or_else(|| format!("role '{}' not found in pg_roles", role_name)));
+    // Read-only transaction: a rollback failure cannot change the result.
+    let _ = tx.rollback().await;
+    result
 }
 
 /// Maximum nesting depth for workflow graphs. Bounds recursive graph walkers

@@ -6,6 +6,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.8] - Unreleased
 
+### Fixed
+
+- **Caller-transaction handoff:** `df.start()` now tracks the originating transaction until it commits or aborts, so legal caller transactions lasting more than five seconds no longer leave a `pending` `df.instances` row paired with a failed engine execution. Graph admission uses durable backoff and bounded-history compaction rather than holding a worker connection while it waits.
+
 ## [0.2.7] - 2026-08-31
 
 ### Added
@@ -18,7 +22,6 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Fixed
 
-- **Caller-transaction handoff:** `df.start()` now tracks the originating transaction until it commits or aborts, so legal caller transactions lasting more than five seconds no longer leave a `pending` `df.instances` row paired with a failed engine execution. Graph admission uses durable backoff and bounded-history compaction rather than holding a worker connection while it waits.
 - **Worker connection role names (#364):** catalog role names are now passed verbatim when opening workflow connections, preventing quote-wrapped names from being reinterpreted as a different role.
 - **Restricted HTTP transport (#342, #363):** restricted allow-list builds now require HTTPS so credentials and request bodies cannot be sent over plaintext HTTP; development-only `http-allow-all` builds continue to permit HTTP.
 
