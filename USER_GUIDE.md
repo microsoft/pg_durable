@@ -68,9 +68,13 @@ pg_durable enables you to define and execute **durable SQL functions** entirely 
 ### Prerequisites
 
 pg_durable requires:
-1. **PostgreSQL configuration**: Add `pg_durable` to `shared_preload_libraries` in `postgresql.conf`
-2. **Server restart**: Required after modifying `shared_preload_libraries`
-3. **Extension creation**: Run `CREATE EXTENSION pg_durable` in your database
+1. **An installed extension**: a Debian package, the Docker image, a source
+   build, or `pgxn install pg_durable`. See
+   [Packages](https://github.com/microsoft/pg_durable#packages) for the
+   available channels and their prerequisites.
+2. **PostgreSQL configuration**: Add `pg_durable` to `shared_preload_libraries` in `postgresql.conf`
+3. **Server restart**: Required after modifying `shared_preload_libraries`
+4. **Extension creation**: Run `CREATE EXTENSION pg_durable` in your database
 
 ### Enable the Extension
 

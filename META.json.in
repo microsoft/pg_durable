@@ -47,5 +47,23 @@
       "background worker",
       "pgrx",
       "rust"
-   ]
+   ],
+   "no_index": {
+      "directory": [
+         ".agents/",
+         ".github/",
+         "prompts/",
+         "docs/website/"
+      ],
+      "file": [
+         "TODO.md",
+         "docs/CODESPACES_PREBUILDS.md",
+         "docs/DUROXIDE_PG_DEADLOCK_ISSUE.md",
+         "docs/dep_issues.md",
+         "docs/http_problems.md",
+         "docs/loop_rework_problems.md",
+         "examples/azure-functions/function-app/requirements.txt",
+         "examples/invoice-approval/function-app/requirements.txt"
+      ]
+   }
 }

@@ -159,7 +159,42 @@ on the build command to enable an HTTP policy feature. `DESTDIR` may be set on
 `sudo make uninstall PG_CONFIG="$PG_CONFIG"` removes the installed files again.
 It needs no build, so it also works from an unbuilt source tree.
 
-The extension is also distributed on [PGXN](https://pgxn.org/dist/pg_durable/), the PostgreSQL Extension Network. PGXN carries the **source** distribution, built and installed exactly as described above, so it needs the Rust toolchain and cargo-pgrx. For prebuilt binaries use the Debian packages or the Docker image.
+### Installing from PGXN
+
+The extension is listed on [PGXN](https://pgxn.org/dist/pg_durable/), the
+PostgreSQL Extension Network. **PGXN carries the source distribution, not a
+binary**: `pgxn install` downloads the source and compiles it on your machine,
+so it needs the same toolchain as a source-archive build and takes several
+minutes. For prebuilt binaries use the Debian packages or the Docker image
+above.
+
+Prerequisites:
+
+- PostgreSQL 17 or 18, including development headers and `pg_config`
+  (`postgresql-server-dev-17` on Debian/Ubuntu)
+- A Rust toolchain — see [rustup](https://rustup.rs)
+- [pgxnclient](https://pgxn.github.io/pgxnclient/) (`pip install pgxnclient`)
+- cargo-pgrx, at the version pinned in `Cargo.toml`
+
+From a source checkout, `make install-pgrx` installs the pinned cargo-pgrx for
+you. Then:
+
+```bash
+pgxn install pg_durable
+```
+
+`make package` registers your PostgreSQL with cargo-pgrx automatically the first
+time, so no separate `cargo pgrx init` step is needed. To do that explicitly
+instead, run `make pgrx-init PG_CONFIG="$PG_CONFIG"` from a source checkout, or
+set `PGRX_AUTO_INIT=0` to make the build tell you what to run rather than
+initializing on its own.
+
+`pgxn install` builds as your user and installs with `sudo`, so it needs a
+`pg_config` on `PATH` for the PostgreSQL you are installing into. Afterwards,
+add `pg_durable` to `shared_preload_libraries`, restart PostgreSQL, and run
+`CREATE EXTENSION pg_durable` as described above.
+
+`pgxn uninstall pg_durable` removes the installed files again.
 
 ## Development Installation
 
