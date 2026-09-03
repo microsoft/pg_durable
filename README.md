@@ -218,7 +218,7 @@ and run `CREATE EXTENSION pg_durable` as described above.
 
 - PostgreSQL 17 or 18
 - Rust (stable)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19.2
 
 ### GitHub Codespace
 

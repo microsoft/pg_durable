@@ -9,10 +9,6 @@ description = "Durable SQL Functions for PostgreSQL"
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "pgrx_embed_pg_durable"
-path = "./src/bin/pgrx_embed.rs"
-
 [features]
 default = ["pg17"]
 http-allow-all = []
@@ -32,7 +28,7 @@ unsafe = ["pgrx/unsafe-postgres"]
 pg_test = []
 
 [dependencies]
-pgrx = "=0.16.1"
+pgrx = "=0.19.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -72,7 +68,7 @@ base64 = "0.22"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-pgrx-tests = "=0.16.1"
+pgrx-tests = "=0.19.2"
 
 [profile.dev]
 panic = "unwind"
