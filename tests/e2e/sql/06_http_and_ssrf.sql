@@ -571,7 +571,7 @@ END $$;
 
 DROP TABLE _test_http_404;
 
--- Test 7: HTTP delay (tests timeout handling)
+-- Test 7: HTTP delay well inside the timeout still completes
 CREATE TEMP TABLE _test_http_delay (instance_id TEXT);
 
 INSERT INTO _test_http_delay SELECT df.start(
@@ -598,6 +598,44 @@ BEGIN
 END $$;
 
 DROP TABLE _test_http_delay;
+
+-- Test 7b: a response slower than timeout_seconds fails as a timeout.
+-- The HTTP client is shared process-wide and carries no timeout of its own,
+-- so this is what proves the per-node timeout still reaches the request.
+CREATE TEMP TABLE _test_http_timeout (instance_id TEXT);
+
+INSERT INTO _test_http_timeout SELECT df.start(
+    df.http('https://httpbingo.org/delay/10', 'GET', timeout_seconds => 1),
+    'test-http-timeout'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_timeout;
+    RAISE NOTICE 'Testing HTTP timeout: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: 1s timeout against a 10s response should have failed, got status = %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%timeout%' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected "timeout" in error, got: %', node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_timeout';
+END $$;
+
+DROP TABLE _test_http_timeout;
 
 -- Test 8: HTTP with workflow variables
 SELECT df.clearvars();

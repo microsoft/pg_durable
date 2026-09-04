@@ -13,7 +13,7 @@
 //! See docs/http-security.md for the full security model.
 
 use duroxide::ActivityContext;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -50,6 +50,9 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 
 /// Build a reqwest Client with optional SSRF-safe DNS resolver.
 ///
+/// No client-level timeout is set: the timeout is per-node config, so callers
+/// apply it with `RequestBuilder::timeout`.
+///
 /// A default `User-Agent` is set so requests are not anonymous: some endpoints
 /// (e.g. fly.io-hosted services) reject requests that omit it. Nodes may still
 /// override it via an explicit `User-Agent` header.
@@ -62,9 +65,8 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 /// Restricted builds also disable environment/system proxies. A proxy resolves
 /// the destination itself, which would bypass `SsrfSafeResolver`'s check of the
 /// address reqwest ultimately reaches.
-pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+fn build_client() -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
-        .timeout(timeout)
         .user_agent(concat!("pg_durable/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none());
 
@@ -80,6 +82,20 @@ pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String>
     builder
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))
+}
+
+static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+/// The process-wide HTTP client, built on first use.
+///
+/// The client owns reqwest's connection pool, so building it per request meant
+/// a fresh TCP and TLS handshake every time. Caching it keeps connections alive
+/// across requests and builds the SSRF-safe resolver and TLS connector once.
+pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
+    HTTP_CLIENT
+        .get_or_init(build_client)
+        .as_ref()
+        .map_err(|e| e.clone())
 }
 
 /// Execute an HTTP request and return the response as JSON
@@ -99,6 +115,12 @@ pub async fn execute(
         .submitted_by
         .as_deref()
         .ok_or("Blocked: HTTP node has no submitted_by \u{2014} cannot verify privilege")?;
+
+    // Every log line and error below reports this, never `config.url`: an Azure
+    // SAS token lives entirely in the query string, and both sinks outlive the
+    // instance (the server log has no retention bound; errors are persisted to
+    // df.nodes.error and into duroxide history).
+    let safe_url = crate::redact::redact_url(&config.url);
 
     // Validation chain — order is security-critical:
     //   0. Privilege: submitted_by must hold EXECUTE on df.http(). Closes the
@@ -121,8 +143,7 @@ pub async fn execute(
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (privilege) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
             ));
         })?;
 
@@ -136,27 +157,26 @@ pub async fn execute(
     // --- Scheme validation (always enforced, regardless of feature flag) ---
     crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (scheme) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
     crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (allowlist) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
-        "HTTP {} {} submitted_by={audit_user}",
-        config.method, config.url
+        "HTTP {} {safe_url} submitted_by={audit_user}",
+        config.method
     ));
 
-    // Build client with SSRF-safe resolver (when feature enabled) and timeout
-    let client = build_client(Duration::from_secs(config.timeout_seconds))?;
+    // Shared client with SSRF-safe resolver (when feature enabled); the
+    // per-node timeout is applied to the request, not the client.
+    let client = http_client()?;
 
     // Build request based on method
     let mut request = match config.method.as_str() {
@@ -166,7 +186,8 @@ pub async fn execute(
         "DELETE" => client.delete(request_url),
         "PATCH" => client.patch(request_url),
         _ => return Err(format!("Unsupported HTTP method: {}", config.method)),
-    };
+    }
+    .timeout(Duration::from_secs(config.timeout_seconds));
 
     // Add headers
     if let Some(headers) = &config.headers {
@@ -192,10 +213,9 @@ pub async fn execute(
         // a structured audit log (mirrors the scheme-block log above).
         if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (ip) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP BLOCKED (ip) url={safe_url} submitted_by={audit_user}"
             ));
-            return err_string;
+            return crate::redact::redact_urls_in(&err_string);
         }
 
         // Try to extract status code from error if available
@@ -204,21 +224,22 @@ pub async fn execute(
             .map(|s| format!(" (HTTP {})", s.as_u16()))
             .unwrap_or_default();
 
+        // reqwest's Display interpolates the request URL, so the error text is
+        // scrubbed as well as the URL we format ourselves.
+        let detail = crate::redact::redact_urls_in(&err_string);
+
         if e.is_timeout() {
             format!(
                 "HTTP timeout after {}s{}: {}",
-                config.timeout_seconds, status_info, config.url
+                config.timeout_seconds, status_info, safe_url
             )
         } else if e.is_connect() {
-            format!(
-                "HTTP connection failed{}: {} - {}",
-                status_info, config.url, e
-            )
+            format!("HTTP connection failed{status_info}: {safe_url} - {detail}")
         } else if e.is_status() {
             // Error due to HTTP status code
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
         } else {
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
         }
     })?;
 
@@ -251,9 +272,8 @@ pub async fn execute(
     // Fail on 5xx server errors (transient, should retry)
     if status.is_server_error() {
         return Err(format!(
-            "HTTP {} {} returned {}: {}",
+            "HTTP {} {safe_url} returned {}: {}",
             config.method,
-            config.url,
             status_code,
             response_body.error_preview()
         ));
@@ -335,9 +355,10 @@ mod tests {
             }
         });
 
-        let client = build_client(Duration::from_secs(1)).unwrap();
+        let client = build_client().unwrap();
         let _ = client
             .get("http://pg-durable-proxy-test.invalid/")
+            .timeout(Duration::from_secs(1))
             .send()
             .await;
         stop_tx.send(()).unwrap();
@@ -347,5 +368,41 @@ mod tests {
             !proxy_was_used,
             "restricted HTTP modes must bypass system proxies"
         );
+    }
+
+    /// The shared client carries no timeout of its own, so a dropped
+    /// `RequestBuilder::timeout` would leave requests to hang indefinitely.
+    #[tokio::test]
+    async fn per_request_timeout_applies_to_the_shared_client() {
+        // Accept the connection but never reply, so only the timeout can end it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stall_thread = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(3));
+                drop(stream);
+            }
+        });
+
+        // An IP-literal URL never reaches the DNS resolver, so loopback is
+        // reachable here even though SsrfSafeResolver blocks 127.0.0.0/8.
+        let started = std::time::Instant::now();
+        let error = http_client()
+            .unwrap()
+            .get(format!("http://{addr}/"))
+            .timeout(Duration::from_millis(250))
+            .send()
+            .await
+            .expect_err("a stalled response must fail");
+
+        // execute() branches on is_timeout() to build its error message.
+        assert!(error.is_timeout(), "expected a timeout error, got: {error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout did not fire promptly: {:?}",
+            started.elapsed()
+        );
+
+        stall_thread.join().unwrap();
     }
 }

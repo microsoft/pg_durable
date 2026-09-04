@@ -6,7 +6,7 @@
 //! This is the file-upload / form-post counterpart to `execute_http`. It shares
 //! the same security model (privilege check, scheme validation, Azure
 //! allow-list, SSRF-safe DNS resolver, no redirects) and reuses
-//! `execute_http::build_client` so the two paths cannot drift on client
+//! `execute_http::http_client` so the two paths cannot drift on client
 //! configuration. The only differences are the body construction (a
 //! `reqwest::multipart::Form` built from base64-encoded parts) and the
 //! privilege target (`df.http_multipart` instead of `df.http`).
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 
-use crate::activities::execute_http::build_client;
+use crate::activities::execute_http::http_client;
 use crate::types::MultipartConfig;
 
 /// Activity name for registration and scheduling
@@ -91,6 +91,9 @@ pub async fn execute(
         "Blocked: HTTP_MULTIPART node has no submitted_by \u{2014} cannot verify privilege",
     )?;
 
+    // See execute_http: never log or return `config.url` itself.
+    let safe_url = crate::redact::redact_url(&config.url);
+
     // Validation chain — order is security-critical and mirrors execute_http:
     //   0. Privilege: submitted_by must hold EXECUTE on df.http_multipart().
     //   1. Scheme:    blocks file://, gopher://, etc.
@@ -103,8 +106,7 @@ pub async fn execute(
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
-                "HTTP_MULTIPART BLOCKED (privilege) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP_MULTIPART BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
             ));
         })?;
 
@@ -118,29 +120,27 @@ pub async fn execute(
     // --- Scheme validation (always enforced) ---
     crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP_MULTIPART BLOCKED (scheme) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP_MULTIPART BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list ---
     crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP_MULTIPART BLOCKED (allowlist) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
-        "HTTP_MULTIPART {} {} ({} parts) submitted_by={audit_user}",
+        "HTTP_MULTIPART {} {safe_url} ({} parts) submitted_by={audit_user}",
         config.method,
-        config.url,
         config.parts.len()
     ));
 
-    // Build client (shared SSRF-safe resolver + timeout) with execute_http.
-    let client = build_client(Duration::from_secs(config.timeout_seconds))?;
+    // Client shared with execute_http (same SSRF-safe resolver and pool); the
+    // per-node timeout is applied to the request.
+    let client = http_client()?;
 
     // Build request based on method. Multipart only makes sense for
     // body-carrying methods; the DSL guard restricts to POST/PUT/PATCH and we
@@ -155,7 +155,8 @@ pub async fn execute(
                 config.method
             ))
         }
-    };
+    }
+    .timeout(Duration::from_secs(config.timeout_seconds));
 
     // Add headers — but NEVER Content-Type. reqwest sets
     // `multipart/form-data; boundary=...` itself when .multipart() is called; a
@@ -198,10 +199,9 @@ pub async fn execute(
         // Detect SSRF IP-blocklist rejections from the resolver.
         if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
-                "HTTP_MULTIPART BLOCKED (ip) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP_MULTIPART BLOCKED (ip) url={safe_url} submitted_by={audit_user}"
             ));
-            return err_string;
+            return crate::redact::redact_urls_in(&err_string);
         }
 
         let status_info = e
@@ -209,18 +209,18 @@ pub async fn execute(
             .map(|s| format!(" (HTTP {})", s.as_u16()))
             .unwrap_or_default();
 
+        // reqwest's Display interpolates the request URL — scrub it too.
+        let detail = crate::redact::redact_urls_in(&err_string);
+
         if e.is_timeout() {
             format!(
                 "HTTP timeout after {}s{}: {}",
-                config.timeout_seconds, status_info, config.url
+                config.timeout_seconds, status_info, safe_url
             )
         } else if e.is_connect() {
-            format!(
-                "HTTP connection failed{}: {} - {}",
-                status_info, config.url, e
-            )
+            format!("HTTP connection failed{status_info}: {safe_url} - {detail}")
         } else {
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
         }
     })?;
 
@@ -253,9 +253,8 @@ pub async fn execute(
     // Fail on 5xx server errors (transient, should retry)
     if status.is_server_error() {
         return Err(format!(
-            "HTTP_MULTIPART {} {} returned {}: {}",
+            "HTTP_MULTIPART {} {safe_url} returned {}: {}",
             config.method,
-            config.url,
             status_code,
             response_body.error_preview()
         ));
