@@ -459,6 +459,26 @@ pub fn race(a: &str, b: &str) -> String {
     .to_json()
 }
 
+/// Reject any `options` payload that carries keys.
+///
+/// `options` exists so the SQL signature never has to change again; no option
+/// key is supported in this version, so anything but NULL or `{}` is an error
+/// rather than a silently ignored request.
+fn validate_http_options(function_name: &str, options: Option<&pgrx::JsonB>) {
+    let Some(options) = options else { return };
+
+    let Some(map) = options.0.as_object() else {
+        pgrx::error!("{function_name}: options must be a JSON object");
+    };
+
+    if let Some(key) = map.keys().next() {
+        pgrx::error!(
+            "{function_name}: unrecognised option '{key}'. \
+             No options are supported in this version."
+        );
+    }
+}
+
 /// Creates an HTTP request node.
 /// Makes an HTTP request to the specified URL and returns the response.
 ///
@@ -468,6 +488,8 @@ pub fn race(a: &str, b: &str) -> String {
 /// * `body` - Request body (typically JSON). Supports $variable substitution
 /// * `headers` - JSONB object of headers. Example: '{"Authorization": "Bearer token"}'
 /// * `timeout_seconds` - Request timeout in seconds. Default: 30
+/// * `options` - Reserved JSONB extension point. Only NULL or `{}` is accepted;
+///   no option keys are supported in this version
 ///
 /// # Returns
 /// JSON object with: status, body, encoding, headers, ok (boolean), duration_ms.
@@ -480,6 +502,7 @@ pub fn http(
     body: default!(Option<&str>, "NULL"),
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
+    options: default!(Option<pgrx::JsonB>, "NULL"),
 ) -> String {
     // Fail early when no http feature is compiled in — df.nodes can be inserted
     // by hand, so we also enforce this at execution time, but blocking at DSL
@@ -514,6 +537,8 @@ pub fn http(
     if timeout_seconds <= 0 {
         pgrx::error!("Timeout must be positive");
     }
+
+    validate_http_options("df.http()", options.as_ref());
 
     let config = serde_json::json!({
         "url": url,
@@ -551,6 +576,8 @@ pub fn http(
 /// * `headers` - JSONB object of headers. Content-Type is ignored (multipart
 ///   owns the boundary). Example: '{"Authorization": "Bearer token"}'
 /// * `timeout_seconds` - Request timeout in seconds. Default: 30
+/// * `options` - Reserved JSONB extension point. Only NULL or `{}` is accepted;
+///   no option keys are supported in this version
 ///
 /// # Returns
 /// JSON object with: status, body, encoding, headers, ok (boolean), duration_ms.
@@ -566,6 +593,7 @@ pub fn http_multipart(
     parts: default!(Option<pgrx::JsonB>, "NULL"),
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
+    options: default!(Option<pgrx::JsonB>, "NULL"),
 ) -> String {
     // Fail early when no http feature is compiled in — same guard as df.http.
     if !crate::ssrf::http_enabled() {
@@ -595,6 +623,8 @@ pub fn http_multipart(
     if timeout_seconds <= 0 {
         pgrx::error!("Timeout must be positive");
     }
+
+    validate_http_options("df.http_multipart()", options.as_ref());
 
     // parts is required — the NULL default is only there to keep the SQL
     // signature valid (see the signature comment).

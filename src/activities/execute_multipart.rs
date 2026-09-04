@@ -32,22 +32,34 @@ pub const NAME: &str = "pg_durable::activity::execute-multipart";
 /// Mirrors `execute_http::check_http_privilege` — closes the bypass path where
 /// a user crafts a raw Durofut JSON and passes it directly to `df.start()`,
 /// inserting an HTTP_MULTIPART node without going through the DSL guard.
+/// Signature resolution uses `to_regprocedure()` for the same backward
+/// compatibility reason described there.
 async fn check_multipart_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
-    let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http_multipart(text,text,jsonb,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
+    let verdict: Option<String> = sqlx::query_scalar(
+        "SELECT CASE \
+             WHEN p.oid IS NULL THEN 'absent' \
+             WHEN pg_catalog.has_function_privilege($1::regrole, p.oid, 'EXECUTE') THEN 'allowed' \
+             ELSE 'denied' \
+         END \
+         FROM (SELECT COALESCE( \
+             pg_catalog.to_regprocedure('df.http_multipart(text,text,jsonb,jsonb,integer,jsonb)'), \
+             pg_catalog.to_regprocedure('df.http_multipart(text,text,jsonb,jsonb,integer)') \
+         ) AS oid) p",
     )
     .bind(submitted_by)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
 
-    match has_priv {
-        Some(true) => Ok(()),
+    match verdict.as_deref() {
+        Some("allowed") => Ok(()),
+        Some("absent") => Err(format!(
+            "Blocked: df.http_multipart() is not installed in this database, so the multipart \
+             HTTP privilege of role '{submitted_by}' cannot be verified."
+        )),
         _ => Err(format!(
             "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http_multipart(). \
-             Grant EXECUTE ON FUNCTION df.http_multipart(text,text,jsonb,jsonb,integer) TO {submitted_by} to allow multipart HTTP requests."
+             Grant EXECUTE ON FUNCTION df.http_multipart(text,text,jsonb,jsonb,integer,jsonb) TO {submitted_by} to allow multipart HTTP requests."
         )),
     }
 }

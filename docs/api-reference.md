@@ -242,7 +242,7 @@ df.wait_for_signal('approval', 3600)   -- 1 hour timeout
 
 ---
 
-### df.http(url [, method, body, headers, timeout])
+### df.http(url [, method, body, headers, timeout, options])
 
 Makes an HTTP request.
 
@@ -253,6 +253,7 @@ Makes an HTTP request.
 | `body` | TEXT | ❌ Literal | Request body JSON (supports `$var`) |
 | `headers` | JSONB | ❌ Literal | Request headers |
 | `timeout` | INTEGER | ❌ Literal | Timeout in seconds (default: 30) |
+| `options` | JSONB | ❌ Literal | Reserved extension point. Only `NULL` (default) or `'{}'` is accepted; any option key raises an error |
 
 ```sql
 df.http('https://api.example.com/users', 'GET')
@@ -270,12 +271,12 @@ df.http('https://api.example.com/thing', 'GET') |=> 'resp'
 
 `encoding` is `text` when the response `Content-Type` is textual, and `base64` when it is
 not — in which case `body` holds the base64 of the raw bytes. See
-[df.http_multipart](#dfhttp_multiparturl--method-parts-headers-timeout) for feeding those
+[df.http_multipart](#dfhttp_multiparturl--method-parts-headers-timeout-options) for feeding those
 bytes into a subsequent upload.
 
 ---
 
-### df.http_multipart(url [, method, parts, headers, timeout])
+### df.http_multipart(url [, method, parts, headers, timeout, options])
 
 Makes an HTTP request with a `multipart/form-data` body. Requires the same
 `include_http => true` grant as `df.http()`.
@@ -287,6 +288,7 @@ Makes an HTTP request with a `multipart/form-data` body. Requires the same
 | `parts` | JSONB | ❌ Literal | Array of part objects (see below) |
 | `headers` | JSONB | ❌ Literal | Request headers |
 | `timeout` | INTEGER | ❌ Literal | Timeout in seconds (default: 30) |
+| `options` | JSONB | ❌ Literal | Reserved extension point. Only `NULL` (default) or `'{}'` is accepted; any option key raises an error |
 
 Each element of `parts` is an object:
 
@@ -664,7 +666,7 @@ Authorization is enforced by PostgreSQL’s native mechanisms: EXECUTE on this f
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `role_name` | TEXT | The role to grant privileges to |
-| `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer)` |
+| `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer, jsonb)` |
 | `with_grant` | BOOLEAN | Optional, defaults to `false`; when `true`, grants all privileges WITH GRANT OPTION and retains EXECUTE on `df.grant_usage` / `df.revoke_usage` |
 
 ```sql

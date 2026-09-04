@@ -28,22 +28,37 @@ pub const NAME: &str = "pg_durable::activity::execute-http";
 /// This closes the bypass path where a user crafts a raw Durofut JSON and
 /// passes it directly to `df.start()`, inserting an HTTP node without going
 /// through the DSL guard in `df.http()`.
+///
+/// The signature is resolved with `to_regprocedure()` over an ordered list
+/// (current form first, pre-0.2.8 form second) because a `::regprocedure` cast
+/// raises on a missing function: the new `.so` must also run against older
+/// installed schemas that only have the five-argument form.
 async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
-    let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http(text,text,text,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
+    let verdict: Option<String> = sqlx::query_scalar(
+        "SELECT CASE \
+             WHEN p.oid IS NULL THEN 'absent' \
+             WHEN pg_catalog.has_function_privilege($1::regrole, p.oid, 'EXECUTE') THEN 'allowed' \
+             ELSE 'denied' \
+         END \
+         FROM (SELECT COALESCE( \
+             pg_catalog.to_regprocedure('df.http(text,text,text,jsonb,integer,jsonb)'), \
+             pg_catalog.to_regprocedure('df.http(text,text,text,jsonb,integer)') \
+         ) AS oid) p",
     )
     .bind(submitted_by)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
 
-    match has_priv {
-        Some(true) => Ok(()),
+    match verdict.as_deref() {
+        Some("allowed") => Ok(()),
+        Some("absent") => Err(format!(
+            "Blocked: df.http() is not installed in this database, so the HTTP privilege \
+             of role '{submitted_by}' cannot be verified."
+        )),
         _ => Err(format!(
             "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http(). \
-             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {submitted_by} to allow HTTP requests."
+             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer,jsonb) TO {submitted_by} to allow HTTP requests."
         )),
     }
 }

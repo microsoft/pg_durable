@@ -107,14 +107,27 @@ the node fails immediately.
 `execute_http` runs the following check before any network activity:
 
 ```sql
-SELECT has_function_privilege($submitted_by::regrole,
-    'df.http(text,text,text,jsonb,integer)'::regprocedure,
-    'EXECUTE')
+SELECT CASE
+           WHEN p.oid IS NULL THEN 'absent'
+           WHEN has_function_privilege($submitted_by::regrole, p.oid, 'EXECUTE') THEN 'allowed'
+           ELSE 'denied'
+       END
+FROM (SELECT COALESCE(
+    to_regprocedure('df.http(text,text,text,jsonb,integer,jsonb)'),
+    to_regprocedure('df.http(text,text,text,jsonb,integer)')
+) AS oid) p
 ```
+
+The signature is resolved with `to_regprocedure()` over an ordered list — the
+current form first, the pre-0.2.8 form second — because a `::regprocedure` cast
+raises on a missing function, and the same binary must run against older
+installed schemas that only have the five-argument form. Only `'allowed'`
+permits the request; `'absent'` (neither signature installed) and `'denied'`
+both fail the node.
 
 `has_function_privilege` honours PostgreSQL's standard privilege model:
 superusers always return `true`; regular roles return `true` only when an
-explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO <role>` (or a role that
+explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) TO <role>` (or a role that
 inherits one) is in effect.
 
 ### 3.3 Managing access

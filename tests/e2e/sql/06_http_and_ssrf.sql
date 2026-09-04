@@ -1344,7 +1344,7 @@ END $$;
 DROP TABLE _test_http_priv1;
 
 -- Permission Test 2: After REVOKE, user is blocked at execution time even via raw JSON
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM http_priv_alice;
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) FROM http_priv_alice;
 
 SET SESSION AUTHORIZATION http_priv_alice;
 CREATE TEMP TABLE _test_http_priv2 (instance_id TEXT);
@@ -1385,7 +1385,7 @@ END $$;
 DROP TABLE _test_http_priv2;
 
 -- Permission Test 3: Restore grant and confirm access works again
-GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO http_priv_alice;
+GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) TO http_priv_alice;
 
 SET SESSION AUTHORIZATION http_priv_alice;
 CREATE TEMP TABLE _test_http_priv3 (instance_id TEXT);

@@ -697,9 +697,14 @@ df.http(
     method TEXT DEFAULT 'POST',   -- GET, POST, PUT, DELETE, PATCH
     body TEXT DEFAULT NULL,       -- Request body (JSON)
     headers JSONB DEFAULT '{}',   -- Custom headers
-    timeout_seconds INT DEFAULT 30
+    timeout_seconds INT DEFAULT 30,
+    options JSONB DEFAULT NULL    -- Reserved; only NULL or '{}' is accepted
 ) RETURNS TEXT                    -- JSON response object
 ```
+
+`options` is the extension point for future request modifiers. No option key is
+supported in this version: passing an object with any key, or a JSON value that
+is not an object, raises an error.
 
 ### Response Format
 
@@ -963,7 +968,8 @@ df.http_multipart(
     method TEXT DEFAULT 'POST',
     parts JSONB DEFAULT '[]',     -- Array of part objects
     headers JSONB DEFAULT '{}',
-    timeout_seconds INT DEFAULT 30
+    timeout_seconds INT DEFAULT 30,
+    options JSONB DEFAULT NULL    -- Reserved; only NULL or '{}' is accepted
 ) RETURNS TEXT                    -- Same JSON envelope as df.http()
 ```
 
@@ -2185,7 +2191,7 @@ The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep Postgr
 -- Access gate: schema USAGE makes every ordinary df.* function callable
 GRANT USAGE ON SCHEMA df TO app_role;
 -- Optional: HTTP access (include_http => true)
--- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
+-- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) TO app_role;
 
 -- Optional: system-wide metrics access (also granted automatically by
 --           df.grant_usage(role, with_grant => true))
