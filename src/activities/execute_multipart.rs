@@ -6,7 +6,7 @@
 //! This is the file-upload / form-post counterpart to `execute_http`. It shares
 //! the same security model (privilege check, scheme validation, Azure
 //! allow-list, SSRF-safe DNS resolver, no redirects) and reuses
-//! `execute_http::build_client` so the two paths cannot drift on client
+//! `execute_http::http_client` so the two paths cannot drift on client
 //! configuration. The only differences are the body construction (a
 //! `reqwest::multipart::Form` built from base64-encoded parts) and the
 //! privilege target (`df.http_multipart` instead of `df.http`).
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 
-use crate::activities::execute_http::build_client;
+use crate::activities::execute_http::http_client;
 use crate::types::MultipartConfig;
 
 /// Activity name for registration and scheduling
@@ -138,8 +138,9 @@ pub async fn execute(
         config.parts.len()
     ));
 
-    // Build client (shared SSRF-safe resolver + timeout) with execute_http.
-    let client = build_client(Duration::from_secs(config.timeout_seconds))?;
+    // Client shared with execute_http (same SSRF-safe resolver and pool); the
+    // per-node timeout is applied to the request.
+    let client = http_client()?;
 
     // Build request based on method. Multipart only makes sense for
     // body-carrying methods; the DSL guard restricts to POST/PUT/PATCH and we
@@ -154,7 +155,8 @@ pub async fn execute(
                 config.method
             ))
         }
-    };
+    }
+    .timeout(Duration::from_secs(config.timeout_seconds));
 
     // Add headers — but NEVER Content-Type. reqwest sets
     // `multipart/form-data; boundary=...` itself when .multipart() is called; a

@@ -13,7 +13,7 @@
 //! See docs/http-security.md for the full security model.
 
 use duroxide::ActivityContext;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -50,6 +50,9 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 
 /// Build a reqwest Client with optional SSRF-safe DNS resolver.
 ///
+/// No client-level timeout is set: the timeout is per-node config, so callers
+/// apply it with `RequestBuilder::timeout`.
+///
 /// A default `User-Agent` is set so requests are not anonymous: some endpoints
 /// (e.g. fly.io-hosted services) reject requests that omit it. Nodes may still
 /// override it via an explicit `User-Agent` header.
@@ -62,9 +65,8 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 /// Restricted builds also disable environment/system proxies. A proxy resolves
 /// the destination itself, which would bypass `SsrfSafeResolver`'s check of the
 /// address reqwest ultimately reaches.
-pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+fn build_client() -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
-        .timeout(timeout)
         .user_agent(concat!("pg_durable/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none());
 
@@ -80,6 +82,20 @@ pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String>
     builder
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))
+}
+
+static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+/// The process-wide HTTP client, built on first use.
+///
+/// The client owns reqwest's connection pool, so building it per request meant
+/// a fresh TCP and TLS handshake every time. Caching it keeps connections alive
+/// across requests and builds the SSRF-safe resolver and TLS connector once.
+pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
+    HTTP_CLIENT
+        .get_or_init(build_client)
+        .as_ref()
+        .map_err(|e| e.clone())
 }
 
 /// Execute an HTTP request and return the response as JSON
@@ -158,8 +174,9 @@ pub async fn execute(
         config.method
     ));
 
-    // Build client with SSRF-safe resolver (when feature enabled) and timeout
-    let client = build_client(Duration::from_secs(config.timeout_seconds))?;
+    // Shared client with SSRF-safe resolver (when feature enabled); the
+    // per-node timeout is applied to the request, not the client.
+    let client = http_client()?;
 
     // Build request based on method
     let mut request = match config.method.as_str() {
@@ -169,7 +186,8 @@ pub async fn execute(
         "DELETE" => client.delete(request_url),
         "PATCH" => client.patch(request_url),
         _ => return Err(format!("Unsupported HTTP method: {}", config.method)),
-    };
+    }
+    .timeout(Duration::from_secs(config.timeout_seconds));
 
     // Add headers
     if let Some(headers) = &config.headers {
@@ -337,9 +355,10 @@ mod tests {
             }
         });
 
-        let client = build_client(Duration::from_secs(1)).unwrap();
+        let client = build_client().unwrap();
         let _ = client
             .get("http://pg-durable-proxy-test.invalid/")
+            .timeout(Duration::from_secs(1))
             .send()
             .await;
         stop_tx.send(()).unwrap();
@@ -349,5 +368,41 @@ mod tests {
             !proxy_was_used,
             "restricted HTTP modes must bypass system proxies"
         );
+    }
+
+    /// The shared client carries no timeout of its own, so a dropped
+    /// `RequestBuilder::timeout` would leave requests to hang indefinitely.
+    #[tokio::test]
+    async fn per_request_timeout_applies_to_the_shared_client() {
+        // Accept the connection but never reply, so only the timeout can end it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stall_thread = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(3));
+                drop(stream);
+            }
+        });
+
+        // An IP-literal URL never reaches the DNS resolver, so loopback is
+        // reachable here even though SsrfSafeResolver blocks 127.0.0.0/8.
+        let started = std::time::Instant::now();
+        let error = http_client()
+            .unwrap()
+            .get(format!("http://{addr}/"))
+            .timeout(Duration::from_millis(250))
+            .send()
+            .await
+            .expect_err("a stalled response must fail");
+
+        // execute() branches on is_timeout() to build its error message.
+        assert!(error.is_timeout(), "expected a timeout error, got: {error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout did not fire promptly: {:?}",
+            started.elapsed()
+        );
+
+        stall_thread.join().unwrap();
     }
 }

@@ -336,6 +336,17 @@ prevents redirect-based bypasses where an attacker hosts a public server that
 returns a `302 Location: http://169.254.169.254/...` — since the redirect
 target is an IP literal, the DNS resolver would never be called.
 
+### 6.3 Shared connection pool
+
+The background worker builds one `reqwest::Client` for the whole process, so
+its connection pool is reused across every HTTP node — and therefore across
+database users. This is deliberate: a pooled connection carries no caller
+identity. Credentials travel as per-request headers (`Authorization`, SAS
+tokens in the URL), never as connection state, so one role's request cannot
+inherit another's authentication by landing on a warm connection. The
+per-node timeout is applied to each request rather than to the client for the
+same reason — it is caller configuration, not connection state.
+
 ---
 
 ## 7. Audit Logging
