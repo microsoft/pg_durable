@@ -310,7 +310,7 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 ///
 /// With one argument: repeats the body indefinitely (infinite loop).
 /// With a text condition: repeats while the condition is true (while loop).
-/// With `continue_on_failure => true`: repeats indefinitely after body failures.
+/// With `continue_on_failure => true`: repeats indefinitely after body activity failures.
 ///
 /// The body and condition can be either Durofut JSON or plain SQL strings (auto-wrapped).
 /// The condition is evaluated after each iteration (do-while semantics).

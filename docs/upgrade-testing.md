@@ -203,6 +203,24 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### 0.2.8
+
+- `sql/pg_durable--0.2.7--0.2.8.sql` creates `df.loop(text, boolean)` without
+  dropping or replacing `df.loop(text, text)`.
+- Existing schemas do not expose the boolean overload until
+  `ALTER EXTENSION UPDATE` runs. Until then, the new `.so` retains
+  `loop_fn_wrapper`, so the old text overload remains callable safely.
+- Existing LOOP graphs have no `continue_on_failure` key and remain inline and
+  fail-fast. Only newly constructed opted-in loops schedule an iteration child.
+- Opted-in loops consume only typed application failures returned by body
+  activities. Malformed graph/protocol data, unrecognized child errors,
+  child-ID collisions, and infrastructure/configuration/poison failures remain
+  fatal.
+- Raises the loop backstop for all loops from 100,000 to 8,388,608 (`2^23`),
+  which is about 80 years at five-minute ticks.
+- Replay is unchanged through iteration 100,000. At the old boundary, loops
+  now continue until the new finite backstop instead of failing.
+
 ### v0.2.6 → v0.2.7
 
 #### Transaction-aware graph admission

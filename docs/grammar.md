@@ -62,6 +62,7 @@ node_function ::= df.sql( QUERY )
                 | df.seq( expression, expression )
                 | df.if( condition, then_expr, else_expr )
                 | df.loop( expression [, condition] )
+                | df.loop( expression, continue_on_failure => BOOLEAN )
                 | df.break( [value] )
                 | df.as( expression, NAME )
 ```
@@ -78,6 +79,7 @@ METHOD      ::= 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
 BODY        ::= JSON string (supports $variable substitution)
 HEADERS     ::= JSONB object
 TIMEOUT     ::= positive integer (seconds)
+BOOLEAN     ::= true | false
 STRING      ::= single-quoted SQL string
 ```
 
@@ -164,6 +166,13 @@ df.if(
 df.loop(
     'SELECT process_item()',
     'SELECT count(*) > 0 FROM queue'  -- while queue has items
+)
+
+-- Infinite loop with failure-isolated iterations
+df.loop(
+    df.wait_for_schedule('*/5 * * * *')
+    ~> 'CALL refresh_search_index()',
+    continue_on_failure => true
 )
 
 -- Loop with df.break() to exit

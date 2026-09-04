@@ -91,20 +91,33 @@ struct SubtreeInput {
 ///
 /// `Break` is **not** a failure: it unwinds through compound nodes (THEN, IF, JOIN,
 /// RACE, and the subtree boundary) via the `?` operator until the nearest enclosing
-/// `execute_loop_node` catches it. `Failure` is a genuine error that propagates to the
-/// orchestration result. Encoding break this way means forgetting to propagate it is a
-/// compile error rather than a silently-ignored value (see issue #148 / #132).
+/// `execute_loop_node` catches it. `Application` is an expected body-activity failure;
+/// `Failure` is a graph, protocol, or runtime fault. Encoding these distinctions in the
+/// type prevents a broad catch from consuming failures it does not recognize.
 #[derive(Debug)]
 enum NodeError {
     /// A `df.break()` signal carrying its (already-stringified) value, caught by the loop.
     Break(String),
+    /// An expected application failure returned by a workflow activity.
+    Application(String),
     /// A real failure; propagates to the orchestration's `Err` result.
     Failure(String),
 }
 
+impl NodeError {
+    fn message(&self) -> &str {
+        match self {
+            NodeError::Break(value) | NodeError::Application(value) | NodeError::Failure(value) => {
+                value
+            }
+        }
+    }
+}
+
 /// All helper functions (`substitute_all`, `evaluate_condition`) and activity scheduling
-/// return `Result<_, String>`. This conversion lets `?` turn those `String` errors into
-/// `NodeError::Failure` automatically, so only genuine control flow needs explicit handling.
+/// return `Result<_, String>`. This conversion lets `?` turn structural/configuration errors
+/// into `NodeError::Failure` automatically. Activity failures are mapped explicitly to
+/// `NodeError::Application` at their scheduling boundaries.
 impl From<String> for NodeError {
     fn from(e: String) -> Self {
         NodeError::Failure(e)
@@ -293,6 +306,56 @@ enum SubtreeControl {
     Break,
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "pg_durable_subtree_failure",
+    content = "message",
+    rename_all = "snake_case"
+)]
+enum SubtreeFailure {
+    Application(String),
+}
+
+fn encode_subtree_application_failure(message: &str) -> String {
+    serde_json::to_string(&SubtreeFailure::Application(message.to_string()))
+        .expect("SubtreeFailure serialization cannot fail")
+}
+
+fn decode_subtree_application_failure(error: &str) -> Option<String> {
+    let failure: SubtreeFailure = serde_json::from_str(error).ok()?;
+    match failure {
+        SubtreeFailure::Application(message) => Some(message),
+    }
+}
+
+fn classify_subtree_failure(error: String) -> NodeError {
+    match decode_subtree_application_failure(&error) {
+        Some(message) => NodeError::Application(message),
+        None => NodeError::Failure(error),
+    }
+}
+
+fn contextualize_subtree_failure(context: &str, error: String) -> NodeError {
+    match classify_subtree_failure(error) {
+        NodeError::Application(message) => NodeError::Application(format!("{context}: {message}")),
+        NodeError::Failure(message) => NodeError::Failure(format!("{context}: {message}")),
+        NodeError::Break(_) => unreachable!("subtree failures cannot carry break control flow"),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum IsolatedIterationFailure {
+    Continue(String),
+    Propagate(String),
+}
+
+fn classify_isolated_iteration_failure(error: String) -> IsolatedIterationFailure {
+    match decode_subtree_application_failure(&error) {
+        Some(message) => IsolatedIterationFailure::Continue(message),
+        None => IsolatedIterationFailure::Propagate(error),
+    }
+}
+
 /// Envelope returned by `execute_subtree` containing the SQL result and the updated
 /// named-results map so the parent orchestration can merge any new entries after join/race.
 /// `control` carries a `df.break()` signal back across the sub-orchestration boundary so the
@@ -367,11 +430,11 @@ async fn finalize_instance_status(ctx: &OrchestrationContext, instance_id: &str,
 /// Internally every node handler returns `NodeResult`, where `NodeError::Break` is
 /// **intentional control flow** (a `df.break()` signal), not a failure. Break unwinds
 /// through compound nodes via `?` and is caught by the nearest enclosing
-/// `execute_loop_node`; only `NodeError::Failure` represents a genuine error. This
-/// boundary collapses the typed result back to `Result<String, String>`: a `Break`
-/// that reaches here was used outside `df.loop()`, so it is surfaced as a clear failure
-/// rather than completing with a control-flow value. Callers should treat the returned
-/// `Err` strictly as a failure and must not add retry/recovery logic for break.
+/// `execute_loop_node`; `NodeError::Application` distinguishes activity failures that an
+/// opted-in loop may consume, while `NodeError::Failure` carries graph, protocol, and runtime
+/// faults. This boundary collapses both failure variants back to `Result<String, String>`:
+/// a `Break` that reaches here was used outside `df.loop()`, so it is surfaced as a clear
+/// failure rather than completing with a control-flow value.
 pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<String, String> {
     let input: FunctionInput = serde_json::from_str(&input_json)
         .map_err(|e| format!("Invalid orchestration input: {e}"))?;
@@ -459,7 +522,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     // control-flow value as the function's result.
     let function_result: Result<String, String> = match function_outcome {
         Ok(result) => Ok(result),
-        Err(NodeError::Failure(err)) => Err(err),
+        Err(NodeError::Application(err)) | Err(NodeError::Failure(err)) => Err(err),
         Err(NodeError::Break(_)) => Err(
             "df.break() was called outside of a loop. df.break() may only be used inside df.loop()."
                 .to_string(),
@@ -556,7 +619,9 @@ pub async fn execute_subtree(
     // Build the envelope carrying the result, the updated named-results map, and a typed
     // control signal. A `Break` inside the subtree is re-encoded as `control: Break` (not a
     // sentinel smuggled inside `result`) so the parent can re-raise it as `NodeError::Break`.
-    // A genuine `Failure` propagates as `Err` across the sub-orchestration boundary.
+    // An expected activity failure is encoded as a typed application-failure payload before
+    // crossing the sub-orchestration boundary. Other failures remain unrecognized strings so
+    // callers cannot accidentally consume graph, protocol, collision, or runtime faults.
     //
     // When the root node is a loop that needs another iteration it calls `continue_as_new`,
     // whose future never resolves — so none of the arms below run for a continuing
@@ -589,7 +654,10 @@ pub async fn execute_subtree(
                 results,
             }
         }
-        Err(NodeError::Failure(e)) => return Err(e),
+        Err(NodeError::Application(error)) => {
+            return Err(encode_subtree_application_failure(&error));
+        }
+        Err(NodeError::Failure(error)) => return Err(error),
     };
 
     serde_json::to_string(&envelope)
@@ -709,13 +777,13 @@ async fn execute_function_node_with_vars(
 
     // Update node with final status and result. A `Break` is control flow rather than a
     // failure: record the node as completed (carrying the break value) so observability is
-    // unchanged from when break travelled as a normal `Ok` sentinel. Only `Failure` marks
-    // the node failed. All three arms schedule exactly one `update_node_status`, so collapse
+    // unchanged from when break travelled as a normal `Ok` sentinel. Both failure variants
+    // mark the node failed. All arms schedule exactly one `update_node_status`, so collapse
     // them to a single (status, result) pair to keep the recorded history identical.
     let (status, status_result) = match &execute_result {
         Ok(result) => ("completed", result.as_str()),
         Err(NodeError::Break(value)) => ("completed", value.as_str()),
-        Err(NodeError::Failure(err)) => ("failed", err.as_str()),
+        Err(NodeError::Application(err)) | Err(NodeError::Failure(err)) => ("failed", err.as_str()),
     };
     let status_input = serde_json::json!({
         "node_id": node_id,
@@ -796,7 +864,8 @@ async fn execute_sql_node(
 
     let result = ctx
         .schedule_activity(activities::execute_sql::NAME, input.to_string())
-        .await?;
+        .await
+        .map_err(NodeError::Application)?;
 
     if let Some(name) = &node.result_name {
         ctx.trace_info(format!("Storing result as ${name}"));
@@ -994,7 +1063,7 @@ async fn fail_loop_child_future(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
     loop_node_id: &str,
-    error: String,
+    error: NodeError,
 ) -> NodeResult {
     let child_stamp = format!("{}::1", subtree_instance_id(ctx, loop_node_id));
     stamp_loop_node(
@@ -1002,19 +1071,23 @@ async fn fail_loop_child_future(
         &graph.instance_id,
         loop_node_id,
         "failed",
-        Some(&error),
+        Some(error.message()),
         &child_stamp,
     )
     .await;
-    Err(NodeError::Failure(error))
+    Err(error)
 }
 
 fn parse_loop_config(node: &FunctionNode, node_id: &str) -> Result<LoopConfig, String> {
-    match node.query.as_deref() {
+    let config = match node.query.as_deref() {
         Some(query) => serde_json::from_str(query)
             .map_err(|e| format!("LOOP node {node_id}: failed to parse config: {e}")),
         None => Ok(LoopConfig::default()),
-    }
+    }?;
+    config
+        .validate()
+        .map_err(|e| format!("LOOP node {node_id}: invalid config: {e}"))?;
+    Ok(config)
 }
 
 /// Run one iteration of a loop body (and its optional while-condition).
@@ -1033,7 +1106,7 @@ async fn run_loop_iteration(
     condition_node: Option<&str>,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, NodeError> {
     // The loop is where `NodeError::Break` is caught: a break unwinds through the body via
     // `?` and is converted here into the loop's normal exit value.  A `Failure` propagates
     // out of the sub-orchestration unchanged.
@@ -1047,7 +1120,8 @@ async fn run_loop_iteration(
                 store_named_result(ctx, node, &break_value, results, "LOOP");
                 return Ok(Some(break_value));
             }
-            Err(NodeError::Failure(e)) => return Err(e),
+            Err(NodeError::Application(error)) => return Err(NodeError::Application(error)),
+            Err(NodeError::Failure(error)) => return Err(NodeError::Failure(error)),
         };
 
     // While-condition: if present and false, exit the loop.
@@ -1062,7 +1136,10 @@ async fn run_loop_iteration(
                     store_named_result(ctx, node, &break_value, results, "LOOP");
                     return Ok(Some(break_value));
                 }
-                Err(NodeError::Failure(error)) => return Err(error),
+                Err(NodeError::Application(error)) => {
+                    return Err(NodeError::Application(error));
+                }
+                Err(NodeError::Failure(error)) => return Err(NodeError::Failure(error)),
             };
 
         let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
@@ -1087,7 +1164,7 @@ async fn run_failure_isolated_iteration(
     body_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, NodeError> {
     let child_input = build_subtree_input(graph, body_id, results, exec_ctx)?;
     let child_id = subtree_instance_id(ctx, body_id);
 
@@ -1100,12 +1177,17 @@ async fn run_failure_isolated_iteration(
         .await
     {
         Ok(raw) => raw,
-        Err(error) => {
-            ctx.trace_warn(format!(
-                "LOOP node {loop_node_id} iteration failed; continuing: {error}"
-            ));
-            return Ok(None);
-        }
+        Err(error) => match classify_isolated_iteration_failure(error) {
+            IsolatedIterationFailure::Continue(error) => {
+                ctx.trace_warn(format!(
+                    "LOOP node {loop_node_id} iteration application failure; continuing: {error}"
+                ));
+                return Ok(None);
+            }
+            IsolatedIterationFailure::Propagate(error) => {
+                return Err(NodeError::Failure(error));
+            }
+        },
     };
 
     match parse_subtree_envelope(&raw, "LOOP iteration", results) {
@@ -1114,7 +1196,7 @@ async fn run_failure_isolated_iteration(
             store_named_result(ctx, node, &value, results, "LOOP");
             Ok(Some(value))
         }
-        Err(NodeError::Failure(error)) => Err(error),
+        Err(error) => Err(error),
     }
 }
 
@@ -1176,7 +1258,7 @@ async fn execute_loop_node(
         .await
     };
 
-    if let Some(final_result) = final_result.map_err(NodeError::Failure)? {
+    if let Some(final_result) = final_result? {
         return Ok(final_result);
     }
 
@@ -1321,7 +1403,7 @@ async fn execute_loop_suborchestration(
                 ctx,
                 graph,
                 node_id,
-                format!("Loop sub-orchestration failed: {e}"),
+                contextualize_subtree_failure("Loop sub-orchestration failed", e),
             )
             .await;
         }
@@ -1612,25 +1694,17 @@ async fn execute_join_node(
                 join_results.push(parsed);
             }
             Err(e) => {
+                let error =
+                    contextualize_subtree_failure(&format!("JOIN branch {} failed", i + 1), e);
                 if graph
                     .nodes
                     .get(&branch_ids[i])
                     .map(|branch| branch.node_type.eq_ignore_ascii_case("loop"))
                     .unwrap_or(false)
                 {
-                    return fail_loop_child_future(
-                        ctx,
-                        graph,
-                        &branch_ids[i],
-                        format!("JOIN branch {} failed: {}", i + 1, e),
-                    )
-                    .await;
+                    return fail_loop_child_future(ctx, graph, &branch_ids[i], error).await;
                 }
-                return Err(NodeError::Failure(format!(
-                    "JOIN branch {} failed: {}",
-                    i + 1,
-                    e
-                )));
+                return Err(error);
             }
         }
     }
@@ -1697,21 +1771,16 @@ async fn execute_race_node(
         }
         duroxide::Either2::First(Err(e)) => {
             cancel_losing_loop_branch(ctx, graph, right_id).await;
+            let error = contextualize_subtree_failure("RACE left branch failed", e);
             if graph
                 .nodes
                 .get(left_id)
                 .map(|branch| branch.node_type.eq_ignore_ascii_case("loop"))
                 .unwrap_or(false)
             {
-                return fail_loop_child_future(
-                    ctx,
-                    graph,
-                    left_id,
-                    format!("RACE left branch failed: {e}"),
-                )
-                .await;
+                return fail_loop_child_future(ctx, graph, left_id, error).await;
             }
-            Err(format!("RACE left branch failed: {e}"))
+            Err(error)
         }
         duroxide::Either2::Second(Ok(r)) => {
             ctx.trace_info("RACE completed - right branch won");
@@ -1720,21 +1789,16 @@ async fn execute_race_node(
         }
         duroxide::Either2::Second(Err(e)) => {
             cancel_losing_loop_branch(ctx, graph, left_id).await;
+            let error = contextualize_subtree_failure("RACE right branch failed", e);
             if graph
                 .nodes
                 .get(right_id)
                 .map(|branch| branch.node_type.eq_ignore_ascii_case("loop"))
                 .unwrap_or(false)
             {
-                return fail_loop_child_future(
-                    ctx,
-                    graph,
-                    right_id,
-                    format!("RACE right branch failed: {e}"),
-                )
-                .await;
+                return fail_loop_child_future(ctx, graph, right_id, error).await;
             }
-            Err(format!("RACE right branch failed: {e}"))
+            Err(error)
         }
     }?;
 
@@ -1811,7 +1875,8 @@ async fn execute_http_node(
 
     let result = ctx
         .schedule_activity(activities::execute_http::NAME, final_config)
-        .await?;
+        .await
+        .map_err(NodeError::Application)?;
 
     // Store result if named
     if let Some(name) = &node.result_name {
@@ -1910,7 +1975,8 @@ async fn execute_http_multipart_node(
 
     let result = ctx
         .schedule_activity(activities::execute_multipart::NAME, final_config)
-        .await?;
+        .await
+        .map_err(NodeError::Application)?;
 
     // Store result if named
     if let Some(name) = &node.result_name {
@@ -2112,6 +2178,29 @@ mod tests {
     }
 
     #[test]
+    fn isolated_iteration_continues_typed_application_failure() {
+        let encoded = encode_subtree_application_failure("division by zero");
+        assert_eq!(
+            encoded,
+            r#"{"pg_durable_subtree_failure":"application","message":"division by zero"}"#
+        );
+        assert_eq!(
+            classify_isolated_iteration_failure(encoded),
+            IsolatedIterationFailure::Continue("division by zero".to_string())
+        );
+    }
+
+    #[test]
+    fn isolated_iteration_propagates_unrecognized_runtime_failure() {
+        let runtime_error =
+            "sub-orchestration instance id 'child' already exists and is terminal".to_string();
+        assert_eq!(
+            classify_isolated_iteration_failure(runtime_error.clone()),
+            IsolatedIterationFailure::Propagate(runtime_error)
+        );
+    }
+
+    #[test]
     fn subtree_input_is_byte_stable_across_result_insertion_order() {
         let graph = FunctionGraph {
             instance_id: "deadbeef".to_string(),
@@ -2134,10 +2223,12 @@ mod tests {
             ("alpha".to_string(), "1".to_string()),
         ]);
 
-        assert_eq!(
-            build_subtree_input(&graph, "deadbeef", &first, &exec_ctx).unwrap(),
-            build_subtree_input(&graph, "deadbeef", &second, &exec_ctx).unwrap()
-        );
+        let first_input = build_subtree_input(&graph, "deadbeef", &first, &exec_ctx).unwrap();
+        let second_input = build_subtree_input(&graph, "deadbeef", &second, &exec_ctx).unwrap();
+        let expected = r#"{"instance_id":"deadbeef","node_id":"deadbeef","graph":"{\"instance_id\":\"deadbeef\",\"root_node_id\":\"cafebabe\",\"nodes\":{}}","results":"{\"alpha\":\"1\",\"beta\":\"2\"}","vars":"{}","label":"stable","iteration":0}"#;
+
+        assert_eq!(first_input, expected);
+        assert_eq!(second_input, expected);
     }
 
     #[test]
@@ -2156,6 +2247,26 @@ mod tests {
         let config = parse_loop_config(&node, &node.id).unwrap();
         assert!(!config.continue_on_failure);
         assert_eq!(config.condition_node, None);
+    }
+
+    #[test]
+    fn loop_config_parser_rejects_continue_on_failure_with_condition() {
+        let node = FunctionNode {
+            id: "aaaaaaaa".to_string(),
+            node_type: "LOOP".to_string(),
+            query: Some(r#"{"continue_on_failure":true,"condition_node":"bbbbbbbb"}"#.to_string()),
+            result_name: None,
+            left_node: Some("cccccccc".to_string()),
+            right_node: None,
+            submitted_by: "postgres".to_string(),
+            database: None,
+        };
+
+        let error = parse_loop_config(&node, &node.id).unwrap_err();
+        assert!(
+            error.contains("continue_on_failure cannot be combined with condition_node"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -2210,6 +2321,17 @@ mod tests {
             expect_ok(parse_subtree_envelope(&raw, "JOIN", &mut parent)),
             "42"
         );
+    }
+
+    #[test]
+    fn malformed_subtree_envelope_remains_fatal() {
+        let mut parent = HashMap::new();
+        match parse_subtree_envelope("not-json", "LOOP iteration", &mut parent) {
+            Err(NodeError::Failure(error)) => {
+                assert!(error.contains("LOOP iteration envelope parse error"));
+            }
+            other => panic!("expected fatal envelope error, got {other:?}"),
+        }
     }
 
     #[test]

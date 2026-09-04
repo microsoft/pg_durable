@@ -6,6 +6,19 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [0.2.8] - Unreleased
 
+### Added
+
+- **Failure-isolated loops:** `df.loop(body, continue_on_failure => true)` runs
+  each infinite-loop iteration as a child orchestration. An application failure
+  returned by a body activity does not fail the loop parent, which proceeds to
+  the next iteration. Graph, protocol, child-runtime, and infrastructure
+  failures remain fatal.
+
+### Changed
+
+- **Loop lifetime:** raises the loop-iteration backstop from 100,000 to
+  8,388,608 (`2^23`), approximately 80 years at five-minute ticks.
+
 ### Fixed
 
 - **Caller-transaction handoff:** `df.start()` now tracks the originating transaction until it commits or aborts, so legal caller transactions lasting more than five seconds no longer leave a `pending` `df.instances` row paired with a failed engine execution. Graph admission uses durable backoff and bounded-history compaction rather than holding a worker connection while it waits.

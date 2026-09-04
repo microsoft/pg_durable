@@ -1494,6 +1494,15 @@ pub struct LoopConfig {
     pub condition_node: Option<String>,
 }
 
+impl LoopConfig {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.continue_on_failure && self.condition_node.is_some() {
+            return Err("continue_on_failure cannot be combined with condition_node");
+        }
+        Ok(())
+    }
+}
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as opaque JSON objects, not stored as ID references. Keeping them as
 /// `RawValue` lets each graph level deserialize independently without serde_json's recursion limit.
@@ -1734,6 +1743,18 @@ impl Durofut {
         }
 
         self.reject_embedded_config_children()?;
+        if self.node_type == "LOOP" && self.condition_node.is_some() {
+            let config = match self.query.as_deref() {
+                Some(query) => serde_json::from_str::<LoopConfig>(query)
+                    .map_err(|e| format!("query in LOOP must be valid loop configuration: {e}"))?,
+                None => LoopConfig::default(),
+            };
+            if config.continue_on_failure {
+                return Err(
+                    "continue_on_failure cannot be combined with condition_node".to_string()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1809,6 +1830,40 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(json, r#"{"continue_on_failure":true}"#);
         assert_eq!(serde_json::from_str::<LoopConfig>(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn flatten_graph_rejects_continue_on_failure_with_condition() {
+        let sql = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT true".to_string()),
+            ..Default::default()
+        };
+        let loop_node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(sql.clone().into_raw()),
+            condition_node: Some(sql.into_raw()),
+            query: Some(r#"{"continue_on_failure":true}"#.to_string()),
+            ..Default::default()
+        };
+        let mut counter = 0;
+        let error = flatten_graph(&loop_node, &mut || {
+            counter += 1;
+            Ok(format!("{counter:08x}"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.path, "root");
+        assert_eq!(
+            counter, 1,
+            "conflict should fail before materializing children"
+        );
+        assert!(
+            error
+                .message
+                .contains("continue_on_failure cannot be combined with condition_node"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

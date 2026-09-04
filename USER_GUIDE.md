@@ -266,6 +266,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.if(cond, then, else)` | Conditional branch | `df.if('SELECT true', a, b)` |
 | `df.loop(body)` | Repeat forever | `df.loop(body)` |
 | `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
+| `df.loop(body, continue_on_failure => boolean)` | Repeat forever and optionally continue after body activity failures | `df.loop(body, continue_on_failure => true)` |
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
@@ -1180,6 +1181,32 @@ SELECT df.start(
 );
 ```
 
+The first form, `df.loop(body [, condition])`, and `@>` are fail-fast: an
+iteration failure fails the loop. Passing `continue_on_failure => false` is
+equivalent to the default and does not change where the loop is hosted. The
+named boolean overload creates an infinite loop; when it is `true`, each
+iteration runs as a child orchestration and the parent starts the next
+iteration after an application failure returned by a body activity. Malformed
+graph or child data, child-runtime failures, child-ID collisions, and
+infrastructure/configuration/poison failures remain fatal.
+
+This is useful for scheduled maintenance such as a pg_textsearch-style indexer:
+
+```sql
+SELECT df.start(
+    df.loop(
+        df.wait_for_schedule('*/5 * * * *')
+        ~> 'CALL refresh_search_index()',
+        continue_on_failure => true
+    ),
+    'search-index-maintenance'
+);
+```
+
+The next schedule is computed only after the prior iteration finishes. Slow or
+failed iterations therefore do not overlap, queue missed ticks, or backfill
+earlier schedule times.
+
 ### Cron-Style Scheduling
 
 Use `df.wait_for_schedule()` with a cron expression:
@@ -1285,10 +1312,21 @@ SELECT df.start(
 
 Each loop iteration advances via *continue-as-new*, which restarts the loop with fresh state while preserving durability. Where that restart happens depends on whether the loop is the **root** of the function:
 
-- A **root loop** (the function graph's outermost node, e.g. `df.start(df.loop(...))` or `df.start(@> 'SELECT work()')`) runs inline on the function's own orchestration. There is no surrounding work to preserve, so each iteration simply restarts the function. The `@>` operator does not make a loop root by itself: `df.seq('SELECT setup()', @> 'SELECT work()')` is non-root because the sequence is the graph root.
-- A **non-root loop** (a loop with prefix/suffix nodes, or one nested inside a `df.if()`, JOIN (`&`), or RACE (`|`) branch) runs as its own **child sub-orchestration**. Only the loop body restarts on each iteration — any work *before* the loop runs exactly once and is never re-executed, and a loop nested in a parallel branch gets its own durable instance.
+- A fail-fast **root loop** (the function graph's outermost node, e.g. `df.start(df.loop(...))` or `df.start(@> 'SELECT work()')`) runs inline on the function's own orchestration. There is no surrounding work to preserve, so each iteration simply restarts the function. The `@>` operator does not make a loop root by itself: `df.seq('SELECT setup()', @> 'SELECT work()')` is non-root because the sequence is the graph root.
+- A fail-fast **non-root loop** (a loop with prefix/suffix nodes, or one nested inside a `df.if()`, JOIN (`&`), or RACE (`|`) branch) runs as its own **child sub-orchestration**. Only the loop body restarts on each iteration — any work *before* the loop runs exactly once and is never re-executed, and a loop nested in a parallel branch gets its own durable instance.
+- Fail-fast iterations execute inline within whichever orchestration hosts the loop. Explicit `continue_on_failure => false` keeps this placement; it does not force a non-root loop into the function's root orchestration.
+- A loop with `continue_on_failure => true` runs every iteration in a child orchestration. The loop parent remains `running` after a body activity returns an application failure and proceeds to the next iteration. Unrecognized child errors and graph, protocol, runtime, or infrastructure failures remain fatal.
 
-This is transparent to your workflow; it only affects observability. The child sub-orchestration is an internal durable instance: it does **not** appear in `df.list_instances()` (which lists only the instances you started with `df.start()`). Instead, the loop node's status in `df.instance_nodes()` / `df.explain()` reflects the child's progress, so you observe the loop through its parent instance as usual.
+These child sub-orchestrations are internal durable instances and do **not**
+appear in `df.list_instances()`, which lists only instances started with
+`df.start()`. `df.instance_nodes()` / `df.explain()` show the loop parent as
+running and may show a failed iteration on its body-root or descendant nodes.
+Those node statuses are not permanent per-iteration history: a later iteration
+can supersede them with newer execution status.
+
+All loops have a finite backstop of 8,388,608 (`2^23`) iterations: about 80
+years at five-minute intervals, or a little over 97 days at the enforced
+one-second minimum.
 
 ### Stopping a Loop Externally
 

@@ -160,9 +160,10 @@ df.if_rows('data', 'SELECT $data.id', 'SELECT ''no data''')
 
 ---
 
-### df.loop(body [, condition]) / `@>` operator
+### df.loop(body [, condition])
 
-Repeats body (forever or while condition is true).
+Repeats `body` forever or while `condition` is true. This form is fail-fast,
+executing each iteration inline within whichever orchestration hosts the loop.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
@@ -172,10 +173,32 @@ Repeats body (forever or while condition is true).
 ```sql
 -- Infinite loop
 df.loop('SELECT process_item()' ~> df.sleep(1))
-@> ('SELECT process_item()' ~> df.sleep(1))  -- operator (infinite only)
 
--- While loop (function only, no operator)
+-- While loop
 df.loop('SELECT process_item()', 'SELECT count(*) > 0 FROM queue')
+```
+
+### df.loop(body, continue_on_failure => boolean)
+
+Creates an infinite loop. When `continue_on_failure` is `true`, each iteration
+runs in a child orchestration; an application failure returned by a body
+activity does not fail the parent, which starts the next iteration. Malformed
+graph or child data, child-runtime failures, child-ID collisions, and
+infrastructure/configuration/poison failures remain fatal. `false` preserves
+fail-fast execution in the loop's existing host orchestration; it does not force
+root-level execution.
+
+```sql
+df.loop(
+    'SELECT process_item()' ~> df.sleep(1),
+    continue_on_failure => true
+)
+```
+
+The `@>` operator is an infinite, fail-fast loop:
+
+```sql
+@> ('SELECT process_item()' ~> df.sleep(1))
 ```
 
 ---
@@ -641,6 +664,7 @@ SELECT df.clearvars();
 | `df.race(a, b)` | `a`, `b` |
 | `df.if(cond, then, else)` | `cond`, `then`, `else` |
 | `df.loop(body, cond)` | `body`, `cond` |
+| `df.loop(body, continue_on_failure => boolean)` | `body` |
 | `df.start(fut, label)` | `fut` |
 | All others | No auto-wrap (literals only) |
 
