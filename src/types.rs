@@ -1789,6 +1789,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_loop_config_without_query_is_fail_fast() {
+        assert!(!LoopConfig::default().continue_on_failure);
+    }
+
+    #[test]
+    fn conditional_loop_config_without_continue_flag_is_fail_fast() {
+        let config: LoopConfig = serde_json::from_str(r#"{"condition_node":"deadbeef"}"#).unwrap();
+        assert!(!config.continue_on_failure);
+        assert_eq!(config.condition_node.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
     fn loop_config_round_trips_continue_on_failure() {
         let config = LoopConfig {
             continue_on_failure: true,

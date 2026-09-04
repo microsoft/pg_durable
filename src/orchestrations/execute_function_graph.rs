@@ -630,12 +630,21 @@ fn build_subtree_input(
 /// a complete parent-to-child lineage and per-generation uniqueness: the parent execution id
 /// advances on every loop `continue_as_new`, while the child root node id distinguishes sibling
 /// branches. df.instance_nodes() and the write fence walk the full composed lineage.
+fn compose_subtree_instance_id(
+    parent_instance_id: &str,
+    parent_execution_id: &str,
+    child_root_node_id: &str,
+) -> String {
+    format!("{parent_instance_id}::{parent_execution_id}::{child_root_node_id}")
+}
+
 fn subtree_instance_id(ctx: &OrchestrationContext, child_root_node_id: &str) -> String {
-    format!(
-        "{}::{}::{}",
-        ctx.instance_id(),
-        ctx.execution_id(),
-        child_root_node_id
+    let parent_instance_id = ctx.instance_id();
+    let parent_execution_id = ctx.execution_id().to_string();
+    compose_subtree_instance_id(
+        &parent_instance_id,
+        &parent_execution_id,
+        child_root_node_id,
     )
 }
 
@@ -2088,6 +2097,65 @@ mod tests {
     fn loop_iteration_backstop_is_two_to_the_twenty_third() {
         assert_eq!(MAX_LOOP_ITERATIONS, 8_388_608);
         assert!(MAX_LOOP_ITERATIONS.is_power_of_two());
+    }
+
+    #[test]
+    fn subtree_instance_ids_are_stable_and_generation_scoped() {
+        assert_eq!(
+            compose_subtree_instance_id("parent", "1", "deadbeef"),
+            "parent::1::deadbeef"
+        );
+        assert_ne!(
+            compose_subtree_instance_id("parent", "1", "deadbeef"),
+            compose_subtree_instance_id("parent", "2", "deadbeef")
+        );
+    }
+
+    #[test]
+    fn subtree_input_is_byte_stable_across_result_insertion_order() {
+        let graph = FunctionGraph {
+            instance_id: "deadbeef".to_string(),
+            root_node_id: "cafebabe".to_string(),
+            nodes: std::collections::BTreeMap::new(),
+        };
+        let exec_ctx = ExecutionContext {
+            vars: HashMap::new(),
+            label: Some("stable".to_string()),
+            loop_iteration: 7,
+            subtree_root: "cafebabe".to_string(),
+            continuation: Continuation::Root,
+        };
+        let first = HashMap::from([
+            ("alpha".to_string(), "1".to_string()),
+            ("beta".to_string(), "2".to_string()),
+        ]);
+        let second = HashMap::from([
+            ("beta".to_string(), "2".to_string()),
+            ("alpha".to_string(), "1".to_string()),
+        ]);
+
+        assert_eq!(
+            build_subtree_input(&graph, "deadbeef", &first, &exec_ctx).unwrap(),
+            build_subtree_input(&graph, "deadbeef", &second, &exec_ctx).unwrap()
+        );
+    }
+
+    #[test]
+    fn loop_config_parser_defaults_legacy_node_to_fail_fast() {
+        let node = FunctionNode {
+            id: "aaaaaaaa".to_string(),
+            node_type: "LOOP".to_string(),
+            query: None,
+            result_name: None,
+            left_node: Some("bbbbbbbb".to_string()),
+            right_node: None,
+            submitted_by: "postgres".to_string(),
+            database: None,
+        };
+
+        let config = parse_loop_config(&node, &node.id).unwrap();
+        assert!(!config.continue_on_failure);
+        assert_eq!(config.condition_node, None);
     }
 
     #[test]
