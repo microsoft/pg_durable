@@ -203,7 +203,9 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
-### 0.2.8
+### v0.2.7 → v0.2.8
+
+#### Loop failure continuation
 
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent
@@ -232,6 +234,12 @@ what the upgrade script handles, and any backward compatibility considerations.
   that recorded the previous terminal-failure path cannot replay under the new
   binary, which continues toward the higher backstop instead. Drain such
   long-running loops before upgrade when continuity is required.
+
+#### Add `df.with_http_options()`
+- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. No option keys are supported yet: SQL `NULL` and `{}` return the original node text byte-for-byte; other values and unsupported keys raise an error.
+- **Upgrade script:** [sql/pg_durable--0.2.7--0.2.8.sql](../sql/pg_durable--0.2.7--0.2.8.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.
+- **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
+- **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
 
 ### v0.2.6 → v0.2.7
 

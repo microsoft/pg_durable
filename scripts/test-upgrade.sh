@@ -778,6 +778,17 @@ test_b1_conditional_loop() {
     assert_sql_contains "SELECT df.loop('SELECT 1', 'SELECT false');" '"node_type":"LOOP"'
 }
 
+test_b1_http_construction() {
+    assert_sql_contains "SELECT df.http('https://api.github.com/');" '"node_type":"HTTP"' &&
+    assert_sql_equals \
+        "SELECT (df.http('https://api.github.com/', 'GET', NULL, NULL, 7)::jsonb->>'query')::jsonb->>'timeout_seconds';" \
+        "7"
+}
+
+test_b1_http_options_absent() {
+    assert_sql_equals "SELECT to_regprocedure('df.with_http_options(text,jsonb)') IS NULL;" "t"
+}
+
 test_b1_dsl_chain() {
     assert_sql_contains "SELECT df.sql('SELECT 1') ~> df.sql('SELECT 2');" '"node_type":"THEN"'
 }
@@ -909,6 +920,10 @@ else
         run_test "B1 [v${B1_VERSION}]: df.version()" test_b1_version
         run_test "B1 [v${B1_VERSION}]: df.sql() construction" test_b1_dsl_construction
         run_test "B1 [v${B1_VERSION}]: df.loop(body, condition)" test_b1_conditional_loop
+        run_test "B1 [v${B1_VERSION}]: df.http() construction" test_b1_http_construction
+        if ! version_ge "$B1_VERSION" "0.2.8"; then
+            run_test "B1 [v${B1_VERSION}]: new HTTP options helper remains absent" test_b1_http_options_absent
+        fi
         run_test "B1 [v${B1_VERSION}]: DSL chain (~>)" test_b1_dsl_chain
         run_test "B1 [v${B1_VERSION}]: conditional operators (?>/!>)" test_b1_conditional_operators
         run_test "B1 [v${B1_VERSION}]: df.start()/wait_for_completion()" test_b1_start_and_complete
@@ -1030,6 +1045,55 @@ test_b2_grant_usage_after_upgrade() {
     run_sql_capture "DROP OWNED BY ${probe_role}; DROP ROLE IF EXISTS ${probe_role};" >/dev/null 2>&1 || true
 }
 
+test_b2_http_api_after_upgrade() {
+    create_extension_at_version "$PREV_VERSION"
+
+    local output
+    output=$(run_sql_capture "
+        CREATE ROLE durable_b2_http_probe;
+        GRANT EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer),
+            df.http_multipart(text,text,jsonb,jsonb,integer)
+            TO durable_b2_http_probe WITH GRANT OPTION;
+
+        CREATE TEMP TABLE http_api_before AS
+            SELECT oid, proacl FROM pg_proc
+            WHERE oid IN (
+                'df.http(text,text,text,jsonb,integer)'::regprocedure,
+                'df.http_multipart(text,text,jsonb,jsonb,integer)'::regprocedure
+            );
+        CREATE TEMP VIEW http_calls_before AS
+            SELECT df.http('https://api.github.com/') AS http_node,
+                df.http_multipart('https://api.github.com/',
+                    parts => '[{\"name\":\"field\",\"data_b64\":\"aGk=\"}]'::jsonb) AS multipart_node;
+
+        ALTER EXTENSION pg_durable UPDATE TO '${CURRENT_VERSION}';
+
+        DO \$verify\$
+        BEGIN
+            IF (SELECT count(*) FROM http_api_before) <> 2 OR EXISTS (
+                SELECT 1 FROM http_api_before AS previous
+                LEFT JOIN pg_proc AS current ON current.oid = previous.oid
+                WHERE current.oid IS NULL OR current.proacl IS DISTINCT FROM previous.proacl
+            ) THEN
+                RAISE EXCEPTION 'HTTP function OIDs or ACLs changed during upgrade';
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM http_calls_before
+                WHERE http_node::jsonb->>'node_type' = 'HTTP'
+                  AND multipart_node::jsonb->>'node_type' = 'HTTP_MULTIPART'
+                  AND df.with_http_options(http_node, '{}'::jsonb) = http_node
+                  AND df.with_http_options(multipart_node, NULL) = multipart_node
+            ) THEN
+                RAISE EXCEPTION 'Legacy HTTP calls or the additive helper failed after upgrade';
+            END IF;
+        END
+        \$verify\$;
+
+        DROP OWNED BY durable_b2_http_probe;
+        DROP ROLE durable_b2_http_probe;
+    ") || { echo "$output"; return 1; }
+}
+
 if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
@@ -1037,6 +1101,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Loop dependency and unified API survive upgrade" test_b2_loop_dependency_survives_upgrade
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
+    run_test "B2: HTTP OIDs, grants and dependent views survive upgrade" test_b2_http_api_after_upgrade
 fi
 
 # ============================================================================

@@ -487,6 +487,52 @@ pub fn race(a: &str, b: &str) -> String {
     .to_json()
 }
 
+/// Applies HTTP options to a single HTTP or HTTP_MULTIPART node.
+#[pg_extern(schema = "df")]
+pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
+    use std::{collections::HashSet, sync::LazyLock};
+    static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = {
+        LazyLock::new(|| {
+            HashSet::from_iter([
+                // Intentionally empty for now.
+            ])
+        })
+    };
+    let node = Durofut::try_from_json(fut).unwrap_or_else(|_| {
+        pgrx::error!("df.with_http_options(): expected an HTTP or HTTP_MULTIPART node")
+    });
+
+    if !matches!(node.node_type.as_str(), "HTTP" | "HTTP_MULTIPART")
+        || node.left_node.is_some()
+        || node.right_node.is_some()
+        || node.condition_node.is_some()
+        || !node.extra_nodes.is_empty()
+    {
+        pgrx::error!("df.with_http_options(): expected a single HTTP or HTTP_MULTIPART node");
+    }
+
+    let config = node
+        .query
+        .as_deref()
+        .and_then(|query| serde_json::from_str::<serde_json::Value>(query).ok());
+    if !config.as_ref().is_some_and(serde_json::Value::is_object) {
+        pgrx::error!("df.with_http_options(): HTTP node config must be a JSON object");
+    }
+
+    if let Some(options) = options {
+        let Some(map) = options.0.as_object() else {
+            pgrx::error!("df.with_http_options(): options must be a JSON object");
+        };
+        for key in map.keys() {
+            if !ALLOWED_KEYS.contains(key.as_str()) {
+                pgrx::error!("df.with_http_options(): unrecognised option '{key}'.");
+            }
+        }
+    }
+
+    fut.to_string()
+}
+
 /// Creates an HTTP request node.
 /// Makes an HTTP request to the specified URL and returns the response.
 ///

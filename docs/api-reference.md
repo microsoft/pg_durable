@@ -367,6 +367,31 @@ Returns the same envelope as `df.http()`.
 
 ---
 
+### df.with_http_options(fut, options)
+
+HTTP-specific modifier entry point. Returns the JSON-encoded TEXT node for use in
+a workflow, not an HTTP response. Neither existing HTTP function changes signature.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `fut` | TEXT | ❌ Literal | A single `HTTP` or `HTTP_MULTIPART` node, optionally named with `\|=>` |
+| `options` | JSONB | ❌ Literal | SQL `NULL` or an empty object (`'{}'`) only in this version |
+
+```sql
+df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
+  |=> 'response'
+```
+
+No option keys are supported yet. Unknown keys, non-object JSON values (including
+JSON `null`), malformed nodes, SQL nodes, and compound graphs raise an error.
+SQL `NULL` and `{}` return the original node text byte-for-byte, preserving its
+config and result name. Apply the helper to each HTTP node before combining nodes.
+It neither resolves secrets nor grants HTTP access; activity-time permission and
+network checks still apply. Existing installations need `ALTER EXTENSION pg_durable
+UPDATE` to use this new helper, but not to keep using the original HTTP functions.
+
+---
+
 ## Control Functions
 
 ### df.start(fut [, label] [, database] [, transaction_mode])
