@@ -28,22 +28,37 @@ pub const NAME: &str = "pg_durable::activity::execute-http";
 /// This closes the bypass path where a user crafts a raw Durofut JSON and
 /// passes it directly to `df.start()`, inserting an HTTP node without going
 /// through the DSL guard in `df.http()`.
+///
+/// The signature is resolved with `to_regprocedure()` over an ordered list
+/// (current form first, pre-0.2.8 form second) because a `::regprocedure` cast
+/// raises on a missing function: the new `.so` must also run against older
+/// installed schemas that only have the five-argument form.
 async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
-    let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http(text,text,text,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
+    let verdict: Option<String> = sqlx::query_scalar(
+        "SELECT CASE \
+             WHEN p.oid IS NULL THEN 'absent' \
+             WHEN pg_catalog.has_function_privilege($1::regrole, p.oid, 'EXECUTE') THEN 'allowed' \
+             ELSE 'denied' \
+         END \
+         FROM (SELECT COALESCE( \
+             pg_catalog.to_regprocedure('df.http(text,text,text,jsonb,integer,jsonb)'), \
+             pg_catalog.to_regprocedure('df.http(text,text,text,jsonb,integer)') \
+         ) AS oid) p",
     )
     .bind(submitted_by)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
 
-    match has_priv {
-        Some(true) => Ok(()),
+    match verdict.as_deref() {
+        Some("allowed") => Ok(()),
+        Some("absent") => Err(format!(
+            "Blocked: df.http() is not installed in this database, so the HTTP privilege \
+             of role '{submitted_by}' cannot be verified."
+        )),
         _ => Err(format!(
             "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http(). \
-             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {submitted_by} to allow HTTP requests."
+             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer,jsonb) TO {submitted_by} to allow HTTP requests."
         )),
     }
 }
@@ -100,6 +115,12 @@ pub async fn execute(
         .as_deref()
         .ok_or("Blocked: HTTP node has no submitted_by \u{2014} cannot verify privilege")?;
 
+    // Every log line and error below reports this, never `config.url`: an Azure
+    // SAS token lives entirely in the query string, and both sinks outlive the
+    // instance (the server log has no retention bound; errors are persisted to
+    // df.nodes.error and into duroxide history).
+    let safe_url = crate::redact::redact_url(&config.url);
+
     // Validation chain — order is security-critical:
     //   0. Privilege: submitted_by must hold EXECUTE on df.http(). Closes the
     //                 bypass path where a user crafts raw Durofut JSON and passes
@@ -121,8 +142,7 @@ pub async fn execute(
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (privilege) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
             ));
         })?;
 
@@ -136,23 +156,21 @@ pub async fn execute(
     // --- Scheme validation (always enforced, regardless of feature flag) ---
     crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (scheme) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
     crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (allowlist) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
-        "HTTP {} {} submitted_by={audit_user}",
-        config.method, config.url
+        "HTTP {} {safe_url} submitted_by={audit_user}",
+        config.method
     ));
 
     // Build client with SSRF-safe resolver (when feature enabled) and timeout
@@ -192,10 +210,9 @@ pub async fn execute(
         // a structured audit log (mirrors the scheme-block log above).
         if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (ip) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP BLOCKED (ip) url={safe_url} submitted_by={audit_user}"
             ));
-            return err_string;
+            return crate::redact::redact_urls_in(&err_string);
         }
 
         // Try to extract status code from error if available
@@ -204,21 +221,22 @@ pub async fn execute(
             .map(|s| format!(" (HTTP {})", s.as_u16()))
             .unwrap_or_default();
 
+        // reqwest's Display interpolates the request URL, so the error text is
+        // scrubbed as well as the URL we format ourselves.
+        let detail = crate::redact::redact_urls_in(&err_string);
+
         if e.is_timeout() {
             format!(
                 "HTTP timeout after {}s{}: {}",
-                config.timeout_seconds, status_info, config.url
+                config.timeout_seconds, status_info, safe_url
             )
         } else if e.is_connect() {
-            format!(
-                "HTTP connection failed{}: {} - {}",
-                status_info, config.url, e
-            )
+            format!("HTTP connection failed{status_info}: {safe_url} - {detail}")
         } else if e.is_status() {
             // Error due to HTTP status code
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
         } else {
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
         }
     })?;
 
@@ -251,9 +269,8 @@ pub async fn execute(
     // Fail on 5xx server errors (transient, should retry)
     if status.is_server_error() {
         return Err(format!(
-            "HTTP {} {} returned {}: {}",
+            "HTTP {} {safe_url} returned {}: {}",
             config.method,
-            config.url,
             status_code,
             response_body.error_preview()
         ));

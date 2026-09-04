@@ -175,7 +175,7 @@ DECLARE
 BEGIN
     SELECT has_function_privilege(
         'dg_http_target',
-        'df.http(text, text, text, jsonb, integer)',
+        'df.http(text, text, text, jsonb, integer, jsonb)',
         'EXECUTE'
     ) INTO can_http;
 
@@ -240,7 +240,7 @@ DECLARE
 BEGIN
     SELECT has_schema_privilege('dg_app', 'df', 'USAGE') INTO has_usage;
     SELECT has_function_privilege('dg_app', 'df.start(text, text, text, text)', 'EXECUTE') INTO can_start;
-    SELECT has_function_privilege('dg_app', 'df.http(text, text, text, jsonb, integer)', 'EXECUTE') INTO can_http;
+    SELECT has_function_privilege('dg_app', 'df.http(text, text, text, jsonb, integer, jsonb)', 'EXECUTE') INTO can_http;
 
     IF NOT has_usage THEN
         RAISE EXCEPTION 'TEST 5b FAILED: dg_app should have USAGE on schema df after grant_usage';

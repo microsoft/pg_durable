@@ -53,6 +53,15 @@ pub static RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(30);
 /// terminal instances and reclaims orphaned engine records. `0` disables it.
 pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(3600);
 
+/// When `false`, the worker log omits the SQL text of executed workflow nodes.
+/// The text is logged fully substituted, so a `{var}` holding a credential is
+/// written to the server log in cleartext. Unlike a query string, SQL cannot be
+/// redacted heuristically, so this is on/off rather than a masking rule.
+///
+/// Postmaster context: it is read in the background worker, which never calls
+/// `ProcessConfigFile`, so a reload would not reach it.
+pub static LOG_WORKFLOW_SQL: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -61,6 +70,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
+pub mod redact;
 pub mod registry;
 pub mod ssrf;
 pub mod types;
@@ -226,6 +236,15 @@ pub extern "C-unwind" fn _PG_init() {
         &RECONCILE_INTERVAL,
         0,
         86400,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_durable.log_workflow_sql",
+        c"Log the SQL text of executed workflow nodes to the worker log",
+        c"The SQL is logged after variable substitution, so any credential held in a df.vars variable and spliced into a query is written to the PostgreSQL server log in cleartext. Set to off in environments where the server log is less protected than the database. Turning this off also removes the primary forensic record of what workflows executed. Requires server restart to change.",
+        &LOG_WORKFLOW_SQL,
         GucContext::Postmaster,
         GucFlags::default(),
     );
@@ -529,9 +548,9 @@ BEGIN
 
     -- df.http() — opt-in because it makes outbound network requests.
     IF include_http THEN
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
         -- df.http_multipart() shares the same opt-in (HTTP egress is one privilege).
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer, jsonb) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- Admin helpers and system-wide metrics — with_grant => true marks a
@@ -572,7 +591,7 @@ BEGIN
     -- Sensitive functions (granted explicitly by grant_usage()).  A delegated
     -- admin may lack privilege on some of these (e.g. df.http); skip those.
     BEGIN
-        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM %I CASCADE', p_role);
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -582,7 +601,7 @@ BEGIN
         NULL;
     END;
     BEGIN
-        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM %I CASCADE', p_role);
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer, jsonb) FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -640,9 +659,9 @@ END $$;
 -- PostgreSQL's default PUBLIC EXECUTE. df.grant_usage() re-grants the helper
 -- functions explicitly to authorized roles; df.metrics() is granted to
 -- with_grant => true admins or by a direct administrator GRANT.
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.metrics() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
@@ -1250,7 +1269,7 @@ mod tests {
     ))]
     #[pg_test]
     fn test_http_creates_valid_node() {
-        let json = crate::dsl::http("https://example.com/api", "GET", None, None, 30);
+        let json = crate::dsl::http("https://example.com/api", "GET", None, None, 30, None);
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "HTTP");
         assert!(fut.query.is_some());
@@ -1269,6 +1288,7 @@ mod tests {
             Some(r#"{"key": "value"}"#),
             None,
             30,
+            None,
         );
         let fut = Durofut::from_json(&json);
         assert_eq!(fut.node_type, "HTTP");
@@ -1296,6 +1316,7 @@ mod tests {
             Some(r#"{"data": "test"}"#),
             Some(headers),
             60,
+            None,
         );
         let fut = Durofut::from_json(&json);
 
@@ -1320,6 +1341,7 @@ mod tests {
             Some(r#"{"test": true}"#),
             None,
             45,
+            None,
         );
         let fut = Durofut::from_json(&json);
         let config: HttpConfig = serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();
@@ -1351,7 +1373,8 @@ mod tests {
     ))]
     #[pg_test]
     fn test_http_in_sequence() {
-        let http_node = crate::dsl::http("https://api.example.com/data", "GET", None, None, 30);
+        let http_node =
+            crate::dsl::http("https://api.example.com/data", "GET", None, None, 30, None);
         let sql_node = crate::dsl::sql("SELECT 1");
         let seq = crate::dsl::then_fn(&http_node, &sql_node);
         let fut = Durofut::from_json(&seq);
@@ -1367,7 +1390,7 @@ mod tests {
     ))]
     #[pg_test]
     fn test_http_with_name() {
-        let http_node = crate::dsl::http("https://api.example.com", "GET", None, None, 30);
+        let http_node = crate::dsl::http("https://api.example.com", "GET", None, None, 30, None);
         let named = crate::dsl::as_named(&http_node, "api_response");
         let fut = Durofut::from_json(&named);
         assert_eq!(fut.result_name, Some("api_response".to_string()));
@@ -1382,7 +1405,7 @@ mod tests {
     fn test_http_methods() {
         // Test all supported methods
         for method in &["GET", "POST", "PUT", "DELETE", "PATCH"] {
-            let json = crate::dsl::http("https://example.com", method, None, None, 30);
+            let json = crate::dsl::http("https://example.com", method, None, None, 30, None);
             let fut = Durofut::from_json(&json);
             let config: serde_json::Value =
                 serde_json::from_str(fut.query.as_ref().unwrap()).unwrap();

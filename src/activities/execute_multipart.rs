@@ -32,22 +32,34 @@ pub const NAME: &str = "pg_durable::activity::execute-multipart";
 /// Mirrors `execute_http::check_http_privilege` — closes the bypass path where
 /// a user crafts a raw Durofut JSON and passes it directly to `df.start()`,
 /// inserting an HTTP_MULTIPART node without going through the DSL guard.
+/// Signature resolution uses `to_regprocedure()` for the same backward
+/// compatibility reason described there.
 async fn check_multipart_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
-    let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http_multipart(text,text,jsonb,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
+    let verdict: Option<String> = sqlx::query_scalar(
+        "SELECT CASE \
+             WHEN p.oid IS NULL THEN 'absent' \
+             WHEN pg_catalog.has_function_privilege($1::regrole, p.oid, 'EXECUTE') THEN 'allowed' \
+             ELSE 'denied' \
+         END \
+         FROM (SELECT COALESCE( \
+             pg_catalog.to_regprocedure('df.http_multipart(text,text,jsonb,jsonb,integer,jsonb)'), \
+             pg_catalog.to_regprocedure('df.http_multipart(text,text,jsonb,jsonb,integer)') \
+         ) AS oid) p",
     )
     .bind(submitted_by)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
 
-    match has_priv {
-        Some(true) => Ok(()),
+    match verdict.as_deref() {
+        Some("allowed") => Ok(()),
+        Some("absent") => Err(format!(
+            "Blocked: df.http_multipart() is not installed in this database, so the multipart \
+             HTTP privilege of role '{submitted_by}' cannot be verified."
+        )),
         _ => Err(format!(
             "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http_multipart(). \
-             Grant EXECUTE ON FUNCTION df.http_multipart(text,text,jsonb,jsonb,integer) TO {submitted_by} to allow multipart HTTP requests."
+             Grant EXECUTE ON FUNCTION df.http_multipart(text,text,jsonb,jsonb,integer,jsonb) TO {submitted_by} to allow multipart HTTP requests."
         )),
     }
 }
@@ -91,6 +103,9 @@ pub async fn execute(
         "Blocked: HTTP_MULTIPART node has no submitted_by \u{2014} cannot verify privilege",
     )?;
 
+    // See execute_http: never log or return `config.url` itself.
+    let safe_url = crate::redact::redact_url(&config.url);
+
     // Validation chain — order is security-critical and mirrors execute_http:
     //   0. Privilege: submitted_by must hold EXECUTE on df.http_multipart().
     //   1. Scheme:    blocks file://, gopher://, etc.
@@ -103,8 +118,7 @@ pub async fn execute(
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
-                "HTTP_MULTIPART BLOCKED (privilege) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP_MULTIPART BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
             ));
         })?;
 
@@ -118,24 +132,21 @@ pub async fn execute(
     // --- Scheme validation (always enforced) ---
     crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP_MULTIPART BLOCKED (scheme) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP_MULTIPART BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list ---
     crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP_MULTIPART BLOCKED (allowlist) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
-        "HTTP_MULTIPART {} {} ({} parts) submitted_by={audit_user}",
+        "HTTP_MULTIPART {} {safe_url} ({} parts) submitted_by={audit_user}",
         config.method,
-        config.url,
         config.parts.len()
     ));
 
@@ -198,10 +209,9 @@ pub async fn execute(
         // Detect SSRF IP-blocklist rejections from the resolver.
         if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
-                "HTTP_MULTIPART BLOCKED (ip) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP_MULTIPART BLOCKED (ip) url={safe_url} submitted_by={audit_user}"
             ));
-            return err_string;
+            return crate::redact::redact_urls_in(&err_string);
         }
 
         let status_info = e
@@ -209,18 +219,18 @@ pub async fn execute(
             .map(|s| format!(" (HTTP {})", s.as_u16()))
             .unwrap_or_default();
 
+        // reqwest's Display interpolates the request URL — scrub it too.
+        let detail = crate::redact::redact_urls_in(&err_string);
+
         if e.is_timeout() {
             format!(
                 "HTTP timeout after {}s{}: {}",
-                config.timeout_seconds, status_info, config.url
+                config.timeout_seconds, status_info, safe_url
             )
         } else if e.is_connect() {
-            format!(
-                "HTTP connection failed{}: {} - {}",
-                status_info, config.url, e
-            )
+            format!("HTTP connection failed{status_info}: {safe_url} - {detail}")
         } else {
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
         }
     })?;
 
@@ -253,9 +263,8 @@ pub async fn execute(
     // Fail on 5xx server errors (transient, should retry)
     if status.is_server_error() {
         return Err(format!(
-            "HTTP_MULTIPART {} {} returned {}: {}",
+            "HTTP_MULTIPART {} {safe_url} returned {}: {}",
             config.method,
-            config.url,
             status_code,
             response_body.error_preview()
         ));

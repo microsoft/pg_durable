@@ -203,6 +203,15 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.7 → v0.2.8
+
+#### Freeze the `df.http()` / `df.http_multipart()` signatures with a trailing `options jsonb`
+- **DDL change:** `df.http` becomes `df.http(text, text, text, jsonb, integer, jsonb)` and `df.http_multipart` becomes `df.http_multipart(text, text, jsonb, jsonb, integer, jsonb)` — one trailing `options jsonb DEFAULT NULL` on each. No option key is accepted in this version (`NULL` and `{}` only; anything else raises), so `options` never reaches the node config: the JSON stored in `df.nodes.query` is byte-identical to 0.2.7, which matters because duroxide matches recorded activity inputs by exact string equality. The parameter exists so future request modifiers do not need another signature change — a function's argument list is its privilege identity, so each change orphans existing `EXECUTE` grants.
+- **Upgrade script:** `sql/pg_durable--0.2.7--0.2.8.sql` creates both new signatures with the same DDL pgrx generates for a fresh install, revokes `EXECUTE` from `PUBLIC`, copies the old functions' `EXECUTE` ACL (via `aclexplode(COALESCE(proacl, acldefault('f', proowner)))`, preserving `WITH GRANT OPTION` and re-granting `PUBLIC` only when the old function still had it), drops the five-argument forms, and re-emits `df.grant_usage()` / `df.revoke_usage()` naming the new signatures. Their own signatures (`df.grant_usage(text, boolean, boolean)`, `df.revoke_usage(text)`) are unchanged. The grantor of the re-applied grants becomes the role running `ALTER EXTENSION`; the original grantor is not recoverable through a `GRANT` statement.
+- **Scenario A considerations:** The recreated functions match the pgrx-generated fresh-install DDL (argument names, defaults, `LANGUAGE c`, `MODULE_PATHNAME` symbols `http_wrapper` / `http_multipart_wrapper`), so the `df` schema snapshots agree. Non-`PUBLIC` routine-grant rows are compared: on a database with no extra grantees, both paths end at `{owner=X/owner}`. `PUBLIC` grant rows are already excluded from the diff.
+- **Scenario B1 considerations:** This is the reason for the change. `check_http_privilege` / `check_multipart_privilege` no longer cast a literal signature to `regprocedure` (which *raises* when the function does not exist). They now resolve the target with `pg_catalog.to_regprocedure()` over an ordered list — six-argument form first, five-argument form second — so the new `.so` works both against upgraded 0.2.8 schemas and against ≤0.2.7 schemas that have not run `ALTER EXTENSION UPDATE`. When neither signature exists the check fails with a distinct "not installed" error; anything other than an explicit privilege grant still denies (fail-closed).
+- **Scenario B2 considerations:** No data migration. Existing `HTTP` / `HTTP_MULTIPART` nodes keep their stored config verbatim and continue to replay, because the new parameter contributes nothing to the node config.
+
 ### v0.2.6 → v0.2.7
 
 #### Transaction-aware graph admission

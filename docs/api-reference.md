@@ -242,7 +242,7 @@ df.wait_for_signal('approval', 3600)   -- 1 hour timeout
 
 ---
 
-### df.http(url [, method, body, headers, timeout])
+### df.http(url [, method, body, headers, timeout, options])
 
 Makes an HTTP request.
 
@@ -253,6 +253,7 @@ Makes an HTTP request.
 | `body` | TEXT | ❌ Literal | Request body JSON (supports `$var`) |
 | `headers` | JSONB | ❌ Literal | Request headers |
 | `timeout` | INTEGER | ❌ Literal | Timeout in seconds (default: 30) |
+| `options` | JSONB | ❌ Literal | Reserved extension point. Only `NULL` (default) or `'{}'` is accepted; any option key raises an error |
 
 ```sql
 df.http('https://api.example.com/users', 'GET')
@@ -270,12 +271,12 @@ df.http('https://api.example.com/thing', 'GET') |=> 'resp'
 
 `encoding` is `text` when the response `Content-Type` is textual, and `base64` when it is
 not — in which case `body` holds the base64 of the raw bytes. See
-[df.http_multipart](#dfhttp_multiparturl--method-parts-headers-timeout) for feeding those
+[df.http_multipart](#dfhttp_multiparturl--method-parts-headers-timeout-options) for feeding those
 bytes into a subsequent upload.
 
 ---
 
-### df.http_multipart(url [, method, parts, headers, timeout])
+### df.http_multipart(url [, method, parts, headers, timeout, options])
 
 Makes an HTTP request with a `multipart/form-data` body. Requires the same
 `include_http => true` grant as `df.http()`.
@@ -287,6 +288,7 @@ Makes an HTTP request with a `multipart/form-data` body. Requires the same
 | `parts` | JSONB | ❌ Literal | Array of part objects (see below) |
 | `headers` | JSONB | ❌ Literal | Request headers |
 | `timeout` | INTEGER | ❌ Literal | Timeout in seconds (default: 30) |
+| `options` | JSONB | ❌ Literal | Reserved extension point. Only `NULL` (default) or `'{}'` is accepted; any option key raises an error |
 
 Each element of `parts` is an object:
 
@@ -588,6 +590,11 @@ Sets a workflow variable for the current user (before `df.start()`). Each user h
 SELECT df.setvar('api_url', 'https://api.example.com');
 ```
 
+> **Not for credentials.** Values are stored as plaintext in `df.vars`, and `df.start()` copies
+> every variable you own into durable execution history. Using `{varname}` keeps the value out of
+> `df.nodes.query` but not out of history. See
+> [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
 ---
 
 ### df.getvar(name)
@@ -659,7 +666,7 @@ Authorization is enforced by PostgreSQL’s native mechanisms: EXECUTE on this f
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `role_name` | TEXT | The role to grant privileges to |
-| `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer)` |
+| `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer, jsonb)` |
 | `with_grant` | BOOLEAN | Optional, defaults to `false`; when `true`, grants all privileges WITH GRANT OPTION and retains EXECUTE on `df.grant_usage` / `df.revoke_usage` |
 
 ```sql
@@ -684,7 +691,7 @@ SELECT df.revoke_usage('app_role');
 
 ## Server Configuration (GUCs)
 
-These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf` and take effect after `SELECT pg_reload_conf()` (no restart required).
+These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. Each one lists its context: `SUSET` settings take effect after `SELECT pg_reload_conf()`, while `POSTMASTER` settings require a restart. Every GUC read by the background worker is `POSTMASTER`, because the worker does not process a configuration reload.
 
 ---
 
@@ -749,3 +756,28 @@ SELECT pg_reload_conf();
 ```
 
 > **Behavior change (v0.2.4):** prior to v0.2.4, `df.list_instances()` silently truncated `limit_count` to 10000. It now raises an error when `limit_count` exceeds this GUC (default 1000). Callers that previously requested very large pages should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`).
+
+---
+
+### pg_durable.log_workflow_sql
+
+Controls whether the background worker writes the SQL text of an executed workflow node to the PostgreSQL server log.
+
+| Property | Value |
+|----------|-------|
+| Type | `boolean` |
+| Default | `on` |
+| Context | `POSTMASTER` (set in `postgresql.conf`; requires restart) |
+
+The SQL is logged *after* variable substitution, so a credential held in a `df.vars` variable and spliced into a query reaches the server log in cleartext. Unlike a URL query string — which pg_durable redacts unconditionally — SQL cannot be masked heuristically, because a substituted value is indistinguishable from the surrounding statement. This GUC is therefore an on/off switch.
+
+```ini
+# postgresql.conf
+pg_durable.log_workflow_sql = off
+```
+
+The value is read by the background worker, which does not process a configuration reload, so a restart is required — the same as `pg_durable.retention_days` and the connection-limit GUCs.
+
+Turning it off keeps the submitting role and target database in the log but drops the statement text. That also removes the primary record of what workflows executed, which is usually the first thing an incident investigation looks for — prefer keeping credentials out of SQL over disabling the log. See [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
+This trace is written by the background worker's own logging, not by PostgreSQL statement logging, so `log_statement` neither enables nor suppresses it.

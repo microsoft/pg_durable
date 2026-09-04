@@ -107,14 +107,27 @@ the node fails immediately.
 `execute_http` runs the following check before any network activity:
 
 ```sql
-SELECT has_function_privilege($submitted_by::regrole,
-    'df.http(text,text,text,jsonb,integer)'::regprocedure,
-    'EXECUTE')
+SELECT CASE
+           WHEN p.oid IS NULL THEN 'absent'
+           WHEN has_function_privilege($submitted_by::regrole, p.oid, 'EXECUTE') THEN 'allowed'
+           ELSE 'denied'
+       END
+FROM (SELECT COALESCE(
+    to_regprocedure('df.http(text,text,text,jsonb,integer,jsonb)'),
+    to_regprocedure('df.http(text,text,text,jsonb,integer)')
+) AS oid) p
 ```
+
+The signature is resolved with `to_regprocedure()` over an ordered list — the
+current form first, the pre-0.2.8 form second — because a `::regprocedure` cast
+raises on a missing function, and the same binary must run against older
+installed schemas that only have the five-argument form. Only `'allowed'`
+permits the request; `'absent'` (neither signature installed) and `'denied'`
+both fail the node.
 
 `has_function_privilege` honours PostgreSQL's standard privilege model:
 superusers always return `true`; regular roles return `true` only when an
-explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO <role>` (or a role that
+explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer, jsonb) TO <role>` (or a role that
 inherits one) is in effect.
 
 ### 3.3 Managing access
@@ -166,22 +179,25 @@ REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC
 ```
 
 When `df.grant_usage(role, include_http => false)` is called and the role still
-has effective HTTP access via the PUBLIC grant (or another inherited grant), a
-`WARNING` is emitted to signal that the revocation had no net effect.
+has effective HTTP access via the PUBLIC grant (or another inherited grant),
+that grant is left intact — `df.grant_usage()` is purely additive and never
+issues a `REVOKE`. Call `df.revoke_usage()` first to downgrade a role.
 
 ### 3.4 Admin function protection
 
 `df.grant_usage()` and `df.revoke_usage()` are admin-only functions.
 `EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, so only
-superusers can call them.
+superusers can call them — plus any role an admin delegated to with
+`df.grant_usage(role, with_grant => true)`.
 
-> **Caution:** `df.grant_usage()` internally runs
-> `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df`, which temporarily includes
-> `df.grant_usage()` and `df.revoke_usage()` themselves before the function
-> immediately revokes them from the target role.  If an admin replicates the
-> blanket `GRANT` manually without the matching `REVOKE`s, the target role
-> will gain access to these admin helpers.  Always use `df.grant_usage()`
-> rather than hand-crafting the equivalent `GRANT` statements.
+`df.grant_usage()` issues a specific set of grants: `USAGE ON SCHEMA df`,
+column-scoped table privileges, `EXECUTE` on `df.http()` / `df.http_multipart()`
+when `include_http => true`, and `EXECUTE` on `df.grant_usage()`,
+`df.revoke_usage()` and `df.metrics()` when `with_grant => true`. Those five
+functions are the only ones with `PUBLIC` `EXECUTE` revoked at install; every
+other `df.*` function keeps PostgreSQL's default, so **schema `USAGE` is the
+real access gate**. Granting `USAGE ON SCHEMA df` by hand therefore exposes the
+whole DSL surface at once; prefer `df.grant_usage()`.
 
 ### 3.5 Feature-flag interaction
 
@@ -341,11 +357,46 @@ Every HTTP attempt (allowed or blocked) is logged via `ctx.trace_info` with:
 
 - `submitted_by` — the role that called `df.start()` at the time the node was
   created (captured as `current_user` in the DSL and stored in `FunctionNode`)
-- `url` — the requested URL
+- `url` — the requested URL, **redacted** (see below)
 - Block reason tag — `(scheme)`, `(allowlist)`, or `(ip)` in the log prefix
 
 Resolved IP addresses are **not** included in error messages or logs to avoid
 leaking internal network topology to potentially malicious users.
+
+### 7.1 URL redaction
+
+A URL is a credential carrier: an Azure SAS token lives entirely in the query
+string, and `?api-key=` / `?code=` are common elsewhere. The server log is a
+weaker boundary than the database — no RLS, no `pg_durable.retention_days`, and
+frequently a separate shipping and backup path — so `crate::redact::redact_url`
+is applied before any URL reaches a log line or an error string.
+
+| Component | Treatment |
+|-----------|-----------|
+| Scheme, host, port, path | Preserved. The URL is reparsed, so a logged line may be normalized (host lowercased, default port dropped) relative to what the workflow supplied. |
+| Query parameter *names* | Preserved — `sig` and `code` are not themselves secret, and keeping them makes a redacted line diagnosable |
+| Query parameter *values* | Replaced with `<redacted>`, except an allowlist of benign parameters (`api-version`, `apiversion`, `comp`, `restype`) |
+| Bare query token with no `=` | Replaced whole — indistinguishable from a name |
+| `userinfo@` | Replaced with `<redacted>@`, keeping the host |
+| Fragment | Replaced whole |
+| Unparseable input | Replaced whole — redaction fails closed and never echoes back a string it could not parse |
+
+Parsing uses the `url` crate, so IPv6 authorities, percent-encoding, default
+ports and userinfo follow the spec rather than ad-hoc string splitting.
+
+The same redaction is applied to the HTTP client's own error text, which
+interpolates the request URL into messages such as
+`error sending request for url (...)`. This matters because activity errors are
+persisted to `df.nodes.error` and recorded in durable execution history, not
+just written to the log.
+
+Request headers and bodies are never logged.
+
+> **Not covered:** the response body. A workflow's final result is traced on
+> completion, and the full response envelope is stored in `df.nodes.result`. A
+> request whose *response* is a credential — reading a secret from Key Vault, or
+> an OAuth token endpoint — still persists that value. Response-side redaction
+> is tracked separately.
 
 ---
 
