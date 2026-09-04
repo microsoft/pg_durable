@@ -1124,6 +1124,33 @@ mod tests {
     }
 
     #[pg_test]
+    fn loop_continue_on_failure_sql_overload() {
+        use crate::types::LoopConfig;
+
+        let configured =
+            Spi::get_one::<String>("SELECT df.loop('SELECT work()', continue_on_failure => true)")
+                .unwrap()
+                .unwrap();
+        let disabled =
+            Spi::get_one::<String>("SELECT df.loop('SELECT work()', continue_on_failure => false)")
+                .unwrap()
+                .unwrap();
+        let legacy = Spi::get_one::<String>("SELECT df.loop('SELECT work()') LIMIT 1")
+            .unwrap()
+            .unwrap();
+        let configured = Durofut::from_json(&configured);
+        let config: LoopConfig =
+            serde_json::from_str(configured.query.as_deref().unwrap()).unwrap();
+
+        assert_eq!(configured.node_type, "LOOP");
+        assert!(configured.left_node.is_some());
+        assert!(configured.condition_node.is_none());
+        assert!(config.continue_on_failure);
+        assert_eq!(disabled, legacy);
+        assert!(!legacy.contains("continue_on_failure"));
+    }
+
+    #[pg_test]
     fn test_break_creates_break_node() {
         let json = crate::dsl::break_fn(None);
         let fut = Durofut::from_json(&json);
@@ -2089,6 +2116,17 @@ mod tests {
     fn test_explain_expression_loop() {
         let result = crate::explain::explain("df.loop(df.sql('SELECT 1'))");
         assert!(result.contains("LOOP"), "Expected LOOP: {result}");
+        assert!(result.contains("body"), "Expected body section: {result}");
+    }
+
+    #[pg_test]
+    fn test_explain_expression_loop_continue_on_failure() {
+        let result =
+            crate::explain::explain("df.loop(df.sql('SELECT 1'), continue_on_failure => true)");
+        assert!(
+            result.contains("LOOP (infinite, continue on failure)"),
+            "Expected loop failure policy: {result}"
+        );
         assert!(result.contains("body"), "Expected body section: {result}");
     }
 

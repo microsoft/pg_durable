@@ -6,5 +6,11 @@
 -- See docs/upgrade-testing.md for the upgrade-script and backward-compatibility
 -- requirements (Scenario A / B1 / B2).
 --
--- No schema changes yet for 0.2.8. Add DDL below as the 0.2.8 cycle lands
--- extension-schema changes.
+-- pg_durable::dsl::loop
+CREATE FUNCTION df."loop"(
+    "body" TEXT,
+    "continue_on_failure" bool
+) RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'loop_continue_on_failure_wrapper';

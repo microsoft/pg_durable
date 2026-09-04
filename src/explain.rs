@@ -6,7 +6,7 @@
 use pgrx::prelude::*;
 use std::collections::HashMap;
 
-use crate::types::{flatten_graph, Durofut, MaterializedNode};
+use crate::types::{flatten_graph, Durofut, LoopConfig, MaterializedNode};
 
 /// Represents a node for visualization
 #[derive(Debug, Clone)]
@@ -511,12 +511,11 @@ fn render_children(
 ) {
     match node.node_type.as_str() {
         "LOOP" => {
-            // Check for while-condition
             let condition_id = node
                 .query
                 .as_ref()
-                .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
-                .and_then(|v| v["condition_node"].as_str().map(|s| s.to_string()));
+                .and_then(|query| serde_json::from_str::<LoopConfig>(query).ok())
+                .and_then(|config| config.condition_node);
 
             if let Some(ref body_id) = node.left_node {
                 output.push_str(&format!("{prefix}↻ body:\n"));
@@ -702,18 +701,19 @@ fn format_node_display(node: &ExplainNode) -> String {
             format!("SIGNAL '{signal_name}'{timeout_str}{name_suffix}")
         }
         "LOOP" => {
-            // Check if it has a while condition
-            let has_condition = node
+            let config = node
                 .query
                 .as_ref()
-                .and_then(|q| serde_json::from_str::<serde_json::Value>(q).ok())
-                .map(|cfg| cfg["condition_node"].is_string())
-                .unwrap_or(false);
-            if has_condition {
-                format!("LOOP (while){name_suffix}")
+                .and_then(|query| serde_json::from_str::<LoopConfig>(query).ok())
+                .unwrap_or_default();
+            let kind = if config.condition_node.is_some() {
+                "while"
+            } else if config.continue_on_failure {
+                "infinite, continue on failure"
             } else {
-                format!("LOOP (infinite){name_suffix}")
-            }
+                "infinite"
+            };
+            format!("LOOP ({kind}){name_suffix}")
         }
         "BREAK" => {
             // Parse config to get break value

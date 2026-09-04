@@ -1482,6 +1482,18 @@ where
     Ok(value)
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopConfig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub continue_on_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_node: Option<String>,
+}
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as opaque JSON objects, not stored as ID references. Keeping them as
 /// `RawValue` lets each graph level deserialize independently without serde_json's recursion limit.
@@ -1768,6 +1780,24 @@ impl Durofut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn loop_config_defaults_to_fail_fast() {
+        let config: LoopConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.continue_on_failure);
+        assert_eq!(config.condition_node, None);
+    }
+
+    #[test]
+    fn loop_config_round_trips_continue_on_failure() {
+        let config = LoopConfig {
+            continue_on_failure: true,
+            condition_node: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, r#"{"continue_on_failure":true}"#);
+        assert_eq!(serde_json::from_str::<LoopConfig>(&json).unwrap(), config);
+    }
 
     #[test]
     fn durofut_raw_children_preserve_wire_format() {
