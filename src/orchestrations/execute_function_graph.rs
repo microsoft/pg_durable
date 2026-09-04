@@ -20,7 +20,7 @@ use crate::activities;
 use crate::activities::load_function_graph::{TransactionAwareLoadInput, TransactionGraphProbe};
 use crate::types::{
     evaluate_condition, string_map_to_json, substitute_all, substitute_all_raw, FunctionGraph,
-    FunctionInput, FunctionNode, SystemVars,
+    FunctionInput, FunctionNode, LoopConfig, SystemVars,
 };
 
 /// Orchestration name for ExecuteFunctionGraph
@@ -930,8 +930,8 @@ const LOOP_MIN_ITER_DURATION: Duration = Duration::from_secs(1);
 
 /// Maximum loop iterations before the orchestration is forcibly terminated.
 /// This prevents runaway infinite loops from consuming resources indefinitely.
-/// At the minimum 1-second rate limit, this allows ~27 hours of looping.
-const MAX_LOOP_ITERATIONS: u64 = 100_000;
+/// At the minimum 1-second rate limit, this allows over 97 days of looping.
+const MAX_LOOP_ITERATIONS: u64 = 1 << 23;
 
 /// Stamp a loop node's status from its *parent* orchestration.
 ///
@@ -1000,6 +1000,14 @@ async fn fail_loop_child_future(
     Err(NodeError::Failure(error))
 }
 
+fn parse_loop_config(node: &FunctionNode, node_id: &str) -> Result<LoopConfig, String> {
+    match node.query.as_deref() {
+        Some(query) => serde_json::from_str(query)
+            .map_err(|e| format!("LOOP node {node_id}: failed to parse config: {e}")),
+        None => Ok(LoopConfig::default()),
+    }
+}
+
 /// Run one iteration of a loop body (and its optional while-condition).
 ///
 /// Shared by both inline loop paths: a loop at the root of the root orchestration and a
@@ -1012,8 +1020,8 @@ async fn run_loop_iteration(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
     node: &FunctionNode,
-    loop_node_id: &str,
     body_id: &str,
+    condition_node: Option<&str>,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
 ) -> Result<Option<String>, String> {
@@ -1034,46 +1042,71 @@ async fn run_loop_iteration(
         };
 
     // While-condition: if present and false, exit the loop.
-    if let Some(ref config_str) = node.query {
-        let config: serde_json::Value = serde_json::from_str(config_str).map_err(|e| {
-            // M8: Malformed condition config should fail the loop rather than
-            // silently creating an infinite loop without exit condition.
-            format!("LOOP node {loop_node_id}: failed to parse condition config: {e}")
-        })?;
-        if let Some(condition_node_id) = config["condition_node"].as_str() {
-            ctx.trace_info("Evaluating loop condition");
-            let condition_result = match execute_function_node_with_vars(
-                ctx,
-                graph,
-                condition_node_id,
-                results,
-                exec_ctx,
-            )
-            .await
+    if let Some(condition_node_id) = condition_node {
+        ctx.trace_info("Evaluating loop condition");
+        let condition_result =
+            match execute_function_node_with_vars(ctx, graph, condition_node_id, results, exec_ctx)
+                .await
             {
-                Ok(v) => v,
+                Ok(value) => value,
                 Err(NodeError::Break(break_value)) => {
                     store_named_result(ctx, node, &break_value, results, "LOOP");
                     return Ok(Some(break_value));
                 }
-                Err(NodeError::Failure(e)) => return Err(e),
+                Err(NodeError::Failure(error)) => return Err(error),
             };
 
-            // Parse condition result to check truthiness (uses evaluate_condition to extract boolean from SQL result)
-            let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
-            ctx.trace_info(format!(
-                "Loop condition evaluated to: {condition_result} (continue={should_continue})"
-            ));
-
-            if !should_continue {
-                ctx.trace_info("Loop condition false, exiting loop");
-                store_named_result(ctx, node, &body_result, results, "LOOP");
-                return Ok(Some(body_result));
-            }
+        let should_continue = evaluate_condition(&condition_result).unwrap_or(false);
+        ctx.trace_info(format!(
+            "Loop condition evaluated to: {condition_result} (continue={should_continue})"
+        ));
+        if !should_continue {
+            ctx.trace_info("Loop condition false, exiting loop");
+            store_named_result(ctx, node, &body_result, results, "LOOP");
+            return Ok(Some(body_result));
         }
     }
 
     Ok(None)
+}
+
+async fn run_failure_isolated_iteration(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    loop_node_id: &str,
+    body_id: &str,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<Option<String>, String> {
+    let child_input = build_subtree_input(graph, body_id, results, exec_ctx)?;
+    let child_id = subtree_instance_id(ctx, body_id);
+
+    ctx.trace_info(format!(
+        "Starting failure-isolated iteration for LOOP node {loop_node_id} as child {child_id}"
+    ));
+
+    let raw = match ctx
+        .schedule_sub_orchestration_with_id(SUBTREE_NAME, child_id, child_input)
+        .await
+    {
+        Ok(raw) => raw,
+        Err(error) => {
+            ctx.trace_warn(format!(
+                "LOOP node {loop_node_id} iteration failed; continuing: {error}"
+            ));
+            return Ok(None);
+        }
+    };
+
+    match parse_subtree_envelope(&raw, "LOOP iteration", results) {
+        Ok(_) => Ok(None),
+        Err(NodeError::Break(value)) => {
+            store_named_result(ctx, node, &value, results, "LOOP");
+            Ok(Some(value))
+        }
+        Err(NodeError::Failure(error)) => Err(error),
+    }
 }
 
 /// Execute a loop node inline, driving the *current* orchestration's `continue_as_new`.
@@ -1107,6 +1140,7 @@ async fn execute_loop_node(
         .left_node
         .as_ref()
         .ok_or_else(|| format!("LOOP node {node_id} has no body"))?;
+    let config = parse_loop_config(node, node_id).map_err(NodeError::Failure)?;
 
     // Capture the iteration start time so we can rate-limit `continue_as_new`
     // below.  `utc_now()` is duroxide's deterministic clock (recorded in
@@ -1115,12 +1149,25 @@ async fn execute_loop_node(
 
     ctx.trace_info("Executing loop iteration");
 
-    if let Some(final_result) = Box::pin(run_loop_iteration(
-        ctx, graph, node, node_id, body_id, results, exec_ctx,
-    ))
-    .await
-    .map_err(NodeError::Failure)?
-    {
+    let final_result = if config.continue_on_failure {
+        Box::pin(run_failure_isolated_iteration(
+            ctx, graph, node, node_id, body_id, results, exec_ctx,
+        ))
+        .await
+    } else {
+        Box::pin(run_loop_iteration(
+            ctx,
+            graph,
+            node,
+            body_id,
+            config.condition_node.as_deref(),
+            results,
+            exec_ctx,
+        ))
+        .await
+    };
+
+    if let Some(final_result) = final_result.map_err(NodeError::Failure)? {
         return Ok(final_result);
     }
 
@@ -2035,6 +2082,12 @@ mod tests {
         assert!(!graph_retry_budget_exceeded(MAX_GRAPH_RETRY_ATTEMPTS));
         assert!(graph_retry_budget_exceeded(MAX_GRAPH_RETRY_ATTEMPTS + 1));
         assert!(graph_retry_budget_exceeded(u32::MAX));
+    }
+
+    #[test]
+    fn loop_iteration_backstop_is_two_to_the_twenty_third() {
+        assert_eq!(MAX_LOOP_ITERATIONS, 8_388_608);
+        assert!(MAX_LOOP_ITERATIONS.is_power_of_two());
     }
 
     #[test]
