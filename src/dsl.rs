@@ -310,7 +310,7 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 ///
 /// With one argument: repeats the body indefinitely (infinite loop).
 /// With a text condition: repeats while the condition is true (while loop).
-/// With `continue_on_failure => true`: repeats indefinitely after body activity failures.
+/// With `continue_on_failure => true`: continues after body activity failures.
 ///
 /// The body and condition can be either Durofut JSON or plain SQL strings (auto-wrapped).
 /// The condition is evaluated after each iteration (do-while semantics).
@@ -350,14 +350,18 @@ fn build_loop(body: &str, condition: Option<&str>, continue_on_failure: bool) ->
     .to_json()
 }
 
-#[pg_extern(name = "loop", schema = "df")]
+#[pg_extern(name = "_loop_legacy", schema = "df")]
 pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String {
     build_loop(body, condition, false)
 }
 
 #[pg_extern(name = "loop", schema = "df")]
-pub fn loop_continue_on_failure(body: &str, continue_on_failure: bool) -> String {
-    build_loop(body, None, continue_on_failure)
+pub fn loop_with_policy(
+    body: &str,
+    condition: default!(Option<&str>, "NULL"),
+    continue_on_failure: default!(bool, "false"),
+) -> String {
+    build_loop(body, condition, continue_on_failure)
 }
 
 /// Creates a break node that exits the enclosing loop.

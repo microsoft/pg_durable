@@ -264,9 +264,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
 | `df.race(a, b)` | Execute in parallel, first wins | `df.race(fast_query, slow_query)` |
 | `df.if(cond, then, else)` | Conditional branch | `df.if('SELECT true', a, b)` |
-| `df.loop(body)` | Repeat forever | `df.loop(body)` |
-| `df.loop(body, cond)` | Repeat while condition is true | `df.loop(body, 'SELECT count(*) > 0 FROM q')` |
-| `df.loop(body, continue_on_failure => boolean)` | Repeat forever and optionally continue after body activity failures | `df.loop(body, continue_on_failure => true)` |
+| `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)` | Repeat forever or while a condition is true, optionally continuing after body activity failures | `df.loop(body, 'SELECT count(*) > 0 FROM q', continue_on_failure => true)` |
 | `df.break()` | Exit enclosing loop | `df.break()` |
 | `df.break(value)` | Exit loop with **literal** return value (not auto-wrapped as SQL) | `df.break('{"done": true}')` |
 | `df.start(func, label, database)` | Start function (optionally in another database) | `df.start('SELECT 1', 'job')` |
@@ -1181,13 +1179,14 @@ SELECT df.start(
 );
 ```
 
-The first form, `df.loop(body [, condition])`, and `@>` are fail-fast: an
-iteration failure fails the loop. Passing `continue_on_failure => false` is
-equivalent to the default and does not change where the loop is hosted. The
-named boolean overload creates an infinite loop; when it is `true`, each
-iteration runs as a child orchestration and the parent starts the next
-iteration after an application failure returned by a body activity. Malformed
-graph or child data, child-runtime failures, child-ID collisions, and
+The unified signature is
+`df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`.
+By default, it and `@>` are fail-fast: an iteration failure fails the loop.
+Passing `continue_on_failure => false` is equivalent to the default and does
+not change where the loop is hosted. When it is `true`, each iteration runs as
+a child orchestration and the parent starts the next iteration after an
+application failure returned by a body activity. Malformed graph or child
+data, child-runtime failures, child-ID collisions, and
 infrastructure/configuration/poison failures remain fatal.
 
 This is useful for scheduled maintenance such as a pg_textsearch-style indexer:
@@ -1201,6 +1200,16 @@ SELECT df.start(
     ),
     'search-index-maintenance'
 );
+```
+
+The condition and continuation policy can be combined:
+
+```sql
+df.loop(
+    'SELECT process_next_item()',
+    'SELECT count(*) > 0 FROM task_queue',
+    continue_on_failure => true
+)
 ```
 
 The next schedule is computed only after the prior iteration finishes. Slow or

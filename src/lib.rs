@@ -1124,10 +1124,31 @@ mod tests {
     }
 
     #[pg_test]
-    fn loop_continue_on_failure_sql_overload() {
+    fn loop_uses_one_public_signature() {
         use crate::types::LoopConfig;
 
-        let configured =
+        let infinite = Spi::get_one::<String>("SELECT df.loop('SELECT work()')")
+            .unwrap()
+            .unwrap();
+        let conditional =
+            Spi::get_one::<String>("SELECT df.loop('SELECT work()', 'SELECT keep_going()')")
+                .unwrap()
+                .unwrap();
+        let conditional_disabled = Spi::get_one::<String>(
+            "SELECT df.loop(
+                'SELECT work()',
+                'SELECT keep_going()',
+                continue_on_failure => false
+            )",
+        )
+        .unwrap()
+        .unwrap();
+        let legacy_conditional = Spi::get_one::<String>(
+            "SELECT df._loop_legacy('SELECT work()', 'SELECT keep_going()')",
+        )
+        .unwrap()
+        .unwrap();
+        let resilient =
             Spi::get_one::<String>("SELECT df.loop('SELECT work()', continue_on_failure => true)")
                 .unwrap()
                 .unwrap();
@@ -1135,19 +1156,54 @@ mod tests {
             Spi::get_one::<String>("SELECT df.loop('SELECT work()', continue_on_failure => false)")
                 .unwrap()
                 .unwrap();
-        let legacy = Spi::get_one::<String>("SELECT df.loop('SELECT work()') LIMIT 1")
-            .unwrap()
-            .unwrap();
-        let configured = Durofut::from_json(&configured);
-        let config: LoopConfig =
-            serde_json::from_str(configured.query.as_deref().unwrap()).unwrap();
+        let resilient_conditional = Spi::get_one::<String>(
+            "SELECT df.loop(
+                'SELECT work()',
+                'SELECT keep_going()',
+                continue_on_failure => true
+            )",
+        )
+        .unwrap()
+        .unwrap();
 
-        assert_eq!(configured.node_type, "LOOP");
-        assert!(configured.left_node.is_some());
-        assert!(configured.condition_node.is_none());
-        assert!(config.continue_on_failure);
-        assert_eq!(disabled, legacy);
-        assert!(!legacy.contains("continue_on_failure"));
+        let public_count = Spi::get_one::<i64>(
+            "SELECT count(*)
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'df' AND p.proname = 'loop'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(public_count, 1);
+
+        let legacy_exists = Spi::get_one::<bool>(
+            "SELECT to_regprocedure('df._loop_legacy(text,text)') IS NOT NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(legacy_exists);
+
+        let infinite_fut = Durofut::from_json(&infinite);
+        let conditional_fut = Durofut::from_json(&conditional);
+        let resilient_fut = Durofut::from_json(&resilient);
+        let resilient_conditional_fut = Durofut::from_json(&resilient_conditional);
+
+        assert_eq!(disabled, infinite);
+        assert_eq!(conditional, legacy_conditional);
+        assert_eq!(conditional_disabled, legacy_conditional);
+        assert!(infinite_fut.query.is_none());
+        assert!(conditional_fut.query.is_none());
+        assert!(conditional_fut.condition_node.is_some());
+
+        let resilient_config: LoopConfig =
+            serde_json::from_str(resilient_fut.query.as_deref().unwrap()).unwrap();
+        assert!(resilient_config.continue_on_failure);
+        assert!(resilient_fut.condition_node.is_none());
+
+        let combined_config: LoopConfig =
+            serde_json::from_str(resilient_conditional_fut.query.as_deref().unwrap()).unwrap();
+        assert!(combined_config.continue_on_failure);
+        assert!(resilient_conditional_fut.condition_node.is_some());
     }
 
     #[pg_test]

@@ -61,8 +61,8 @@ node_function ::= df.sql( QUERY )
                 | df.race( expression, expression )
                 | df.seq( expression, expression )
                 | df.if( condition, then_expr, else_expr )
-                | df.loop( expression [, condition] )
-                | df.loop( expression, continue_on_failure => BOOLEAN )
+                | df.loop( expression, condition DEFAULT NULL,
+                           continue_on_failure BOOLEAN DEFAULT false )
                 | df.break( [value] )
                 | df.as( expression, NAME )
 ```
@@ -172,6 +172,13 @@ df.loop(
 df.loop(
     df.wait_for_schedule('*/5 * * * *')
     ~> 'CALL refresh_search_index()',
+    continue_on_failure => true
+)
+
+-- Conditional loop with failure-isolated iterations
+df.loop(
+    'SELECT process_item()',
+    'SELECT count(*) > 0 FROM queue',
     continue_on_failure => true
 )
 
@@ -309,4 +316,3 @@ compensate_expr ::= atom_expr [ '<->' atom_expr ]
 ```
 
 See [spec-compensation.md](spec-compensation.md) for details.
-

@@ -6,11 +6,12 @@
 -- See docs/upgrade-testing.md for the upgrade-script and backward-compatibility
 -- requirements (Scenario A / B1 / B2).
 --
--- pg_durable::dsl::loop
+ALTER FUNCTION df."loop"(TEXT, TEXT) RENAME TO "_loop_legacy";
+
 CREATE FUNCTION df."loop"(
     "body" TEXT,
-    "continue_on_failure" bool
+    "condition" TEXT DEFAULT NULL,
+    "continue_on_failure" bool DEFAULT false
 ) RETURNS TEXT
-STRICT
 LANGUAGE c
-AS 'MODULE_PATHNAME', 'loop_continue_on_failure_wrapper';
+AS 'MODULE_PATHNAME', 'loop_with_policy_wrapper';

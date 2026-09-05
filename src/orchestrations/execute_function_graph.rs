@@ -1079,15 +1079,11 @@ async fn fail_loop_child_future(
 }
 
 fn parse_loop_config(node: &FunctionNode, node_id: &str) -> Result<LoopConfig, String> {
-    let config = match node.query.as_deref() {
+    match node.query.as_deref() {
         Some(query) => serde_json::from_str(query)
             .map_err(|e| format!("LOOP node {node_id}: failed to parse config: {e}")),
         None => Ok(LoopConfig::default()),
-    }?;
-    config
-        .validate()
-        .map_err(|e| format!("LOOP node {node_id}: invalid config: {e}"))?;
-    Ok(config)
+    }
 }
 
 /// Run one iteration of a loop body (and its optional while-condition).
@@ -2250,7 +2246,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_config_parser_rejects_continue_on_failure_with_condition() {
+    fn loop_config_parser_accepts_continue_on_failure_with_condition() {
         let node = FunctionNode {
             id: "aaaaaaaa".to_string(),
             node_type: "LOOP".to_string(),
@@ -2262,11 +2258,9 @@ mod tests {
             database: None,
         };
 
-        let error = parse_loop_config(&node, &node.id).unwrap_err();
-        assert!(
-            error.contains("continue_on_failure cannot be combined with condition_node"),
-            "unexpected error: {error}"
-        );
+        let config = parse_loop_config(&node, &node.id).unwrap();
+        assert!(config.continue_on_failure);
+        assert_eq!(config.condition_node.as_deref(), Some("bbbbbbbb"));
     }
 
     #[test]
