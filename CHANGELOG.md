@@ -8,11 +8,13 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
-- **Failure-isolated loops:** `df.loop(body, continue_on_failure => true)` runs
-  each infinite-loop iteration as a child orchestration. An application failure
-  returned by a body activity does not fail the loop parent, which proceeds to
-  the next iteration. Graph, protocol, child-runtime, and infrastructure
-  failures remain fatal.
+- **Failure-isolated loops:** the unified
+  `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`
+  signature supports resilient infinite and conditional loops. With
+  `continue_on_failure => true`, a consumed typed body activity failure skips
+  the condition and starts the next iteration; after a successful body, the
+  condition is evaluated normally. Condition, graph, protocol,
+  unknown child/runtime failures, and infrastructure failures remain fatal.
 
 ### Changed
 

@@ -2196,31 +2196,6 @@ mod tests {
     }
 
     #[test]
-    fn isolated_iteration_continues_typed_application_failure() {
-        let encoded = encode_subtree_application_failure("division by zero");
-        assert_eq!(
-            encoded,
-            r#"{"pg_durable_subtree_failure":"application","message":"division by zero"}"#
-        );
-        let mut results = HashMap::new();
-        assert_eq!(
-            classify_isolated_body_result(Err(encoded), &mut results).unwrap(),
-            FailureIsolatedBodyOutcome::ApplicationFailed
-        );
-    }
-
-    #[test]
-    fn isolated_iteration_propagates_unrecognized_runtime_failure() {
-        let runtime_error =
-            "sub-orchestration instance id 'child' already exists and is terminal".to_string();
-        let mut results = HashMap::new();
-        match classify_isolated_body_result(Err(runtime_error.clone()), &mut results) {
-            Err(NodeError::Failure(error)) => assert_eq!(error, runtime_error),
-            other => panic!("expected runtime failure, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn subtree_instance_ids_are_stable_and_generation_scoped() {
         assert_eq!(
             compose_subtree_instance_id("parent", "1", "deadbeef"),
@@ -2253,14 +2228,15 @@ mod tests {
 
     #[test]
     fn isolated_body_consumes_typed_application_failure() {
+        let encoded = encode_subtree_application_failure("boom");
+        assert_eq!(
+            encoded,
+            r#"{"pg_durable_subtree_failure":"application","message":"boom"}"#
+        );
         let mut results = HashMap::new();
 
         assert_eq!(
-            classify_isolated_body_result(
-                Err(encode_subtree_application_failure("boom")),
-                &mut results,
-            )
-            .unwrap(),
+            classify_isolated_body_result(Err(encoded), &mut results).unwrap(),
             FailureIsolatedBodyOutcome::ApplicationFailed
         );
     }

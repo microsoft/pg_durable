@@ -818,7 +818,7 @@ CREATE OPERATOR @> (
         dsl::join,
         dsl::race,
         dsl::if_fn,
-        dsl::loop_fn
+        dsl::loop_with_policy
     ]
 );
 
@@ -2176,14 +2176,38 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_explain_expression_loop_continue_on_failure() {
-        let result =
-            crate::explain::explain("df.loop(df.sql('SELECT 1'), continue_on_failure => true)");
-        assert!(
-            result.contains("LOOP (infinite, continue on failure)"),
-            "Expected loop failure policy: {result}"
-        );
-        assert!(result.contains("body"), "Expected body section: {result}");
+    fn test_explain_expression_loop_modes_via_sql() {
+        let cases = [
+            ("df.loop(df.sql('SELECT 1'))", "LOOP (infinite)"),
+            (
+                "df.loop(df.sql('SELECT 1'), df.sql('SELECT false'))",
+                "LOOP (while)",
+            ),
+            (
+                "df.loop(df.sql('SELECT 1'), continue_on_failure => true)",
+                "LOOP (infinite, continue on failure)",
+            ),
+            (
+                "df.loop(
+                    df.sql('SELECT 1'),
+                    df.sql('SELECT false'),
+                    continue_on_failure => true
+                )",
+                "LOOP (while, continue on failure)",
+            ),
+        ];
+
+        for (expression, expected) in cases {
+            let result =
+                Spi::get_one::<String>(&format!("SELECT df.explain($dsl${expression}$dsl$)"))
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                result.contains(expected),
+                "Expected {expected} for {expression}: {result}"
+            );
+            assert!(result.contains("body"), "Expected body section: {result}");
+        }
     }
 
     #[pg_test]

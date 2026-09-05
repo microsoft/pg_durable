@@ -205,17 +205,26 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### 0.2.8
 
-- `sql/pg_durable--0.2.7--0.2.8.sql` creates `df.loop(text, boolean)` without
-  dropping or replacing `df.loop(text, text)`.
-- Existing schemas do not expose the boolean overload until
-  `ALTER EXTENSION UPDATE` runs. Until then, the new `.so` retains
-  `loop_fn_wrapper`, so the old text overload remains callable safely.
+- `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
+  `df._loop_legacy(text, text)`, preserving its function OID and dependent
+  objects, then creates the single public
+  `df.loop(text, text DEFAULT NULL, boolean DEFAULT false)` signature.
+  `_loop_legacy` is an internal upgrade-compatibility object, not a user-facing
+  alternative.
+- For Scenario B1, the new `.so` retains `loop_fn_wrapper`, so every supported
+  schema that has not run `ALTER EXTENSION UPDATE` can continue calling its
+  cataloged `df.loop(text, text)` function safely.
+- For Scenario A, fresh installs and upgraded schemas both contain the unified
+  public signature and the internal `_loop_legacy` object, so their schema
+  snapshots remain equal while upgrade dependencies stay attached to the
+  renamed function OID.
 - Existing LOOP graphs have no `continue_on_failure` key and remain inline and
   fail-fast. Only newly constructed opted-in loops schedule an iteration child.
-- Opted-in loops consume only typed application failures returned by body
-  activities. Malformed graph/protocol data, unrecognized child errors,
-  child-ID collisions, and infrastructure/configuration/poison failures remain
-  fatal.
+- For opted-in conditional loops, a successful body is followed by condition
+  evaluation; a consumed typed body activity failure skips the condition and
+  starts the next iteration. Condition failures, malformed graph/protocol
+  data, unrecognized child errors, child-ID collisions, and
+  infrastructure/configuration/poison failures remain fatal.
 - Raises the loop backstop for all loops from 100,000 to 8,388,608 (`2^23`),
   which is about 80 years at five-minute ticks.
 - Replay is unchanged through iteration 100,000. At the old boundary, loops

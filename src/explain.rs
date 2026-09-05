@@ -706,12 +706,11 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .as_ref()
                 .and_then(|query| serde_json::from_str::<LoopConfig>(query).ok())
                 .unwrap_or_default();
-            let kind = if config.condition_node.is_some() {
-                "while"
-            } else if config.continue_on_failure {
-                "infinite, continue on failure"
-            } else {
-                "infinite"
+            let kind = match (config.condition_node.is_some(), config.continue_on_failure) {
+                (false, false) => "infinite",
+                (true, false) => "while",
+                (false, true) => "infinite, continue on failure",
+                (true, true) => "while, continue on failure",
             };
             format!("LOOP ({kind}){name_suffix}")
         }

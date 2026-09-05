@@ -61,8 +61,11 @@ node_function ::= df.sql( QUERY )
                 | df.race( expression, expression )
                 | df.seq( expression, expression )
                 | df.if( condition, then_expr, else_expr )
-                | df.loop( expression, condition DEFAULT NULL,
-                           continue_on_failure BOOLEAN DEFAULT false )
+                | df.loop(
+                      expression
+                      [, expression]
+                      [, continue_on_failure => BOOLEAN]
+                  )
                 | df.break( [value] )
                 | df.as( expression, NAME )
 ```

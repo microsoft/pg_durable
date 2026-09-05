@@ -264,6 +264,7 @@ DECLARE
     condition_failure_status TEXT;
     body_attempts INT;
     condition_checks INT;
+    conditional_explain TEXT;
 BEGIN
     SELECT df.await_instance(instance_id, 30)
     INTO recovered_status
@@ -279,6 +280,10 @@ BEGIN
     INTO body_attempts, condition_checks
     FROM test_conditional_continue_state s;
 
+    SELECT df.explain(instance_id) INTO conditional_explain
+    FROM _conditional_continue_instances
+    WHERE scenario = 'body-recovery';
+
     IF recovered_status IS DISTINCT FROM 'completed' THEN
         RAISE EXCEPTION
             'TEST FAILED [conditional continue]: expected completed, got %',
@@ -293,6 +298,11 @@ BEGIN
         RAISE EXCEPTION
             'TEST FAILED [condition failure]: expected failed, got %',
             condition_failure_status;
+    END IF;
+    IF conditional_explain NOT LIKE '%LOOP (while, continue on failure)%' THEN
+        RAISE EXCEPTION
+            'TEST FAILED [conditional continue]: df.explain() omitted combined loop mode: %',
+            conditional_explain;
     END IF;
 END $$;
 
