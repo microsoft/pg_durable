@@ -160,22 +160,58 @@ df.if_rows('data', 'SELECT $data.id', 'SELECT ''no data''')
 
 ---
 
-### df.loop(body [, condition]) / `@>` operator
+### df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)
 
-Repeats body (forever or while condition is true).
+Repeats `body` forever or while `condition` is true. The supported call shapes
+are:
+
+```sql
+df.loop(body)
+df.loop(body, condition)
+df.loop(body, continue_on_failure => true)
+df.loop(body, condition, continue_on_failure => true)
+```
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
 | `body` | TEXT | ✅ Auto-wrap | Node to repeat |
-| `condition` | TEXT | ✅ Auto-wrap | (Optional) Continue while truthy |
+| `condition` | TEXT | ✅ Auto-wrap | (Optional) Evaluate after a successful body; continue while truthy |
+| `continue_on_failure` | BOOLEAN | ❌ Literal | (Optional) Continue after a body activity failure; default `false` |
 
 ```sql
 -- Infinite loop
 df.loop('SELECT process_item()' ~> df.sleep(1))
-@> ('SELECT process_item()' ~> df.sleep(1))  -- operator (infinite only)
 
--- While loop (function only, no operator)
+-- While loop
 df.loop('SELECT process_item()', 'SELECT count(*) > 0 FROM queue')
+
+-- Infinite loop that continues after body activity failures
+df.loop(
+    'SELECT process_item()' ~> df.sleep(1),
+    continue_on_failure => true
+)
+
+-- Conditional loop that continues after body activity failures
+df.loop(
+    'SELECT process_item()',
+    'SELECT count(*) > 0 FROM queue',
+    continue_on_failure => true
+)
+```
+
+By default, and when `continue_on_failure` is `false`, loop execution is
+fail-fast. When it is `true`, each body iteration runs in a child
+orchestration. After a successful body iteration, the child's results are
+merged into the parent result map before condition evaluation. A consumed
+typed application failure from a body activity skips condition evaluation and
+starts the next iteration. Condition failures, malformed graph or child data,
+unrecognized child errors, child-ID collisions, and child-runtime or
+infrastructure failures remain fatal.
+
+The `@>` operator remains an infinite, fail-fast loop:
+
+```sql
+@> ('SELECT process_item()' ~> df.sleep(1))
 ```
 
 ---
@@ -640,7 +676,7 @@ SELECT df.clearvars();
 | `df.join3(a, b, c)` | `a`, `b`, `c` |
 | `df.race(a, b)` | `a`, `b` |
 | `df.if(cond, then, else)` | `cond`, `then`, `else` |
-| `df.loop(body, cond)` | `body`, `cond` |
+| `df.loop(body, condition, continue_on_failure)` | `body`, `condition` |
 | `df.start(fut, label)` | `fut` |
 | All others | No auto-wrap (literals only) |
 

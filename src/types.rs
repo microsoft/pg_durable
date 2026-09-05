@@ -1482,6 +1482,18 @@ where
     Ok(value)
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopConfig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub continue_on_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_node: Option<String>,
+}
+
 /// The Durofut type represents a "durable future" - a reference to a node in the function graph.
 /// Children are embedded as opaque JSON objects, not stored as ID references. Keeping them as
 /// `RawValue` lets each graph level deserialize independently without serde_json's recursion limit.
@@ -1721,8 +1733,7 @@ impl Durofut {
             ));
         }
 
-        self.reject_embedded_config_children()?;
-        Ok(())
+        self.reject_embedded_config_children()
     }
 
     fn materialized_query(
@@ -1768,6 +1779,62 @@ impl Durofut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn loop_config_defaults_to_fail_fast() {
+        let config: LoopConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.continue_on_failure);
+        assert_eq!(config.condition_node, None);
+    }
+
+    #[test]
+    fn legacy_loop_config_without_query_is_fail_fast() {
+        assert!(!LoopConfig::default().continue_on_failure);
+    }
+
+    #[test]
+    fn conditional_loop_config_without_continue_flag_is_fail_fast() {
+        let config: LoopConfig = serde_json::from_str(r#"{"condition_node":"deadbeef"}"#).unwrap();
+        assert!(!config.continue_on_failure);
+        assert_eq!(config.condition_node.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn loop_config_round_trips_continue_on_failure() {
+        let config = LoopConfig {
+            continue_on_failure: true,
+            condition_node: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, r#"{"continue_on_failure":true}"#);
+        assert_eq!(serde_json::from_str::<LoopConfig>(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn flatten_graph_materializes_continue_on_failure_with_condition() {
+        let sql = Durofut {
+            node_type: "SQL".to_string(),
+            query: Some("SELECT true".to_string()),
+            ..Default::default()
+        };
+        let loop_node = Durofut {
+            node_type: "LOOP".to_string(),
+            left_node: Some(sql.clone().into_raw()),
+            condition_node: Some(sql.into_raw()),
+            query: Some(r#"{"continue_on_failure":true}"#.to_string()),
+            ..Default::default()
+        };
+        let mut ids = ["root", "body-id", "condition-id"]
+            .into_iter()
+            .map(str::to_string);
+        let (_, nodes) = flatten_graph(&loop_node, &mut || Ok(ids.next().unwrap())).unwrap();
+        let materialized_loop = &nodes[0];
+
+        assert_eq!(
+            materialized_loop.query.as_deref(),
+            Some(r#"{"continue_on_failure":true,"condition_node":"condition-id"}"#)
+        );
+    }
 
     #[test]
     fn durofut_raw_children_preserve_wire_format() {

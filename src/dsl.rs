@@ -15,7 +15,7 @@ use crate::client::start_durable_function;
 use crate::types::{
     flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
-    MaterializedNode,
+    LoopConfig, MaterializedNode,
 };
 
 /// Check if we're running inside a workflow context (background worker connection).
@@ -309,7 +309,8 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 /// Creates a loop node.
 ///
 /// With one argument: repeats the body indefinitely (infinite loop).
-/// With two arguments: repeats while the condition is true (while loop).
+/// With a text condition: repeats while the condition is true (while loop).
+/// With `continue_on_failure => true`: continues after body activity failures.
 ///
 /// The body and condition can be either Durofut JSON or plain SQL strings (auto-wrapped).
 /// The condition is evaluated after each iteration (do-while semantics).
@@ -321,19 +322,46 @@ pub fn wait_for_schedule(cron_expr: &str) -> String {
 ///
 /// -- While loop - continues while condition is true
 /// df.loop('SELECT process_item()', 'SELECT count(*) > 0 FROM queue')
+///
+/// -- Infinite loop that continues after a body failure
+/// df.loop(
+///     df.wait_for_schedule('*/5 * * * *') ~> 'SELECT process_batch()',
+///     continue_on_failure => true
+/// )
 /// ```
-#[pg_extern(name = "loop", schema = "df")]
-pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String {
+fn build_loop(body: &str, condition: Option<&str>, continue_on_failure: bool) -> String {
     let body_fut = Durofut::ensure(body);
     let condition_node = condition.map(|cond| Durofut::ensure(cond).into_raw());
+    let query = continue_on_failure.then(|| {
+        serde_json::to_string(&LoopConfig {
+            continue_on_failure: true,
+            condition_node: None,
+        })
+        .expect("LoopConfig serialization cannot fail")
+    });
 
     Durofut {
         node_type: "LOOP".to_string(),
         left_node: Some(body_fut.into_raw()),
         condition_node,
+        query,
         ..Default::default()
     }
     .to_json()
+}
+
+#[pg_extern(name = "_loop_legacy", schema = "df")]
+pub fn loop_fn(body: &str, condition: default!(Option<&str>, "NULL")) -> String {
+    build_loop(body, condition, false)
+}
+
+#[pg_extern(name = "loop", schema = "df")]
+pub fn loop_with_policy(
+    body: &str,
+    condition: default!(Option<&str>, "NULL"),
+    continue_on_failure: default!(bool, "false"),
+) -> String {
+    build_loop(body, condition, continue_on_failure)
 }
 
 /// Creates a break node that exits the enclosing loop.
