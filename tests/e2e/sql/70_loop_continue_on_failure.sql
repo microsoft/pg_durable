@@ -183,6 +183,126 @@ END $$;
 DROP TABLE _nested_continue_instance;
 DROP TABLE test_nested_continue;
 
+DROP FUNCTION IF EXISTS test_conditional_continue_body();
+DROP FUNCTION IF EXISTS test_conditional_continue_condition();
+DROP FUNCTION IF EXISTS test_conditional_continue_failing_condition();
+DROP SEQUENCE IF EXISTS test_conditional_continue_attempt_seq;
+DROP TABLE IF EXISTS test_conditional_continue_state;
+
+CREATE TABLE test_conditional_continue_state (
+    body_attempts INT NOT NULL DEFAULT 0,
+    condition_checks INT NOT NULL DEFAULT 0
+);
+INSERT INTO test_conditional_continue_state DEFAULT VALUES;
+
+-- Sequence values are not rolled back when the first function call raises, allowing the
+-- second successful call to persist the total attempt count in the state table.
+CREATE SEQUENCE test_conditional_continue_attempt_seq;
+
+CREATE FUNCTION test_conditional_continue_body() RETURNS INT
+LANGUAGE plpgsql AS $$
+DECLARE
+    attempts INT;
+BEGIN
+    attempts := nextval('test_conditional_continue_attempt_seq');
+    UPDATE test_conditional_continue_state
+    SET body_attempts = attempts;
+
+    IF attempts = 1 THEN
+        RAISE EXCEPTION 'transient body failure';
+    END IF;
+    RETURN attempts;
+END
+$$;
+
+CREATE FUNCTION test_conditional_continue_condition() RETURNS BOOLEAN
+LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE test_conditional_continue_state
+    SET condition_checks = condition_checks + 1;
+    RETURN false;
+END
+$$;
+
+CREATE FUNCTION test_conditional_continue_failing_condition() RETURNS BOOLEAN
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'fatal condition failure';
+END
+$$;
+
+CREATE TEMP TABLE _conditional_continue_instances (
+    scenario TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL
+);
+
+INSERT INTO _conditional_continue_instances
+SELECT 'body-recovery',
+       df.start(
+           df.loop(
+               'SELECT test_conditional_continue_body()',
+               'SELECT test_conditional_continue_condition()',
+               continue_on_failure => true
+           ),
+           'test-conditional-loop-continues-after-body-failure'
+       );
+
+INSERT INTO _conditional_continue_instances
+SELECT 'condition-failure',
+       df.start(
+           df.loop(
+               'SELECT 42',
+               'SELECT test_conditional_continue_failing_condition()',
+               continue_on_failure => true
+           ),
+           'test-conditional-loop-condition-failure-is-fatal'
+       );
+
+DO $$
+DECLARE
+    recovered_status TEXT;
+    condition_failure_status TEXT;
+    body_attempts INT;
+    condition_checks INT;
+BEGIN
+    SELECT df.await_instance(instance_id, 30)
+    INTO recovered_status
+    FROM _conditional_continue_instances
+    WHERE scenario = 'body-recovery';
+
+    SELECT df.await_instance(instance_id, 30)
+    INTO condition_failure_status
+    FROM _conditional_continue_instances
+    WHERE scenario = 'condition-failure';
+
+    SELECT s.body_attempts, s.condition_checks
+    INTO body_attempts, condition_checks
+    FROM test_conditional_continue_state s;
+
+    IF recovered_status IS DISTINCT FROM 'completed' THEN
+        RAISE EXCEPTION
+            'TEST FAILED [conditional continue]: expected completed, got %',
+            recovered_status;
+    END IF;
+    IF body_attempts <> 2 OR condition_checks <> 1 THEN
+        RAISE EXCEPTION
+            'TEST FAILED [conditional continue]: expected body/condition = 2/1, got %/%',
+            body_attempts, condition_checks;
+    END IF;
+    IF condition_failure_status IS DISTINCT FROM 'failed' THEN
+        RAISE EXCEPTION
+            'TEST FAILED [condition failure]: expected failed, got %',
+            condition_failure_status;
+    END IF;
+END $$;
+
+DROP TABLE _conditional_continue_instances;
+DROP FUNCTION test_conditional_continue_body();
+DROP FUNCTION test_conditional_continue_condition();
+DROP FUNCTION test_conditional_continue_failing_condition();
+DROP SEQUENCE test_conditional_continue_attempt_seq;
+DROP TABLE test_conditional_continue_state;
+
 CREATE TEMP TABLE _cancel_continue_instance (instance_id TEXT);
 
 INSERT INTO _cancel_continue_instance(instance_id)

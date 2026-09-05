@@ -344,15 +344,26 @@ fn contextualize_subtree_failure(context: &str, error: String) -> NodeError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum IsolatedIterationFailure {
-    Continue(String),
-    Propagate(String),
+enum FailureIsolatedBodyOutcome {
+    Succeeded(String),
+    ApplicationFailed,
+    Break(String),
 }
 
-fn classify_isolated_iteration_failure(error: String) -> IsolatedIterationFailure {
-    match decode_subtree_application_failure(&error) {
-        Some(message) => IsolatedIterationFailure::Continue(message),
-        None => IsolatedIterationFailure::Propagate(error),
+fn classify_isolated_body_result(
+    result: Result<String, String>,
+    results: &mut HashMap<String, String>,
+) -> Result<FailureIsolatedBodyOutcome, NodeError> {
+    match result {
+        Ok(raw) => match parse_subtree_envelope(&raw, "LOOP iteration", results) {
+            Ok(body_result) => Ok(FailureIsolatedBodyOutcome::Succeeded(body_result)),
+            Err(NodeError::Break(value)) => Ok(FailureIsolatedBodyOutcome::Break(value)),
+            Err(error) => Err(error),
+        },
+        Err(error) => match decode_subtree_application_failure(&error) {
+            Some(_) => Ok(FailureIsolatedBodyOutcome::ApplicationFailed),
+            None => Err(NodeError::Failure(error)),
+        },
     }
 }
 
@@ -1120,7 +1131,27 @@ async fn run_loop_iteration(
             Err(NodeError::Failure(error)) => return Err(NodeError::Failure(error)),
         };
 
-    // While-condition: if present and false, exit the loop.
+    Box::pin(evaluate_loop_condition(
+        ctx,
+        graph,
+        node,
+        condition_node,
+        body_result,
+        results,
+        exec_ctx,
+    ))
+    .await
+}
+
+async fn evaluate_loop_condition(
+    ctx: &OrchestrationContext,
+    graph: &FunctionGraph,
+    node: &FunctionNode,
+    condition_node: Option<&str>,
+    body_result: String,
+    results: &mut HashMap<String, String>,
+    exec_ctx: &ExecutionContext,
+) -> Result<Option<String>, NodeError> {
     if let Some(condition_node_id) = condition_node {
         ctx.trace_info("Evaluating loop condition");
         let condition_result =
@@ -1152,15 +1183,14 @@ async fn run_loop_iteration(
     Ok(None)
 }
 
-async fn run_failure_isolated_iteration(
+async fn run_failure_isolated_body(
     ctx: &OrchestrationContext,
     graph: &FunctionGraph,
-    node: &FunctionNode,
     loop_node_id: &str,
     body_id: &str,
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
-) -> Result<Option<String>, NodeError> {
+) -> Result<FailureIsolatedBodyOutcome, NodeError> {
     let child_input = build_subtree_input(graph, body_id, results, exec_ctx)?;
     let child_id = subtree_instance_id(ctx, body_id);
 
@@ -1168,32 +1198,17 @@ async fn run_failure_isolated_iteration(
         "Starting failure-isolated iteration for LOOP node {loop_node_id} as child {child_id}"
     ));
 
-    let raw = match ctx
+    let child_result = ctx
         .schedule_sub_orchestration_with_id(SUBTREE_NAME, child_id, child_input)
-        .await
-    {
-        Ok(raw) => raw,
-        Err(error) => match classify_isolated_iteration_failure(error) {
-            IsolatedIterationFailure::Continue(error) => {
-                ctx.trace_warn(format!(
-                    "LOOP node {loop_node_id} iteration application failure; continuing: {error}"
-                ));
-                return Ok(None);
-            }
-            IsolatedIterationFailure::Propagate(error) => {
-                return Err(NodeError::Failure(error));
-            }
-        },
-    };
+        .await;
 
-    match parse_subtree_envelope(&raw, "LOOP iteration", results) {
-        Ok(_) => Ok(None),
-        Err(NodeError::Break(value)) => {
-            store_named_result(ctx, node, &value, results, "LOOP");
-            Ok(Some(value))
-        }
-        Err(error) => Err(error),
+    let outcome = classify_isolated_body_result(child_result, results)?;
+    if outcome == FailureIsolatedBodyOutcome::ApplicationFailed {
+        ctx.trace_warn(format!(
+            "LOOP node {loop_node_id} iteration application failure; continuing"
+        ));
     }
+    Ok(outcome)
 }
 
 /// Execute a loop node inline, driving the *current* orchestration's `continue_as_new`.
@@ -1237,10 +1252,29 @@ async fn execute_loop_node(
     ctx.trace_info("Executing loop iteration");
 
     let final_result = if config.continue_on_failure {
-        Box::pin(run_failure_isolated_iteration(
-            ctx, graph, node, node_id, body_id, results, exec_ctx,
+        match Box::pin(run_failure_isolated_body(
+            ctx, graph, node_id, body_id, results, exec_ctx,
         ))
-        .await
+        .await?
+        {
+            FailureIsolatedBodyOutcome::Succeeded(body_result) => {
+                Box::pin(evaluate_loop_condition(
+                    ctx,
+                    graph,
+                    node,
+                    config.condition_node.as_deref(),
+                    body_result,
+                    results,
+                    exec_ctx,
+                ))
+                .await?
+            }
+            FailureIsolatedBodyOutcome::ApplicationFailed => None,
+            FailureIsolatedBodyOutcome::Break(value) => {
+                store_named_result(ctx, node, &value, results, "LOOP");
+                Some(value)
+            }
+        }
     } else {
         Box::pin(run_loop_iteration(
             ctx,
@@ -1251,10 +1285,10 @@ async fn execute_loop_node(
             results,
             exec_ctx,
         ))
-        .await
+        .await?
     };
 
-    if let Some(final_result) = final_result? {
+    if let Some(final_result) = final_result {
         return Ok(final_result);
     }
 
@@ -2162,6 +2196,31 @@ mod tests {
     }
 
     #[test]
+    fn isolated_iteration_continues_typed_application_failure() {
+        let encoded = encode_subtree_application_failure("division by zero");
+        assert_eq!(
+            encoded,
+            r#"{"pg_durable_subtree_failure":"application","message":"division by zero"}"#
+        );
+        let mut results = HashMap::new();
+        assert_eq!(
+            classify_isolated_body_result(Err(encoded), &mut results).unwrap(),
+            FailureIsolatedBodyOutcome::ApplicationFailed
+        );
+    }
+
+    #[test]
+    fn isolated_iteration_propagates_unrecognized_runtime_failure() {
+        let runtime_error =
+            "sub-orchestration instance id 'child' already exists and is terminal".to_string();
+        let mut results = HashMap::new();
+        match classify_isolated_body_result(Err(runtime_error.clone()), &mut results) {
+            Err(NodeError::Failure(error)) => assert_eq!(error, runtime_error),
+            other => panic!("expected runtime failure, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn subtree_instance_ids_are_stable_and_generation_scoped() {
         assert_eq!(
             compose_subtree_instance_id("parent", "1", "deadbeef"),
@@ -2174,25 +2233,57 @@ mod tests {
     }
 
     #[test]
-    fn isolated_iteration_continues_typed_application_failure() {
-        let encoded = encode_subtree_application_failure("division by zero");
+    fn isolated_body_success_returns_result_and_merges_results() {
+        let raw = envelope_json(
+            Some("Normal"),
+            "42",
+            serde_json::json!({"body_result": "stored"}),
+        );
+        let mut results = HashMap::new();
+
         assert_eq!(
-            encoded,
-            r#"{"pg_durable_subtree_failure":"application","message":"division by zero"}"#
+            classify_isolated_body_result(Ok(raw), &mut results).unwrap(),
+            FailureIsolatedBodyOutcome::Succeeded("42".to_string())
         );
         assert_eq!(
-            classify_isolated_iteration_failure(encoded),
-            IsolatedIterationFailure::Continue("division by zero".to_string())
+            results.get("body_result").map(String::as_str),
+            Some("stored")
         );
     }
 
     #[test]
-    fn isolated_iteration_propagates_unrecognized_runtime_failure() {
-        let runtime_error =
-            "sub-orchestration instance id 'child' already exists and is terminal".to_string();
+    fn isolated_body_consumes_typed_application_failure() {
+        let mut results = HashMap::new();
+
         assert_eq!(
-            classify_isolated_iteration_failure(runtime_error.clone()),
-            IsolatedIterationFailure::Propagate(runtime_error)
+            classify_isolated_body_result(
+                Err(encode_subtree_application_failure("boom")),
+                &mut results,
+            )
+            .unwrap(),
+            FailureIsolatedBodyOutcome::ApplicationFailed
+        );
+    }
+
+    #[test]
+    fn isolated_body_propagates_unrecognized_runtime_failure() {
+        let mut results = HashMap::new();
+
+        match classify_isolated_body_result(Err("instance id collision".to_string()), &mut results)
+        {
+            Err(NodeError::Failure(error)) => assert_eq!(error, "instance id collision"),
+            other => panic!("expected runtime failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn isolated_body_preserves_break_value() {
+        let raw = envelope_json(Some("Break"), r#"{"status":"done"}"#, serde_json::json!({}));
+        let mut results = HashMap::new();
+
+        assert_eq!(
+            classify_isolated_body_result(Ok(raw), &mut results).unwrap(),
+            FailureIsolatedBodyOutcome::Break(r#"{"status":"done"}"#.to_string())
         );
     }
 
