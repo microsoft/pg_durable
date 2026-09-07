@@ -1202,18 +1202,33 @@ the condition is skipped and the parent starts the next iteration. Condition
 failures, malformed graph or child data, unrecognized child errors, child-ID
 collisions, and child-runtime or infrastructure failures remain fatal.
 
-This is useful for scheduled maintenance such as a pg_textsearch-style indexer:
+This is useful for scheduled maintenance such as a pg_textsearch-style
+per-index compactor. A simplified periodic backstop repeatedly runs one
+compaction step until the index has no more reducible debt:
 
 ```sql
 SELECT df.start(
     df.loop(
         df.wait_for_schedule('*/5 * * * *')
-        ~> 'CALL refresh_search_index()',
+        ~> df.loop(
+            $$SELECT public.bm25_compact_step(
+                'documents_idx'::regclass
+            ) AS ran$$
+            |=> 'step'
+            ~> df.if(
+                'SELECT $step.ran',
+                'SELECT true',
+                df.break()
+            )
+        ),
         continue_on_failure => true
     ),
-    'search-index-maintenance'
+    'documents-index-compaction'
 );
 ```
+
+The managed pg_textsearch workflow also validates the physical index identity
+before each cascade, so replacing or dropping the index stops stale work.
 
 The condition and continuation policy can be combined:
 
