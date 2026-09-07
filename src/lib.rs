@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn loop_uses_one_public_signature() {
+    fn loop_call_forms() {
         use crate::types::LoopConfig;
 
         let infinite = Spi::get_one::<String>("SELECT df.loop('SELECT work()')")
