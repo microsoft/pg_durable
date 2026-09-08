@@ -261,10 +261,10 @@ mod tests {
                 .unwrap();
             let error = read_body(response).await.err().unwrap();
             server.join().unwrap();
-            assert_eq!(
-                error,
-                "Failed to read response body: error decoding response body"
-            );
+            assert!(error.starts_with("Failed to read response body:"), "{error}");
+            assert!(error.contains("error decoding response body"), "{error}");
+            assert!(!error.contains("FIRST"), "{error}");
+            assert!(!error.contains("SEKRIT"), "{error}");
         }
     }
 

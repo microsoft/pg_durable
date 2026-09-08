@@ -468,8 +468,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
 
     match &function_result {
         Ok(result) => {
-            // FIXME: This might be tracing sensitive data. Should it be fixed?
-            // It's a larger behavioral change than the rest of this work.
+            // Logs the final return value (may contain sensitive data; see USER_GUIDE.md#what-reaches-the-server-log).
             ctx.trace_info(format!("Function completed with result: {result}"));
             finalize_instance_status(&ctx, &input.instance_id, "completed").await;
         }
