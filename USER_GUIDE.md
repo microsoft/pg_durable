@@ -1069,11 +1069,8 @@ These read-only variables are automatically available during durable function ex
 
 ### Variables and secrets
 
-Using `df.setvar()` to hold an API key is a natural move, and it genuinely helps — but only in
-one place. Here is exactly what it does and does not protect, so you can make an informed
-choice.
-
-Given this pattern:
+Variables keep credentials out of node templates, but do not provide secret storage.
+For example:
 
 ```sql
 SELECT df.setvar('api_key', '<credential>');
@@ -1083,15 +1080,15 @@ SELECT df.start(df.http('https://api.example.com/users', 'GET', NULL,
 
 | Location | Holds the credential? | Notes |
 |----------|----------------------|-------|
-| `df.nodes.query` | No — stores the literal `{api_key}` | This is the one thing `{var}` genuinely buys you. Substitution happens at execution time, not when the node is created. |
+| `df.nodes.query` | No — stores the literal `{api_key}` | Substitution happens at execution time, not when the node is created. |
 | `df.vars.value` | **Yes, plaintext** | RLS isolates it from other users. It is *not* encrypted, and it is not hidden from a superuser or the table owner. |
 | Durable execution history | **Yes, plaintext** | `df.start()` snapshots every variable you own into the orchestration input, and the substituted header is recorded as the HTTP step's input. Parallel branches and each loop iteration re-record it. |
 | WAL, backups, replicas | **Yes** | Follows every write above, typically with a longer retention than `pg_durable.retention_days`. |
-| Server log | URLs are redacted; SQL text depends on `pg_durable.log_workflow_sql` | See [What reaches the server log](#what-reaches-the-server-log). |
-| `pg_stat_activity`, `pg_stat_statements` | Only if you inline the literal | `SELECT df.setvar('api_key', '<credential>')` is itself a statement. Bind it as a parameter, or use `\getenv` in psql, rather than typing the value into SQL. |
+| Server log | May contain it | Request diagnostics redact URLs, but SQL, errors and results can still expose values. See [What reaches the server log](#what-reaches-the-server-log). |
+| Query monitoring and PostgreSQL logs | Depends on the statement and server settings | Bind parameters avoid inlining the value in the `df.setvar()` statement. Client-side `psql` variable expansion, including values read with `\getenv`, does not provide that protection. Values later substituted into workflow SQL become literal query text. |
 
-Writing the credential directly into `df.http(...)` instead of using a variable is strictly
-worse: it adds `df.nodes.query` to that list without removing anything from it.
+Inlining a credential in `df.http(...)` also stores it in `df.nodes.query`; it does not
+avoid exposure in that workflow's execution history.
 
 Practical guidance:
 
@@ -2117,25 +2114,24 @@ different security boundary from the database: RLS does not apply to it, it is n
 
 | Trace | Contents |
 |-------|----------|
-| HTTP and multipart requests | Method, scheme, host, port and path. **Query-string values, userinfo and the URL fragment are redacted**, so an Azure SAS token or `?api-key=` does not reach the log. Parameter *names* are kept so the line stays diagnosable. |
-| HTTP request errors | Same redaction, applied to the message text as well, since the HTTP client interpolates the request URL into its own errors. |
-| HTTP and multipart request headers and bodies | Never logged. |
-| SQL nodes | The submitting role and target database, plus the fully-substituted SQL text when `pg_durable.log_workflow_sql` is on. |
-| Workflow result | The final return value is logged on completion. For a workflow ending in an HTTP step this includes the response body. |
+| HTTP and multipart requests | Method, scheme, host, port and path. **Query-string values, userinfo and the URL fragment are redacted** in request diagnostics. Parameter *names* are kept. Do not put credentials in paths or parameter names. |
+| HTTP request errors | Request URLs are removed from HTTP client errors; explicitly reported URLs are redacted as above. Response bodies included in 5xx errors are not redacted. |
+| HTTP and multipart request headers and bodies | Not directly included in request traces. An endpoint can echo them in its response. |
+| SQL nodes | The submitting role and any explicit target database, plus the fully-substituted SQL text when `pg_durable.log_workflow_sql` is on. |
+| Workflow result | The final return value is logged on completion. For a workflow ending in an HTTP step this includes response headers and body, without redaction. |
 
-`pg_durable.log_workflow_sql` (default `on`) is what gates the SQL text. SQL cannot be
-redacted heuristically — a variable value spliced into a query is indistinguishable from the
-query itself — so this is an on/off switch rather than a masking rule. It is read by the
-background worker, so like the other worker GUCs it is Postmaster-context and needs a restart:
+`pg_durable.log_workflow_sql` (default `on`) controls SQL text in the worker's execution
+trace. SQL cannot be reliably redacted after substitution, so this is an on/off switch.
+It requires a server restart:
 
 ```ini
 # postgresql.conf — omit workflow SQL text from the log
 pg_durable.log_workflow_sql = off
 ```
 
-Turning it off also removes the primary record of what workflows actually executed, which is the
-first thing an incident investigation looks for. Leave it on unless the server log is less well
-protected than the database, and prefer keeping credentials out of SQL in the first place.
+Turning it off keeps the submitting role and any explicit target database in the trace, but removes
+statement text. It does not suppress workflow results, error messages, or PostgreSQL's
+own statement logging. Keep credentials out of SQL even when this setting is off.
 
 ### Security Best Practices
 

@@ -9,33 +9,16 @@
 //! unredacted URL lands in the PostgreSQL server log in cleartext — a sink with
 //! no RLS, no `pg_durable.retention_days`, and often a different backup path
 //! than the database itself. Error strings are worse still: they are persisted
-//! to `df.nodes.error` and into duroxide history.
+//! to `df.nodes.result` and into duroxide history.
 //!
 //! Redaction is deliberately lossy and fails closed: anything that cannot be
 //! parsed as a URL is replaced wholesale rather than echoed back.
 
-use url::Url;
+use url::{Position, Url};
 
 /// Stand-in for any elided value. Deliberately not a fixed-width mask, so the
 /// length of the original is not disclosed.
 pub const REDACTED: &str = "<redacted>";
-
-/// Query parameters whose values carry no credential and are worth keeping for
-/// diagnosis. Matched case-insensitively against the parameter name.
-const SAFE_QUERY_PARAMS: &[&str] = &["api-version", "apiversion", "comp", "restype"];
-
-/// Characters that cannot appear inside a URL, used to find where an embedded
-/// URL ends when scanning free-form text.
-///
-/// `{` and `}` are deliberately absent so that a URL still carrying a `{var}`
-/// placeholder is scanned as a single token rather than being cut in half.
-const URL_TERMINATORS: &[char] = &['"', '\'', '<', '>', '\\', '^', '`', '|', '(', ')', ','];
-
-fn is_safe_query_param(name: &str) -> bool {
-    SAFE_QUERY_PARAMS
-        .iter()
-        .any(|safe| name.eq_ignore_ascii_case(safe))
-}
 
 /// Redact the values in a raw query string, preserving parameter names.
 ///
@@ -52,11 +35,7 @@ fn redact_query(query: &str) -> String {
             out.push('&');
         }
         match pair.split_once('=') {
-            // An empty value has nothing to elide, and leaving it alone is what
-            // makes redaction idempotent: re-redacting `sig=<redacted>` must not
-            // append a second marker.
             Some((_, "")) => out.push_str(pair),
-            Some((name, _)) if is_safe_query_param(name) => out.push_str(pair),
             Some((name, _)) => {
                 out.push_str(name);
                 out.push('=');
@@ -72,7 +51,7 @@ fn redact_query(query: &str) -> String {
 /// Redact the credential-bearing parts of a single URL.
 ///
 /// Preserved: scheme, host, port, path. Elided: userinfo, every query-parameter
-/// value except [`SAFE_QUERY_PARAMS`], and the fragment.
+/// value, and the fragment.
 ///
 /// The output is rebuilt from the parsed components rather than by mutating the
 /// [`Url`], because the setters percent-encode `<` and `>` and would turn the
@@ -84,8 +63,7 @@ pub fn redact_url(url: &str) -> String {
     };
 
     let mut out = String::with_capacity(url.len());
-    out.push_str(parsed.scheme());
-    out.push_str("://");
+    out.push_str(&parsed[..Position::BeforeUsername]);
 
     // Keep only the fact that credentials were present, not which.
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -93,15 +71,7 @@ pub fn redact_url(url: &str) -> String {
         out.push('@');
     }
 
-    if let Some(host) = parsed.host_str() {
-        out.push_str(host);
-    }
-    if let Some(port) = parsed.port() {
-        out.push(':');
-        out.push_str(&port.to_string());
-    }
-
-    out.push_str(parsed.path());
+    out.push_str(&parsed[Position::BeforeHost..Position::AfterPath]);
 
     if let Some(query) = parsed.query().filter(|q| !q.is_empty()) {
         out.push('?');
@@ -113,52 +83,6 @@ pub fn redact_url(url: &str) -> String {
         out.push_str(REDACTED);
     }
 
-    out
-}
-
-/// Redact every URL embedded in free-form text.
-///
-/// Needed because `reqwest::Error`'s `Display` interpolates the request URL, so
-/// wrapping a transport error without scrubbing it would reintroduce the very
-/// query string [`redact_url`] was applied to remove.
-///
-/// Locating a URL inside prose is necessarily heuristic — a parser can validate
-/// a candidate but cannot tell you where one ends in surrounding text. So this
-/// only delimits candidates; [`redact_url`] does the parsing, and a candidate it
-/// rejects is replaced wholesale.
-pub fn redact_urls_in(text: &str) -> String {
-    if !text.contains("://") {
-        return text.to_string();
-    }
-
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-
-    while let Some(sep) = rest.find("://") {
-        // Walk back over the scheme, which must be alphanumeric with `+-.`.
-        let scheme_start = rest[..sep]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'))
-            .map_or(0, |i| i + 1);
-
-        if scheme_start == sep {
-            // `://` with no scheme in front of it — not a URL.
-            out.push_str(&rest[..sep + 3]);
-            rest = &rest[sep + 3..];
-            continue;
-        }
-
-        out.push_str(&rest[..scheme_start]);
-
-        let candidate = &rest[scheme_start..];
-        let end = candidate
-            .find(|c: char| c.is_whitespace() || URL_TERMINATORS.contains(&c))
-            .unwrap_or(candidate.len());
-
-        out.push_str(&redact_url(&candidate[..end]));
-        rest = &candidate[end..];
-    }
-
-    out.push_str(rest);
     out
 }
 
@@ -179,19 +103,19 @@ mod tests {
     }
 
     #[test]
-    fn keeps_safe_query_params() {
-        assert_eq!(
-            redact_url("https://v.vault.azure.net/secrets/s?api-version=7.4&code=SEKRIT"),
-            "https://v.vault.azure.net/secrets/s?api-version=7.4&code=<redacted>"
-        );
-    }
-
-    #[test]
-    fn safe_query_param_match_is_case_insensitive() {
-        assert_eq!(
-            redact_url("https://h/p?API-Version=7.4"),
-            "https://h/p?API-Version=7.4"
-        );
+    fn redacts_query_values_regardless_of_parameter_name() {
+        for name in [
+            "api-version",
+            "API-Version",
+            "apiversion",
+            "comp",
+            "restype",
+        ] {
+            assert_eq!(
+                redact_url(&format!("https://h/p?{name}=SEKRIT")),
+                format!("https://h/p?{name}=<redacted>")
+            );
+        }
     }
 
     #[test]
@@ -223,8 +147,11 @@ mod tests {
     }
 
     #[test]
-    fn redacts_bare_query_token_whole() {
-        assert_eq!(redact_url("https://h/p?SEKRIT"), "https://h/p?<redacted>");
+    fn preserves_urls_without_authority() {
+        assert_eq!(
+            redact_url("mailto:alice@example.com?body=SEKRIT#SEKRIT"),
+            "mailto:alice@example.com?body=<redacted>#<redacted>"
+        );
     }
 
     #[test]
@@ -271,7 +198,7 @@ mod tests {
         // and the path is percent-encoded, so the mistake is still diagnosable.
         assert_eq!(
             redact_url("https://{kv_host}/secrets/{name}?api-version=7.4"),
-            "https://{kv_host}/secrets/%7Bname%7D?api-version=7.4"
+            "https://{kv_host}/secrets/%7Bname%7D?api-version=<redacted>"
         );
     }
 
@@ -290,44 +217,45 @@ mod tests {
     }
 
     #[test]
-    fn redacts_url_embedded_in_error_text() {
-        let scrubbed = redact_urls_in(
-            "error sending request for url (https://h/p?sig=SEKRIT): connection closed",
-        );
-        assert_eq!(
-            scrubbed,
-            "error sending request for url (https://h/p?sig=<redacted>): connection closed"
-        );
-        assert!(!scrubbed.contains("SEKRIT"));
+    fn redacts_query_values_containing_url_punctuation() {
+        for punctuation in [",", "(", ")", "'", "<", ">", "\\", "^", "`", "|", "\""] {
+            assert_eq!(
+                redact_url(&format!("https://h/p?sig=FIRST{punctuation}LAST")),
+                "https://h/p?sig=<redacted>"
+            );
+        }
     }
 
     #[test]
-    fn redacts_every_url_in_text() {
-        let scrubbed = redact_urls_in("from https://a/x?k=S1 to https://b/y?k=S2 failed");
-        assert!(!scrubbed.contains("S1"));
-        assert!(!scrubbed.contains("S2"));
-        assert_eq!(
-            scrubbed,
-            "from https://a/x?k=<redacted> to https://b/y?k=<redacted> failed"
-        );
-    }
+    fn reqwest_errors_can_remove_sensitive_urls() {
+        let url = Url::parse("https://user:password@h/p?sig=FIRST,(LAST)#SEKRIT").unwrap();
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url.clone())
+            .header("invalid header name", "value")
+            .build()
+            .unwrap_err()
+            .with_url(url);
+        assert!(error.to_string().contains("FIRST,(LAST)"));
 
-    #[test]
-    fn leaves_text_without_urls_untouched() {
-        assert_eq!(redact_urls_in("plain error, no url"), "plain error, no url");
-        assert_eq!(redact_urls_in(""), "");
-    }
-
-    #[test]
-    fn tolerates_bare_scheme_separator() {
-        assert_eq!(redact_urls_in("weird :// text"), "weird :// text");
+        let error = error.without_url();
+        assert!(error.is_builder());
+        assert!(error.url().is_none());
+        assert_eq!(error.to_string(), "builder error");
     }
 
     #[test]
     fn redaction_is_idempotent() {
-        let once = redact_url("https://h/p?sig=SEKRIT");
-        assert_eq!(redact_url(&once), once);
-        let once_in_text = redact_urls_in("url (https://h/p?sig=SEKRIT)");
-        assert_eq!(redact_urls_in(&once_in_text), once_in_text);
+        for url in [
+            "https://h/p?sig=SEKRIT",
+            "https://user:pa%40ss@h/p?sig=SEKRIT#SEKRIT",
+            "https://h/p?SEKRIT",
+            "mailto:alice@example.com?body=SEKRIT#SEKRIT",
+        ] {
+            let once = redact_url(url);
+            assert_eq!(redact_url(&once), once);
+        }
     }
 }

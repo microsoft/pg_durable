@@ -767,15 +767,13 @@ Controls whether the background worker writes the SQL text of an executed workfl
 | Default | `on` |
 | Context | `POSTMASTER` (set in `postgresql.conf`; requires restart) |
 
-The SQL is logged *after* variable substitution, so a credential held in a `df.vars` variable and spliced into a query reaches the server log in cleartext. Unlike a URL query string — which pg_durable redacts unconditionally — SQL cannot be masked heuristically, because a substituted value is indistinguishable from the surrounding statement. This GUC is therefore an on/off switch.
+The SQL is logged *after* variable substitution, so credentials substituted into a query reach the server log in cleartext. SQL cannot be reliably redacted after substitution, so this is an on/off switch.
 
 ```ini
 # postgresql.conf
 pg_durable.log_workflow_sql = off
 ```
 
-The value is read by the background worker, which does not process a configuration reload, so a restart is required — the same as `pg_durable.retention_days` and the connection-limit GUCs.
+Turning it off keeps the submitting role and any explicit target database in the worker trace but drops the statement text. It does not suppress workflow results or error messages, which can also contain sensitive data.
 
-Turning it off keeps the submitting role and target database in the log but drops the statement text. That also removes the primary record of what workflows executed, which is usually the first thing an incident investigation looks for — prefer keeping credentials out of SQL over disabling the log. See [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
-
-This trace is written by the background worker's own logging, not by PostgreSQL statement logging, so `log_statement` neither enables nor suppresses it.
+PostgreSQL's own statement logging is independent: settings such as `log_statement` and `log_min_duration_statement` can still log executed SQL when this GUC is off. Keep credentials out of SQL even with this setting disabled. See [What reaches the server log](../USER_GUIDE.md#what-reaches-the-server-log) and [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).

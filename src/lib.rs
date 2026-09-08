@@ -243,7 +243,7 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_bool_guc(
         c"pg_durable.log_workflow_sql",
         c"Log the SQL text of executed workflow nodes to the worker log",
-        c"The SQL is logged after variable substitution, so any credential held in a df.vars variable and spliced into a query is written to the PostgreSQL server log in cleartext. Set to off in environments where the server log is less protected than the database. Turning this off also removes the primary forensic record of what workflows executed. Requires server restart to change.",
+        c"SQL is logged after variable substitution. Turning this off omits statement text from worker execution traces, but does not suppress errors, results, or PostgreSQL statement logging. Requires server restart to change.",
         &LOG_WORKFLOW_SQL,
         GucContext::Postmaster,
         GucFlags::default(),

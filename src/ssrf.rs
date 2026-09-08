@@ -181,14 +181,14 @@ fn validate_scheme_value(scheme: &str) -> Result<(), String> {
             "Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required."
                 .to_string(),
         ),
-        other => {
+        _ => {
             let allowed = if allows_plaintext {
                 "http and https"
             } else {
                 "https"
             };
             Err(format!(
-                "Blocked: unsupported URL scheme '{other}'. Only {allowed} is allowed."
+                "Blocked: unsupported URL scheme. Only {allowed} is allowed."
             ))
         }
     }
@@ -624,6 +624,15 @@ mod tests {
     fn blocks_empty_and_malformed() {
         assert!(precheck_url_scheme("").is_err());
         assert!(precheck_url_scheme("no-scheme").is_err());
+    }
+
+    #[test]
+    fn malformed_scheme_errors_do_not_echo_credentials() {
+        for url in ["https:/h/p?sig=query_token", "invalid?sig=query_token://h"] {
+            let error = precheck_url_scheme(url).unwrap_err();
+            assert!(error.contains("unsupported URL scheme"), "{error}");
+            assert!(!error.contains("query_token"), "{error}");
+        }
     }
 
     // --- Canonical URL parsing ---

@@ -103,7 +103,7 @@ pub async fn execute(
     // Every log line and error below reports this, never `config.url`: an Azure
     // SAS token lives entirely in the query string, and both sinks outlive the
     // instance (the server log has no retention bound; errors are persisted to
-    // df.nodes.error and into duroxide history).
+    // df.nodes.result and into duroxide history).
     let safe_url = crate::redact::redact_url(&config.url);
 
     // Validation chain — order is security-critical:
@@ -133,8 +133,7 @@ pub async fn execute(
 
     let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (malformed) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
@@ -189,6 +188,7 @@ pub async fn execute(
 
     // Execute request
     let response = request.send().await.map_err(|e| {
+        let e = e.without_url();
         let err_string = e.to_string();
 
         // Detect SSRF IP-blocklist rejections from the resolver and emit
@@ -197,7 +197,7 @@ pub async fn execute(
             ctx.trace_info(format!(
                 "HTTP BLOCKED (ip) url={safe_url} submitted_by={audit_user}"
             ));
-            return crate::redact::redact_urls_in(&err_string);
+            return err_string;
         }
 
         // Try to extract status code from error if available
@@ -206,22 +206,15 @@ pub async fn execute(
             .map(|s| format!(" (HTTP {})", s.as_u16()))
             .unwrap_or_default();
 
-        // reqwest's Display interpolates the request URL, so the error text is
-        // scrubbed as well as the URL we format ourselves.
-        let detail = crate::redact::redact_urls_in(&err_string);
-
         if e.is_timeout() {
             format!(
                 "HTTP timeout after {}s{}: {}",
                 config.timeout_seconds, status_info, safe_url
             )
         } else if e.is_connect() {
-            format!("HTTP connection failed{status_info}: {safe_url} - {detail}")
-        } else if e.is_status() {
-            // Error due to HTTP status code
-            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
+            format!("HTTP connection failed{status_info}: {safe_url} - {err_string}")
         } else {
-            format!("HTTP request failed{status_info}: {safe_url} - {detail}")
+            format!("HTTP request failed{status_info}: {safe_url} - {err_string}")
         }
     })?;
 
