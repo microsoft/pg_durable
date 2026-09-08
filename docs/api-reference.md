@@ -701,7 +701,7 @@ Controls whether pg_durable allows durable function instances whose `submitted_b
 |----------|-------|
 | Type | `boolean` |
 | Default | `off` |
-| Context | `SUSET` (superuser can change at runtime; no restart needed) |
+| Context | `POSTMASTER` (requires server restart) |
 | Visibility | Hidden from `SHOW ALL` and `pg_settings` for non-superusers |
 
 **When `off` (default):**
@@ -715,11 +715,11 @@ Controls whether pg_durable allows durable function instances whose `submitted_b
 ```sql
 -- Enable (requires superuser)
 ALTER SYSTEM SET pg_durable.enable_superuser_instances = on;
-SELECT pg_reload_conf();
+-- Restart PostgreSQL to apply the change.
 
 -- Disable (default; recommended for multi-tenant)
 ALTER SYSTEM SET pg_durable.enable_superuser_instances = off;
-SELECT pg_reload_conf();
+-- Restart PostgreSQL to apply the change.
 
 -- Check current value (superuser only)
 SHOW pg_durable.enable_superuser_instances;
