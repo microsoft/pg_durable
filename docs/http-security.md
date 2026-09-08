@@ -166,25 +166,22 @@ REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC
 ```
 
 When `df.grant_usage(role, include_http => false)` is called and the role still
-has effective HTTP access via the PUBLIC grant (or another inherited grant),
-that grant is left intact — `df.grant_usage()` is purely additive and never
-issues a `REVOKE`. Call `df.revoke_usage()` first to downgrade a role.
+has effective HTTP access via the PUBLIC grant (or another inherited grant), a
+`WARNING` is emitted to signal that the revocation had no net effect.
 
 ### 3.4 Admin function protection
 
 `df.grant_usage()` and `df.revoke_usage()` are admin-only functions.
 `EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, so only
-superusers can call them — plus any role an admin delegated to with
-`df.grant_usage(role, with_grant => true)`.
+superusers can call them.
 
-`df.grant_usage()` issues a specific set of grants: `USAGE ON SCHEMA df`,
-column-scoped table privileges, `EXECUTE` on `df.http()` / `df.http_multipart()`
-when `include_http => true`, and `EXECUTE` on `df.grant_usage()`,
-`df.revoke_usage()` and `df.metrics()` when `with_grant => true`. Those five
-functions are the only ones with `PUBLIC` `EXECUTE` revoked at install; every
-other `df.*` function keeps PostgreSQL's default, so **schema `USAGE` is the
-real access gate**. Granting `USAGE ON SCHEMA df` by hand therefore exposes the
-whole DSL surface at once; prefer `df.grant_usage()`.
+> **Caution:** `df.grant_usage()` internally runs
+> `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df`, which temporarily includes
+> `df.grant_usage()` and `df.revoke_usage()` themselves before the function
+> immediately revokes them from the target role.  If an admin replicates the
+> blanket `GRANT` manually without the matching `REVOKE`s, the target role
+> will gain access to these admin helpers.  Always use `df.grant_usage()`
+> rather than hand-crafting the equivalent `GRANT` statements.
 
 ### 3.5 Feature-flag interaction
 

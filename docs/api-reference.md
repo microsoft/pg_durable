@@ -689,7 +689,7 @@ SELECT df.revoke_usage('app_role');
 
 ## Server Configuration (GUCs)
 
-These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. Each one lists its context: `SUSET` settings take effect after `SELECT pg_reload_conf()`, while `POSTMASTER` settings require a restart. Every GUC read by the background worker is `POSTMASTER`, because the worker does not process a configuration reload.
+These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See each setting for reload or restart requirements.
 
 ---
 
@@ -701,7 +701,7 @@ Controls whether pg_durable allows durable function instances whose `submitted_b
 |----------|-------|
 | Type | `boolean` |
 | Default | `off` |
-| Context | `POSTMASTER` (requires server restart) |
+| Context | `SUSET` (superuser can change at runtime; no restart needed) |
 | Visibility | Hidden from `SHOW ALL` and `pg_settings` for non-superusers |
 
 **When `off` (default):**
@@ -715,11 +715,11 @@ Controls whether pg_durable allows durable function instances whose `submitted_b
 ```sql
 -- Enable (requires superuser)
 ALTER SYSTEM SET pg_durable.enable_superuser_instances = on;
--- Restart PostgreSQL to apply the change.
+SELECT pg_reload_conf();
 
 -- Disable (default; recommended for multi-tenant)
 ALTER SYSTEM SET pg_durable.enable_superuser_instances = off;
--- Restart PostgreSQL to apply the change.
+SELECT pg_reload_conf();
 
 -- Check current value (superuser only)
 SHOW pg_durable.enable_superuser_instances;
