@@ -13,8 +13,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   signature supports resilient infinite and conditional loops. With
   `continue_on_failure => true`, a consumed typed body activity failure skips
   the condition and starts the next iteration; after a successful body, the
-  condition is evaluated normally. Condition, graph, protocol,
-  unknown child/runtime failures, and infrastructure failures remain fatal.
+  condition is evaluated normally. All errors returned by body SQL, HTTP, and
+  multipart activities are consumable, including query, authorization,
+  connection, and network errors. Condition, graph, protocol, unknown child,
+  and orchestration/runtime failures remain fatal.
 
 ### Changed
 

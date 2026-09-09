@@ -701,34 +701,25 @@ pub fn is_truthy(value: &serde_json::Value) -> bool {
 
 ### Parallel Execution (JOIN/RACE)
 
-JOIN and RACE use duroxide's sub-orchestration support:
+Each JOIN or RACE branch runs as an explicitly named `execute_subtree` child
+whose input contains the validated graph snapshot, variables, label, and
+canonically serialized named results. The child returns a `SubtreeEnvelope`
+containing its result, named-result updates, and optional `df.break()` control
+flow.
 
-```rust
-async fn execute_join_node(...) -> Result<String, String> {
-    let left_id = node.left_node.as_ref().ok_or("JOIN missing left")?;
-    let right_id = node.right_node.as_ref().ok_or("JOIN missing right")?;
-    
-    // Create sub-orchestration inputs
-    let left_input = create_subtree_input(graph, left_id, results);
-    let right_input = create_subtree_input(graph, right_id, results);
-    
-    // Schedule parallel sub-orchestrations
-    let left_handle = ctx.schedule_orchestration(SUBTREE_NAME, &left_id, left_input);
-    let right_handle = ctx.schedule_orchestration(SUBTREE_NAME, &right_id, right_input);
-    
-    // Wait for all to complete (duroxide handles parallelism)
-    let (left_result, right_result) = tokio::join!(
-        left_handle.into_orchestration(),
-        right_handle.into_orchestration()
-    );
-    
-    // Combine results
-    let results = vec![left_result?, right_result?];
-    Ok(serde_json::to_string(&results)?)
-}
-```
+JOIN schedules its two branches, plus any ordered `join3` extras, then waits
+with `ctx.join()`. Successful envelopes are processed in branch order and
+their named results are merged into the parent. Historically, JOIN returned
+the first branch error in that same order. That behavior remains unchanged
+outside failure-isolated loop bodies for replay compatibility. Inside a
+failure-isolated body, every settled outcome is inspected so a fatal sibling
+cannot be hidden by a recoverable activity failure or `df.break()`. The
+deterministic priority is fatal failure, then break, then recoverable activity
+failure; equal-priority outcomes keep the first branch.
 
-For RACE, duroxide's `select` is used to return the first completed result.
+RACE uses `ctx.select2()` and returns the first completed branch. The losing
+branch is cancelled, and a losing loop branch receives a terminal fallback
+node-status stamp because cancellation may stop it before it can stamp itself.
 
 ### Loops and Continue-As-New
 
@@ -748,9 +739,11 @@ with `continue_on_failure => true` instead calls
 named results are merged into the parent result map before the parent evaluates
 the optional condition. On a structurally encoded body application failure,
 the parent consumes the failure, skips the condition because body results may
-be absent, and advances to the next generation. Condition failures, malformed
-envelopes or graph data, child-ID collisions, and other unrecognized
-infrastructure/runtime failures remain fatal.
+be absent, and advances to the next generation. Every error returned by a body
+SQL, HTTP, or multipart activity uses this application-failure path, including
+query, authorization, connection, and network errors. Condition failures,
+malformed envelopes or graph data, child-ID collisions, and unrecognized
+orchestration/runtime failures remain fatal.
 
 A child stamps its LOOP node `running` on each generation and `completed` or
 `failed` on exit; because `continue_as_new` returns a future that never

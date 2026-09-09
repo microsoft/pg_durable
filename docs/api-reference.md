@@ -204,9 +204,11 @@ fail-fast. When it is `true`, each body iteration runs in a child
 orchestration. After a successful body iteration, the child's results are
 merged into the parent result map before condition evaluation. A consumed
 typed application failure from a body activity skips condition evaluation and
-starts the next iteration. Condition failures, malformed graph or child data,
-unrecognized child errors, child-ID collisions, and child-runtime or
-infrastructure failures remain fatal.
+starts the next iteration. This includes any error returned by a body SQL,
+HTTP, or multipart activity, such as a query, authorization, connection, or
+network error. Condition failures, malformed graph or child data, unrecognized
+child errors, child-ID collisions, and orchestration/runtime failures remain
+fatal.
 
 The `@>` operator remains an infinite, fail-fast loop:
 

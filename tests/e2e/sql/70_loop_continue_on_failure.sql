@@ -188,12 +188,14 @@ DROP FUNCTION IF EXISTS test_conditional_continue_condition();
 DROP FUNCTION IF EXISTS test_conditional_continue_failing_condition();
 DROP SEQUENCE IF EXISTS test_conditional_continue_attempt_seq;
 DROP TABLE IF EXISTS test_conditional_continue_state;
+DROP TABLE IF EXISTS test_nested_condition_failure_attempts;
 
 CREATE TABLE test_conditional_continue_state (
     body_attempts INT NOT NULL DEFAULT 0,
     condition_checks INT NOT NULL DEFAULT 0
 );
 INSERT INTO test_conditional_continue_state DEFAULT VALUES;
+CREATE TABLE test_nested_condition_failure_attempts (id SERIAL PRIMARY KEY);
 
 -- Sequence values are not rolled back when the first function call raises, allowing the
 -- second successful call to persist the total attempt count in the state table.
@@ -258,12 +260,45 @@ SELECT 'condition-failure',
            'test-conditional-loop-condition-failure-is-fatal'
        );
 
+INSERT INTO _conditional_continue_instances
+SELECT 'named-result-condition',
+       df.start(
+           df.loop(
+               df.sql('SELECT 42 AS value') |=> 'body_value',
+               'SELECT $body_value.value = 0',
+               continue_on_failure => true
+           ),
+           'test-conditional-loop-body-result-visible-to-condition'
+       );
+
+INSERT INTO _conditional_continue_instances
+SELECT 'nested-condition-failure',
+       df.start(
+           df.loop(
+               'INSERT INTO test_nested_condition_failure_attempts DEFAULT VALUES'
+               ~> df.if(
+                   'SELECT count(*) = 1 FROM test_nested_condition_failure_attempts',
+                   df.loop(
+                       'SELECT 42',
+                       'SELECT test_conditional_continue_failing_condition()',
+                       continue_on_failure => true
+                   ),
+                   df.break('"nested-condition-was-consumed"')
+               ),
+               continue_on_failure => true
+           ),
+           'test-nested-condition-failure-is-fatal'
+       );
+
 DO $$
 DECLARE
     recovered_status TEXT;
     condition_failure_status TEXT;
+    named_result_condition_status TEXT;
+    nested_condition_failure_status TEXT;
     body_attempts INT;
     condition_checks INT;
+    nested_attempts INT;
     conditional_explain TEXT;
 BEGIN
     SELECT df.await_instance(instance_id, 30)
@@ -276,9 +311,22 @@ BEGIN
     FROM _conditional_continue_instances
     WHERE scenario = 'condition-failure';
 
+    SELECT df.await_instance(instance_id, 30)
+    INTO named_result_condition_status
+    FROM _conditional_continue_instances
+    WHERE scenario = 'named-result-condition';
+
+    SELECT df.await_instance(instance_id, 30)
+    INTO nested_condition_failure_status
+    FROM _conditional_continue_instances
+    WHERE scenario = 'nested-condition-failure';
+
     SELECT s.body_attempts, s.condition_checks
     INTO body_attempts, condition_checks
     FROM test_conditional_continue_state s;
+
+    SELECT count(*) INTO nested_attempts
+    FROM test_nested_condition_failure_attempts;
 
     SELECT df.explain(instance_id) INTO conditional_explain
     FROM _conditional_continue_instances
@@ -299,6 +347,17 @@ BEGIN
             'TEST FAILED [condition failure]: expected failed, got %',
             condition_failure_status;
     END IF;
+    IF named_result_condition_status IS DISTINCT FROM 'completed' THEN
+        RAISE EXCEPTION
+            'TEST FAILED [named result condition]: expected completed, got %',
+            named_result_condition_status;
+    END IF;
+    IF nested_condition_failure_status IS DISTINCT FROM 'failed'
+       OR nested_attempts <> 1 THEN
+        RAISE EXCEPTION
+            'TEST FAILED [nested condition failure]: expected failed after one outer iteration, got % / %',
+            nested_condition_failure_status, nested_attempts;
+    END IF;
     IF conditional_explain NOT LIKE '%LOOP (while, continue on failure)%' THEN
         RAISE EXCEPTION
             'TEST FAILED [conditional continue]: df.explain() omitted combined loop mode: %',
@@ -312,6 +371,7 @@ DROP FUNCTION test_conditional_continue_condition();
 DROP FUNCTION test_conditional_continue_failing_condition();
 DROP SEQUENCE test_conditional_continue_attempt_seq;
 DROP TABLE test_conditional_continue_state;
+DROP TABLE test_nested_condition_failure_attempts;
 
 CREATE TEMP TABLE _cancel_continue_instance (instance_id TEXT);
 

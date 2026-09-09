@@ -102,7 +102,8 @@ df.loop(
 -- NULL condition: infinite loop.
 -- Non-NULL condition: do-while semantics; evaluate it after each successful body.
 -- With continue_on_failure => true, a consumed body activity failure skips the
--- condition and starts the next iteration. Condition and non-application failures are fatal.
+-- condition and starts the next iteration. The loop's condition and
+-- orchestration/runtime failures remain fatal.
 
 -- Break from enclosing loop
 df.break() → TEXT                                    -- Exit with NULL
@@ -386,7 +387,8 @@ SELECT df.start(
 This is a do-while loop: after a successful body execution, the condition is
 evaluated and the loop continues while it is truthy. After a consumed body
 activity failure, the condition is skipped and the body starts again.
-Condition failures and non-application failures remain fatal.
+Errors returned by body SQL, HTTP, and multipart activities are consumable.
+Condition and orchestration/runtime failures remain fatal.
 
 ### Cron Scheduled Job
 

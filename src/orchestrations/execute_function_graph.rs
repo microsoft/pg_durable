@@ -1193,9 +1193,9 @@ async fn evaluate_loop_condition(
                     store_named_result(ctx, node, &break_value, results, "LOOP");
                     return Ok(Some(break_value));
                 }
-                Err(NodeError::Application(error)) => {
-                    return Err(NodeError::Application(error));
-                }
+                // A condition controls loop execution; no enclosing resilient loop may
+                // consume its failure as an ordinary body activity error.
+                Err(NodeError::Application(error)) => return Err(NodeError::Failure(error)),
                 Err(NodeError::Failure(error)) => return Err(NodeError::Failure(error)),
             };
 

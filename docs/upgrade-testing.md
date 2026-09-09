@@ -222,13 +222,16 @@ what the upgrade script handles, and any backward compatibility considerations.
   fail-fast. Only newly constructed opted-in loops schedule an iteration child.
 - For opted-in conditional loops, a successful body is followed by condition
   evaluation; a consumed typed body activity failure skips the condition and
-  starts the next iteration. Condition failures, malformed graph/protocol
-  data, unrecognized child errors, child-ID collisions, and
-  infrastructure/configuration/poison failures remain fatal.
+  starts the next iteration. All errors returned by body SQL, HTTP, and
+  multipart activities are consumable. Condition failures, malformed
+  graph/protocol data, unrecognized child errors, child-ID collisions, and
+  orchestration/runtime failures remain fatal.
 - Raises the loop backstop for all loops from 100,000 to 8,388,608 (`2^23`),
   which is about 80 years at five-minute ticks.
-- Replay is unchanged through iteration 100,000. At the old boundary, loops
-  now continue until the new finite backstop instead of failing.
+- Replay is unchanged before iteration 100,000. At the old boundary, a history
+  that recorded the previous terminal-failure path cannot replay under the new
+  binary, which continues toward the higher backstop instead. Drain such
+  long-running loops before upgrade when continuity is required.
 
 ### v0.2.6 → v0.2.7
 

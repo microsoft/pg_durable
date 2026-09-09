@@ -1198,9 +1198,11 @@ not change where the loop is hosted. When it is `true`, each body iteration
 runs as a child orchestration. After a successful body iteration, the child's
 results are merged into the parent result map before the optional condition is
 evaluated. After a consumed typed application failure from a body activity,
-the condition is skipped and the parent starts the next iteration. Condition
-failures, malformed graph or child data, unrecognized child errors, child-ID
-collisions, and child-runtime or infrastructure failures remain fatal.
+the condition is skipped and the parent starts the next iteration. This
+includes any error returned by a body SQL, HTTP, or multipart activity, such as
+a query, authorization, connection, or network error. Condition failures,
+malformed graph or child data, unrecognized child errors, child-ID collisions,
+and orchestration/runtime failures remain fatal.
 
 This is useful for scheduled maintenance such as a pg_textsearch-style
 per-index compactor. A simplified periodic backstop repeatedly runs one
@@ -1352,7 +1354,7 @@ Each loop iteration advances via *continue-as-new*, which restarts the loop with
 - A fail-fast **root loop** (the function graph's outermost node, e.g. `df.start(df.loop(...))` or `df.start(@> 'SELECT work()')`) runs inline on the function's own orchestration. There is no surrounding work to preserve, so each iteration simply restarts the function. The `@>` operator does not make a loop root by itself: `df.seq('SELECT setup()', @> 'SELECT work()')` is non-root because the sequence is the graph root.
 - A fail-fast **non-root loop** (a loop with prefix/suffix nodes, or one nested inside a `df.if()`, JOIN (`&`), or RACE (`|`) branch) runs as its own **child sub-orchestration**. Only the loop body restarts on each iteration — any work *before* the loop runs exactly once and is never re-executed, and a loop nested in a parallel branch gets its own durable instance.
 - Fail-fast iterations execute inline within whichever orchestration hosts the loop. Explicit `continue_on_failure => false` keeps this placement; it does not force a non-root loop into the function's root orchestration.
-- A loop with `continue_on_failure => true` runs every body iteration in a child orchestration. After a successful body iteration, the child's results are merged into the parent result map before the optional condition is evaluated. After a consumed typed body activity failure, the condition is skipped and the loop parent proceeds to the next iteration. Condition failures and unrecognized child, graph, protocol, runtime, or infrastructure failures remain fatal.
+- A loop with `continue_on_failure => true` runs every body iteration in a child orchestration. After a successful body iteration, the child's results are merged into the parent result map before the optional condition is evaluated. After any error returned by a body SQL, HTTP, or multipart activity, the condition is skipped and the loop parent proceeds to the next iteration. Condition failures and unrecognized child, graph, protocol, orchestration, or runtime failures remain fatal.
 
 These child sub-orchestrations are internal durable instances and do **not**
 appear in `df.list_instances()`, which lists only instances started with
