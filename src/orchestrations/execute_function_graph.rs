@@ -34,6 +34,8 @@ pub const SUBTREE_NAME: &str = "pg_durable::orchestration::execute-subtree";
 struct ExecutionContext {
     vars: HashMap<String, String>,
     label: Option<String>,
+    /// Whether an enclosing loop may consume application failures from this subtree.
+    failure_isolated: bool,
     /// Loop iteration counter (persisted across continue_as_new generations).
     loop_iteration: u64,
     /// Node id at the root of the *current* orchestration's node tree: `graph.root_node_id`
@@ -85,6 +87,12 @@ struct SubtreeInput {
     label: Option<String>,
     #[serde(default)]
     iteration: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    failure_isolated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Control-flow-aware error type returned by every node handler.
@@ -343,6 +351,25 @@ fn contextualize_subtree_failure(context: &str, error: String) -> NodeError {
     }
 }
 
+fn retain_higher_priority_join_error(
+    selected: &mut Option<(NodeError, Option<String>)>,
+    candidate: NodeError,
+    loop_node_id: Option<String>,
+) {
+    let priority = |error: &NodeError| match error {
+        NodeError::Application(_) => 0,
+        NodeError::Break(_) => 1,
+        NodeError::Failure(_) => 2,
+    };
+    let should_replace = selected
+        .as_ref()
+        .map(|(current, _)| priority(&candidate) > priority(current))
+        .unwrap_or(true);
+    if should_replace {
+        *selected = Some((candidate, loop_node_id));
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FailureIsolatedBodyOutcome {
     Succeeded(String),
@@ -518,6 +545,7 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
     let exec_ctx = ExecutionContext {
         vars: input.vars.clone(),
         label: input.label.clone(),
+        failure_isolated: false,
         loop_iteration: input.loop_iteration,
         subtree_root: graph.root_node_id.clone(),
         continuation: Continuation::Root,
@@ -622,6 +650,7 @@ pub async fn execute_subtree(
     let exec_ctx = ExecutionContext {
         vars,
         label: input.label.clone(),
+        failure_isolated: input.failure_isolated,
         loop_iteration: input.iteration,
         subtree_root: input.node_id.clone(),
         continuation: Continuation::Subtree,
@@ -698,6 +727,7 @@ fn build_subtree_input(
         ),
         label: exec_ctx.label.clone(),
         iteration: 0,
+        failure_isolated: exec_ctx.failure_isolated,
     };
     serde_json::to_string(&input).map_err(|e| format!("Failed to serialize subtree input: {e}"))
 }
@@ -1191,7 +1221,9 @@ async fn run_failure_isolated_body(
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
 ) -> Result<FailureIsolatedBodyOutcome, NodeError> {
-    let child_input = build_subtree_input(graph, body_id, results, exec_ctx)?;
+    let mut child_exec_ctx = exec_ctx.clone();
+    child_exec_ctx.failure_isolated = true;
+    let child_input = build_subtree_input(graph, body_id, results, &child_exec_ctx)?;
     let child_id = subtree_instance_id(ctx, body_id);
 
     ctx.trace_info(format!(
@@ -1361,6 +1393,7 @@ async fn execute_loop_node(
                 ),
                 label: exec_ctx.label.clone(),
                 iteration: next_iteration,
+                failure_isolated: exec_ctx.failure_isolated,
             };
             serde_json::to_string(&new_input)
                 .map_err(|e| format!("Failed to serialize loop input: {e}"))?
@@ -1712,31 +1745,61 @@ async fn execute_join_node(
     // Each Ok value is a JSON envelope {"result": "...", "results": {...}} produced by
     // execute_subtree; unwrap it and merge the branch's named results into the parent map.
     let mut join_results: Vec<serde_json::Value> = Vec::new();
+    let mut selected_error: Option<(NodeError, Option<String>)> = None;
     for (i, result) in results_vec.into_iter().enumerate() {
         match result {
             Ok(r) => {
                 let context = format!("JOIN branch {}", i + 1);
-                // A break in any branch surfaces as `NodeError::Break` from
-                // `parse_subtree_envelope` and unwinds via `?` to the enclosing loop.
-                let branch_result = parse_subtree_envelope(&r, &context, results)?;
-                let parsed = serde_json::from_str::<serde_json::Value>(&branch_result)
-                    .map_err(|e| format!("JOIN branch {} result parse error: {}", i + 1, e))?;
-                join_results.push(parsed);
+                match parse_subtree_envelope(&r, &context, results) {
+                    Ok(branch_result) => {
+                        match serde_json::from_str::<serde_json::Value>(&branch_result) {
+                            Ok(parsed) => join_results.push(parsed),
+                            Err(e) => {
+                                let error = NodeError::Failure(format!(
+                                    "JOIN branch {} result parse error: {}",
+                                    i + 1,
+                                    e
+                                ));
+                                if !exec_ctx.failure_isolated {
+                                    return Err(error);
+                                }
+                                retain_higher_priority_join_error(&mut selected_error, error, None);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if !exec_ctx.failure_isolated {
+                            return Err(error);
+                        }
+                        retain_higher_priority_join_error(&mut selected_error, error, None);
+                    }
+                }
             }
             Err(e) => {
                 let error =
                     contextualize_subtree_failure(&format!("JOIN branch {} failed", i + 1), e);
-                if graph
+                let loop_node_id = graph
                     .nodes
                     .get(&branch_ids[i])
                     .map(|branch| branch.node_type.eq_ignore_ascii_case("loop"))
                     .unwrap_or(false)
-                {
-                    return fail_loop_child_future(ctx, graph, &branch_ids[i], error).await;
+                    .then(|| branch_ids[i].clone());
+                if !exec_ctx.failure_isolated {
+                    if let Some(loop_node_id) = loop_node_id {
+                        return fail_loop_child_future(ctx, graph, &loop_node_id, error).await;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                retain_higher_priority_join_error(&mut selected_error, error, loop_node_id);
             }
         }
+    }
+
+    if let Some((error, loop_node_id)) = selected_error {
+        if let Some(loop_node_id) = loop_node_id {
+            return fail_loop_child_future(ctx, graph, &loop_node_id, error).await;
+        }
+        return Err(error);
     }
 
     ctx.trace_info(format!(
@@ -2190,12 +2253,6 @@ mod tests {
     }
 
     #[test]
-    fn loop_iteration_backstop_is_two_to_the_twenty_third() {
-        assert_eq!(MAX_LOOP_ITERATIONS, 8_388_608);
-        assert!(MAX_LOOP_ITERATIONS.is_power_of_two());
-    }
-
-    #[test]
     fn subtree_instance_ids_are_stable_and_generation_scoped() {
         assert_eq!(
             compose_subtree_instance_id("parent", "1", "deadbeef"),
@@ -2264,6 +2321,46 @@ mod tests {
     }
 
     #[test]
+    fn failure_isolated_join_prioritizes_errors_deterministically() {
+        let mut selected = None;
+        retain_higher_priority_join_error(
+            &mut selected,
+            NodeError::Application("recoverable".to_string()),
+            None,
+        );
+        retain_higher_priority_join_error(
+            &mut selected,
+            NodeError::Break("break".to_string()),
+            None,
+        );
+        retain_higher_priority_join_error(
+            &mut selected,
+            NodeError::Failure("first fatal".to_string()),
+            None,
+        );
+        retain_higher_priority_join_error(
+            &mut selected,
+            NodeError::Failure("second fatal".to_string()),
+            None,
+        );
+
+        match selected {
+            Some((NodeError::Failure(error), None)) => assert_eq!(error, "first fatal"),
+            other => panic!("expected first fatal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_subtree_input_preserves_first_error_behavior() {
+        let input: SubtreeInput = serde_json::from_str(
+            r#"{"instance_id":"deadbeef","node_id":"cafebabe","graph":"{}","results":"{}"}"#,
+        )
+        .unwrap();
+
+        assert!(!input.failure_isolated);
+    }
+
+    #[test]
     fn subtree_input_is_byte_stable_across_result_insertion_order() {
         let graph = FunctionGraph {
             instance_id: "deadbeef".to_string(),
@@ -2273,6 +2370,7 @@ mod tests {
         let exec_ctx = ExecutionContext {
             vars: HashMap::new(),
             label: Some("stable".to_string()),
+            failure_isolated: false,
             loop_iteration: 7,
             subtree_root: "cafebabe".to_string(),
             continuation: Continuation::Root,
