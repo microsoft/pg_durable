@@ -358,9 +358,9 @@ shipping and backup path.
 | Component | Treatment |
 |-----------|-----------|
 | Scheme, host, port, path | Preserved. The URL is reparsed, so a logged line may be normalized (host lowercased, default port dropped) relative to what the workflow supplied. |
-| Query parameter *names* | Preserved — `sig` and `code` are not themselves secret, and keeping them makes a redacted line diagnosable |
-| Query parameter *values* | Nonempty values replaced with `<redacted>` |
-| Bare query token with no `=` | Replaced whole — indistinguishable from a name |
+| Query parameter *names* | Preserved except for ambiguous pairs below |
+| Query parameter *values* | Replaced with `<redacted>` |
+| Bare query tokens and pairs with empty or padding-only values | Replaced whole: `token`, `token=`, and `token==` can all be opaque credentials |
 | `userinfo@` | Replaced with `<redacted>@`, keeping the host |
 | Fragment | Replaced whole |
 | Unparseable input | Replaced whole — redaction fails closed and never echoes back a string it could not parse |
@@ -373,7 +373,7 @@ including response-body read failures. Explicitly reported request URLs are
 redacted as above. This matters because failed nodes store their error in
 `df.nodes.result` and durable execution history, not just in the log.
 
-Do not put credentials in paths or parameter names: those remain visible.
+Do not put credentials in paths or parameter names: those can remain visible.
 Request headers and bodies are not directly included in request traces, but an
 endpoint can echo them in its response.
 

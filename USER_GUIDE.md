@@ -2114,7 +2114,7 @@ different security boundary from the database: RLS does not apply to it, it is n
 
 | Trace | Contents |
 |-------|----------|
-| HTTP and multipart requests | Method, scheme, host, port and path. **Query-string values, userinfo and the URL fragment are redacted** in request diagnostics. Parameter *names* are kept. Do not put credentials in paths or parameter names. |
+| HTTP and multipart requests | Method, scheme, host, port and path. **Query-string values, userinfo and the URL fragment are redacted** in request diagnostics. Bare tokens and pairs with empty or padding-only values are redacted whole; other parameter *names* are kept. Do not put credentials in paths or parameter names. |
 | HTTP request errors | Request URLs are removed from HTTP client errors; explicitly reported URLs are redacted as above. Response bodies included in 5xx errors are not redacted. |
 | HTTP and multipart request headers and bodies | Not directly included in request traces. An endpoint can echo them in its response. |
 | SQL nodes | The submitting role and any explicit target database, plus the fully-substituted SQL text when `pg_durable.log_workflow_sql` is on. |

@@ -20,13 +20,14 @@ use url::{Position, Url};
 /// length of the original is not disclosed.
 pub const REDACTED: &str = "<redacted>";
 
-/// Redact the values in a raw query string, preserving parameter names.
+/// Redact the values in a raw query string, preserving unambiguous parameter names.
 ///
 /// This splits on `&` and `=` rather than using [`Url::query_pairs`], because
 /// `query_pairs` follows the form-urlencoded rules and reports a bare token
 /// (`?SEKRIT`, no `=`) as the *name* of a valueless parameter. Emitting that
-/// would publish the token verbatim. Here a bare token is elided whole, since a
-/// lone token is indistinguishable from a name.
+/// would publish the token verbatim. Bare tokens and pairs with empty or
+/// padding-only values are elided whole: `token=` and `token==` could be padded
+/// opaque tokens rather than parameters.
 fn redact_query(query: &str) -> String {
     let mut out = String::with_capacity(query.len());
 
@@ -35,13 +36,12 @@ fn redact_query(query: &str) -> String {
             out.push('&');
         }
         match pair.split_once('=') {
-            Some((_, "")) => out.push_str(pair),
-            Some((name, _)) => {
+            Some((name, value)) if !value.trim_end_matches('=').is_empty() => {
                 out.push_str(name);
                 out.push('=');
                 out.push_str(REDACTED);
             }
-            None => out.push_str(REDACTED),
+            _ => out.push_str(REDACTED),
         }
     }
 
@@ -177,11 +177,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_parameter_value_is_left_alone() {
+    fn redacts_empty_valued_query_pairs() {
         assert_eq!(
-            redact_url("https://h/p?a=&b=SEKRIT"),
-            "https://h/p?a=&b=<redacted>"
+            redact_url("https://h/p?a=&b=SEKRIT&="),
+            "https://h/p?<redacted>&b=<redacted>&<redacted>"
         );
+    }
+
+    #[test]
+    fn padded_query_tokens_are_not_treated_as_parameter_names() {
+        for token in ["c2VjcmV0=", "c2VjcmV0MQ=="] {
+            assert_eq!(
+                redact_url(&format!("https://h/p?{token}")),
+                "https://h/p?<redacted>"
+            );
+            assert_eq!(
+                redact_url(&format!("https://h/p?a=1&{token}&b=2")),
+                "https://h/p?a=<redacted>&<redacted>&b=<redacted>"
+            );
+            assert_eq!(
+                redact_url(&format!("https://h/p?token={token}")),
+                "https://h/p?token=<redacted>"
+            );
+        }
     }
 
     #[test]
@@ -252,6 +270,9 @@ mod tests {
             "https://h/p?sig=SEKRIT",
             "https://user:pa%40ss@h/p?sig=SEKRIT#SEKRIT",
             "https://h/p?SEKRIT",
+            "https://h/p?a=&b=SEKRIT&=",
+            "https://h/p?c2VjcmV0=",
+            "https://h/p?c2VjcmV0MQ==",
             "mailto:alice@example.com?body=SEKRIT#SEKRIT",
         ] {
             let once = redact_url(url);
