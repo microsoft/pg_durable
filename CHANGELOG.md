@@ -4,11 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.8] - Unreleased
+## [0.2.8] - 2026-09-10
 
 ### Added
 
-- **Failure-isolated loops:** the unified
+- **Failure-isolated loops (#377):** the unified
   `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`
   signature supports resilient infinite and conditional loops. With
   `continue_on_failure => true`, a consumed typed body activity failure skips
@@ -19,15 +19,33 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   and orchestration/runtime failures remain fatal. The
   `continue_on_failure` syntax is experimental and may change in future
   releases.
+- **Workflow SQL logging control (#378):** the new
+  `pg_durable.log_workflow_sql` postmaster setting controls whether fully
+  substituted workflow SQL is written to PostgreSQL logs and defaults to off.
 
 ### Changed
 
-- **Loop lifetime:** raises the loop-iteration backstop from 100,000 to
+- **Loop lifetime (#377):** raises the loop-iteration backstop from 100,000 to
   8,388,608 (`2^23`), approximately 80 years at five-minute ticks.
 
 ### Fixed
 
-- **Caller-transaction handoff:** `df.start()` now tracks the originating transaction until it commits or aborts, so legal caller transactions lasting more than five seconds no longer leave a `pending` `df.instances` row paired with a failed engine execution. Graph admission uses durable backoff and bounded-history compaction rather than holding a worker connection while it waits.
+- **Caller-transaction handoff (#367):** `df.start()` now tracks the originating
+  transaction until it commits or aborts, so legal caller transactions lasting
+  more than five seconds no longer leave a `pending` `df.instances` row paired
+  with a failed engine execution. Graph admission uses durable backoff and
+  bounded-history compaction rather than holding a worker connection while it
+  waits.
+- **PGXN source installation (#370):** source builds now initialize cargo-pgrx
+  from the supplied `PG_CONFIG` when its configuration is missing, while
+  preserving existing cargo-pgrx configurations.
+
+### Security
+
+- **Secrets handling (#378):** URL user information, query parameter values,
+  fragments, and URL-bearing HTTP client errors are redacted before reaching
+  PostgreSQL logs, node errors, or durable execution history. Documentation now
+  also describes the exposure model for `df.vars`.
 
 ## [0.2.7] - 2026-08-31
 
