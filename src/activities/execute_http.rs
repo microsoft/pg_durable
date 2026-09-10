@@ -100,6 +100,12 @@ pub async fn execute(
         .as_deref()
         .ok_or("Blocked: HTTP node has no submitted_by \u{2014} cannot verify privilege")?;
 
+    // Every log line and error below reports this, never `config.url`: an Azure
+    // SAS token lives entirely in the query string, and both sinks outlive the
+    // instance (the server log has no retention bound; errors are persisted to
+    // df.nodes.result and into duroxide history).
+    let safe_url = crate::redact::redact_url(&config.url);
+
     // Validation chain — order is security-critical:
     //   0. Privilege: submitted_by must hold EXECUTE on df.http(). Closes the
     //                 bypass path where a user crafts raw Durofut JSON and passes
@@ -121,38 +127,34 @@ pub async fn execute(
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (privilege) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
             ));
         })?;
 
     let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (malformed) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Scheme validation (always enforced, regardless of feature flag) ---
     crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (scheme) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
     crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
         ctx.trace_info(format!(
-            "HTTP BLOCKED (allowlist) url={} submitted_by={audit_user}",
-            config.url
+            "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
-        "HTTP {} {} submitted_by={audit_user}",
-        config.method, config.url
+        "HTTP {} {safe_url} submitted_by={audit_user}",
+        config.method
     ));
 
     // Build client with SSRF-safe resolver (when feature enabled) and timeout
@@ -186,14 +188,14 @@ pub async fn execute(
 
     // Execute request
     let response = request.send().await.map_err(|e| {
+        let e = e.without_url();
         let err_string = e.to_string();
 
         // Detect SSRF IP-blocklist rejections from the resolver and emit
         // a structured audit log (mirrors the scheme-block log above).
         if crate::ssrf::is_ssrf_block_error(&err_string) {
             ctx.trace_info(format!(
-                "HTTP BLOCKED (ip) url={} submitted_by={audit_user}",
-                config.url
+                "HTTP BLOCKED (ip) url={safe_url} submitted_by={audit_user}"
             ));
             return err_string;
         }
@@ -207,18 +209,12 @@ pub async fn execute(
         if e.is_timeout() {
             format!(
                 "HTTP timeout after {}s{}: {}",
-                config.timeout_seconds, status_info, config.url
+                config.timeout_seconds, status_info, safe_url
             )
         } else if e.is_connect() {
-            format!(
-                "HTTP connection failed{}: {} - {}",
-                status_info, config.url, e
-            )
-        } else if e.is_status() {
-            // Error due to HTTP status code
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP connection failed{status_info}: {safe_url} - {err_string}")
         } else {
-            format!("HTTP request failed{}: {} - {}", status_info, config.url, e)
+            format!("HTTP request failed{status_info}: {safe_url} - {err_string}")
         }
     })?;
 
@@ -251,9 +247,8 @@ pub async fn execute(
     // Fail on 5xx server errors (transient, should retry)
     if status.is_server_error() {
         return Err(format!(
-            "HTTP {} {} returned {}: {}",
+            "HTTP {} {safe_url} returned {}: {}",
             config.method,
-            config.url,
             status_code,
             response_body.error_preview()
         ));

@@ -193,14 +193,18 @@ pub async fn execute(
         serde_json::from_str(&input_json).map_err(|e| format!("Invalid execute_sql input: {e}"))?;
 
     ctx.trace_info(format!(
-        "Executing SQL as '{}'{}: {}",
+        "Executing SQL as '{}'{}{}",
         input.submitted_by,
         input
             .database
             .as_ref()
             .map(|db| format!(" in database '{db}'"))
             .unwrap_or_default(),
-        input.query
+        if crate::types::log_workflow_sql_enabled() {
+            format!(": {}", input.query)
+        } else {
+            String::new()
+        }
     ));
 
     // Acquire a permit from the user-connection semaphore. The permit is held

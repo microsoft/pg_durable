@@ -1054,6 +1054,10 @@ Durable function variables allow you to configure durable functions with externa
 
 > **Important**: `df.setvar()`, `df.unsetvar()`, and `df.clearvars()` cannot be called from within a running durable function. They are for configuration only.
 
+> **Variables are not secrets.** `df.vars` stores values as plaintext, and the value is copied
+> into durable execution history when `df.start()` runs. See
+> [Variables and secrets](#variables-and-secrets) before putting a credential in one.
+
 ### System Variables
 
 These read-only variables are automatically available during durable function execution:
@@ -1062,6 +1066,36 @@ These read-only variables are automatically available during durable function ex
 |----------|-------------|
 | `{sys_instance_id}` | Current durable function instance ID |
 | `{sys_label}` | Durable function label (if provided) |
+
+### Variables and secrets
+
+Variables keep credentials out of node templates, but do not provide secret storage.
+For example:
+
+```sql
+SELECT df.setvar('api_key', '<credential>');
+SELECT df.start(df.http('https://api.example.com/users', 'GET', NULL,
+                        '{"Authorization": "Bearer {api_key}"}'::jsonb), 'fetch-users');
+```
+
+| Location | Holds the credential? | Notes |
+|----------|----------------------|-------|
+| `df.nodes.query` | No — stores the literal `{api_key}` | Substitution happens at execution time, not when the node is created. |
+| `df.vars.value` | **Yes, plaintext** | RLS isolates it from other users. It is *not* encrypted, and it is not hidden from a superuser or the table owner. |
+| Durable execution history | **Yes, plaintext** | `df.start()` snapshots every variable you own into the orchestration input, and the substituted header is recorded as the HTTP step's input. Parallel branches and each loop iteration re-record it. |
+| WAL, backups, replicas | **Yes** | Follows every write above, typically with a longer retention than `pg_durable.retention_days`. |
+| Server log | May contain it | Request diagnostics redact URLs, but SQL, errors and results can still expose values. See [What reaches the server log](#what-reaches-the-server-log). |
+| Query monitoring and PostgreSQL logs | Depends on the statement and server settings | Bind parameters avoid inlining the value in the `df.setvar()` statement. Client-side `psql` variable expansion, including values read with `\getenv`, does not provide that protection. Values later substituted into workflow SQL become literal query text. |
+
+Inlining a credential in `df.http(...)` also stores it in `df.nodes.query`; it does not
+avoid exposure in that workflow's execution history.
+
+Practical guidance:
+
+- Prefer credentials that are short-lived and narrowly scoped, so history exposure is bounded.
+- Treat `df.vars` as configuration — hostnames, table names, batch sizes, API versions.
+- Treat a database backup as containing every credential any workflow has used.
+- Set `pg_durable.retention_days` to the shortest value your operations allow.
 
 ### Variable Substitution
 
@@ -1072,11 +1106,11 @@ Use `{varname}` in SQL queries to substitute variable values:
 ```sql
 -- Set up configuration
 SELECT df.setvar('api_base', 'https://api.example.com');
-SELECT df.setvar('api_key', 'secret123');
+SELECT df.setvar('page_size', '50');
 
 -- Start durable function using variables
 SELECT df.start(
-    df.http('{api_base}/users', 'GET', NULL, '{"Authorization": "Bearer {api_key}"}'::jsonb)
+    df.http('{api_base}/users?per_page={page_size}', 'GET')
     ~> 'INSERT INTO playground.logs (msg) VALUES (''Fetched users'')',
     'fetch-users'
 );
@@ -2072,10 +2106,37 @@ Row-level security (RLS) restricts each user to their own instances and nodes:
 - `df.cancel()` and `df.signal()` check ownership before acting — attempts on other users' instances return "Instance not found or access denied"
 - Superusers bypass RLS and can see all instances (standard PostgreSQL behavior)
 
+### What reaches the server log
+
+The background worker writes an execution trace to the PostgreSQL server log. That log is a
+different security boundary from the database: RLS does not apply to it, it is not bound by
+`pg_durable.retention_days`, and it is often shipped and backed up separately.
+
+| Trace | Contents |
+|-------|----------|
+| HTTP and multipart requests | Method, scheme, host, port and path. **Query-string values, userinfo and the URL fragment are redacted** in request diagnostics. Bare tokens and pairs with empty or padding-only values are redacted whole; other parameter *names* are kept. Do not put credentials in paths or parameter names. |
+| HTTP request errors | Request URLs are removed from HTTP client errors; explicitly reported URLs are redacted as above. Response bodies included in 5xx errors are not redacted. |
+| HTTP and multipart request headers and bodies | Not directly included in request traces. An endpoint can echo them in its response. |
+| SQL nodes | The submitting role and any explicit target database, plus the fully-substituted SQL text when `pg_durable.log_workflow_sql` is on. |
+| Workflow result | The final return value is logged on completion. For a workflow ending in an HTTP step this includes response headers and body, without redaction. |
+
+`pg_durable.log_workflow_sql` (default `on`) controls SQL text in the worker's execution
+trace. SQL cannot be reliably redacted after substitution, so this is an on/off switch.
+It requires a server restart:
+
+```ini
+# postgresql.conf — omit workflow SQL text from the log
+pg_durable.log_workflow_sql = off
+```
+
+Turning it off keeps the submitting role and any explicit target database in the trace, but removes
+statement text. It does not suppress workflow results, error messages, or PostgreSQL's
+own statement logging. Keep credentials out of SQL even when this setting is off.
+
 ### Security Best Practices
 
 1. **Worker role must be superuser** — The background worker role (`pg_durable.worker_role`) must be a superuser to bypass RLS and manage all instances
-2. **Review df.vars usage** — Variables are scoped per-user via RLS, but avoid storing secrets in plain text
+2. **Do not put credentials in `df.vars`** — Variables are scoped per-user via RLS, but they are stored as plaintext and are copied into durable execution history. See [Variables and secrets](#variables-and-secrets)
 3. **Use labels carefully** — Instance labels are visible only to the submitting user (RLS-filtered) and superusers
 4. **Monitor instances** — Superusers can use `df.list_instances()` to see all users' instances; regular users see only their own
 5. **Avoid unsafe `SECURITY DEFINER` wrappers around `df.start()`** — Never allow untrusted callers to supply SQL or futures to `df.start()` from a `SECURITY DEFINER` context unless definer-level execution is intentional.
@@ -2178,7 +2239,7 @@ GRANT pg_durable_user TO app_backend, etl_service;
 
 Users get `SELECT` and `INSERT` on `df.instances` and `df.nodes` (required for `df.start()`, `df.status()`, `df.result()`). Column-level `UPDATE` on `(status, updated_at)` allows `df.cancel()` to set status. No full `UPDATE` or `DELETE` — the identity column (`submitted_by`) and structural columns are protected.
 
-> **Note:** `df.vars` uses per-user scoping via an `owner` column and RLS — each user can only read and write their own variables. Superusers bypass RLS but the DSL functions (`df.setvar()`, `df.getvar()`, etc.) still scope to the calling user via explicit filters. Avoid storing secrets in plain text.
+> **Note:** `df.vars` uses per-user scoping via an `owner` column and RLS — each user can only read and write their own variables. Superusers bypass RLS but the DSL functions (`df.setvar()`, `df.getvar()`, etc.) still scope to the calling user via explicit filters. Values are stored as plaintext and are copied into durable execution history — see [Variables and secrets](#variables-and-secrets).
 
 ### Revoking Privileges
 
@@ -2271,7 +2332,7 @@ pg_durable.max_new_transaction_starts = 2
 pg_durable.new_transaction_start_timeout = 5
 ```
 
-> **Other GUCs:** `pg_durable.list_instances_max_limit` (SUSET context, default `1000`) caps the per-call page size of `df.list_instances()`. Unlike the connection-limit GUCs above, it is superuser-settable at runtime (no restart) and is not loaded from `postgresql.conf` at startup only. See [docs/api-reference.md](docs/api-reference.md#pg_durablelist_instances_max_limit).
+> **Other GUCs:** `pg_durable.list_instances_max_limit` (SUSET context, default `1000`) caps the per-call page size of `df.list_instances()`. Unlike the connection-limit GUCs above, it is superuser-settable at runtime (no restart) and is not loaded from `postgresql.conf` at startup only. See [docs/api-reference.md](docs/api-reference.md#pg_durablelist_instances_max_limit). `pg_durable.log_workflow_sql` (Postmaster context, default `on`) controls whether workflow SQL text is written to the server log — see [What reaches the server log](#what-reaches-the-server-log).
 
 ### Connection Budget Formula
 

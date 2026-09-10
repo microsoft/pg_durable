@@ -87,6 +87,11 @@ pub fn get_reconcile_interval() -> Duration {
     Duration::from_secs(crate::RECONCILE_INTERVAL.get() as u64)
 }
 
+/// Returns `true` when the SQL text of a workflow node may be written to the log.
+pub fn log_workflow_sql_enabled() -> bool {
+    crate::LOG_WORKFLOW_SQL.get()
+}
+
 /// Returns `true` when superuser-submitted instances are permitted.
 pub fn superuser_instances_enabled() -> bool {
     crate::ENABLE_SUPERUSER_INSTANCES.get()
@@ -280,7 +285,7 @@ async fn connect_as_user_with_application_name(
     application_name: &str,
 ) -> Result<sqlx::postgres::PgConnection, String> {
     use sqlx::postgres::PgConnectOptions;
-    use sqlx::Connection;
+    use sqlx::{ConnectOptions, Connection};
 
     /// Connection timeout for per-user SQL connections (seconds).
     const CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -296,6 +301,10 @@ async fn connect_as_user_with_application_name(
     let host = get_host();
     if !host.is_empty() {
         options = options.host(&host);
+    }
+
+    if !log_workflow_sql_enabled() {
+        options = options.disable_statement_logging();
     }
 
     let connect_future = sqlx::postgres::PgConnection::connect_with(&options);

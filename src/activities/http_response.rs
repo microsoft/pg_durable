@@ -172,14 +172,14 @@ pub async fn read_body(response: reqwest::Response) -> Result<ResponseBody, Stri
         let text = response
             .text()
             .await
-            .map_err(|e| format!("Failed to read response body: {e}"))?;
+            .map_err(|e| format!("Failed to read response body: {}", e.without_url()))?;
         return Ok(ResponseBody::text(text));
     }
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+        .map_err(|e| format!("Failed to read response body: {}", e.without_url()))?;
     Ok(match text_from_bytes(&bytes) {
         Some(text) => ResponseBody::text(text),
         None => ResponseBody::base64(&bytes),
@@ -221,6 +221,55 @@ pub fn build_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn response_read_errors_omit_credentials() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        for content_type in ["text/plain", "application/octet-stream"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (connection, _) = listener.accept().unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut connection = BufReader::new(connection);
+                loop {
+                    let mut line = String::new();
+                    if connection.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                write!(
+                    connection.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort"
+                )
+                .unwrap();
+            });
+
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/?sig=FIRST,(LAST)#SEKRIT"))
+                .send()
+                .await
+                .unwrap();
+            let error = read_body(response).await.err().unwrap();
+            server.join().unwrap();
+            assert!(
+                error.starts_with("Failed to read response body:"),
+                "{error}"
+            );
+            assert!(error.contains("error decoding response body"), "{error}");
+            assert!(!error.contains("FIRST"), "{error}");
+            assert!(!error.contains("SEKRIT"), "{error}");
+        }
+    }
 
     #[test]
     fn classifies_text_types_as_textual() {

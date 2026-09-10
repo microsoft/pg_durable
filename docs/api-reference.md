@@ -588,6 +588,11 @@ Sets a workflow variable for the current user (before `df.start()`). Each user h
 SELECT df.setvar('api_url', 'https://api.example.com');
 ```
 
+> **Not for credentials.** Values are stored as plaintext in `df.vars`, and `df.start()` copies
+> every variable you own into durable execution history. Using `{varname}` keeps the value out of
+> `df.nodes.query` but not out of history. See
+> [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
 ---
 
 ### df.getvar(name)
@@ -684,7 +689,7 @@ SELECT df.revoke_usage('app_role');
 
 ## Server Configuration (GUCs)
 
-These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf` and take effect after `SELECT pg_reload_conf()` (no restart required).
+These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See each setting for reload or restart requirements.
 
 ---
 
@@ -749,3 +754,26 @@ SELECT pg_reload_conf();
 ```
 
 > **Behavior change (v0.2.4):** prior to v0.2.4, `df.list_instances()` silently truncated `limit_count` to 10000. It now raises an error when `limit_count` exceeds this GUC (default 1000). Callers that previously requested very large pages should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`).
+
+---
+
+### pg_durable.log_workflow_sql
+
+Controls whether the background worker writes the SQL text of an executed workflow node to the PostgreSQL server log.
+
+| Property | Value |
+|----------|-------|
+| Type | `boolean` |
+| Default | `on` |
+| Context | `POSTMASTER` (set in `postgresql.conf`; requires restart) |
+
+The SQL is logged *after* variable substitution, so credentials substituted into a query reach the server log in cleartext. SQL cannot be reliably redacted after substitution, so this is an on/off switch.
+
+```ini
+# postgresql.conf
+pg_durable.log_workflow_sql = off
+```
+
+Turning it off keeps the submitting role and any explicit target database in the worker trace but drops the statement text. It does not suppress workflow results or error messages, which can also contain sensitive data.
+
+PostgreSQL's own statement logging is independent: settings such as `log_statement` and `log_min_duration_statement` can still log executed SQL when this GUC is off. Keep credentials out of SQL even with this setting disabled. See [What reaches the server log](../USER_GUIDE.md#what-reaches-the-server-log) and [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).

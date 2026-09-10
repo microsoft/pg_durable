@@ -341,11 +341,48 @@ Every HTTP attempt (allowed or blocked) is logged via `ctx.trace_info` with:
 
 - `submitted_by` — the role that called `df.start()` at the time the node was
   created (captured as `current_user` in the DSL and stored in `FunctionNode`)
-- `url` — the requested URL
+- `url` — the requested URL, **redacted** (see below)
 - Block reason tag — `(scheme)`, `(allowlist)`, or `(ip)` in the log prefix
 
 Resolved IP addresses are **not** included in error messages or logs to avoid
 leaking internal network topology to potentially malicious users.
+
+### 7.1 URL redaction
+
+A URL is a credential carrier: an Azure SAS token lives entirely in the query
+string, and `?api-key=` / `?code=` are common elsewhere. Worker request diagnostics
+redact these values before logging URLs or including them in errors. The server
+log has no RLS or `pg_durable.retention_days`, and frequently has a separate
+shipping and backup path.
+
+| Component | Treatment |
+|-----------|-----------|
+| Scheme, host, port, path | Preserved. The URL is reparsed, so a logged line may be normalized (host lowercased, default port dropped) relative to what the workflow supplied. |
+| Query parameter *names* | Preserved except for ambiguous pairs below |
+| Query parameter *values* | Replaced with `<redacted>` |
+| Bare query tokens and pairs with empty or padding-only values | Replaced whole: `token`, `token=`, and `token==` can all be opaque credentials |
+| `userinfo@` | Replaced with `<redacted>@`, keeping the host |
+| Fragment | Replaced whole |
+| Unparseable input | Replaced whole — redaction fails closed and never echoes back a string it could not parse |
+
+Parsing uses the `url` crate, so IPv6 authorities, percent-encoding, default
+ports and userinfo follow the spec rather than ad-hoc string splitting.
+
+The HTTP client's attached request URL is removed before formatting its errors,
+including response-body read failures. Explicitly reported request URLs are
+redacted as above. This matters because failed nodes store their error in
+`df.nodes.result` and durable execution history, not just in the log.
+
+Do not put credentials in paths or parameter names: those can remain visible.
+Request headers and bodies are not directly included in request traces, but an
+endpoint can echo them in its response.
+
+> **Not covered:** stored request inputs, response headers and response bodies.
+> A workflow's final result is logged, and response-body previews appear in 5xx
+> errors. A response containing a credential, including an echoed request URL or
+> a token returned by an endpoint, can still expose it in logs and stored results.
+> URL redaction does not make `df.vars` secret storage; see
+> [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
 
 ---
 
@@ -356,7 +393,7 @@ leaking internal network topology to potentially malicious users.
 | No EXECUTE privilege on df.http() | `Blocked: role '{role}' does not have EXECUTE privilege on df.http(). Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {role} to allow HTTP requests.` |
 | HTTP disabled (no feature) | `Blocked: outbound HTTP requests are disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them.` |
 | Plaintext HTTP in a restricted build | `Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required.` |
-| Unsupported scheme | `Blocked: unsupported URL scheme '{scheme}'. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |
+| Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |
 | Bare IP address | `Blocked: requests to bare IP addresses are not permitted. Use an approved Azure service hostname instead.` |
 | Non-allowed domain | `Blocked: '{host}' is not in the allowed endpoint list. Only requests to approved Azure service domains are permitted.` |
 | Blocked IP (literal or DNS) | `Blocked: the resolved IP address for '{host}' is in a restricted range. df.http() cannot access private or internal network addresses.` |

@@ -53,6 +53,15 @@ pub static RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(30);
 /// terminal instances and reclaims orphaned engine records. `0` disables it.
 pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(3600);
 
+/// When `false`, the worker log omits the SQL text of executed workflow nodes.
+/// The text is logged fully substituted, so a `{var}` holding a credential is
+/// written to the server log in cleartext. Unlike a query string, SQL cannot be
+/// redacted heuristically, so this is on/off rather than a masking rule.
+///
+/// Postmaster context: it is read in the background worker, which never calls
+/// `ProcessConfigFile`, so a reload would not reach it.
+pub static LOG_WORKFLOW_SQL: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 // Module declarations
 pub mod activities;
 pub mod client;
@@ -61,6 +70,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
+pub mod redact;
 pub mod registry;
 pub mod ssrf;
 pub mod types;
@@ -226,6 +236,15 @@ pub extern "C-unwind" fn _PG_init() {
         &RECONCILE_INTERVAL,
         0,
         86400,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_durable.log_workflow_sql",
+        c"Log the SQL text of executed workflow nodes to the worker log",
+        c"SQL is logged after variable substitution. Turning this off omits statement text from worker execution traces, but does not suppress errors, results, or PostgreSQL statement logging. Requires server restart to change.",
+        &LOG_WORKFLOW_SQL,
         GucContext::Postmaster,
         GucFlags::default(),
     );
