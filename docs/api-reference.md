@@ -162,6 +162,9 @@ df.if_rows('data', 'SELECT $data.id', 'SELECT ''no data''')
 
 ### df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)
 
+> **Experimental:** The `continue_on_failure` syntax is subject to change in
+> future releases.
+
 Repeats `body` forever or while `condition` is true. The supported call shapes
 are:
 

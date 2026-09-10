@@ -1183,6 +1183,9 @@ SELECT df.start(
 The unified signature is
 `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`.
 
+> **Experimental:** The `continue_on_failure` syntax is subject to change in
+> future releases.
+
 It supports four call shapes:
 
 ```sql

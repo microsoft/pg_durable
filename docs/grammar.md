@@ -70,6 +70,9 @@ node_function ::= df.sql( QUERY )
                 | df.as( expression, NAME )
 ```
 
+> **Experimental:** The `continue_on_failure` syntax is subject to change in
+> future releases.
+
 ### Terminals
 
 ```ebnf

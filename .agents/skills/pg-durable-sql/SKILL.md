@@ -99,6 +99,7 @@ df.loop(
     condition TEXT DEFAULT NULL,
     continue_on_failure BOOLEAN DEFAULT false
 ) → TEXT
+-- Experimental: continue_on_failure syntax may change in future releases.
 -- NULL condition: infinite loop.
 -- Non-NULL condition: do-while semantics; evaluate it after each successful body.
 -- With continue_on_failure => true, a consumed body activity failure skips the

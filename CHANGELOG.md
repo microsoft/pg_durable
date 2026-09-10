@@ -16,7 +16,9 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   condition is evaluated normally. All errors returned by body SQL, HTTP, and
   multipart activities are consumable, including query, authorization,
   connection, and network errors. Condition, graph, protocol, unknown child,
-  and orchestration/runtime failures remain fatal.
+  and orchestration/runtime failures remain fatal. The
+  `continue_on_failure` syntax is experimental and may change in future
+  releases.
 
 ### Changed
 
