@@ -8,6 +8,12 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
+- **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
+  option validator, and per-user catalog resolution for unauthenticated, bearer,
+  named-header and query-string endpoint authentication. FDW creation authority
+  is delegated with native grants. User mappings remain plaintext and may be
+  included in dumps; `DROP EXTENSION ... CASCADE` removes dependent endpoints
+  and mappings.
 - **Failure-isolated loops:** the unified
   `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`
   signature supports resilient infinite and conditional loops. With

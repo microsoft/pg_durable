@@ -783,6 +783,71 @@ df.http('https://api.example.com/report.pdf', 'GET') |=> 'pdf'
 Because the body is *already* base64, it can be handed straight to a multipart upload with
 no round trip through a table — see [Multipart Uploads](#multipart-uploads).
 
+### Endpoint Credential Catalog
+
+Endpoint definitions use a handler-less `pg_durable_fdw`. A foreign server holds
+the base URL and authentication scheme; each caller's user mapping holds its
+credentials. There are no foreign tables or scans.
+
+`base_url` and `auth_scheme` are required server options. The base must be a
+literal HTTPS URL, optionally with a path prefix, without userinfo, query or
+fragment. Creating a server does not authorize network access or bypass HTTP
+destination restrictions.
+
+| `auth_scheme` | Additional server option | Required user-mapping option |
+|---|---|---|
+| `none` | None | None; no mapping is needed |
+| `bearer` | None | `token` (without the `Bearer ` prefix) |
+| `header` | `header_name`, such as `x-api-key` | `header_value` |
+| `query` | None | `query_string`, already URL-encoded, optionally starting with `?` |
+
+Unknown options and authentication schemes are rejected. `managed-identity` is
+reserved and rejected until its authentication controls are available. The
+catalog does not accept free-form `resource`, `scope` or `client_id` settings.
+Header names cannot override routing, framing or multipart content type.
+Credential values must be nonempty and valid for their transport; validation
+errors do not echo those values. The mapping validator checks individual options;
+resolution also requires the option for the server's selected scheme.
+
+Endpoint creation is delegated separately from HTTP execution:
+
+```sql
+SELECT df.grant_usage('endpoint_admin', include_http => true);
+GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO endpoint_admin;
+
+SET ROLE endpoint_admin;
+CREATE SERVER partner_api FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (base_url 'https://partner.azure-api.net', auth_scheme 'bearer');
+GRANT USAGE ON FOREIGN SERVER partner_api TO app_role;
+RESET ROLE;
+
+SELECT df.grant_usage('app_role', include_http => true);
+SET ROLE app_role;
+CREATE USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (token '<credential>');
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (SET token '<replacement-token>');
+RESET ROLE;
+```
+
+The roles above must already exist. `df.grant_usage` does not grant FDW creation
+authority, even with `with_grant => true`; use the native FDW grant explicitly.
+A caller with server `USAGE` can create and read its own mapping. Other ordinary
+roles cannot read its values, including a server owner who is not that mapped
+role. `PUBLIC` mappings are not a fallback for endpoint credential lookup.
+
+The catalog resolver checks server `USAGE` and reads the authenticated caller's
+mapping on every attempt. Rotation affects the next lookup, not an already-sent
+request. Missing or inaccessible credentials fail without privileged fallback.
+Body secret insertion is a separate follow-up; do not put arbitrary body-secret
+option names into these mappings.
+
+User mappings are plaintext in catalogs, WAL and backups. Superuser dumps include
+their credential values; less privileged dumps can omit options. Literal values
+in provisioning DDL can appear in PostgreSQL logs. Treat backup/restore and
+credential provisioning accordingly. Dropping the extension with `CASCADE`
+also removes dependent servers and mappings.
+
 ### Error Handling
 
 - **2xx responses**: Success - `ok` is `true`

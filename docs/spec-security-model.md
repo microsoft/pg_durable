@@ -434,6 +434,10 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 - `df.secret(server text, option text)` constructs an inert TEXT marker, conceptually `${secret:server.option}`, for composition into HTTP request templates. It does not return a credential or require redaction of its output.
 - Neither helper reads endpoint configuration or credentials. Exact marker escaping and literal-marker syntax remain open design details.
 
+**Catalog options**: Servers require `base_url` and `auth_scheme`; `header_name` is required only for header authentication. Schemes are `none` (no mapping required), `bearer` (`token` mapping option), `header` (`header_value`), and `query` (`query_string`). The closed option set excludes arbitrary secret names and ambient-identity settings. See [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog). FDW creation authority uses a native grant separate from `df.grant_usage`.
+
+**Body handling**: Secret insertion into request bodies is deferred. Whole-body marker scanning is unsafe even when opted in, because untrusted data concatenated during graph construction is indistinguishable from intentional references. Keep endpoint-bound authentication independent of a future body API; do not automatically expand markers in body data.
+
 **Resolution and authorization**:
 - The activity re-checks `EXECUTE` on the corresponding HTTP function and `USAGE` on the referenced server for `submitted_by`. Hand-crafted node JSON or marker text must pass the same checks as helper-produced references.
 - Credential lookup uses `pg_user_mappings` over `connect_as_user(submitted_by)`, never the worker's privileged pool. Missing servers, mappings, options or masked values fail explicitly; there is no fallback to another role's mapping or an unauthenticated request.
@@ -448,7 +452,7 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 
 **Limits**: Literal credentials supplied outside this mechanism remain unsafe. A response may contain a retrieved or echoed secret, so request-side resolution alone cannot promise that no secret ever appears in results or logs. Secret-bearing paths need diagnostic protection after resolution; the current URL redactor preserves paths. See [HTTP redaction coverage](http-security.md#71-url-redaction).
 
-The older requirement for opaque, admin-managed shared credentials is a separate decision ([OQ5](#oq5-opaque-shared-http-credentials)). Whether callers need endpoint-only access without raw-URL HTTP access is also separate ([OQ6](#oq6-endpoint-only-http-access)). Neither property follows merely from adding reference helpers.
+The authorization baseline accepts caller-readable mapping credentials ([OQ5](#oq5-opaque-shared-http-credentials)) and uses existing HTTP function grants plus server `USAGE` ([OQ6](#oq6-endpoint-only-http-access)). Opaque shared credentials and endpoint-only access are outside this work.
 
 ---
 
@@ -1827,7 +1831,7 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 
 **Question**: Must an administrator be able to provide credentials that workflows can use but their callers cannot read?
 
-**Baseline**: Per-role user mappings do not provide this property. Nor would an admin-only table plus unrestricted SQL/HTTP substitution: callers could return the substituted value or send it to a destination they control. If required, this needs a separately defined, constrained endpoint-authentication capability. The requirement remains open rather than being silently inherited from the old table proposal.
+**Resolution (2026-09-10)**: No. Callers may read their own mapping credentials. Opaque shared secrets are outside this work. An admin-only table plus unrestricted SQL/HTTP substitution would not provide that stronger property anyway: callers could return the substituted value or send it to a destination they control.
 
 ---
 
@@ -1835,7 +1839,7 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 
 **Question**: Must roles be able to call approved endpoints without permission to use raw-URL HTTP?
 
-**Baseline**: `df.endpoint` composes with the existing HTTP constructors and their `EXECUTE` grants; endpoint requests additionally require server `USAGE`. That does not remove the role's ability to make raw-URL requests allowed by HTTP policy. A separate endpoint-only authorization policy, if required, must be designed explicitly and enforced at activity execution, not merely by restricting a reference constructor.
+**Resolution (2026-09-10)**: Use existing HTTP function grants plus server `USAGE`. `df.endpoint` composes with the existing HTTP constructors; it does not remove the role's ability to make raw-URL requests allowed by HTTP policy. Endpoint-only authorization is outside this work.
 
 ---
 

@@ -23,3 +23,14 @@ CREATE FUNCTION df."with_http_options"(
 ) RETURNS TEXT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'with_http_options_wrapper';
+
+CREATE FUNCTION df.endpoint_option_validator(
+    "options" pg_catalog.text[],
+    "catalog" pg_catalog.oid
+) RETURNS pg_catalog.void
+LANGUAGE c STRICT
+AS 'MODULE_PATHNAME', 'endpoint_option_validator_wrapper';
+
+CREATE FOREIGN DATA WRAPPER pg_durable_fdw
+    NO HANDLER VALIDATOR df.endpoint_option_validator;
+REVOKE ALL ON FOREIGN DATA WRAPPER pg_durable_fdw FROM PUBLIC;

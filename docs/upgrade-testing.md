@@ -207,6 +207,16 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 #### Loop failure continuation
 
+- Adds the handler-less `pg_durable_fdw` and
+  `df.endpoint_option_validator(text[], oid)` in fresh and upgraded schemas.
+  FDW `USAGE` is not granted to `PUBLIC` or by `df.grant_usage`; administrators
+  delegate creation with a native FDW grant. The catalog resolver uses only
+  native catalogs, verifies extension ownership of the wrapper, and reports
+  unavailable endpoint support without changing legacy workflow execution.
+- Upgrade snapshots include FDW ownership, handler/validator, extension
+  membership and ACLs, plus endpoint server and mapping metadata. Mapping
+  credential values are excluded. B2 exercises delegated server/mapping DDL
+  after upgrade. Existing HTTP signatures, grants and activity inputs are unchanged.
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent
   objects, then creates the single public

@@ -66,6 +66,7 @@ pub static LOG_WORKFLOW_SQL: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub mod activities;
 pub mod client;
 pub mod dsl;
+pub mod endpoints;
 pub mod explain;
 pub mod monitoring;
 pub mod node_status;

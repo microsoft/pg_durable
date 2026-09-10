@@ -316,6 +316,19 @@ bytes into a subsequent upload.
 
 ---
 
+### Endpoint Credential Catalog
+
+`pg_durable_fdw` stores endpoint configuration in native foreign servers and
+per-role credentials in user mappings. It has no handler and does not support
+foreign tables. `df.endpoint_option_validator(options text[], catalog oid)` is
+the FDW validator invoked by PostgreSQL on creation and alteration; it returns
+`void` or raises an error without echoing credential values.
+
+The server options are `base_url`, `auth_scheme`, and `header_name` (only for
+header authentication). Mapping options are `token`, `header_value`, and
+`query_string`. See [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
+for option combinations, grants, rotation and backup implications.
+
 ### df.http_multipart(url [, method, parts, headers, timeout])
 
 Makes an HTTP request with a `multipart/form-data` body. Requires the same
