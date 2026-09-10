@@ -4,6 +4,10 @@ This document describes the security model for `df.http()` — the durable HTTP
 activity that lets workflows make outbound HTTP(S) requests from within the
 PostgreSQL background worker.
 
+The same HTTP policy applies to `df.http_multipart`, which has its own function
+privilege check. For endpoint credentials and secret-reference helpers, see
+[the credential security contract](spec-security-model.md#44-endpoint-credentials).
+
 ---
 
 ## Table of Contents
@@ -100,7 +104,8 @@ hand-crafted `Durofut` JSON string, inserting an HTTP node without ever calling
 To close this gap, `execute_http` checks at execution time whether the
 `submitted_by` role recorded in the node still holds `EXECUTE` privilege on
 `df.http()`.  If the role's grant has been revoked since the node was created,
-the node fails immediately.
+and no other effective grant remains, the next execution attempt fails before
+sending a request. Revocation does not cancel a request already in progress.
 
 ### 3.2 Mechanism
 
@@ -114,8 +119,12 @@ SELECT has_function_privilege($submitted_by::regrole,
 
 `has_function_privilege` honours PostgreSQL's standard privilege model:
 superusers always return `true`; regular roles return `true` only when an
-explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO <role>` (or a role that
-inherits one) is in effect.
+effective grant exists, whether direct, inherited from another role or granted
+to `PUBLIC`.
+
+Multipart activities perform the corresponding check on
+`df.http_multipart(text,text,jsonb,jsonb,integer)`. Restricting one function does
+not restrict the other.
 
 `df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
 Like other combinators, it uses ordinary `df` schema access and default PUBLIC
@@ -129,7 +138,7 @@ HTTP access is **opt-in** and separate from general `df` access.
 
 #### Granting access
 
-Use `df.grant_usage()` with `include_http => true`:
+Use `df.grant_usage()` with `include_http => true` to grant both HTTP functions:
 
 ```sql
 SELECT df.grant_usage('my_role', include_http => true);
@@ -139,10 +148,14 @@ Or grant directly:
 
 ```sql
 GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO my_role;
+GRANT EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) TO my_role;
 ```
 
 `df.grant_usage('my_role')` (without `include_http`) grants all standard `df`
-privileges but **not** `df.http()`.  HTTP access must be explicitly opted in to.
+privileges but does not grant either HTTP function. The helper is **additive**:
+`include_http => false` does not revoke previously granted or inherited HTTP
+access. Ordinary helpers retain PostgreSQL's default `PUBLIC EXECUTE`; schema
+`USAGE` is their access gate. Sensitive functions are granted explicitly.
 
 #### Revoking access
 
@@ -150,13 +163,16 @@ To remove HTTP access without removing all `df` access:
 
 ```sql
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM my_role;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM my_role;
 ```
 
-After this, any existing or future HTTP nodes submitted by `my_role` will fail
-at execution time with a "permission denied" error.  All other `df` functions
-remain accessible.
+Once no effective HTTP grant remains, later execution attempts fail with a
+privilege error. Other `df` functions remain accessible. Check for grants through
+`PUBLIC` or inherited roles: revoking a direct grant does not remove those paths.
 
-`df.revoke_usage('my_role')` removes all `df` access, including `df.http()`.
+`df.revoke_usage('my_role')` also revokes standard `df` access and sensitive
+function grants within the caller's grant authority. It does not erase
+independent grants through `PUBLIC` or other roles.
 
 #### PUBLIC grant and upgrades
 
@@ -171,23 +187,27 @@ run manually:
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 ```
 
-When `df.grant_usage(role, include_http => false)` is called and the role still
-has effective HTTP access via the PUBLIC grant (or another inherited grant), a
-`WARNING` is emitted to signal that the revocation had no net effect.
+Calling `df.grant_usage(role, include_http => false)` does not revoke the legacy
+grant or warn about residual access. Use `has_function_privilege` to check the
+role's effective permissions after changing grants.
 
 ### 3.4 Admin function protection
 
 `df.grant_usage()` and `df.revoke_usage()` are admin-only functions.
-`EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, so only
-superusers can call them.
+`EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, but administration
+can be delegated. A role must have permission to call a helper, and its operations
+are additionally constrained by PostgreSQL's native grant authority because the
+helpers run as `SECURITY INVOKER`.
 
-> **Caution:** `df.grant_usage()` internally runs
-> `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df`, which temporarily includes
-> `df.grant_usage()` and `df.revoke_usage()` themselves before the function
-> immediately revokes them from the target role.  If an admin replicates the
-> blanket `GRANT` manually without the matching `REVOKE`s, the target role
-> will gain access to these admin helpers.  Always use `df.grant_usage()`
-> rather than hand-crafting the equivalent `GRANT` statements.
+`df.grant_usage(..., with_grant => true)` grants privileges with `WITH GRANT
+OPTION`, including execution of the grant/revoke helpers. Such a delegated admin
+can grant only privileges it has authority to grant; execution permission alone
+does not confer the extension owner's privileges.
+
+`df.grant_usage` issues explicit schema, table and sensitive-function grants.
+It does not use a blanket function grant followed by revocations. When granting
+HTTP access, the caller must be able to grant both HTTP functions; otherwise the
+call fails rather than silently skipping the HTTP grant.
 
 ### 3.5 Feature-flag interaction
 
