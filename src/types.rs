@@ -1364,6 +1364,8 @@ pub struct HttpConfig {
     /// Role that called df.start() (audit trail)
     #[serde(default)]
     pub submitted_by: Option<String>,
+    #[serde(flatten)]
+    pub secret_options: crate::secrets::SecretOptions,
 }
 
 fn default_http_timeout() -> u64 {
@@ -1402,6 +1404,8 @@ pub struct MultipartConfig {
     /// Role that called df.start() (audit trail)
     #[serde(default)]
     pub submitted_by: Option<String>,
+    #[serde(flatten)]
+    pub secret_options: crate::secrets::SecretOptions,
 }
 
 // ============================================================================

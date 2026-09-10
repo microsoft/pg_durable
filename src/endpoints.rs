@@ -99,7 +99,10 @@ pub fn set_execution_context(
     database: Option<&str>,
 ) {
     config["submitted_by"] = serde_json::Value::String(submitted_by.into());
-    if config.get("endpoint").is_some() {
+    if config.get("endpoint").is_some()
+        || config.get("secret_bindings").is_some()
+        || config.get("form_fields").is_some()
+    {
         config["database"] = database.map_or(serde_json::Value::Null, |database| {
             serde_json::Value::String(database.into())
         });
@@ -312,6 +315,10 @@ impl EndpointConfig {
 fn validate_mapping_options(options: &[String]) -> Result<(), String> {
     let options = parse_options(options)?;
     for (name, value) in options {
+        if let Some(key) = name.strip_prefix(crate::secrets::SECRET_OPTION_PREFIX) {
+            crate::secrets::validate_secret_key(key)?;
+            continue;
+        }
         if value.is_empty() {
             return Err("Endpoint credential options must not be empty".into());
         }
@@ -333,7 +340,7 @@ fn validate_mapping_options(options: &[String]) -> Result<(), String> {
                     return Err("Endpoint query_string must already be URL-encoded".into());
                 }
             }
-            _ => return Err("Unsupported endpoint user mapping option; allowed: token, header_value, query_string".into()),
+            _ => return Err("Unsupported endpoint user mapping option; allowed: token, header_value, query_string, secret.<key>".into()),
         }
     }
     Ok(())
@@ -411,11 +418,11 @@ fn resolve_auth(config: AuthScheme, mapping: &[String]) -> Result<EndpointAuth, 
     }
 }
 
-pub async fn resolve_endpoint(
+async fn load_endpoint_catalog(
     submitted_by: &str,
     database: Option<&str>,
     server: &str,
-) -> Result<ResolvedEndpoint, String> {
+) -> Result<(sqlx::PgConnection, i64, EndpointConfig), String> {
     let mut connection = crate::types::connect_as_user(submitted_by, database)
         .await
         .map_err(|_| "Endpoint catalog connection failed")?;
@@ -464,26 +471,63 @@ pub async fn resolve_endpoint(
         return Err("Permission denied: endpoint server USAGE is required".into());
     }
     let config = EndpointConfig::from_options(options.as_deref().unwrap_or_default())?;
-    let auth = if matches!(config.auth_scheme, AuthScheme::None) {
-        EndpointAuth::None
-    } else {
-        let mapping: Option<Option<Vec<String>>> = sqlx::query_scalar(
-            "SELECT mapping.umoptions
+    Ok((connection, server_oid, config))
+}
+
+async fn load_user_mapping(
+    connection: &mut sqlx::PgConnection,
+    server_oid: i64,
+) -> Result<Vec<String>, String> {
+    let mapping: Option<Option<Vec<String>>> = sqlx::query_scalar(
+        "SELECT mapping.umoptions
              FROM pg_catalog.pg_user_mappings AS mapping
              WHERE mapping.srvid::pg_catalog.int8 = $1
                AND mapping.umuser = (
                    SELECT role.oid FROM pg_catalog.pg_roles AS role
                    WHERE role.rolname = CURRENT_USER
                )",
-        )
-        .bind(server_oid)
-        .fetch_optional(&mut connection)
-        .await
-        .map_err(|_| "Endpoint user mapping lookup failed")?;
-        let mapping = mapping.ok_or(
+    )
+    .bind(server_oid)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| "Endpoint user mapping lookup failed")?;
+    let mapping = mapping.ok_or(
             "Endpoint user mapping for the submitting role is required; PUBLIC mappings are unsupported",
         )?;
-        let mapping = mapping.ok_or("Endpoint credential options are missing or inaccessible")?;
+    let mapping = mapping.ok_or("Endpoint credential options are missing or inaccessible")?;
+    validate_mapping_options(&mapping)?;
+    Ok(mapping)
+}
+
+pub async fn resolve_named_secrets(
+    submitted_by: &str,
+    database: Option<&str>,
+    server: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let (mut connection, server_oid, _) =
+        load_endpoint_catalog(submitted_by, database, server).await?;
+    let mapping = load_user_mapping(&mut connection, server_oid).await?;
+    let options = parse_options(&mapping)?;
+    Ok(options
+        .into_iter()
+        .filter_map(|(name, value)| {
+            name.strip_prefix(crate::secrets::SECRET_OPTION_PREFIX)
+                .map(|key| (key.to_owned(), value.to_owned()))
+        })
+        .collect())
+}
+
+pub async fn resolve_endpoint(
+    submitted_by: &str,
+    database: Option<&str>,
+    server: &str,
+) -> Result<ResolvedEndpoint, String> {
+    let (mut connection, server_oid, config) =
+        load_endpoint_catalog(submitted_by, database, server).await?;
+    let auth = if matches!(config.auth_scheme, AuthScheme::None) {
+        EndpointAuth::None
+    } else {
+        let mapping = load_user_mapping(&mut connection, server_oid).await?;
         resolve_auth(config.auth_scheme, &mapping)?
     };
     Ok(ResolvedEndpoint {
@@ -495,6 +539,32 @@ pub async fn resolve_endpoint(
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn endpoint_named_secret_options_are_opaque() {
+        let values = options(&[
+            "token=ENDPOINT_TOKEN",
+            "secret.api_key=abc==def",
+            "secret.empty=",
+            "secret.json={\"nested\":123}",
+            "secret.token=separate-token",
+            "secret.Mixed.Key=literal ${secret:other.key}\nvalue",
+        ]);
+        validate_mapping_options(&values).unwrap();
+        let parsed = parse_options(&values).unwrap();
+        assert_eq!(parsed["secret.api_key"], "abc==def");
+        assert_eq!(parsed["secret.empty"], "");
+        assert_eq!(parsed["secret.json"], r#"{"nested":123}"#);
+        for invalid in [
+            "secret.=PRIVATE_VALUE",
+            "secret.bad\nname=PRIVATE_VALUE",
+            "secrets=PRIVATE_VALUE",
+            "resource=PRIVATE_VALUE",
+        ] {
+            let error = validate_mapping_options(&options(&[invalid])).unwrap_err();
+            assert!(!error.contains("PRIVATE_VALUE"));
+        }
+    }
 
     #[test]
     fn endpoint_execution_context_preserves_legacy_inputs() {
@@ -837,10 +907,44 @@ mod tests {
                 let resolved = resolve_endpoint("endpoint Alice", Some(&database), "endpoint_test").await.unwrap();
                 assert!(matches!(resolved.auth, EndpointAuth::Bearer(value) if value == "Bearer ROTATED_TOKEN"));
 
+                sqlx::raw_sql(r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (ADD "secret.key" 'ALICE_SECRET', ADD "secret.empty" '', ADD "secret.token" 'NAMED_TOKEN')"#)
+                    .execute(&mut alice).await.unwrap();
+                sqlx::raw_sql(r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (ADD "secret.key" 'BOB_SECRET')"#)
+                    .execute(&mut bob).await.unwrap();
+                let values = resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_test").await.unwrap();
+                assert_eq!(values["key"], "ALICE_SECRET");
+                assert_eq!(values["empty"], "");
+                assert_eq!(values["token"], "NAMED_TOKEN");
+                assert_eq!(resolve_named_secrets("endpoint_bob", Some(&database), "endpoint_test").await.unwrap()["key"], "BOB_SECRET");
+                sqlx::raw_sql(r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (ADD "secret.Mixed.Key" 'abc=={"nested":true}')"#)
+                    .execute(&mut alice).await.unwrap();
+                let values = resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_test").await.unwrap();
+                assert_eq!(values["key"], "ALICE_SECRET");
+                assert_eq!(values["Mixed.Key"], "abc=={\"nested\":true}");
+                sqlx::raw_sql(r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (SET "secret.key" 'ROTATED_SECRET', DROP "secret.Mixed.Key")"#)
+                    .execute(&mut alice).await.unwrap();
+                let values = resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_test").await.unwrap();
+                assert_eq!(values["key"], "ROTATED_SECRET");
+                assert_eq!(values["empty"], "");
+                assert_eq!(values["token"], "NAMED_TOKEN");
+                assert!(!values.contains_key("Mixed.Key"));
+                let resolved = resolve_endpoint("endpoint Alice", Some(&database), "endpoint_test").await.unwrap();
+                assert!(matches!(resolved.auth, EndpointAuth::Bearer(value) if value == "Bearer ROTATED_TOKEN"));
+                for statement in [
+                    r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (ADD "secret." 'DO_NOT_ECHO')"#,
+                    r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (ADD secrets '{"key":"DO_NOT_ECHO"}')"#,
+                    r#"ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (ADD scope 'DO_NOT_ECHO')"#,
+                    r#"ALTER SERVER endpoint_owned OPTIONS (ADD "secret.key" 'DO_NOT_ECHO')"#,
+                ] {
+                    let error = sqlx::raw_sql(statement).execute(&mut alice).await.unwrap_err();
+                    assert!(!error.to_string().contains("DO_NOT_ECHO"));
+                }
+
                 sqlx::raw_sql("REVOKE USAGE ON FOREIGN SERVER endpoint_test FROM \"endpoint Alice\"")
                     .execute(&mut connection).await.unwrap();
                 let error = resolve_endpoint("endpoint Alice", Some(&database), "endpoint_test").await.err().unwrap();
                 assert!(error.contains("USAGE"));
+                assert!(resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_test").await.err().unwrap().contains("USAGE"));
                 sqlx::raw_sql("GRANT USAGE ON FOREIGN SERVER endpoint_test TO \"endpoint Alice\"")
                     .execute(&mut connection).await.unwrap();
                 sqlx::raw_sql("DROP USER MAPPING FOR CURRENT_USER SERVER endpoint_test")
