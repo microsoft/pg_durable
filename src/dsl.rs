@@ -511,12 +511,15 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
         pgrx::error!("df.with_http_options(): expected a single HTTP or HTTP_MULTIPART node");
     }
 
-    let config = node
-        .query
-        .as_deref()
-        .and_then(|query| serde_json::from_str::<serde_json::Value>(query).ok());
-    if !config.as_ref().is_some_and(serde_json::Value::is_object) {
-        pgrx::error!("df.with_http_options(): HTTP node config must be a JSON object");
+    let valid_config = match (node.node_type.as_str(), node.query.as_deref()) {
+        ("HTTP", Some(query)) => serde_json::from_str::<crate::types::HttpConfig>(query).is_ok(),
+        ("HTTP_MULTIPART", Some(query)) => {
+            serde_json::from_str::<crate::types::MultipartConfig>(query).is_ok()
+        }
+        _ => false,
+    };
+    if !valid_config {
+        pgrx::error!("df.with_http_options(): HTTP node config is malformed");
     }
 
     if let Some(options) = options {
