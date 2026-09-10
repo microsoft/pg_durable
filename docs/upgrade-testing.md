@@ -207,6 +207,12 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 #### Loop failure continuation
 
+- Adds `df.endpoint(text, text)` without changing either HTTP constructor's
+  signature or grants. Endpoint nodes add a fixed `endpoint` server name and use
+  `url` for the path template; only these nodes receive the trusted target
+  `database` in activity inputs. Existing raw-URL nodes retain their serialized
+  inputs and activity names. Both HTTP activities resolve credentials locally,
+  using the same endpoint preparation and validation rules.
 - Adds the handler-less `pg_durable_fdw` and
   `df.endpoint_option_validator(text[], oid)` in fresh and upgraded schemas.
   FDW `USAGE` is not granted to `PUBLIC` or by `df.grant_usage`; administrators

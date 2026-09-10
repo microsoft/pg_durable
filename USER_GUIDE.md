@@ -260,6 +260,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.sleep(seconds)` | Pause for N seconds | `df.sleep(60)` |
 | `df.wait_for_schedule(cron)` | Wait until cron matches | `df.wait_for_schedule('0 * * * *')` |
 | `df.http(url, method, body, headers, timeout)` | Make HTTP request | `df.http('https://api.example.com', 'POST', '{"key": "value"}')` |
+| `df.endpoint(server, path)` | Reference an endpoint destination | `df.http(df.endpoint('partner_api', '/v1/items'), 'GET')` |
 | `df.join(a, b)` | Execute in parallel, wait for all | `df.join('SELECT 1', 'SELECT 2')` |
 | `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
 | `df.race(a, b)` | Execute in parallel, first wins | `df.race(fast_query, slow_query)` |
@@ -847,6 +848,54 @@ their credential values; less privileged dumps can omit options. Literal values
 in provisioning DDL can appear in PostgreSQL logs. Treat backup/restore and
 credential provisioning accordingly. Dropping the extension with `CASCADE`
 also removes dependent servers and mappings.
+
+### Calling an Endpoint
+
+Pass `df.endpoint(server, path)` as the destination of either HTTP constructor:
+
+```sql
+SELECT df.start(
+    df.http(df.endpoint('partner_api', '/v1/invoices?status=pending'), 'GET'),
+    'fetch-invoices'
+);
+
+SELECT df.start(
+    df.http_multipart(
+        df.endpoint('partner_api', '/v1/upload'),
+        parts => '[{"name":"file","filename":"hello.txt","data_b64":"aGVsbG8="}]'::jsonb
+    ),
+    'upload-file'
+);
+```
+
+`df.endpoint` constructs a JSON-encoded TEXT reference, not an HTTP request or a
+resolved URL. It does not look up the server or read credentials. The HTTP
+constructor records only the server name and path template; the activity checks
+the caller's HTTP grant and server `USAGE`, resolves the mapping, and applies
+normal HTTP destination checks. `df.explain` shows the server and path without
+resolving either.
+
+The path starts with one `/` and is appended to the server's base path prefix:
+`https://host/api/` plus `/items` becomes `https://host/api/items`. Absolute URLs,
+protocol-relative paths (`//host`), backslashes, fragments, whitespace, dot
+traversal segments and percent-encoded path separators are rejected. Encode
+spaces and other URL data before supplying them. Existing `{var}` and `$result`
+substitution works in the path; validation runs again after substitution. Server
+names are fixed references, not workflow-variable templates.
+
+Caller headers cannot set `Host` or override the credential header (matching
+case-insensitively). For query authentication, caller query parameters cannot
+duplicate credential parameter names, including percent-encoded spellings.
+Credential query values are appended without re-encoding and redacted in request
+diagnostics. Secret-looking body text is not expanded by endpoint authentication;
+ordinary workflow-variable substitution remains unchanged.
+
+Endpoints and mappings are looked up in the workflow's target database, or the
+extension database when no target was supplied. The FDW must be installed there,
+and the submitting role must be able to connect. Catalog lookup reads current
+permissions and credentials on each attempt, not at graph construction time.
+Returned or echoed credentials are still response data and can enter history;
+endpoint authentication does not redact response bodies or headers.
 
 ### Error Handling
 

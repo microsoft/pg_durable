@@ -5,7 +5,7 @@ activity that lets workflows make outbound HTTP(S) requests from within the
 PostgreSQL background worker.
 
 The same HTTP policy applies to `df.http_multipart`, which has its own function
-privilege check. For endpoint credentials and secret-reference helpers, see
+privilege check. For endpoint credentials, see
 [the credential security contract](spec-security-model.md#44-endpoint-credentials).
 
 ---
@@ -215,6 +215,32 @@ The privilege check runs regardless of which HTTP Cargo feature is enabled.
 When no HTTP feature is compiled in, the request is still blocked later by the
 DSL-time guard and by execution-time URL validation, but the privilege check
 remains compiled in and still runs before any network activity.
+
+---
+
+### 3.6 Endpoint requests
+
+An endpoint reference does not grant authority. Normal and multipart activities
+first check their existing HTTP function grant, then resolve the foreign server
+and the submitting role's user mapping on a connection authenticated as that role.
+Server `USAGE` is mandatory. The workflow's recorded target database selects the
+catalog; caller-supplied database/identity fields in node JSON do not override the
+trusted execution context.
+
+Path composition preserves the base URL's authority and path prefix. Traversal,
+protocol-relative paths and encoded path separators are rejected after variable
+substitution as well as at construction. The final URL, including any credential
+query parameters, passes the same scheme, allow-list and DNS protections as a raw
+URL. Endpoint requests cannot supply `Host`, duplicate a configured credential
+header, or override credential query parameter names. Headers carrying resolved
+credentials are added only after destination validation.
+
+Only the server name and path template enter node configuration and recorded
+request inputs. Resolved credentials stay within the activity. Request diagnostics
+redact the composed URL; response echoes and response secrets remain outside that
+guarantee. Request bodies are not scanned for secret markers. See
+[Calling an Endpoint](../USER_GUIDE.md#calling-an-endpoint) for the API and catalog
+requirements.
 
 ---
 

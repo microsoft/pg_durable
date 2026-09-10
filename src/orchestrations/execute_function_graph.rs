@@ -1963,7 +1963,11 @@ async fn execute_http_node(
     }
 
     // Inject audit context from the function node
-    config["submitted_by"] = serde_json::Value::String(node.submitted_by.clone());
+    crate::endpoints::set_execution_context(
+        &mut config,
+        &node.submitted_by,
+        node.database.as_deref(),
+    );
 
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");
@@ -2068,7 +2072,11 @@ async fn execute_http_multipart_node(
     }
 
     // Inject audit context from the function node.
-    config["submitted_by"] = serde_json::Value::String(node.submitted_by.clone());
+    crate::endpoints::set_execution_context(
+        &mut config,
+        &node.submitted_by,
+        node.database.as_deref(),
+    );
 
     let final_config = config.to_string();
     let url = config["url"].as_str().unwrap_or("?");

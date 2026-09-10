@@ -34,3 +34,8 @@ AS 'MODULE_PATHNAME', 'endpoint_option_validator_wrapper';
 CREATE FOREIGN DATA WRAPPER pg_durable_fdw
     NO HANDLER VALIDATOR df.endpoint_option_validator;
 REVOKE ALL ON FOREIGN DATA WRAPPER pg_durable_fdw FROM PUBLIC;
+
+CREATE FUNCTION df.endpoint("server" pg_catalog.text, "path" pg_catalog.text)
+RETURNS pg_catalog.text
+LANGUAGE c IMMUTABLE STRICT PARALLEL SAFE
+AS 'MODULE_PATHNAME', 'endpoint_wrapper';

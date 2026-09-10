@@ -110,11 +110,25 @@ pub async fn execute(
             ));
         })?;
 
-    let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
+    let prepared = crate::endpoints::prepare_request(
+        audit_user,
+        config.database.as_deref(),
+        config.endpoint.as_deref(),
+        &config.url,
+        config.headers.as_ref(),
+    )
+    .await
+    .inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
+    let request_url = prepared.url;
+    let safe_url = if config.endpoint.is_some() {
+        crate::redact::redact_url(request_url.as_str())
+    } else {
+        safe_url
+    };
 
     // --- Scheme validation (always enforced) ---
     crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
@@ -170,6 +184,10 @@ pub async fn execute(
                 }
             }
         }
+    }
+
+    if let Some((name, value)) = prepared.credential_header {
+        request = request.header(name, value);
     }
 
     // Build the multipart form from base64-encoded parts.
