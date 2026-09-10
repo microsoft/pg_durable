@@ -495,6 +495,61 @@ create_extension_at_version() {
 # ordinal_position) don't cause spurious diffs between the upgrade and
 # fresh-install snapshots.
 SCHEMA_QUERY="
+SELECT 'fdw' AS obj_type,
+             wrapper.fdwname,
+             pg_catalog.pg_get_userbyid(wrapper.fdwowner),
+             wrapper.fdwhandler::pg_catalog.regprocedure::text,
+             wrapper.fdwvalidator::pg_catalog.regprocedure::text,
+             wrapper.fdwoptions::text,
+             EXISTS (
+                     SELECT 1 FROM pg_catalog.pg_depend dependency
+                     JOIN pg_catalog.pg_extension extension ON extension.oid = dependency.refobjid
+                     WHERE dependency.classid = 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass
+                         AND dependency.objid = wrapper.oid
+                         AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+                         AND dependency.deptype = 'e' AND extension.extname = 'pg_durable'
+             )::text
+FROM pg_catalog.pg_foreign_data_wrapper wrapper
+WHERE wrapper.fdwname = 'pg_durable_fdw';
+
+SELECT 'grant_fdw', wrapper.fdwname,
+             CASE WHEN privilege.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(privilege.grantee) END,
+             privilege.privilege_type, privilege.is_grantable::text,
+             pg_catalog.pg_get_userbyid(privilege.grantor), ''
+FROM pg_catalog.pg_foreign_data_wrapper wrapper
+CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(wrapper.fdwacl, pg_catalog.acldefault('F', wrapper.fdwowner))) privilege
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY 2, 3, 4, 6;
+
+SELECT 'endpoint_server', server.srvname,
+             pg_catalog.pg_get_userbyid(server.srvowner),
+             server.srvtype, server.srvversion,
+             ARRAY(SELECT option_name || '=' || option_value FROM pg_catalog.pg_options_to_table(server.srvoptions) ORDER BY option_name)::text, ''
+FROM pg_catalog.pg_foreign_server server
+JOIN pg_catalog.pg_foreign_data_wrapper wrapper ON wrapper.oid = server.srvfdw
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY server.srvname;
+
+SELECT 'grant_endpoint_server', server.srvname,
+             CASE WHEN privilege.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(privilege.grantee) END,
+             privilege.privilege_type, privilege.is_grantable::text,
+             pg_catalog.pg_get_userbyid(privilege.grantor), ''
+FROM pg_catalog.pg_foreign_server server
+JOIN pg_catalog.pg_foreign_data_wrapper wrapper ON wrapper.oid = server.srvfdw
+CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(server.srvacl, pg_catalog.acldefault('S', server.srvowner))) privilege
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY 2, 3, 4, 6;
+
+SELECT 'endpoint_mapping', server.srvname,
+             CASE WHEN mapping.umuser = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(mapping.umuser) END,
+             ARRAY(SELECT option_name FROM pg_catalog.pg_options_to_table(mapping.umoptions) ORDER BY option_name)::text,
+             '', '', ''
+FROM pg_catalog.pg_user_mapping mapping
+JOIN pg_catalog.pg_foreign_server server ON server.oid = mapping.umserver
+JOIN pg_catalog.pg_foreign_data_wrapper wrapper ON wrapper.oid = server.srvfdw
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY 2, 3;
+
 -- Tables and columns (ordinal_position renumbered to avoid dropped-column gaps)
 SELECT 'column' AS obj_type,
        c.table_name,
@@ -1094,6 +1149,23 @@ test_b2_http_api_after_upgrade() {
     ") || { echo "$output"; return 1; }
 }
 
+test_b2_endpoint_catalog_after_upgrade() {
+    run_sql_capture "CREATE ROLE durable_b2_endpoint_probe LOGIN;
+        SELECT df.grant_usage('durable_b2_endpoint_probe');" >/dev/null || return 1
+    assert_sql_equals "SELECT pg_catalog.has_foreign_data_wrapper_privilege('durable_b2_endpoint_probe', 'pg_durable_fdw', 'USAGE');" "f" || return 1
+    run_sql_capture "GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO durable_b2_endpoint_probe;
+        SET ROLE durable_b2_endpoint_probe;
+        CREATE SERVER durable_b2_endpoint FOREIGN DATA WRAPPER pg_durable_fdw
+            OPTIONS (base_url 'https://api.github.com', auth_scheme 'bearer');
+        CREATE USER MAPPING FOR CURRENT_USER SERVER durable_b2_endpoint OPTIONS (token 'UPGRADE_SENTINEL');
+        ALTER USER MAPPING FOR CURRENT_USER SERVER durable_b2_endpoint OPTIONS (SET token 'ROTATED_SENTINEL');" >/dev/null || return 1
+    assert_sql_equals "SELECT fdwhandler = 0 AND fdwvalidator = pg_catalog.to_regprocedure('df.endpoint_option_validator(text[],oid)')::oid FROM pg_catalog.pg_foreign_data_wrapper WHERE fdwname = 'pg_durable_fdw';" "t" || return 1
+    assert_sql_equals "SELECT umoptions = ARRAY['token=ROTATED_SENTINEL'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "DROP SERVER durable_b2_endpoint CASCADE;
+        DROP OWNED BY durable_b2_endpoint_probe;
+        DROP ROLE durable_b2_endpoint_probe;" >/dev/null
+}
+
 if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
@@ -1102,6 +1174,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
     run_test "B2: HTTP OIDs, grants and dependent views survive upgrade" test_b2_http_api_after_upgrade
+    run_test "B2: Endpoint FDW, validator and delegated catalog DDL work after upgrade" test_b2_endpoint_catalog_after_upgrade
 fi
 
 # ============================================================================
