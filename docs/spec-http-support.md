@@ -1,5 +1,10 @@
 # Spec: HTTP Support for pg_durable
 
+> **Historical design sketch; credential proposal superseded (2026-09-10).**
+> `df.http` and `df.http_multipart` are implemented; use the [API reference](api-reference.md) and [HTTP security documentation](http-security.md) for current behavior. The `df.azure` and `df.secrets` examples below are unimplemented proposals, not current APIs.
+>
+> [Endpoint credentials](spec-security-model.md#44-endpoint-credentials) use foreign servers, user mappings and inert reference helpers. Do not copy the construction-time key lookup below: passing its resolved key to `df.http` puts the credential back into the graph and durable history. Resolution belongs inside the HTTP activity.
+
 ## Overview
 
 Add `df.http()` as a new node type that makes HTTP requests as a durable activity. This automatically enables Azure Functions, webhooks, external APIs, and any HTTP service.
@@ -83,6 +88,8 @@ SELECT df.start(
 ## Implementation
 
 ### 1. Secrets Table
+
+**Superseded:** This DDL records the old proposal. The per-role credential store uses native user mappings, with the readability and authorization boundaries described in [Section 4.4 of the security spec](spec-security-model.md#44-endpoint-credentials).
 
 ```sql
 -- Add to extension_sql! in lib.rs
@@ -761,6 +768,8 @@ DROP TABLE _http_test;
 ---
 
 ## Checklist
+
+*Note: This is the historical implementation checklist, not the current work plan.*
 
 - [ ] Add `df.secrets` table to `extension_sql!`
 - [ ] Add `HttpConfig` to `src/types.rs`
