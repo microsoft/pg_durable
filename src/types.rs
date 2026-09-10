@@ -1350,6 +1350,10 @@ pub(crate) fn string_map_to_json(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub method: String,
     #[serde(default)]
     pub body: Option<String>,
@@ -1385,6 +1389,10 @@ pub struct MultipartPart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultipartConfig {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub method: String,
     pub parts: Vec<MultipartPart>,
     #[serde(default)]

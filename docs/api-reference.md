@@ -316,6 +316,26 @@ bytes into a subsequent upload.
 
 ---
 
+### df.endpoint(server, path)
+
+Returns a JSON-encoded TEXT destination reference for `df.http` or
+`df.http_multipart`. Both arguments are required. Construction reads no catalogs
+or credentials. The reference format is
+`{"type":"pg_durable.endpoint","server":"partner_api","path":"/v1/items"}`;
+use the helper to escape server names and paths correctly.
+
+```sql
+df.http(df.endpoint('partner_api', '/v1/items'), 'GET')
+df.http_multipart(df.endpoint('partner_api', '/upload'),
+                  parts => '[{"name":"file","data_b64":"aGVsbG8="}]'::jsonb)
+```
+
+The server name is fixed; the path supports existing workflow substitutions and
+is appended to the base URL's path prefix. Invalid path shapes, traversal, routing
+overrides and credential overrides fail explicitly. Resolution uses the submitting
+role in the workflow's target database and re-checks server `USAGE` in addition to
+the corresponding HTTP function grant. See [Calling an Endpoint](../USER_GUIDE.md#calling-an-endpoint).
+
 ### Endpoint Credential Catalog
 
 `pg_durable_fdw` stores endpoint configuration in native foreign servers and
