@@ -1,10 +1,202 @@
 use std::collections::BTreeMap;
 
 use pgrx::prelude::*;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub const FDW_NAME: &str = "pg_durable_fdw";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointReference {
+    #[serde(rename = "type")]
+    kind: String,
+    pub server: String,
+    pub path: String,
+}
+
+fn validate_endpoint_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains(['\\', '#'])
+        || path
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err("Endpoint path must start with one slash and contain no backslash, fragment or whitespace".into());
+    }
+    for segment in path.split('?').next().unwrap_or_default().split('/') {
+        let decoded = percent_encoding::percent_decode_str(segment).collect::<Vec<u8>>();
+        if decoded == b"."
+            || decoded == b".."
+            || decoded.contains(&b'/')
+            || decoded.contains(&b'\\')
+        {
+            return Err(
+                "Endpoint path cannot contain traversal segments or encoded separators".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+impl EndpointReference {
+    pub fn parse(value: &str) -> Result<Option<Self>, String> {
+        if !value.trim_start().starts_with('{') {
+            return Ok(None);
+        }
+        let parsed: serde_json::Value = match serde_json::from_str(value) {
+            Ok(parsed) => parsed,
+            Err(_) => return Ok(None),
+        };
+        if parsed.get("type").and_then(serde_json::Value::as_str) != Some("pg_durable.endpoint") {
+            return Ok(None);
+        }
+        let reference: Self =
+            serde_json::from_value(parsed).map_err(|_| "Invalid endpoint reference")?;
+        reference.validate()?;
+        Ok(Some(reference))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.server.is_empty() || self.server.chars().any(char::is_control) {
+            return Err(
+                "Endpoint server name must be nonempty and contain no control characters".into(),
+            );
+        }
+        validate_endpoint_path(&self.path)
+    }
+}
+
+#[pg_extern(schema = "df", immutable, parallel_safe)]
+pub fn endpoint(server: &str, path: &str) -> String {
+    let reference = EndpointReference {
+        kind: "pg_durable.endpoint".into(),
+        server: server.into(),
+        path: path.into(),
+    };
+    reference
+        .validate()
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    serde_json::to_string(&reference).expect("Endpoint reference serialization failed")
+}
+
+pub fn configure_destination(
+    config: &mut serde_json::Value,
+    destination: &str,
+) -> Result<(), String> {
+    if let Some(reference) = EndpointReference::parse(destination)? {
+        config["url"] = serde_json::Value::String(reference.path);
+        config["endpoint"] = serde_json::Value::String(reference.server);
+    }
+    Ok(())
+}
+
+pub fn set_execution_context(
+    config: &mut serde_json::Value,
+    submitted_by: &str,
+    database: Option<&str>,
+) {
+    config["submitted_by"] = serde_json::Value::String(submitted_by.into());
+    if config.get("endpoint").is_some() {
+        config["database"] = database.map_or(serde_json::Value::Null, |database| {
+            serde_json::Value::String(database.into())
+        });
+    }
+}
+
+fn compose_endpoint_url(base: &Url, path: &str) -> Result<Url, String> {
+    validate_endpoint_path(path)?;
+    let prefix = base.as_str().strip_suffix('/').unwrap_or(base.as_str());
+    let composed =
+        Url::parse(&format!("{prefix}{path}")).map_err(|_| "Invalid endpoint request URL")?;
+    let base_path = base.path().strip_suffix('/').unwrap_or(base.path());
+    if composed.origin() != base.origin() || !composed.path().starts_with(&format!("{base_path}/"))
+    {
+        return Err("Endpoint path cannot escape its base URL".into());
+    }
+    Ok(composed)
+}
+
+pub struct EndpointRequest {
+    pub url: Url,
+    pub credential_header: Option<(HeaderName, HeaderValue)>,
+}
+
+fn prepare_endpoint_request(
+    endpoint: ResolvedEndpoint,
+    path: &str,
+    headers: Option<&serde_json::Value>,
+) -> Result<EndpointRequest, String> {
+    let mut url = compose_endpoint_url(&endpoint.base_url, path)?;
+    let credential_name = match &endpoint.auth {
+        EndpointAuth::Bearer(_) => Some(&AUTHORIZATION),
+        EndpointAuth::Header { name, .. } => Some(name),
+        _ => None,
+    };
+    if let Some(headers) = headers.and_then(serde_json::Value::as_object) {
+        for name in headers.keys() {
+            if name.eq_ignore_ascii_case("host")
+                || credential_name
+                    .is_some_and(|credential| name.eq_ignore_ascii_case(credential.as_str()))
+            {
+                return Err(
+                    "Request headers cannot override endpoint routing or authentication".into(),
+                );
+            }
+        }
+    }
+    let credential_header = match endpoint.auth {
+        EndpointAuth::None => None,
+        EndpointAuth::Bearer(value) => Some((AUTHORIZATION, value)),
+        EndpointAuth::Header { name, value } => Some((name, value)),
+        EndpointAuth::Query(query) => {
+            let credential_url = Url::parse(&format!("https://endpoint.invalid/?{query}"))
+                .map_err(|_| "Invalid endpoint credential query")?;
+            let names = credential_url
+                .query_pairs()
+                .map(|(name, _)| name.into_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            if url
+                .query_pairs()
+                .any(|(name, _)| names.contains(name.as_ref()))
+            {
+                return Err("Request query cannot override endpoint credential parameters".into());
+            }
+            let combined = match url.query().filter(|query| !query.is_empty()) {
+                Some(existing) => format!("{existing}&{query}"),
+                None => query,
+            };
+            url.set_query(Some(&combined));
+            None
+        }
+    };
+    Ok(EndpointRequest {
+        url,
+        credential_header,
+    })
+}
+
+pub async fn prepare_request(
+    submitted_by: &str,
+    database: Option<&str>,
+    server: Option<&str>,
+    url: &str,
+    headers: Option<&serde_json::Value>,
+) -> Result<EndpointRequest, String> {
+    match server {
+        Some(server) => {
+            validate_endpoint_path(url)?;
+            let endpoint = resolve_endpoint(submitted_by, database, server).await?;
+            prepare_endpoint_request(endpoint, url, headers)
+        }
+        None => Ok(EndpointRequest {
+            url: crate::ssrf::parse_request_url(url)?,
+            credential_header: None,
+        }),
+    }
+}
 
 pub enum AuthScheme {
     None,
@@ -304,6 +496,106 @@ pub async fn resolve_endpoint(
 mod unit_tests {
     use super::*;
 
+    #[test]
+    fn endpoint_execution_context_preserves_legacy_inputs() {
+        for input in [
+            r#"{"url":"https://api.github.com/{path}","method":"GET","body":"${secret:literal.value}","headers":{"Z":"{last}","A":"$first"},"timeout_seconds":30}"#,
+            r#"{"url":"https://api.github.com/upload","method":"POST","parts":[{"name":"file","data_b64":"$payload.body"}],"headers":null,"timeout_seconds":30}"#,
+        ] {
+            let mut expected: serde_json::Value = serde_json::from_str(input).unwrap();
+            expected["submitted_by"] = serde_json::Value::String("caller".into());
+            let mut actual: serde_json::Value = serde_json::from_str(input).unwrap();
+            set_execution_context(&mut actual, "caller", Some("other_database"));
+            assert_eq!(actual.to_string(), expected.to_string());
+            assert!(actual.get("database").is_none());
+        }
+        let mut config = serde_json::json!({"endpoint":"fixed_{server}","url":"/{path}","database":"forged","submitted_by":"forged"});
+        set_execution_context(&mut config, "caller", Some("trusted_database"));
+        assert_eq!(config["database"], "trusted_database");
+        assert_eq!(config["submitted_by"], "caller");
+        assert_eq!(config["endpoint"], "fixed_{server}");
+        set_execution_context(&mut config, "caller", None);
+        assert!(config["database"].is_null());
+    }
+
+    #[test]
+    fn endpoint_reference_round_trip_and_raw_compatibility() {
+        let reference = serde_json::to_string(&EndpointReference {
+            kind: "pg_durable.endpoint".into(),
+            server: "server.with,\"punctuation".into(),
+            path: "/items/{item}?version=1".into(),
+        })
+        .unwrap();
+        let mut config = serde_json::json!({"url": reference, "method": "GET"});
+        configure_destination(&mut config, &reference).unwrap();
+        assert_eq!(config["endpoint"], "server.with,\"punctuation");
+        assert_eq!(config["url"], "/items/{item}?version=1");
+        let mut legacy = serde_json::json!({"url": "{host}/data", "body": null});
+        let original = legacy.to_string();
+        configure_destination(&mut legacy, "{host}/data").unwrap();
+        assert_eq!(legacy.to_string(), original);
+        assert!(EndpointReference::parse(
+            r#"{"type":"pg_durable.endpoint","server":"api","path":"/","extra":true}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn endpoint_path_cannot_change_authority_or_escape_prefix() {
+        let base = Url::parse("https://api.github.com/prefix/").unwrap();
+        assert_eq!(
+            compose_endpoint_url(&base, "/items?q=1").unwrap().as_str(),
+            "https://api.github.com/prefix/items?q=1"
+        );
+        for path in [
+            "https://evil.test/x",
+            "//evil.test/x",
+            "/\\evil.test/x",
+            "/../escape",
+            "/%2e%2e/escape",
+            "/.%2E/escape",
+            "/%2Fescape",
+            "/%5cescape",
+            "/data#fragment",
+            "/data\n",
+        ] {
+            assert!(compose_endpoint_url(&base, path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn endpoint_authentication_cannot_be_overridden() {
+        let bearer = || ResolvedEndpoint {
+            base_url: Url::parse("https://api.github.com/").unwrap(),
+            auth: EndpointAuth::Bearer(HeaderValue::from_static("Bearer PRIVATE_TOKEN")),
+        };
+        for headers in [
+            serde_json::json!({"hOsT":"evil.test"}),
+            serde_json::json!({"authorization":"other"}),
+        ] {
+            assert!(prepare_endpoint_request(bearer(), "/", Some(&headers)).is_err());
+        }
+        let request = prepare_endpoint_request(bearer(), "/", None).unwrap();
+        let (name, value) = request.credential_header.unwrap();
+        let built = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(request.url)
+            .header(name, value)
+            .build()
+            .unwrap();
+        assert_eq!(built.headers()[AUTHORIZATION], "Bearer PRIVATE_TOKEN");
+        let query = || ResolvedEndpoint {
+            base_url: Url::parse("https://api.github.com/").unwrap(),
+            auth: EndpointAuth::Query("sig=PRIVATE%2BVALUE&sv=1".into()),
+        };
+        assert!(prepare_endpoint_request(query(), "/?%73ig=override", None).is_err());
+        let request = prepare_endpoint_request(query(), "/?page=2", None).unwrap();
+        assert_eq!(request.url.query(), Some("page=2&sig=PRIVATE%2BVALUE&sv=1"));
+        assert!(!crate::redact::redact_url(request.url.as_str()).contains("PRIVATE"));
+    }
+
     fn options(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -401,6 +693,52 @@ mod unit_tests {
 #[pg_schema]
 mod tests {
     use super::*;
+
+    #[pg_test]
+    fn endpoint_helper_is_lookup_free() {
+        let reference = endpoint("missing_server", "/items/{item}");
+        let decoded: serde_json::Value = serde_json::from_str(&reference).unwrap();
+        assert_eq!(decoded["type"], "pg_durable.endpoint");
+        assert_eq!(decoded["server"], "missing_server");
+        assert_eq!(decoded["path"], "/items/{item}");
+    }
+
+    #[cfg(any(
+        feature = "http-allow-azure-domains",
+        feature = "http-allow-test-domains",
+        feature = "http-allow-all"
+    ))]
+    #[pg_test]
+    fn endpoint_constructors_preserve_body_and_node_types() {
+        let destination = endpoint("missing_server", "/items/{item}");
+        let http = crate::dsl::http(
+            &destination,
+            "POST",
+            Some("${secret:literal.value}"),
+            None,
+            30,
+        );
+        let multipart = crate::dsl::http_multipart(
+            &destination,
+            "POST",
+            Some(pgrx::JsonB(
+                serde_json::json!([{"name":"file","data_b64":"aGVsbG8="}]),
+            )),
+            None,
+            30,
+        );
+        for (json, node_type) in [(http, "HTTP"), (multipart, "HTTP_MULTIPART")] {
+            let node = crate::types::Durofut::from_json(&json);
+            assert_eq!(node.node_type, node_type);
+            let config: serde_json::Value =
+                serde_json::from_str(node.query.as_ref().unwrap()).unwrap();
+            assert_eq!(config["endpoint"], "missing_server");
+            assert_eq!(config["url"], "/items/{item}");
+            if node_type == "HTTP" {
+                assert_eq!(config["body"], "${secret:literal.value}");
+            }
+        }
+    }
 
     #[pg_test]
     fn endpoint_catalog_permissions() {

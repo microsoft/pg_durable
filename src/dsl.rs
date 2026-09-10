@@ -592,13 +592,15 @@ pub fn http(
         pgrx::error!("Timeout must be positive");
     }
 
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "url": url,
         "method": method_upper,
         "body": body,
         "headers": headers.as_ref().map(|h| &h.0),
         "timeout_seconds": timeout_seconds
     });
+    crate::endpoints::configure_destination(&mut config, url)
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
 
     Durofut {
         node_type: "HTTP".to_string(),
@@ -689,13 +691,15 @@ pub fn http_multipart(
     };
     let _ = parts_arr; // shape validated; activity re-parses from the JSON below
 
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "url": url,
         "method": method_upper,
         "parts": parts_value,
         "headers": headers.as_ref().map(|h| &h.0),
         "timeout_seconds": timeout_seconds
     });
+    crate::endpoints::configure_destination(&mut config, url)
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
 
     Durofut {
         node_type: "HTTP_MULTIPART".to_string(),

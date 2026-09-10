@@ -41,6 +41,11 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
 
 ### Added
 
+- **Endpoint HTTP requests:** `df.endpoint(server, path)` composes with both
+  `df.http` and `df.http_multipart`. Activities resolve per-role credentials,
+  enforce server `USAGE`, preserve the configured base URL and reject routing or
+  credential overrides. Existing HTTP signatures and raw-URL workflow inputs
+  remain unchanged; body secret insertion is deferred.
 - **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
   option validator, and per-user catalog resolution for unauthenticated, bearer,
   named-header and query-string endpoint authentication. FDW creation authority
