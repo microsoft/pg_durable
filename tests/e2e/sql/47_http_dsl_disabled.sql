@@ -7,6 +7,15 @@
 -- This test runs in the "http-disabled" phase, which builds pg_durable without any
 -- http-allow-* features.  df.http() must raise immediately at SQL call time (before
 -- df.start() is ever called), not just at execution time.
+-- The requested hostname is explicitly allowed by the GUC: a configured list
+-- must not enable HTTP in a build without an HTTP feature.
+
+DO $$
+BEGIN
+    IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM 'example.com' THEN
+        RAISE EXCEPTION 'TEST FAILED: http-disabled phase requires the example.com allowlist';
+    END IF;
+END $$;
 
 -- ============================================================================
 -- Test 1: df.http() raises at DSL construction time when HTTP is disabled

@@ -11,9 +11,14 @@ use tokio::sync::Semaphore;
 
 use crate::activities;
 use crate::orchestrations;
+use crate::ssrf::DomainAllowlist;
 
 /// Create the activity registry with all registered activities
-pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) -> ActivityRegistry {
+pub fn create_activity_registry(
+    pool: Arc<PgPool>,
+    semaphore: Arc<Semaphore>,
+    http_allowed_domains: Arc<DomainAllowlist>,
+) -> ActivityRegistry {
     let sql_semaphore = semaphore;
     let graph_pool = pool.clone();
     let transaction_graph_pool = pool.clone();
@@ -21,6 +26,7 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
     let node_status_pool = pool.clone();
     let http_pool = pool.clone();
     let multipart_pool = pool.clone();
+    let multipart_allowed_domains = http_allowed_domains.clone();
 
     ActivityRegistry::builder()
         .register(activities::execute_sql::NAME, move |ctx: ActivityContext, input_json: String| {
@@ -50,11 +56,13 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
         })
         .register(activities::execute_http::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = http_pool.clone();
-            async move { activities::execute_http::execute(ctx, pool, config_json).await }
+            let allowed_domains = http_allowed_domains.clone();
+            async move { activities::execute_http::execute(ctx, pool, allowed_domains, config_json).await }
         })
         .register(activities::execute_multipart::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = multipart_pool.clone();
-            async move { activities::execute_multipart::execute(ctx, pool, config_json).await }
+            let allowed_domains = multipart_allowed_domains.clone();
+            async move { activities::execute_multipart::execute(ctx, pool, allowed_domains, config_json).await }
         })
         .build()
 }

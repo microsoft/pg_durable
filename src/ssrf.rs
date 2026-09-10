@@ -9,22 +9,24 @@
 //! | Feature | Behaviour |
 //! |---------|-----------|
 //! | *(none)* | **All** outbound HTTP is blocked — at DSL time and at execution time. |
-//! | `http-allow-azure-domains` | SSRF IP blocklist active, bare IPs blocked, redirects blocked, only Azure suffixes plus `api.github.com` allowed. |
-//! | `http-allow-test-domains` | Same as `http-allow-azure-domains` **plus** `httpbingo.org` (for E2E tests). Implies `http-allow-azure-domains`. |
+//! | `http-allow-azure-domains` | SSRF IP blocklist active, bare IPs blocked, redirects blocked, GUC allow-list defaults to Azure suffixes plus `api.github.com`. |
+//! | `http-allow-test-domains` | Same as `http-allow-azure-domains`, defaulting to **also** allow `httpbingo.org`. Implies `http-allow-azure-domains`. |
 //! | `http-allow-all` | All SSRF protections disabled — any URL is allowed (development only). |
 //!
-//! The blocklist and allow-list are hardcoded and cannot be bypassed by any
-//! database user, including superusers.  See docs/http-security.md for details.
+//! `pg_durable.http_allowed_domains` replaces the restricted builds' domain
+//! allow-list at server startup. It cannot disable the hardcoded IP blocklist
+//! or override the HTTP feature gates. See docs/http-security.md for details.
 //!
 //! Every check that inspects a URL runs on the [`Url`] produced by
 //! [`parse_request_url`], and that same value is handed to reqwest.  A second,
 //! independent parser would reintroduce the differential described there.
 
 use reqwest::Url;
+use std::ffi::CStr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 // ---------------------------------------------------------------------------
-// Endpoint allow-list — compile-time constant
+// Endpoint allow-list configuration
 // ---------------------------------------------------------------------------
 
 /// Returns `true` when *any* HTTP feature is enabled (azure, test, or all).
@@ -36,55 +38,173 @@ pub const fn http_enabled() -> bool {
     ))
 }
 
-/// Hard-coded Azure endpoint allow-list (data-plane only).
-///
-/// Populated when `http-allow-azure-domains` (or `http-allow-test-domains`,
-/// which implies it) is enabled.  When `http-allow-all` is set the allow-list
-/// is bypassed entirely so its contents don't matter.
-///
-/// Each entry starts with `.` so that a simple `ends_with` check naturally
-/// requires at least one subdomain label (the apex domain itself never matches).
-#[cfg(any(
-    feature = "http-allow-azure-domains",
-    feature = "http-allow-test-domains"
-))]
-pub(crate) const AZURE_DOMAIN_SUFFIXES: &[&str] = &[
-    ".blob.core.windows.net",
-    ".blob.storage.azure.net",
-    ".queue.core.windows.net",
-    ".table.core.windows.net",
-    ".file.core.windows.net",
-    ".azurewebsites.net",
-    ".azure-api.net",
-    ".documents.azure.com",
-    ".servicebus.windows.net",
-    ".openai.azure.com",
-    ".cognitiveservices.azure.com",
-    ".vault.azure.net",
-    ".redis.cache.windows.net",
-    ".database.windows.net",
-    ".kusto.windows.net",
-    ".azurefd.net",
-    ".azureedge.net",
-    ".azure-devices.net",
-    ".trafficmanager.net",
-    ".cloudapp.azure.com",
-];
+// Keep the production and test defaults sourced from the same list.
+macro_rules! azure_domain_defaults {
+    ($extra:literal) => {
+        concat!(
+            "*.blob.core.windows.net,",
+            "*.blob.storage.azure.net,",
+            "*.queue.core.windows.net,",
+            "*.table.core.windows.net,",
+            "*.file.core.windows.net,",
+            "*.azurewebsites.net,",
+            "*.azure-api.net,",
+            "*.documents.azure.com,",
+            "*.servicebus.windows.net,",
+            "*.openai.azure.com,",
+            "*.cognitiveservices.azure.com,",
+            "*.vault.azure.net,",
+            "*.redis.cache.windows.net,",
+            "*.database.windows.net,",
+            "*.kusto.windows.net,",
+            "*.azurefd.net,",
+            "*.azureedge.net,",
+            "*.azure-devices.net,",
+            "*.trafficmanager.net,",
+            "*.cloudapp.azure.com,",
+            "api.github.com",
+            $extra,
+            "\0"
+        )
+        .as_bytes()
+    };
+}
 
-/// Fully-qualified non-Azure domains allowed alongside the Azure suffixes
-/// (exact match, not suffix).
-///
-/// Available whenever `http-allow-azure-domains` (or `http-allow-test-domains`,
-/// which implies it) is enabled.
-#[cfg(any(
-    feature = "http-allow-azure-domains",
-    feature = "http-allow-test-domains"
-))]
-pub(crate) const EXACT_DOMAINS: &[&str] = &["api.github.com"];
+pub(crate) const DEFAULT_HTTP_ALLOWED_DOMAINS: &CStr =
+    match CStr::from_bytes_with_nul(if cfg!(feature = "http-allow-test-domains") {
+        azure_domain_defaults!(",httpbingo.org")
+    } else if cfg!(feature = "http-allow-azure-domains") {
+        azure_domain_defaults!("")
+    } else {
+        b"\0"
+    }) {
+        Ok(value) => value,
+        Err(_) => panic!("HTTP domain defaults must form a C string"),
+    };
 
-/// Fully-qualified test domains (exact match, not suffix).
-#[cfg(feature = "http-allow-test-domains")]
-pub(crate) const TEST_EXACT_DOMAINS: &[&str] = &["httpbingo.org"];
+/// An immutable, canonically parsed hostname policy. Empty means deny all.
+#[derive(Debug, Default)]
+pub struct DomainAllowlist {
+    exact_domains: Vec<String>,
+    domain_suffixes: Vec<String>,
+}
+
+impl DomainAllowlist {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let mut allowlist = Self::default();
+        if value.trim().is_empty() {
+            return Ok(allowlist);
+        }
+
+        for (index, entry) in value.split(',').enumerate() {
+            let entry = entry.trim();
+            let invalid = |reason: &str| format!("entry {} ({entry:?}): {reason}", index + 1);
+            let subdomains = entry.strip_prefix("*.");
+            let domain = subdomains.unwrap_or(entry);
+            if domain.contains('%') {
+                return Err(invalid("percent-encoded hostnames are not permitted"));
+            }
+
+            let host = match url::Host::parse(domain)
+                .map_err(|_| invalid("expected a hostname or *.hostname"))?
+            {
+                url::Host::Domain(host) => host,
+                url::Host::Ipv4(_) | url::Host::Ipv6(_) => {
+                    return Err(invalid("IP addresses are not permitted"));
+                }
+            };
+
+            if host.len() > 253
+                || host.split('.').any(|label| {
+                    label.is_empty()
+                        || label.len() > 63
+                        || label.starts_with('-')
+                        || label.ends_with('-')
+                        || !label
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+            {
+                return Err(invalid("expected a DNS hostname without a trailing dot"));
+            }
+
+            if subdomains.is_some() {
+                allowlist.domain_suffixes.push(format!(".{host}"));
+            } else {
+                allowlist.exact_domains.push(host);
+            }
+        }
+        Ok(allowlist)
+    }
+
+    fn validate(&self, url: &Url) -> Result<(), String> {
+        // WHATWG canonicalises decimal, octal and IPv4-mapped forms into IP
+        // variants. They must not bypass the resolver's IP protection.
+        let host = match url.host() {
+            Some(url::Host::Domain(domain)) => domain,
+            Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+                return Err("Blocked: requests to bare IP addresses are not permitted. \
+                     Use an approved service hostname instead."
+                    .to_string());
+            }
+            None => return Err("Blocked: unable to extract hostname from URL.".to_string()),
+        };
+
+        if self.exact_domains.iter().any(|domain| host == domain)
+            || self
+                .domain_suffixes
+                .iter()
+                .any(|suffix| host.len() > suffix.len() && host.ends_with(suffix))
+        {
+            return Ok(());
+        }
+
+        Err(format!(
+            "Blocked: '{host}' is not in the allowed endpoint list. \
+             Configure pg_durable.http_allowed_domains to allow this hostname."
+        ))
+    }
+}
+
+impl TryFrom<&CStr> for DomainAllowlist {
+    type Error = String;
+
+    fn try_from(value: &CStr) -> Result<Self, Self::Error> {
+        Self::parse(value.to_str().map_err(|_| {
+            "value must be valid UTF-8; ASCII/punycode hostnames are always supported".to_string()
+        })?)
+    }
+}
+
+#[pgrx::pg_guard]
+pub(crate) unsafe extern "C-unwind" fn check_http_allowed_domains(
+    newval: *mut *mut std::ffi::c_char,
+    _extra: *mut *mut std::ffi::c_void,
+    _source: pgrx::pg_sys::GucSource::Type,
+) -> bool {
+    let result = if unsafe { (*newval).is_null() } {
+        Err("value must not be NULL".to_string())
+    } else {
+        DomainAllowlist::try_from(unsafe { CStr::from_ptr(*newval) })
+    };
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            // During preload, PostgreSQL otherwise only warns and restores the
+            // default when rejecting a placeholder, potentially widening policy.
+            if unsafe { pgrx::pg_sys::process_shared_preload_libraries_in_progress } {
+                pgrx::error!(
+                    "invalid value for parameter \"pg_durable.http_allowed_domains\": {error}"
+                );
+            }
+            unsafe {
+                pgrx::pg_sys::GUC_check_errdetail_string =
+                    pgrx::PgMemoryContexts::ErrorContext.pstrdup(&error);
+            }
+            false
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // IP blocklist
@@ -228,83 +348,19 @@ pub fn validate_scheme(url: &Url) -> Result<(), String> {
 /// Behaviour depends on Cargo features (most to least restrictive):
 ///
 /// * *(none)* — all requests blocked, regardless of domain.
-/// * `http-allow-azure-domains` — bare IPs blocked; only Azure suffixes and
-///   `api.github.com` allowed.
-/// * `http-allow-test-domains` — same as above **plus** `httpbingo.org`
-///   (for E2E tests).
+/// * `http-allow-azure-domains` / `http-allow-test-domains` — bare IPs blocked;
+///   the worker's `pg_durable.http_allowed_domains` snapshot is enforced.
 /// * `http-allow-all` — allow-list check is skipped entirely; all domains pass.
-pub fn validate_allowlist(url: &Url) -> Result<(), String> {
-    // http-allow-all: skip all domain checks.
-    #[cfg(feature = "http-allow-all")]
-    {
-        let _ = url;
-        Ok(())
+pub fn validate_allowlist(url: &Url, allowlist: &DomainAllowlist) -> Result<(), String> {
+    if cfg!(feature = "http-allow-all") {
+        return Ok(());
     }
-
-    #[cfg(not(feature = "http-allow-all"))]
-    {
-        // No http feature at all — block everything.
-        #[cfg(not(any(
-            feature = "http-allow-azure-domains",
-            feature = "http-allow-test-domains",
-        )))]
-        {
-            let _ = url;
-            Err("Blocked: outbound HTTP requests are disabled. \
-                 Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them."
-                .to_string())
-        }
-
-        // http-allow-azure-domains or http-allow-test-domains: enforce allow-list.
-        #[cfg(any(
-            feature = "http-allow-azure-domains",
-            feature = "http-allow-test-domains",
-        ))]
-        {
-            // Matching on Host (rather than inspecting the host string) keeps
-            // the IP-literal case total: WHATWG canonicalises decimal, octal and
-            // IPv4-mapped forms into these variants before we ever see them.
-            let host = match url.host() {
-                Some(url::Host::Domain(domain)) => domain,
-                Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
-                    return Err("Blocked: requests to bare IP addresses are not permitted. \
-                         Use an approved service hostname instead."
-                        .to_string());
-                }
-                None => return Err("Blocked: unable to extract hostname from URL.".to_string()),
-            };
-
-            let host_lower = host.to_ascii_lowercase();
-
-            // Check Azure suffixes (always present when either azure or test feature is on).
-            for suffix in AZURE_DOMAIN_SUFFIXES {
-                if host_lower.ends_with(suffix) {
-                    return Ok(());
-                }
-            }
-
-            // Exact-match non-Azure domains allowed in the same tier.
-            for exact in EXACT_DOMAINS {
-                if host_lower == *exact {
-                    return Ok(());
-                }
-            }
-
-            // Additional test domains (only with http-allow-test-domains).
-            #[cfg(feature = "http-allow-test-domains")]
-            for exact in TEST_EXACT_DOMAINS {
-                if host_lower == *exact {
-                    return Ok(());
-                }
-            }
-
-            Err(format!(
-                "Blocked: '{}' is not in the allowed endpoint list. \
-                 Only requests to approved Azure service domains are permitted.",
-                host
-            ))
-        }
+    if !http_enabled() {
+        return Err("Blocked: outbound HTTP requests are disabled. \
+             Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them."
+            .to_string());
     }
+    allowlist.validate(url)
 }
 
 // Keep this marker in sync with the error message in SsrfSafeResolver::resolve().
@@ -637,11 +693,10 @@ mod tests {
 
     // --- Canonical URL parsing ---
 
-    // Tests drive the allow-list through the same parse-then-validate path the
-    // activities use, so an unparseable URL is a rejection like any other.
-    #[cfg(not(feature = "http-allow-all"))]
+    // Exercise domain matching independently of feature gates; their precedence
+    // is covered separately with both custom and empty lists.
     fn validate_url_allowlist(url: &str) -> Result<(), String> {
-        validate_allowlist(&parse_request_url(url)?)
+        DomainAllowlist::try_from(DEFAULT_HTTP_ALLOWED_DOMAINS)?.validate(&parse_request_url(url)?)
     }
 
     #[test]
@@ -673,6 +728,219 @@ mod tests {
     }
 
     // --- Endpoint allow-list validation ---
+
+    #[test]
+    fn allowlist_defaults_match_build() {
+        assert_eq!(
+            validate_url_allowlist("https://api.github.com/").is_ok(),
+            cfg!(feature = "http-allow-azure-domains")
+        );
+        assert_eq!(
+            validate_url_allowlist("https://account.blob.core.windows.net/").is_ok(),
+            cfg!(feature = "http-allow-azure-domains")
+        );
+        assert_eq!(
+            validate_url_allowlist("https://httpbingo.org/").is_ok(),
+            cfg!(feature = "http-allow-test-domains")
+        );
+    }
+
+    #[test]
+    fn configured_allowlist_matches_exact_names_and_subdomain_boundaries() {
+        let allowlist = DomainAllowlist::parse(" API.GitHub.COM ,\n *.Example.COM \t").unwrap();
+        for url in [
+            "https://api.github.com/",
+            "https://API.GITHUB.COM/",
+            "https://a.example.com/",
+            "https://a.b.c.example.com:8443/",
+            "https://a%2Eexample%2Ecom/",
+        ] {
+            assert!(
+                allowlist.validate(&parse_request_url(url).unwrap()).is_ok(),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://github.com/",
+            "https://evil.api.github.com/",
+            "https://evilapi.github.com/",
+            "https://example.com/",
+            "https://.example.com/",
+            "https://a.example.com.evil.net/",
+            "https://api.github.com./",
+            "https://a.example.com./",
+            "https://evil.net?@a.example.com/",
+            r"https://evil.net\@a.example.com/",
+            "https://8.8.8.8/",
+            "https://[2001:4860:4860::8888]/",
+        ] {
+            assert!(
+                parse_request_url(url)
+                    .and_then(|url| allowlist.validate(&url))
+                    .is_err(),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_allowlist_replaces_all_default_domains() {
+        let allowlist = DomainAllowlist::parse("example.com").unwrap();
+        assert!(allowlist
+            .validate(&parse_request_url("https://example.com/").unwrap())
+            .is_ok());
+        for url in [
+            "https://api.github.com/",
+            "https://httpbingo.org/",
+            "https://account.blob.core.windows.net/",
+        ] {
+            let error = allowlist
+                .validate(&parse_request_url(url).unwrap())
+                .unwrap_err();
+            assert!(error.contains("pg_durable.http_allowed_domains"), "{error}");
+        }
+    }
+
+    #[test]
+    fn configured_allowlist_normalizes_idna_without_homograph_matches() {
+        let allowlist =
+            DomainAllowlist::parse("B\u{dc}CHER.example, *.ma\u{f1}ana.example").unwrap();
+        for url in [
+            "https://b\u{fc}cher.example/",
+            "https://xn--bcher-kva.example/",
+            "https://a.b.ma\u{f1}ana.example/",
+            "https://a.xn--maana-pta.example/",
+        ] {
+            assert!(
+                allowlist.validate(&parse_request_url(url).unwrap()).is_ok(),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://bucher.example/",
+            "https://a.manana.example/",
+            "https://ma\u{f1}ana.example/",
+            "https://xn--bcher-kva.example./",
+        ] {
+            assert!(
+                allowlist
+                    .validate(&parse_request_url(url).unwrap())
+                    .is_err(),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_configured_allowlist_denies_all_domains() {
+        for value in ["", " \t\r\n "] {
+            let allowlist = DomainAllowlist::parse(value).unwrap();
+            for url in [
+                "https://api.github.com/",
+                "https://httpbingo.org/",
+                "https://account.blob.core.windows.net/",
+            ] {
+                assert!(allowlist
+                    .validate(&parse_request_url(url).unwrap())
+                    .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_domain_configuration_is_rejected_as_a_whole() {
+        for value in [
+            ",",
+            ",example.com",
+            "example.com,",
+            "example.com,,example.net",
+            "*",
+            "*.",
+            "**.example.com",
+            "api.*.example.com",
+            ".example.com",
+            "example.com.",
+            "example..com",
+            "-api.example.com",
+            "api-.example.com",
+            "api_example.com",
+            "https://example.com",
+            "example.com:443",
+            "example.com/path",
+            "user@example.com",
+            "example.com?query",
+            "example.com#fragment",
+            r"example.com\path",
+            "\"example.com\"",
+            "'example.com'",
+            "exa mple.com",
+            "example%2ecom",
+            "8.8.8.8",
+            "0x7f.1",
+            "2130706433",
+            "[::1]",
+            "::ffff:127.0.0.1",
+            "*.127.0.0.1",
+            "10.0.0.0/8",
+        ] {
+            let error = DomainAllowlist::parse(value).unwrap_err();
+            assert!(error.contains("entry "), "{value:?}: {error}");
+        }
+        let error = DomainAllowlist::parse("example.com, https://example.net").unwrap_err();
+        assert!(error.contains("entry 2"), "{error}");
+    }
+
+    #[test]
+    fn configured_allowlist_enforces_dns_lengths_not_sql_identifier_lengths() {
+        let long_hostname = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let allowlist = DomainAllowlist::parse(&long_hostname).unwrap();
+        assert!(allowlist
+            .validate(&parse_request_url(&format!("https://{long_hostname}/")).unwrap())
+            .is_ok());
+        assert!(DomainAllowlist::parse(&format!("{long_hostname}d")).is_err());
+        assert!(DomainAllowlist::parse(&format!("{}.example.com", "a".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn configured_allowlist_rejects_non_utf8_without_lossy_conversion() {
+        let value = c"\xff.example";
+        assert!(DomainAllowlist::try_from(value)
+            .unwrap_err()
+            .contains("UTF-8"));
+    }
+
+    #[test]
+    fn http_feature_gates_take_precedence_over_configured_domains() {
+        let allowed = parse_request_url("https://example.com/").unwrap();
+        let unlisted = parse_request_url("https://example.net/").unwrap();
+        let ip = parse_request_url("https://8.8.8.8/").unwrap();
+        let custom = DomainAllowlist::parse("example.com").unwrap();
+        let empty = DomainAllowlist::parse("").unwrap();
+        if cfg!(feature = "http-allow-all") {
+            for allowlist in [&custom, &empty] {
+                for url in [&allowed, &unlisted, &ip] {
+                    assert!(validate_allowlist(url, allowlist).is_ok());
+                }
+            }
+        } else if http_enabled() {
+            assert!(validate_allowlist(&allowed, &custom).is_ok());
+            assert!(validate_allowlist(&unlisted, &custom).is_err());
+            assert!(validate_allowlist(&ip, &custom).is_err());
+            assert!(validate_allowlist(&allowed, &empty).is_err());
+        } else {
+            for allowlist in [&custom, &empty] {
+                assert!(validate_allowlist(&allowed, allowlist)
+                    .unwrap_err()
+                    .contains("outbound HTTP requests are disabled"));
+            }
+        }
+    }
 
     // These "blocks_*" tests are only meaningful when some http feature is
     // enabled (otherwise the no-feature path blocks everything anyway).
