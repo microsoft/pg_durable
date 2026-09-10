@@ -93,9 +93,18 @@ df.if(condition TEXT, then_branch TEXT, else_branch TEXT) → TEXT
 -- result_name is a capture from |=> earlier in the graph.
 df.if_rows(result_name TEXT, then_branch TEXT, else_branch TEXT) → TEXT
 
--- Loop — infinite or while-condition
-df.loop(body TEXT) → TEXT                            -- Infinite loop
-df.loop(body TEXT, condition TEXT) → TEXT             -- While-loop: repeats while condition is truthy
+-- Loop — one unified signature
+df.loop(
+    body TEXT,
+    condition TEXT DEFAULT NULL,
+    continue_on_failure BOOLEAN DEFAULT false
+) → TEXT
+-- Experimental: continue_on_failure syntax may change in future releases.
+-- NULL condition: infinite loop.
+-- Non-NULL condition: do-while semantics; evaluate it after each successful body.
+-- With continue_on_failure => true, a consumed body activity failure skips the
+-- condition and starts the next iteration. The loop's condition and
+-- orchestration/runtime failures remain fatal.
 
 -- Break from enclosing loop
 df.break() → TEXT                                    -- Exit with NULL
@@ -227,7 +236,7 @@ Automatically available during execution:
 
 ## Condition Evaluation (Truthiness)
 
-Used by: `?>`, `!>`, `df.if()`, `df.loop(body, condition)`
+Used by: `?>`, `!>`, `df.if()`, and the optional condition in `df.loop()`
 
 The first column of the first row is evaluated:
 
@@ -345,7 +354,7 @@ SELECT df.start(
 -- Cancel with: SELECT df.cancel('instance_id', 'Stopping heartbeat');
 ```
 
-### While-Loop with Break
+### Loop with Break
 
 ```sql
 SELECT df.start(
@@ -360,6 +369,27 @@ SELECT df.start(
     'counted-loop'
 );
 ```
+
+### Conditional Loop with Failure Continuation
+
+```sql
+SELECT df.start(
+    df.loop(
+        'SELECT process_next_item()',
+        'SELECT EXISTS (
+            SELECT 1 FROM work_queue WHERE status = ''pending''
+        )',
+        continue_on_failure => true
+    ),
+    'resilient-worker'
+);
+```
+
+This is a do-while loop: after a successful body execution, the condition is
+evaluated and the loop continues while it is truthy. After a consumed body
+activity failure, the condition is skipped and the body starts again.
+Errors returned by body SQL, HTTP, and multipart activities are consumable.
+Condition and orchestration/runtime failures remain fatal.
 
 ### Cron Scheduled Job
 

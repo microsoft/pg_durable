@@ -61,10 +61,17 @@ node_function ::= df.sql( QUERY )
                 | df.race( expression, expression )
                 | df.seq( expression, expression )
                 | df.if( condition, then_expr, else_expr )
-                | df.loop( expression [, condition] )
+                | df.loop(
+                      expression
+                      [, expression]
+                      [, continue_on_failure => BOOLEAN]
+                  )
                 | df.break( [value] )
                 | df.as( expression, NAME )
 ```
+
+> **Experimental:** The `continue_on_failure` syntax is subject to change in
+> future releases.
 
 ### Terminals
 
@@ -78,6 +85,7 @@ METHOD      ::= 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
 BODY        ::= JSON string (supports $variable substitution)
 HEADERS     ::= JSONB object
 TIMEOUT     ::= positive integer (seconds)
+BOOLEAN     ::= true | false
 STRING      ::= single-quoted SQL string
 ```
 
@@ -164,6 +172,20 @@ df.if(
 df.loop(
     'SELECT process_item()',
     'SELECT count(*) > 0 FROM queue'  -- while queue has items
+)
+
+-- Infinite loop with failure-isolated iterations
+df.loop(
+    df.wait_for_schedule('*/5 * * * *')
+    ~> 'CALL refresh_search_index()',
+    continue_on_failure => true
+)
+
+-- Conditional loop with failure-isolated iterations
+df.loop(
+    'SELECT process_item()',
+    'SELECT count(*) > 0 FROM queue',
+    continue_on_failure => true
 )
 
 -- Loop with df.break() to exit
@@ -300,4 +322,3 @@ compensate_expr ::= atom_expr [ '<->' atom_expr ]
 ```
 
 See [spec-compensation.md](spec-compensation.md) for details.
-

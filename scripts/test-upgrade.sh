@@ -774,6 +774,10 @@ test_b1_dsl_construction() {
     assert_sql_contains "SELECT df.sql('SELECT 1');" '"node_type":"SQL"'
 }
 
+test_b1_conditional_loop() {
+    assert_sql_contains "SELECT df.loop('SELECT 1', 'SELECT false');" '"node_type":"LOOP"'
+}
+
 test_b1_dsl_chain() {
     assert_sql_contains "SELECT df.sql('SELECT 1') ~> df.sql('SELECT 2');" '"node_type":"THEN"'
 }
@@ -904,6 +908,7 @@ else
         run_test "B1 [v${B1_VERSION}]: df.getvar()" test_b1_getvar
         run_test "B1 [v${B1_VERSION}]: df.version()" test_b1_version
         run_test "B1 [v${B1_VERSION}]: df.sql() construction" test_b1_dsl_construction
+        run_test "B1 [v${B1_VERSION}]: df.loop(body, condition)" test_b1_conditional_loop
         run_test "B1 [v${B1_VERSION}]: DSL chain (~>)" test_b1_dsl_chain
         run_test "B1 [v${B1_VERSION}]: conditional operators (?>/!>)" test_b1_conditional_operators
         run_test "B1 [v${B1_VERSION}]: df.start()/wait_for_completion()" test_b1_start_and_complete
@@ -942,6 +947,7 @@ test_b2_data_survives_upgrade() {
 
     assert_sql_equals "SELECT df.clearvars();" "OK" || return 1
     assert_sql_equals "SELECT df.setvar('b2_key', 'b2_value');" "OK" || return 1
+    run_sql_capture "CREATE VIEW test_loop_upgrade_dependency AS SELECT df.loop('SELECT 1', NULL::text) AS graph;" >/dev/null || return 1
 
     B2_PRE_INSTANCE_ID=$(run_sql_capture "SELECT df.start('INSERT INTO test_upgrade_b2_log (kind, msg) VALUES (''pre'', ''{b2_key}'') RETURNING msg', 'b2-pre-upgrade');") || return 1
     B2_INFLIGHT_INSTANCE_ID=$(run_sql_capture "SELECT df.start(df.sleep(2) ~> 'SELECT ''b2-running'' AS value', 'b2-inflight');") || return 1
@@ -975,6 +981,13 @@ test_b2_pre_upgrade_instance_after_upgrade() {
 test_b2_inflight_work_after_upgrade() {
     assert_sql_equals_ignoring_warnings "SELECT df.wait_for_completion('${B2_INFLIGHT_INSTANCE_ID}', 30);" "completed" &&
     assert_sql_contains "SELECT df.result('${B2_INFLIGHT_INSTANCE_ID}');" "b2-running"
+}
+
+test_b2_loop_dependency_survives_upgrade() {
+    assert_sql_equals "SELECT graph LIKE '%\"node_type\":\"LOOP\"%' FROM test_loop_upgrade_dependency;" "t" &&
+    assert_sql_equals "SELECT to_regprocedure('df._loop_legacy(text,text)') IS NOT NULL;" "t" &&
+    assert_sql_equals "SELECT to_regprocedure('df.loop(text,text,boolean)') IS NOT NULL;" "t" &&
+    assert_sql_equals "SELECT (df.loop('SELECT 1', 'SELECT false', continue_on_failure => true)::jsonb ->> 'query') LIKE '%\"continue_on_failure\":true%';" "t"
 }
 
 test_b2_new_data_after_upgrade() {
@@ -1021,6 +1034,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
     run_test "B2: In-flight work completes after upgrade" test_b2_inflight_work_after_upgrade
+    run_test "B2: Loop dependency and unified API survive upgrade" test_b2_loop_dependency_survives_upgrade
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
 fi

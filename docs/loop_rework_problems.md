@@ -54,9 +54,10 @@ let new_input = SubtreeInput {
 
 The graph snapshot is also copied into every JOIN/RACE child input. A large
 graph or named result is therefore persisted repeatedly across loop generations
-and child histories. `MAX_LOOP_ITERATIONS` limits generations to 100,000, but
-that is not a meaningful byte bound: a 1 MB carried result can still produce
-storage measured in tens of gigabytes before the iteration guard trips.
+and child histories. `MAX_LOOP_ITERATIONS` limits generations to 8,388,608
+(`2^23`), but that is not a meaningful byte bound: a 1 MB carried result can
+still produce roughly 8.4 TB of payload copies (8 TiB for a 1 MiB payload)
+before the iteration guard trips, excluding engine-record and graph overhead.
 
 Child engine records also remain until the root instance is retired. A nested
 loop can create a child under each outer generation, so the retained child
@@ -258,8 +259,9 @@ between parent and descendant stamps at equal generations.
 `MAX_LOOP_ITERATIONS` is enforced per orchestration instance. A non-root inner
 loop starts in its own child and receives its own counter, while an outer loop
 can spawn a new inner child under every outer generation. Two loops that each
-stay under the 100,000-iteration cap can therefore produce a combinatorial
-amount of work and retained child state.
+stay under the 8,388,608 (`2^23`)-iteration cap can therefore produce up to
+`2^46` (70,368,744,177,664) inner iterations, plus outer-loop work, and retain
+a correspondingly large child-state population.
 
 The one-second floor limits the rate of each individual loop but does not place
 a workflow-wide bound on nested work. The existing nested-loop E2E test proves

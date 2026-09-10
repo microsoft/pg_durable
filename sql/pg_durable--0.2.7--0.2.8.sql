@@ -6,5 +6,12 @@
 -- See docs/upgrade-testing.md for the upgrade-script and backward-compatibility
 -- requirements (Scenario A / B1 / B2).
 --
--- No schema changes yet for 0.2.8. Add DDL below as the 0.2.8 cycle lands
--- extension-schema changes.
+ALTER FUNCTION df."loop"(TEXT, TEXT) RENAME TO "_loop_legacy";
+
+CREATE FUNCTION df."loop"(
+    "body" TEXT,
+    "condition" TEXT DEFAULT NULL,
+    "continue_on_failure" bool DEFAULT false
+) RETURNS TEXT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'loop_with_policy_wrapper';

@@ -477,14 +477,15 @@ of every handler having to recognise an in-band JSON break sentinel:
 pub enum NodeError {
     /// df.break() fired. Carries the break value. Caught only by execute_loop_node.
     Break(String),
-    /// A genuine failure. Surfaces as a failed instance.
+    /// An expected workflow activity failure.
+    Application(String),
+    /// A graph, protocol, configuration, or runtime failure.
     Failure(String),
 }
 
 pub type NodeResult = Result<String, NodeError>;
 
-// Any `?` on an existing Result<_, String> auto-converts the error to Failure, so
-// activity calls and helpers need no per-call changes.
+// Structural/configuration helpers still convert String errors to Failure.
 impl From<String> for NodeError {
     fn from(e: String) -> Self {
         NodeError::Failure(e)
@@ -492,16 +493,20 @@ impl From<String> for NodeError {
 }
 ```
 
-`execute_loop_node` is the only handler that catches `NodeError::Break` (turning it into the
-loop's `Ok` result); `NodeError::Failure` keeps propagating. The orchestration boundary
-functions (`execute` / `execute_subtree`) still return `Result<String, String>` because they
-are registered with duroxide:
+SQL, HTTP, and multipart activity scheduling boundaries explicitly map activity
+errors to `NodeError::Application`; structural/configuration helper errors use
+`NodeError::Failure`. `execute_loop_node` is the only handler that catches
+`NodeError::Break` (turning it into the loop's `Ok` result). The orchestration
+boundary functions (`execute` / `execute_subtree`) still return
+`Result<String, String>` because they are registered with duroxide:
 
 - `execute`: an uncaught top-level `Break` becomes a clear `Err` ("df.break() was called
   outside of a loop"), so the instance fails instead of completing with a sentinel value.
-- `execute_subtree` (used by JOIN/RACE branches): a `Break` is carried out-of-band in the
-  subtree envelope's `control` field and re-raised as `NodeError::Break` by
-  `parse_subtree_envelope` in the parent orchestration.
+- `execute_subtree`: a `Break` is carried out-of-band in the subtree envelope's
+  `control` field. `NodeError::Application` is encoded as a namespaced,
+  serde-tagged subtree failure so application classification survives nested
+  JOIN, RACE, and LOOP boundaries. `NodeError::Failure` remains an unrecognized
+  child error and propagates fatally.
 
 The orchestration walks the graph recursively:
 
@@ -696,34 +701,25 @@ pub fn is_truthy(value: &serde_json::Value) -> bool {
 
 ### Parallel Execution (JOIN/RACE)
 
-JOIN and RACE use duroxide's sub-orchestration support:
+Each JOIN or RACE branch runs as an explicitly named `execute_subtree` child
+whose input contains the validated graph snapshot, variables, label, and
+canonically serialized named results. The child returns a `SubtreeEnvelope`
+containing its result, named-result updates, and optional `df.break()` control
+flow.
 
-```rust
-async fn execute_join_node(...) -> Result<String, String> {
-    let left_id = node.left_node.as_ref().ok_or("JOIN missing left")?;
-    let right_id = node.right_node.as_ref().ok_or("JOIN missing right")?;
-    
-    // Create sub-orchestration inputs
-    let left_input = create_subtree_input(graph, left_id, results);
-    let right_input = create_subtree_input(graph, right_id, results);
-    
-    // Schedule parallel sub-orchestrations
-    let left_handle = ctx.schedule_orchestration(SUBTREE_NAME, &left_id, left_input);
-    let right_handle = ctx.schedule_orchestration(SUBTREE_NAME, &right_id, right_input);
-    
-    // Wait for all to complete (duroxide handles parallelism)
-    let (left_result, right_result) = tokio::join!(
-        left_handle.into_orchestration(),
-        right_handle.into_orchestration()
-    );
-    
-    // Combine results
-    let results = vec![left_result?, right_result?];
-    Ok(serde_json::to_string(&results)?)
-}
-```
+JOIN schedules its two branches, plus any ordered `join3` extras, then waits
+with `ctx.join()`. Successful envelopes are processed in branch order and
+their named results are merged into the parent. Historically, JOIN returned
+the first branch error in that same order. That behavior remains unchanged
+outside failure-isolated loop bodies for replay compatibility. Inside a
+failure-isolated body, every settled outcome is inspected so a fatal sibling
+cannot be hidden by a recoverable activity failure or `df.break()`. The
+deterministic priority is fatal failure, then break, then recoverable activity
+failure; equal-priority outcomes keep the first branch.
 
-For RACE, duroxide's `select` is used to return the first completed result.
+RACE uses `ctx.select2()` and returns the first completed branch. The losing
+branch is cancelled, and a losing loop branch receives a terminal fallback
+node-status stamp because cancellation may stop it before it can stamp itself.
 
 ### Loops and Continue-As-New
 
@@ -734,7 +730,27 @@ Loops use duroxide's `continue_as_new` to avoid unbounded history growth. Their 
 
 `execute_subtree` is therefore structurally identical to `execute_function_graph`: both root an execution context at their own node and host an inline root loop. They differ only in the input envelope they re-enter with on `continue_as_new` (`FunctionInput` vs `SubtreeInput`), in the fact that only the root orchestration touches instance-level status, and in where their graph comes from — `execute_function_graph` loads it from `df.nodes` on its first generation, while `execute_subtree` receives it inline from its parent. The graph is loaded exactly once per instance and then carried inline through every child input and every `continue_as_new` generation, so `submitted_by` is fixed for the instance's lifetime and a post-start `df.nodes` tamper is never read. Role deletion and privilege revocation are still enforced per node execution, by connecting *as* `submitted_by` for SQL and by re-checking `EXECUTE` privilege per HTTP request.
 
-Both paths call `run_loop_iteration`, which executes the body, catches `NodeError::Break`, evaluates the optional post-body condition, and propagates `NodeError::Failure`. A child stamps its LOOP node `running` on each generation and `completed` or `failed` on exit; because `continue_as_new` returns a future that never resolves, a continuing generation never stamps a terminal status. If a live loop loses a RACE, the parent records the loop node as terminal `failed` with a cancellation reason because duroxide cancellation stops the child before it can run its own terminal stamp.
+Fail-fast loops call `run_loop_iteration`, which executes the body inline,
+catches `NodeError::Break`, evaluates the optional post-body condition, and
+propagates both application and non-application failures. A loop configured
+with `continue_on_failure => true` instead calls
+`run_failure_isolated_body`: each body iteration runs as a fresh
+`execute_subtree` child. On success, the subtree envelope is parsed and its
+named results are merged into the parent result map before the parent evaluates
+the optional condition. On a structurally encoded body application failure,
+the parent consumes the failure, skips the condition because body results may
+be absent, and advances to the next generation. Every error returned by a body
+SQL, HTTP, or multipart activity uses this application-failure path, including
+query, authorization, connection, and network errors. Condition failures,
+malformed envelopes or graph data, child-ID collisions, and unrecognized
+orchestration/runtime failures remain fatal.
+
+A child stamps its LOOP node `running` on each generation and `completed` or
+`failed` on exit; because `continue_as_new` returns a future that never
+resolves, a continuing generation never stamps a terminal status. If a live
+loop loses a RACE, the parent records the loop node as terminal `failed` with a
+cancellation reason because duroxide cancellation stops the child before it
+can run its own terminal stamp.
 
 Node status stamps contain the full composed orchestration lineage: `{root_instance}::{generation}::{child_node}::{generation}...`. Read-time inference and the write fence walk that lineage so stale writes and superseded nested branches are evaluated at every ancestor generation.
 
