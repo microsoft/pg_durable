@@ -1161,6 +1161,17 @@ test_b2_endpoint_catalog_after_upgrade() {
         ALTER USER MAPPING FOR CURRENT_USER SERVER durable_b2_endpoint OPTIONS (SET token 'ROTATED_SENTINEL');" >/dev/null || return 1
     assert_sql_equals "SELECT fdwhandler = 0 AND fdwvalidator = pg_catalog.to_regprocedure('df.endpoint_option_validator(text[],oid)')::oid FROM pg_catalog.pg_foreign_data_wrapper WHERE fdwname = 'pg_durable_fdw';" "t" || return 1
     assert_sql_equals "SELECT umoptions = ARRAY['token=ROTATED_SENTINEL'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (ADD \"secret.key\" 'NAMED_SENTINEL', ADD \"secret.other\" 'UNCHANGED');
+        ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (SET \"secret.key\" 'ROTATED_NAMED_SENTINEL');" >/dev/null || return 1
+    assert_sql_equals "SELECT umoptions @> ARRAY['token=ROTATED_SENTINEL', 'secret.key=ROTATED_NAMED_SENTINEL', 'secret.other=UNCHANGED'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (DROP \"secret.other\");" >/dev/null || return 1
+    assert_sql_equals "SELECT umoptions @> ARRAY['token=ROTATED_SENTINEL', 'secret.key=ROTATED_NAMED_SENTINEL'] AND NOT (umoptions @> ARRAY['secret.other=UNCHANGED']) FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    assert_sql_equals "SELECT df.secret('durable_b2_endpoint', 'key') = jsonb_build_object('server', 'durable_b2_endpoint', 'key', 'key');" "t" || return 1
+    assert_sql_equals "SELECT ((df.with_http_options(
+        df.http('https://api.github.com/', 'POST'),
+        jsonb_build_object('secret_bindings', jsonb_build_object('form', jsonb_build_object('password', df.secret('durable_b2_endpoint', 'key'))),
+            'form_fields', jsonb_build_object('ordinary', 'literal'))
+        )::jsonb->>'query')::jsonb->'secret_bindings'->'form'->'password'->>'key') = 'key';" "t" || return 1
     run_sql_capture "DROP SERVER durable_b2_endpoint CASCADE;
         DROP OWNED BY durable_b2_endpoint_probe;
         DROP ROLE durable_b2_endpoint_probe;" >/dev/null

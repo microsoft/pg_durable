@@ -209,8 +209,39 @@ The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
 development cycle, not the published v0.2.8 release. Of these, only #380 changes
 the extension schema.
 
+#### HTTP endpoints
+
+- Adds `df.endpoint(text, text)` without changing either HTTP constructor's
+  signature or grants. Endpoint nodes add a fixed `endpoint` server name and use
+  `url` for the path template; only these nodes receive the trusted target
+  `database` in activity inputs. Existing raw-URL nodes retain their serialized
+  inputs and activity names. Both HTTP activities resolve credentials locally,
+  using the same endpoint preparation and validation rules.
+- Adds the handler-less `pg_durable_fdw` and
+  `df.endpoint_option_validator(text[], oid)` in fresh and upgraded schemas.
+  FDW `USAGE` is not granted to `PUBLIC` or by `df.grant_usage`; administrators
+  delegate creation with a native FDW grant. The catalog resolver uses only
+  native catalogs, verifies extension ownership of the wrapper, and reports
+  unavailable endpoint support without changing legacy workflow execution.
+- Upgrade snapshots include FDW ownership, handler/validator, extension
+  membership and ACLs, plus endpoint server and mapping metadata. Mapping
+  credential values are excluded. B2 exercises delegated server/mapping DDL
+  after upgrade. Existing HTTP signatures, grants and activity inputs are unchanged.
+
+#### Add explicit secret bindings
+
+- Adds `df.secret(text, text) RETURNS jsonb` in fresh and upgraded schemas and
+  accepts individual `"secret.<key>"` user-mapping options. Only explicitly configured nodes
+  gain binding/form fields and trusted target-database metadata. Existing HTTP
+  signatures, grants and legacy raw-URL activity inputs remain unchanged.
+- Named credential lookup uses native catalogs, checks server `USAGE` and reads
+  the authenticated caller's mapping. Missing endpoint schema support or named
+  keys fails explicitly, without changing legacy requests on older schemas.
+- Named credentials use native `ADD`, `SET` and `DROP`; the B2 catalog test
+  verifies that these preserve unrelated named values and endpoint-auth options.
+
 #### Add `df.with_http_options()`
-- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. No option keys are supported yet: SQL `NULL` and `{}` return the original node text byte-for-byte; other values and unsupported keys raise an error.
+- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. SQL `NULL` and `{}` preserve input bytes; `secret_bindings` and `form_fields` configure references and literal form data. Other values and unsupported keys raise an error.
 - **Upgrade script:** [sql/pg_durable--0.2.8--0.2.9.sql](../sql/pg_durable--0.2.8--0.2.9.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.
 - **Released-schema compatibility:** This helper landed after the v0.2.8 tag. The 0.2.7 to 0.2.8 script remains identical to the released version; the new DDL belongs in 0.2.8 to 0.2.9 so already-installed 0.2.8 schemas also receive it.
 - **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
@@ -248,22 +279,6 @@ the extension schema.
 
 #### Loop failure continuation
 
-- Adds `df.endpoint(text, text)` without changing either HTTP constructor's
-  signature or grants. Endpoint nodes add a fixed `endpoint` server name and use
-  `url` for the path template; only these nodes receive the trusted target
-  `database` in activity inputs. Existing raw-URL nodes retain their serialized
-  inputs and activity names. Both HTTP activities resolve credentials locally,
-  using the same endpoint preparation and validation rules.
-- Adds the handler-less `pg_durable_fdw` and
-  `df.endpoint_option_validator(text[], oid)` in fresh and upgraded schemas.
-  FDW `USAGE` is not granted to `PUBLIC` or by `df.grant_usage`; administrators
-  delegate creation with a native FDW grant. The catalog resolver uses only
-  native catalogs, verifies extension ownership of the wrapper, and reports
-  unavailable endpoint support without changing legacy workflow execution.
-- Upgrade snapshots include FDW ownership, handler/validator, extension
-  membership and ACLs, plus endpoint server and mapping metadata. Mapping
-  credential values are excluded. B2 exercises delegated server/mapping DDL
-  after upgrade. Existing HTTP signatures, grants and activity inputs are unchanged.
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent
   objects, then creates the single public
