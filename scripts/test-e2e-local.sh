@@ -26,6 +26,7 @@
 #   ./scripts/test-e2e-local.sh --default-build-phases
 #   ./scripts/test-e2e-local.sh 00_requires_shared_preload
 #   ./scripts/test-e2e-local.sh 45_connection_limit_timeout
+#   ./scripts/test-e2e-local.sh http_allowed_domains
 #   ./scripts/test-e2e-local.sh --http-disabled 47_http_dsl_disabled
 #   ./scripts/test-e2e-local.sh --http-allow-all
 # END_USAGE
@@ -63,6 +64,8 @@ DEFAULT_BUILD_PHASES=(
     "new-start-limit"
     "connlimit-startup"
     "reconcile"
+    "http-custom-domains"
+    "http-empty-domains"
 )
 
 ALL_PHASES=(
@@ -75,6 +78,8 @@ ALL_PHASES=(
     "new-start-limit"
     "connlimit-startup"
     "reconcile"
+    "http-custom-domains"
+    "http-empty-domains"
     "http-disabled"
     "http-allow-all"
 )
@@ -157,6 +162,12 @@ phase_label() {
         reconcile)
             echo "reconcile orphans"
             ;;
+        http-custom-domains)
+            echo "HTTP custom domain allowlist"
+            ;;
+        http-empty-domains)
+            echo "HTTP empty domain allowlist (deny all)"
+            ;;
         http-disabled)
             echo "HTTP disabled (no http Cargo feature)"
             ;;
@@ -194,6 +205,12 @@ phase_for_test() {
             ;;
         54_reconcile_orphans)
             echo "reconcile"
+            ;;
+        69_http_allowed_domains)
+            echo "http-custom-domains"
+            ;;
+        70_http_allowed_domains_empty)
+            echo "http-empty-domains"
             ;;
         47_http_dsl_disabled)
             echo "http-disabled"
@@ -477,6 +494,7 @@ configure_phase() {
     clear_connlimit_gucs
     remove_conf_key "log_connections"
     remove_conf_key "pg_durable.host"
+    remove_conf_key "pg_durable.http_allowed_domains"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
     set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
@@ -548,17 +566,19 @@ configure_phase() {
             set_conf_line "pg_durable.reconcile_interval" "2"
             set_conf_line "pg_durable.retention_days" "0"
             ;;
-        http-disabled)
+        http-custom-domains|http-disabled)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "pg_durable.http_allowed_domains" "'example.com'"
             ;;
-        http-allow-all)
+        http-empty-domains|http-allow-all)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "pg_durable.http_allowed_domains" "''"
             ;;
     esac
 }
@@ -575,7 +595,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
+        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile|http-custom-domains|http-empty-domains)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -648,7 +668,7 @@ prepare_phase() {
         reconcile)
             wait_for_worker_ready
             ;;
-        http-disabled|http-allow-all)
+        http-custom-domains|http-empty-domains|http-disabled|http-allow-all)
             ensure_e2e_role
             wait_for_worker_ready
             ;;

@@ -3,10 +3,10 @@
 
 //! ExecuteHTTP activity - makes HTTP requests
 //!
-//! Cargo features control what outbound HTTP(S) is allowed:
-//! - `http-allow-azure-domains`: Azure endpoints + api.github.com only
-//!   (+ IP blocklist, no redirects).
-//! - `http-allow-test-domains`: same + httpbingo.org.
+//! Cargo features control the outbound HTTP(S) security tier:
+//! - `http-allow-azure-domains`: configurable domains, defaulting to Azure
+//!   endpoints + api.github.com (+ IP blocklist, no redirects).
+//! - `http-allow-test-domains`: same, also defaulting to allow httpbingo.org.
 //! - `http-allow-all`: no restrictions (development only).
 //! - *(none)*: all HTTP calls fail at execution time.
 //!
@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 
+use crate::ssrf::DomainAllowlist;
 use crate::types::HttpConfig;
 
 /// Activity name for registration and scheduling
@@ -86,6 +87,7 @@ pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String>
 pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
+    allowed_domains: Arc<DomainAllowlist>,
     config_json: String,
 ) -> Result<String, String> {
     let config: HttpConfig =
@@ -111,7 +113,7 @@ pub async fn execute(
     //                 bypass path where a user crafts raw Durofut JSON and passes
     //                 it to df.start() without going through the DSL guard.
     //   1. Scheme:    blocks file://, gopher://, etc.
-    //   2. Allowlist: blocks ALL bare IPs (public and private) + non-Azure
+    //   2. Allowlist: blocks ALL bare IPs (public and private) + unlisted
     //                 domains. Fails-closed on malformed URLs. Because bare IPs
     //                 bypass the DNS resolver entirely in reqwest, this is the
     //                 definitive gate for IP-literal URLs.
@@ -144,8 +146,8 @@ pub async fn execute(
         ));
     })?;
 
-    // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
-    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
+    // --- Endpoint allow-list (blocks all bare IPs + unlisted domains) ---
+    crate::ssrf::validate_allowlist(&request_url, &allowed_domains).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));

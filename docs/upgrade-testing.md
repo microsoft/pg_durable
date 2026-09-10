@@ -205,6 +205,8 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### 0.2.8
 
+#### Failure-isolated loops and loop lifetime
+
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent
   objects, then creates the single public
@@ -232,6 +234,13 @@ what the upgrade script handles, and any backward compatibility considerations.
   that recorded the previous terminal-failure path cannot replay under the new
   binary, which continues toward the higher backstop instead. Drain such
   long-running loops before upgrade when continuity is required.
+
+#### Configurable HTTP domains (#375)
+- **Runtime change (no DDL):** `pg_durable.http_allowed_domains` is a Postmaster-context string GUC that replaces the domain allow-list for both HTTP activities in restricted builds. The defaults preserve the existing Azure/GitHub policy, including `httpbingo.org` in test builds. Disabled and `http-allow-all` build behavior is unchanged.
+- **Configuration migration:** None is required to retain existing behavior. Administrators can configure exact hostnames and `*.domain` patterns, then restart PostgreSQL. An explicit value replaces all defaults; an empty list denies all domains in restricted builds. Malformed values are rejected, including at server startup.
+- **Scenario A/B2 considerations:** No upgrade-script DDL, schema changes, or data migration. Existing graphs, activity names, and serialized activity inputs are unchanged.
+- **Scenario B1 considerations:** The new `.so` works against all previous supported schemas without `ALTER EXTENSION UPDATE` or runtime schema detection. The policy is read from the GUC, not extension tables.
+- **Replay compatibility:** The policy is evaluated only when an HTTP activity executes, not by orchestration code. Pending requests and retries use the new list after restart; already-recorded activity results replay normally.
 
 ### v0.2.6 → v0.2.7
 
