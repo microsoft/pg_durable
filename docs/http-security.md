@@ -244,6 +244,35 @@ requirements.
 
 ---
 
+### 3.7 Explicit secret bindings
+
+`df.secret(server, key)` returns a JSONB reference, not a value or an embeddable
+marker. Only named header/query/form slots in `secret_bindings` interpret these
+references. Ordinary request fields, literal `form_fields`, multipart bytes and
+resolved strings are never searched for secret markers. Binding maps are trusted
+workflow configuration, not untrusted payload data.
+
+Activities validate field shapes, reject conflicts with ordinary fields and
+endpoint authentication, and resolve each referenced server under `submitted_by`
+after destination policy checks. Server `USAGE` and a caller-owned mapping are
+required even for `auth_scheme 'none'`. Named values come only from individual
+`"secret.<key>"` user-mapping options, not ambient identity, endpoint-authentication
+options or server options. The prefix is a credential namespace, not an instruction
+to interpret the value. Native `ADD`, `SET` and `DROP` update one credential
+without rewriting unrelated options.
+
+Header values are validated and marked sensitive. Query/form names and values
+are form-urlencoded; query insertion cannot change the destination authority.
+Form mode owns body framing/content type, rejects raw body/multipart combinations,
+and leaves ordinary field values literal. Missing secrets fail without fallback
+or values in error messages. Request URL diagnostics are redacted after secret
+query insertion; response credentials remain outside this guarantee.
+
+See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings) for API
+examples and deferred general-composition cases.
+
+---
+
 ## 4. Layer 1: IP Blocklist (SSRF protection)
 
 ### 4.1 Blocked IPv4 ranges

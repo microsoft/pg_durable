@@ -39,3 +39,8 @@ CREATE FUNCTION df.endpoint("server" pg_catalog.text, "path" pg_catalog.text)
 RETURNS pg_catalog.text
 LANGUAGE c IMMUTABLE STRICT PARALLEL SAFE
 AS 'MODULE_PATHNAME', 'endpoint_wrapper';
+
+CREATE FUNCTION df.secret("server" pg_catalog.text, "key" pg_catalog.text)
+RETURNS pg_catalog.jsonb
+LANGUAGE c IMMUTABLE STRICT PARALLEL SAFE
+AS 'MODULE_PATHNAME', 'secret_wrapper';

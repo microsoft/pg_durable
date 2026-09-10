@@ -8,11 +8,17 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
+- **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB
+  descriptor for named header/query/form fields through `df.with_http_options`.
+  Individual `"secret.<key>"` user-mapping options support per-key addition,
+  rotation and removal. Literal form data
+  stays separate from references; activities encode fields and resolve credentials
+  under the submitting role without scanning payloads for markers.
 - **Endpoint HTTP requests:** `df.endpoint(server, path)` composes with both
   `df.http` and `df.http_multipart`. Activities resolve per-role credentials,
   enforce server `USAGE`, preserve the configured base URL and reject routing or
   credential overrides. Existing HTTP signatures and raw-URL workflow inputs
-  remain unchanged; body secret insertion is deferred.
+  remain unchanged; general body secret interpolation is deferred.
 - **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
   option validator, and per-user catalog resolution for unauthenticated, bearer,
   named-header and query-string endpoint authentication. FDW creation authority

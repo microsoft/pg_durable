@@ -712,9 +712,11 @@ df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
     |=> 'response'
 ```
 
-In this version, only SQL `NULL` and an empty object (`{}`) are accepted as
-`options`; no option keys are supported yet. Other JSON values, including JSON
-`null`, are rejected. Empty options return the input text byte-for-byte.
+Supported keys are `secret_bindings` and `form_fields`, described under
+[Explicit Secret Bindings](#explicit-secret-bindings). SQL `NULL` and `{}` return
+the input text byte-for-byte. Unknown keys and non-object JSON values, including
+JSON `null`, are rejected. Reapplying a supplied key replaces that entire option;
+omitted keys are retained.
 
 The input must be a single `HTTP` or `HTTP_MULTIPART` node, optionally named with
 `|=>`. SQL nodes and compound graphs are rejected, so apply the helper before
@@ -840,8 +842,11 @@ role. `PUBLIC` mappings are not a fallback for endpoint credential lookup.
 The catalog resolver checks server `USAGE` and reads the authenticated caller's
 mapping on every attempt. Rotation affects the next lookup, not an already-sent
 request. Missing or inaccessible credentials fail without privileged fallback.
-Body secret insertion is a separate follow-up; do not put arbitrary body-secret
-option names into these mappings.
+Mappings also accept individual `secret.<key>` options for explicit bindings.
+These are separate from `token`, `header_value` and `query_string`; other option
+names remain invalid. Named values may be empty or contain arbitrary text,
+including JSON or `=`; they are not parsed as JSON. Header bindings validate the
+resolved text before sending it.
 
 User mappings are plaintext in catalogs, WAL and backups. Superuser dumps include
 their credential values; less privileged dumps can omit options. Literal values
@@ -896,6 +901,116 @@ and the submitting role must be able to connect. Catalog lookup reads current
 permissions and credentials on each attempt, not at graph construction time.
 Returned or echoed credentials are still response data and can enter history;
 endpoint authentication does not redact response bodies or headers.
+
+### Explicit Secret Bindings
+
+`df.secret(server, key)` returns a JSONB descriptor such as
+`{"server":"partner_api","key":"api_key"}`, not a credential or an embeddable
+string marker. It performs no lookup. Use it in dedicated maps passed to
+`df.with_http_options`:
+
+| Option | Meaning |
+|---|---|
+| `secret_bindings.headers` | Header names mapped to descriptors, with an optional literal `prefix` |
+| `secret_bindings.query` | Query parameter names mapped to descriptors |
+| `secret_bindings.form` | Form field names mapped to descriptors |
+| `form_fields` | Ordinary form field names and string values, kept literal |
+
+Provision named values in the caller's user mapping:
+
+```sql
+CREATE USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS ("secret.api_key" '<api-key>');
+
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (ADD "secret.client_secret" '<client-secret>');
+
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (SET "secret.api_key" '<replacement-api-key>');
+```
+
+When a credential is no longer needed, remove it independently:
+
+```sql
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (DROP "secret.client_secret");
+```
+
+If the mapping already exists, use `ADD` instead of creating another mapping.
+Each `ADD`, `SET` or `DROP` leaves other options unchanged; adding an existing
+option or changing/dropping a nonexistent option fails. Quote the entire option
+name because it contains a dot. The `secret.` prefix is reserved for named values:
+`df.secret('partner_api', 'api_key')` reads `"secret.api_key"`, not `token` or any
+other endpoint-authentication option. Keys are case-sensitive, nonempty and
+cannot contain control characters or `=`. Quoted names follow PostgreSQL's normal
+identifier-length limit.
+
+The same plaintext, backup and provisioning-log caveats as other credentials
+apply. A server used only for named secrets can use `auth_scheme 'none'`.
+
+An explicit header binding works with raw URLs or endpoint references:
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://partner.azure-api.net/v1/items', 'GET'),
+        jsonb_build_object('secret_bindings', jsonb_build_object(
+            'headers', jsonb_build_object('X-Api-Key', df.secret('partner_api', 'api_key'))
+        ))
+    ),
+    'fetch-items'
+);
+```
+
+For a header prefix, use
+`df.secret('partner_api', 'api_key') || '{"prefix":"Bearer "}'::jsonb`.
+Prefixes are literal text and allowed only on headers. Query/form bindings encode
+their values automatically; no encoding argument is needed.
+
+A form request keeps ordinary data separate from references:
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://partner.azure-api.net/oauth2/token', 'POST'),
+        jsonb_build_object(
+            'secret_bindings', jsonb_build_object(
+                'form', jsonb_build_object('client_secret', df.secret('partner_api', 'client_secret'))
+            ),
+            'form_fields', jsonb_build_object(
+                'grant_type', 'client_credentials',
+                'client_id', 'a1b2c3d4',
+                'state', '${secret:literal.text}'
+            )
+        )
+    ),
+    'token-request'
+);
+```
+
+The activity generates `application/x-www-form-urlencoded` and sets that content
+type. Both ordinary and secret fields are encoded, including Unicode, delimiters
+and empty values. `form_fields` are literal strings: `${secret:...}`, `$result`,
+`{var}` and reference-shaped text are not interpreted. Compute ordinary values at
+node construction; runtime result bindings for form fields are not supported.
+Existing raw-body substitution is unchanged.
+
+Form mode requires POST, PUT or PATCH and cannot accompany a raw `body` or
+multipart request. Multipart supports header/query bindings, not secret-valued
+parts. Conflicting content types, explicit form-body framing and collisions with
+ordinary fields or endpoint authentication fail rather than overwrite values.
+Header matching is case-insensitive; query collision checks decode parameter names.
+
+Binding maps, names and prefixes are trusted workflow configuration: never source
+them from untrusted payloads. Only ordinary data belongs in `form_fields` or raw
+request fields. Activities re-check HTTP permission and `USAGE` on every referenced
+server, using the caller's mapping in the workflow's target database. Missing keys
+or mappings fail explicitly, and resolved values are never recursively interpreted.
+
+Secret insertion into paths, raw bodies, nested JSON or multipart contents remains
+out of scope. The OAuth example protects the outgoing client secret, but its
+returned access token is still response data recorded in history. Response-secret
+storage and endpoint-managed OAuth token acquisition are separate capabilities.
 
 ### Error Handling
 

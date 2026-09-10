@@ -73,6 +73,7 @@ pub mod node_status;
 pub mod orchestrations;
 pub mod redact;
 pub mod registry;
+pub mod secrets;
 pub mod ssrf;
 pub mod types;
 pub mod worker;

@@ -131,7 +131,13 @@ pub async fn execute(
             ));
         })?;
 
-    let prepared = crate::endpoints::prepare_request(
+    config.secret_options.validate(
+        config.body.is_some(),
+        &config.method,
+        false,
+        config.headers.as_ref(),
+    )?;
+    let mut prepared = crate::endpoints::prepare_request(
         audit_user,
         config.database.as_deref(),
         config.endpoint.as_deref(),
@@ -144,7 +150,7 @@ pub async fn execute(
             "HTTP BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
-    let request_url = prepared.url;
+    let request_url = &prepared.url;
     let safe_url = if config.endpoint.is_some() {
         crate::redact::redact_url(request_url.as_str())
     } else {
@@ -152,19 +158,39 @@ pub async fn execute(
     };
 
     // --- Scheme validation (always enforced, regardless of feature flag) ---
-    crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
-    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
+    let resolved = config
+        .secret_options
+        .resolve(
+            audit_user,
+            config.database.as_deref(),
+            &mut prepared,
+            config.headers.as_ref(),
+        )
+        .await?;
+    let safe_url = if config
+        .secret_options
+        .secret_bindings
+        .as_ref()
+        .is_some_and(|bindings| !bindings.query.is_empty())
+    {
+        crate::redact::redact_url(prepared.url.as_str())
+    } else {
+        safe_url
+    };
+    let request_url = prepared.url;
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
         "HTTP {} {safe_url} submitted_by={audit_user}",
@@ -188,6 +214,9 @@ pub async fn execute(
     if let Some(headers) = &config.headers {
         if let Some(obj) = headers.as_object() {
             for (key, value) in obj {
+                if resolved.form_body.is_some() && key.eq_ignore_ascii_case("content-type") {
+                    continue;
+                }
                 if let Some(v) = value.as_str() {
                     request = request.header(key, v);
                 }
@@ -198,9 +227,17 @@ pub async fn execute(
     if let Some((name, value)) = prepared.credential_header {
         request = request.header(name, value);
     }
+    request = request.headers(resolved.headers);
 
     // Add body (for POST/PUT/PATCH)
-    if let Some(body) = &config.body {
+    if let Some(body) = resolved.form_body {
+        request = request
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(body);
+    } else if let Some(body) = &config.body {
         request = request.body(body.clone());
     }
 

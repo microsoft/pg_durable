@@ -345,8 +345,10 @@ the FDW validator invoked by PostgreSQL on creation and alteration; it returns
 `void` or raises an error without echoing credential values.
 
 The server options are `base_url`, `auth_scheme`, and `header_name` (only for
-header authentication). Mapping options are `token`, `header_value`, and
-`query_string`. See [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
+header authentication). Mapping options are `token`, `header_value`,
+`query_string`, and individual `"secret.<key>"` values. Named credentials support
+native per-option `ADD`, `SET` and `DROP`. See
+[Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
 for option combinations, grants, rotation and backup implications.
 
 ### df.http_multipart(url [, method, parts, headers, timeout])
@@ -400,6 +402,23 @@ Returns the same envelope as `df.http()`.
 
 ---
 
+### df.secret(server, key)
+
+Returns JSONB `{"server":"...","key":"..."}` without reading credentials.
+Both arguments are required, nonempty and cannot contain control characters.
+`key` selects `"secret.<key>"` in the submitting role's user mapping. Keys are
+case-sensitive and cannot contain `=`; values are opaque text, including empty
+strings. Endpoint-authentication options are not searched as a fallback.
+Only explicit binding slots interpret this descriptor; ordinary values never do.
+Header slots may add a literal `prefix`; unknown descriptor fields are rejected.
+
+```sql
+df.secret('partner_api', 'api_key')
+df.secret('partner_api', 'token') || '{"prefix":"Bearer "}'::jsonb
+```
+
+See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings).
+
 ### df.with_http_options(fut, options)
 
 HTTP-specific modifier entry point. Returns the JSON-encoded TEXT node for use in
@@ -408,14 +427,17 @@ a workflow, not an HTTP response. Neither existing HTTP function changes signatu
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
 | `fut` | TEXT | ❌ Literal | A single `HTTP` or `HTTP_MULTIPART` node, optionally named with `\|=>` |
-| `options` | JSONB | ❌ Literal | SQL `NULL` or an empty object (`'{}'`) only in this version |
+| `options` | JSONB | ❌ Literal | Object containing `secret_bindings` and/or `form_fields`; SQL `NULL` and `{}` are no-ops |
 
 ```sql
 df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
   |=> 'response'
 ```
 
-No option keys are supported yet. Unknown keys, non-object JSON values (including
+`secret_bindings` contains named `headers`, `query` and `form` reference maps.
+`form_fields` contains literal form strings. A supplied option replaces the entire
+previous option; omitted options remain intact. See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings)
+for shapes, encoding and conflict rules. Unknown keys, non-object JSON values (including
 JSON `null`), malformed nodes, SQL nodes, and compound graphs raise an error.
 SQL `NULL` and `{}` return the original node text byte-for-byte, preserving its
 config and result name. Apply the helper to each HTTP node before combining nodes.

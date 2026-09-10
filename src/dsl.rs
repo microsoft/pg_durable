@@ -491,13 +491,15 @@ pub fn race(a: &str, b: &str) -> String {
 #[pg_extern(schema = "df")]
 pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
     use std::{collections::HashSet, sync::LazyLock};
-    static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = {
-        LazyLock::new(|| {
-            HashSet::from_iter([
-                // Intentionally empty for now.
-            ])
-        })
-    };
+    static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        let allowed = [
+            // Keep alphabetical to simplify merge conflicts
+            "form_fields",
+            "secret_bindings",
+        ];
+        debug_assert!(allowed.is_sorted());
+        HashSet::from_iter(allowed)
+    });
     let node = Durofut::try_from_json(fut).unwrap_or_else(|_| {
         pgrx::error!("df.with_http_options(): expected an HTTP or HTTP_MULTIPART node")
     });
@@ -530,6 +532,21 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
             if !ALLOWED_KEYS.contains(key.as_str()) {
                 pgrx::error!("df.with_http_options(): unrecognised option '{key}'.");
             }
+        }
+        if !map.is_empty() {
+            let config: serde_json::Value = serde_json::from_str(node.query.as_deref().unwrap())
+                .expect("Validated HTTP configuration");
+            let bindings = map
+                .get("secret_bindings")
+                .or_else(|| config.get("secret_bindings"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let form = map
+                .get("form_fields")
+                .or_else(|| config.get("form_fields"))
+                .cloned();
+            return crate::secrets::configure_bindings(fut, bindings, form)
+                .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
         }
     }
 

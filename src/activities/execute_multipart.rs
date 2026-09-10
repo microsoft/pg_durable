@@ -110,7 +110,10 @@ pub async fn execute(
             ));
         })?;
 
-    let prepared = crate::endpoints::prepare_request(
+    config
+        .secret_options
+        .validate(false, &config.method, true, config.headers.as_ref())?;
+    let mut prepared = crate::endpoints::prepare_request(
         audit_user,
         config.database.as_deref(),
         config.endpoint.as_deref(),
@@ -123,7 +126,7 @@ pub async fn execute(
             "HTTP_MULTIPART BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
-    let request_url = prepared.url;
+    let request_url = &prepared.url;
     let safe_url = if config.endpoint.is_some() {
         crate::redact::redact_url(request_url.as_str())
     } else {
@@ -131,19 +134,39 @@ pub async fn execute(
     };
 
     // --- Scheme validation (always enforced) ---
-    crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list ---
-    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
+    let resolved = config
+        .secret_options
+        .resolve(
+            audit_user,
+            config.database.as_deref(),
+            &mut prepared,
+            config.headers.as_ref(),
+        )
+        .await?;
+    let safe_url = if config
+        .secret_options
+        .secret_bindings
+        .as_ref()
+        .is_some_and(|bindings| !bindings.query.is_empty())
+    {
+        crate::redact::redact_url(prepared.url.as_str())
+    } else {
+        safe_url
+    };
+    let request_url = prepared.url;
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
         "HTTP_MULTIPART {} {safe_url} ({} parts) submitted_by={audit_user}",
@@ -189,6 +212,7 @@ pub async fn execute(
     if let Some((name, value)) = prepared.credential_header {
         request = request.header(name, value);
     }
+    request = request.headers(resolved.headers);
 
     // Build the multipart form from base64-encoded parts.
     let mut form = reqwest::multipart::Form::new();

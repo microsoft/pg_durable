@@ -251,8 +251,20 @@ what the upgrade script handles, and any backward compatibility considerations.
   binary, which continues toward the higher backstop instead. Drain such
   long-running loops before upgrade when continuity is required.
 
+#### Add explicit secret bindings
+
+- Adds `df.secret(text, text) RETURNS jsonb` in fresh and upgraded schemas and
+  accepts individual `"secret.<key>"` user-mapping options. Only explicitly configured nodes
+  gain binding/form fields and trusted target-database metadata. Existing HTTP
+  signatures, grants and legacy raw-URL activity inputs remain unchanged.
+- Named credential lookup uses native catalogs, checks server `USAGE` and reads
+  the authenticated caller's mapping. Missing endpoint schema support or named
+  keys fails explicitly, without changing legacy requests on older schemas.
+- Named credentials use native `ADD`, `SET` and `DROP`; the B2 catalog test
+  verifies that these preserve unrelated named values and endpoint-auth options.
+
 #### Add `df.with_http_options()`
-- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. No option keys are supported yet: SQL `NULL` and `{}` return the original node text byte-for-byte; other values and unsupported keys raise an error.
+- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. SQL `NULL` and `{}` preserve input bytes; `secret_bindings` and `form_fields` configure references and literal form data. Other values and unsupported keys raise an error.
 - **Upgrade script:** [sql/pg_durable--0.2.7--0.2.8.sql](../sql/pg_durable--0.2.7--0.2.8.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.
 - **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
 - **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
