@@ -189,6 +189,15 @@ pub async fn execute(
     semaphore: Arc<Semaphore>,
     input_json: String,
 ) -> Result<String, String> {
+    execute_in_origin(ctx, semaphore, input_json, None).await
+}
+
+pub(crate) async fn execute_in_origin(
+    ctx: ActivityContext,
+    semaphore: Arc<Semaphore>,
+    input_json: String,
+    origin: Option<crate::origin::Origin>,
+) -> Result<String, String> {
     let input: ExecuteSqlInput =
         serde_json::from_str(&input_json).map_err(|e| format!("Invalid execute_sql input: {e}"))?;
 
@@ -230,11 +239,51 @@ pub async fn execute(
 
     let mut conn = connect_as_user(&input.submitted_by, input.database.as_deref()).await?;
 
+    if let Some(origin) = origin {
+        use sqlx::Connection;
+
+        let mut transaction = conn.begin().await.map_err(|error| error.to_string())?;
+        let valid: bool = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM df._installation i
+             JOIN pg_catalog.pg_depend d ON d.objid = 'df._installation'::regclass
+                 AND d.classid = 'pg_catalog.pg_class'::regclass AND d.deptype = 'e'
+             JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
+             WHERE i.id = $1 AND (SELECT oid FROM pg_catalog.pg_database
+                 WHERE datname = pg_catalog.current_database()) = $2::bigint::oid)",
+            )
+            .bind(origin.installation_id)
+            .bind(i64::from(origin.database_oid))
+            .fetch_one(&mut *transaction),
+        )
+        .await
+        .map_err(|_| "Origin execution fence timed out".to_string())?
+        .map_err(|error| format!("Origin execution fence unavailable: {error}"))?;
+        if !valid {
+            return Err("Origin installation removed or replaced".to_string());
+        }
+        let result = execute_query(&ctx, &mut transaction, &input.query).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(result);
+    }
+
+    execute_query(&ctx, &mut conn, &input.query).await
+}
+
+async fn execute_query(
+    ctx: &ActivityContext,
+    conn: &mut sqlx::PgConnection,
+    query: &str,
+) -> Result<String, String> {
     // SECURITY: Dynamic SQL is intentional. The query is authored by the submitting
     // user via df.sql() and executes under their own role via connect_as_user().
     // This is equivalent to the user running SQL directly.
     // See docs/spec-security-model.md §4 for the full threat model.
-    match sqlx::query(&input.query).fetch_all(&mut conn).await {
+    match sqlx::query(query).fetch_all(conn).await {
         Ok(rows) => {
             let mut result_rows: Vec<serde_json::Value> = Vec::new();
             for row in &rows {

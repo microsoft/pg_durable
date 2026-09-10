@@ -1,27 +1,34 @@
 # Multi-Database Support
 
 **Status:** Completed
-**Date:** 2026-03-06
+**Updated:** 2026-09-10
 
 ## Summary
 
-Allow durable functions to execute SQL in any database on the same PostgreSQL cluster, not just the database where the extension is installed. A single function always runs against one database; cross-database workflows are deferred to a future enhancement.
+Durable functions can execute SQL in any database on the same PostgreSQL cluster.
+A single invocation selects one SQL execution database. Since 0.2.8, multiple
+databases can also have native local installations sharing one control runtime;
+see [Multi-Database Extension Installation](multi-database-installation.md).
 
 ## Motivation
 
-Today, pg_durable can only execute SQL in the database configured by `pg_durable.database` (the same database the background worker connects to). Users with multiple databases in the same cluster—e.g., multi-tenant setups, or separate `analytics` / `app` databases—cannot use pg_durable to run durable functions against those databases.
+Explicit SQL targeting lets users with separate tenant, `analytics`, or `app`
+databases execute work without moving data into the control database. Satellite
+installation is a separate capability: it keeps each caller's metadata, grants,
+variables, and transaction semantics local.
 
-pg_cron solved the same problem: it stores all metadata in one database but can schedule jobs against any database via `cron.schedule_in_database()`. We adopt a similar approach.
+The original target-selection API follows pg_cron's optional remote-execution
+model; it does not require an extension installation in the SQL target.
 
 ## Design Principles
 
-1. **Extension lives in one database.** The `df` and `duroxide` schemas, background worker connection, and all metadata tables (`df.instances`, `df.nodes`) remain in the database specified by `pg_durable.database`. The extension is created (`CREATE EXTENSION pg_durable`) in only that one database.
+1. **One engine, multiple local installations.** Install explicitly in the control database (`pg_durable.database`) first and wait for worker readiness, then install satellites. Each origin owns local `df` metadata, RLS, variables, and APIs. Only control has the provider namespace (`_duroxide`, or legacy `duroxide`); there is one runtime/provider.
 
 2. **One database per function invocation.** A single `df.start()` call targets exactly one database. All SQL nodes in that invocation execute against that database. We explicitly do not support functions that span multiple databases in this iteration—it would complicate the DSL and orchestration for limited benefit. Users needing cross-database work can use `dblink` or `postgres_fdw` inside their SQL queries, or start separate durable functions per database.
 
 3. **DSL is database-agnostic.** The DSL (`df.sql()`, `~>`, `&`, etc.) has no concept of "database." Database is purely a property of the *instance*, set at `df.start()` time. This keeps the DSL simple and avoids a combinatorial explosion of database-aware operators.
 
-4. **Backwards compatible.** Omitting the database parameter defaults to `pg_durable.database` (today's behavior). No existing queries break.
+4. **Origin-local default.** Omitting `database` or passing NULL uses the database where `df.start()` was called. Runtime activity routing supplies this default without changing recorded payloads. Existing control-database starts retain their behavior.
 
 ## API Design
 
@@ -31,7 +38,7 @@ pg_cron uses a separate function (`cron.schedule_in_database()`). This has the a
 
 ### Chosen Approach: Optional Parameter on `df.start()`
 
-Add an optional `database` parameter to `df.start()`:
+The optional `database` parameter on `df.start()` selects the SQL target:
 
 ```sql
 -- Existing signature (unchanged behavior):
@@ -46,13 +53,8 @@ SELECT df.start(df.sql('SELECT 1'), 'my-label', 'analytics');
 The current signature is:
 
 ```sql
-df.start(fut text, label text DEFAULT NULL) → text
-```
-
-The new signature becomes:
-
-```sql
-df.start(fut text, label text DEFAULT NULL, database text DEFAULT NULL) → text
+df.start(fut text, label text DEFAULT NULL, database text DEFAULT NULL,
+         transaction_mode text DEFAULT 'caller') → text
 ```
 
 **Why this is not a breaking change:**
@@ -68,11 +70,21 @@ df.start(fut text, label text DEFAULT NULL, database text DEFAULT NULL) → text
 
 ### Querying from Other Databases
 
-Users calling `df.start()` from a *different* database than where the extension is installed need to use `dblink` or `postgres_fdw` to call into the extension database. The extension functions (`df.start`, `df.status`, `df.result`, etc.) only exist in the extension database.
+Install a satellite after control is ready to call `df.start()`, `df.status()`,
+`df.result()`, signal, cancel, await, and other APIs locally. Use public
+eight-character IDs in that origin; engine IDs are privately namespaced by database
+OID and installation UUID. A database without an installation has no local `df`
+API, even if it is a workflow's explicit SQL target.
 
-**Alternative considered:** Installing stub functions in other databases that proxy via `dblink`. Rejected as over-engineering for now; advanced users can set this up themselves.
+`transaction_mode => 'caller'` writes metadata in the caller's transaction.
+`'new'` uses a loopback session in the caller's database, not the SQL target;
+`max_new_transaction_starts` limits these launches per database through advisory
+locks. Neither mode makes local metadata, engine state, and remote SQL atomic.
 
 ## Schema Changes
+
+The following columns describe the original, already-shipped SQL-target feature;
+they are not new 0.2.8 migration DDL.
 
 ### `df.instances` Table
 
@@ -82,7 +94,7 @@ Add a `database` column:
 ALTER TABLE df.instances ADD COLUMN database TEXT;
 ```
 
-- `NULL` means "the extension database" (i.e., the database where `df.instances` itself lives). This is always unambiguous: the table only exists in the extension database, so NULL can only refer to that database. Even if `pg_durable.database` were later changed, the old tables would be gone (extension dropped) or still in the original database.
+- `NULL` means the origin database where this local `df.instances` row lives. Changing `pg_durable.database` selects a different control store; it does not migrate existing engine state.
 - Non-NULL values name a different database on the same cluster.
 - Populated by `df.start()` from the `database` parameter.
 
@@ -101,6 +113,10 @@ Like `submitted_by`, this is denormalized from the instance for convenience—th
 The `Durofut` struct (and by extension `df.sql()`, operators, etc.) does not need a database field. The database is an *instance-level* property, set once at `df.start()` and stamped onto all nodes at insertion time—exactly like `submitted_by` today.
 
 ## Implementation Changes
+
+This list records the original explicit-target implementation. Satellite support
+adds routing in [src/origin.rs](../src/origin.rs) and
+[src/registry.rs](../src/registry.rs), not new recorded orchestration payloads.
 
 ### 1. `df.start()` — [src/dsl.rs](../src/dsl.rs)
 
@@ -129,6 +145,9 @@ The `Durofut` struct (and by extension `df.sql()`, operators, etc.) does not nee
 - Add `database: Option<&str>` parameter.
 - Use `database.unwrap_or_else(|| &target_database())` for connection options instead of hard-coding `target_database()`.
 
+For satellite work, the activity registry fills a NULL target with the origin
+database before calling the SQL activity; the control fallback remains unchanged.
+
 ### 6. Orchestration — [src/orchestrations/execute_function_graph.rs](../src/orchestrations/execute_function_graph.rs)
 
 - When building the `ExecuteSqlInput` JSON, include `node.database`.
@@ -140,7 +159,8 @@ The `Durofut` struct (and by extension `df.sql()`, operators, etc.) does not nee
 
 ### 8. `execute_http` Activity
 
-- No changes needed. HTTP requests don't target a database.
+- HTTP requests have no SQL target, but HTTP and multipart authorization is checked
+    against the origin installation, never against an explicit SQL target.
 
 ## Validation
 
@@ -159,86 +179,44 @@ If the database doesn't exist, raise an error immediately rather than letting th
 - **Role isolation is preserved.** The background worker connects directly as `submitted_by` (the `current_user` captured at `df.start()` time). The user who calls `df.start()` determines the execution role, not the target database.
 - **`pg_hba.conf` applies.** The background worker's `submitted_by` connection to a different database is subject to the same `pg_hba.conf` rules as any other connection. If the role can't connect to that database, the activity fails with a clear error.
 - **No privilege escalation.** Targeting a different database doesn't grant additional privileges. SQL executes with `submitted_by`'s permissions *in that database*.
+- **Local worker access.** `pg_durable.worker_role` defaults to the `postgres` superuser. A custom role needs database-local `CONNECT`, `df` metadata/guard rights, and access for origin-local HTTP privilege lookup. `BYPASSRLS` does not grant those privileges.
+- **Administrative metrics are global.** Local `df.grant_usage(..., with_grant => true)` grants delegation and `df.metrics()` access, which exposes shared-engine totals across all origins and users, including from a satellite.
 
 ## Observability
 
 - `df.instances` and `df.nodes` gain a `database` column visible in `SELECT * FROM df.instances`.
 - Background worker logs already include the SQL being executed; adding the database name to log messages in `execute_sql` would be helpful.
-- `df.status()` and `df.result()` work unchanged—they query `df.instances`/`df.nodes` which are always in the extension database.
+- `df.status()` and `df.result()` use origin-local authorization/metadata and consult the control engine as needed; instance listings remain local and RLS-scoped.
 
-## Migration
+## Upgrade and Migration
 
 - Existing rows in `df.instances` and `df.nodes` will have `database = NULL`, which correctly means "the extension database." No data migration needed.
 - The schema change is additive (`ADD COLUMN ... DEFAULT NULL`), safe for rolling upgrades.
+- Those target-selection columns predate 0.2.8. The 0.2.8 multi-database upgrade adds
+    only local installation identity and validation; no provider DDL is added to
+    migration SQL. The control worker runs `ApplyAll` and creates `_origins` before
+    publishing readiness schema version `2`, required by satellite installs over SQLx.
+- Supported old control schemas still work without `df._installation` or the
+    provider-schema helper: control IDs stay unprefixed, the missing helper retains
+    legacy `duroxide` resolution, and control replay/child composition is unchanged.
+    See [Upgrade Testing](upgrade-testing.md#028).
 
 ## Testing
 
-### Unit Tests
-
-- Verify `df.start()` accepts the new parameter.
-- Verify NULL database defaults to `pg_durable.database`.
-
-### E2E Tests
-
-- **Same-database (regression):** Existing tests continue to pass without changes.
-
-- **Cross-database test** (`NN_multi_database.sql`):
-
-  Must run as **superuser** (add to the superuser list in `test-e2e-local.sh`) because it creates/drops a database. However, the durable function itself should be submitted by `df_e2e_user` (non-privileged) to validate that role isolation works across databases.
-
-  ```sql
-  -- 1. Setup: create test database and grant access to df_e2e_user
-  CREATE DATABASE test_multi_db;
-  GRANT CONNECT ON DATABASE test_multi_db TO df_e2e_user;
-
-  -- 2. Create a table in the target database for df_e2e_user
-  --    (use dblink since we can't switch databases mid-session)
-  SELECT dblink_exec(
-      'dbname=test_multi_db',
-      'CREATE TABLE test_tbl (id INT, value TEXT)'
-  );
-  SELECT dblink_exec(
-      'dbname=test_multi_db',
-      'GRANT ALL ON test_tbl TO df_e2e_user'
-  );
-
-  -- 3. Submit durable function as df_e2e_user targeting test_multi_db
-  SET SESSION AUTHORIZATION df_e2e_user;
-  CREATE TEMP TABLE _test_state (instance_id TEXT);
-  INSERT INTO _test_state SELECT df.start(
-      df.sql('INSERT INTO test_tbl VALUES (1, ''hello'')'),
-      database => 'test_multi_db'
-  );
-  RESET SESSION AUTHORIZATION;
-
-  -- 4. Poll until complete (standard pattern)
-  -- ...
-
-  -- 5. Verify the row exists in test_multi_db
-  SELECT * FROM dblink(
-      'dbname=test_multi_db',
-      'SELECT value FROM test_tbl WHERE id = 1'
-  ) AS t(value TEXT);
-  -- Assert value = 'hello'
-
-  -- 6. Cleanup
-  DROP TABLE _test_state;
-  DROP DATABASE test_multi_db;
-  ```
-
-  Key aspects this test validates:
-  - `df.start()` with `database =>` parameter works
-  - SQL executes in the target database, not the extension database
-  - Role isolation: function runs as `df_e2e_user`, not the background worker's superuser
-  - `submitted_by` can connect to the target database (requires `GRANT CONNECT`)
-
-- **Invalid database:** Verify `df.start(..., database => 'nonexistent')` raises an immediate error (not a deferred background worker failure).
+Known passing focused runs are `14_database` (explicit SQL targeting) and
+`72_multi_database_lifecycle` (satellite lifecycle). Full unit, E2E, upgrade, and
+other release gates are being conducted separately; no broader pass is claimed.
 
 ## Scope Exclusions
 
 - **Cross-database functions:** A single function graph spanning multiple databases (e.g., read from `db1`, write to `db2`) is not supported. This would require per-node database targeting, which adds significant DSL and orchestration complexity. Users can achieve this via `dblink`/`postgres_fdw` within SQL queries, or by starting separate durable functions per database.
-- **Extension installation in multiple databases:** The extension continues to be installed in exactly one database. Supporting multiple installations would require distributed coordination between background workers.
+- **Distributed transactions and instant drop cancellation:** Satellite installs are supported, but there is no cross-database atomicity or DDL hook. Active activities guard local installation/metadata with `ACCESS SHARE` locks; a UUID fence blocks stale work after recreation. Drop cleanup is eventual and limited to confirmed removed origins, not unreachable databases. Control drop destroys all satellites' shared engine history.
 - **Connection pooling per database:** Each SQL activity creates a fresh connection (existing behavior). Per-database connection pooling could improve performance but is orthogonal to this feature.
+
+Origin metadata routes likewise retain no idle pool per database. Activities and
+maintenance share `pg_durable.max_origin_connections` (default `12`, range
+`2` to `1000`, restart required), reserving two slots per active route. The control
+management pool limit is unchanged; there is no database-name count ceiling.
 
 ## Summary of Changes
 

@@ -11,9 +11,11 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+pub(crate) use crate::client::backend_control_state;
 
 pub(crate) const WORKER_MANAGEMENT_APPLICATION_NAME: &str = "pg_durable:worker:management";
 pub(crate) const WORKER_POLL_APPLICATION_NAME: &str = "pg_durable:worker:poll";
@@ -274,9 +276,14 @@ pub async fn connect_as_user(
 
 pub(crate) async fn connect_as_user_for_new_transaction(
     user: &str,
+    origin_database: &str,
 ) -> Result<sqlx::postgres::PgConnection, String> {
-    connect_as_user_with_application_name(user, None, BACKEND_NEW_TRANSACTION_APPLICATION_NAME)
-        .await
+    connect_as_user_with_application_name(
+        user,
+        Some(origin_database),
+        BACKEND_NEW_TRANSACTION_APPLICATION_NAME,
+    )
+    .await
 }
 
 async fn connect_as_user_with_application_name(
@@ -369,13 +376,166 @@ fn resolve_duroxide_schema_spi() -> String {
     }
 }
 
-/// Resolve the duroxide provider schema for the current backend session,
-/// caching it for the session lifetime. The value cannot change without an
-/// extension upgrade, which requires a reconnect to observe reliably, so a
-/// per-session cache is safe.
+fn backend_schema_name(schema: &str) -> Result<&'static str, String> {
+    match schema {
+        "_duroxide" => Ok("_duroxide"),
+        LEGACY_DUROXIDE_SCHEMA => Ok(LEGACY_DUROXIDE_SCHEMA),
+        _ => Err(format!("Unsupported duroxide provider schema: {schema}")),
+    }
+}
+
+#[cfg(test)]
+mod backend_schema_tests {
+    use super::{backend_control_connection_options, backend_schema_name};
+
+    #[test]
+    fn control_connection_bounds_server_queries_at_startup() {
+        let options = backend_control_connection_options(
+            "postgres://worker@localhost/control?options=-c%20statement_timeout%3D0",
+        )
+        .unwrap();
+        assert!(options
+            .get_options()
+            .unwrap()
+            .ends_with("-c statement_timeout=1500ms -c lock_timeout=1500ms"));
+        assert_eq!(options.get_username(), "worker");
+        assert_eq!(options.get_database(), Some("control"));
+    }
+
+    #[test]
+    fn schema_resolution_does_not_pin_a_previous_installation() {
+        assert_eq!(backend_schema_name("duroxide"), Ok("duroxide"));
+        assert_eq!(backend_schema_name("_duroxide"), Ok("_duroxide"));
+        assert_eq!(backend_schema_name("duroxide"), Ok("duroxide"));
+    }
+
+    #[test]
+    fn rejects_unrecognized_schema_identifiers() {
+        for schema in ["", "df", "duroxide; SELECT 1", "\"_duroxide\""] {
+            assert!(backend_schema_name(schema).is_err());
+        }
+    }
+}
+
+/// Resolve without a lifetime cache: drop/recreate may change the provider schema.
+/// Satellites resolve against the control database using the worker credential.
 pub fn backend_duroxide_schema() -> &'static str {
-    static SCHEMA: OnceLock<String> = OnceLock::new();
-    SCHEMA.get_or_init(resolve_duroxide_schema_spi)
+    try_backend_duroxide_schema().unwrap_or_else(|error| pgrx::error!("{error}"))
+}
+
+pub(crate) fn try_backend_duroxide_schema() -> Result<&'static str, String> {
+    let current_database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+        .map_err(|error| format!("Failed to resolve caller database: {error}"))?
+        .ok_or("Failed to resolve caller database")?;
+    if current_database == get_database() {
+        backend_schema_name(&resolve_duroxide_schema_spi())
+    } else {
+        backend_control_state(&postgres_connection_string()).map(|state| state.schema)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackendControlState {
+    pub extension_oid: i64,
+    pub schema: &'static str,
+    pub ready: bool,
+}
+
+pub(crate) fn backend_local_control_state() -> Result<Option<BackendControlState>, String> {
+    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+        .map_err(|error| error.to_string())?
+        .ok_or("Caller database is unavailable")?;
+    if database != get_database() {
+        return Ok(None);
+    }
+    let extension_oid = Spi::get_one::<i64>(
+        "SELECT oid::bigint FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("pg_durable control installation unavailable")?;
+    let schema = backend_schema_name(&resolve_duroxide_schema_spi())?;
+    let table_exists = Spi::get_one::<bool>(&format!(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables
+         WHERE schemaname = '{schema}' AND tablename = '_worker_ready')"
+    ))
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    let ready = table_exists
+        && Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {schema}._worker_ready WHERE schema_version >= {})",
+            crate::WORKER_SCHEMA_VERSION
+        ))
+        .map_err(|error| error.to_string())?
+        .unwrap_or(false);
+    Ok(Some(BackendControlState {
+        extension_oid,
+        schema,
+        ready,
+    }))
+}
+
+pub(crate) fn backend_control_connection_options(
+    database_url: &str,
+) -> Result<sqlx::postgres::PgConnectOptions, String> {
+    sqlx::postgres::PgConnectOptions::from_str(database_url)
+        .map(|options| {
+            options
+                .application_name(BACKEND_MONITORING_APPLICATION_NAME)
+                .options([("statement_timeout", "1500ms"), ("lock_timeout", "1500ms")])
+        })
+        .map_err(|error| format!("Invalid control database connection options: {error}"))
+}
+
+pub(crate) async fn read_backend_control_state(
+    connection: &mut sqlx::PgConnection,
+) -> Result<BackendControlState, String> {
+    let unavailable = |error| format!("pg_durable control installation unavailable: {error}");
+    let (extension_oid, helper_exists, legacy_ready_exists, current_ready_exists) =
+        sqlx::query_as::<_, (i64, bool, bool, bool)>(
+            "SELECT e.oid::bigint, \
+         EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                WHERE n.nspname = 'df' AND p.proname = 'duroxide_schema' AND p.pronargs = 0), \
+         EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
+                WHERE schemaname = 'duroxide' AND tablename = '_worker_ready'), \
+         EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
+                WHERE schemaname = '_duroxide' AND tablename = '_worker_ready') \
+         FROM pg_catalog.pg_extension e WHERE e.extname = 'pg_durable'",
+        )
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| "pg_durable control installation unavailable".to_string())?;
+    let schema = if helper_exists {
+        let schema: String = sqlx::query_scalar("SELECT df.duroxide_schema()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(unavailable)?;
+        backend_schema_name(&schema)?
+    } else {
+        LEGACY_DUROXIDE_SCHEMA
+    };
+    let table_exists = if schema == LEGACY_DUROXIDE_SCHEMA {
+        legacy_ready_exists
+    } else {
+        current_ready_exists
+    };
+    let ready = if table_exists {
+        sqlx::query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM \"{schema}\"._worker_ready WHERE schema_version >= $1)"
+        ))
+        .bind(crate::WORKER_SCHEMA_VERSION)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(unavailable)?
+    } else {
+        false
+    };
+    Ok(BackendControlState {
+        extension_oid,
+        schema,
+        ready,
+    })
 }
 
 /// Resolve the duroxide provider schema name from the background worker using an

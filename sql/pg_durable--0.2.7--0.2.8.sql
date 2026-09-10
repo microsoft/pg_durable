@@ -15,3 +15,21 @@ CREATE FUNCTION df."loop"(
 ) RETURNS TEXT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'loop_with_policy_wrapper';
+
+CREATE TABLE df._installation (
+    singleton pg_catalog.bool PRIMARY KEY DEFAULT true CHECK (singleton),
+    id pg_catalog.uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid()
+);
+INSERT INTO df._installation (singleton) VALUES (true);
+REVOKE ALL ON TABLE df._installation FROM PUBLIC;
+GRANT SELECT ON TABLE df._installation TO PUBLIC;
+
+CREATE FUNCTION df.validate_installation() RETURNS bool
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'validate_installation_wrapper';
+
+DO $$
+BEGIN
+    PERFORM df.validate_installation();
+END $$;

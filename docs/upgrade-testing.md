@@ -205,6 +205,47 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### 0.2.8
 
+#### Multi-database installation
+
+- **Local DDL:** the multi-database portion of
+  [0.2.7 to 0.2.8](../sql/pg_durable--0.2.7--0.2.8.sql) adds only
+  `df._installation` (singleton generated UUID, public read-only access) and
+  `df.validate_installation()`, then invokes the validator. There is no provider
+  DDL or engine-ID mapping column in the upgrade SQL. The separate loop changes
+  below remain in the same script.
+- **Control-first installation:** explicitly create the control extension in
+  `pg_durable.database` and wait for the new worker before creating satellites.
+  Satellite install/upgrade validates a compatible ready control over SQLx using
+  the worker credential. Control validation returns immediately because its own
+  install transaction is not yet visible to the worker.
+- **Worker-owned initialization:** readiness schema version `2` includes `_origins`.
+  The worker creates this registry before publishing readiness; provider migrations
+  remain worker-only `ApplyAll` in the extension-owned control namespace. Satellite
+  DDL creates local `df` objects owned by its installer, never `_duroxide` objects.
+- **B1:** the new binary retains unprefixed control IDs and bypasses local
+  `df._installation` lookup in control, so supported old control schemas without
+  the table still work. Missing `df.duroxide_schema()` retains the legacy
+  `duroxide` fallback. A new satellite can use an older supported control extension
+  schema once the new worker publishes readiness `2`; equal extension versions
+  are not required.
+- **Replay/B2:** satellite engine IDs use
+  `pgdf-<databaseOID>-<installationUUID>-<localID>`; public IDs remain eight
+  characters. Activities derive origin from `ActivityContext`, not added recorded
+  payload fields. Control histories, child composition, and `continue_as_new`
+  are unchanged by this feature. Active upgrade adds identity/validation without
+  rewriting existing IDs or histories. Drop/recreate is destructive, not an upgrade.
+- **Validation requirements:** Scenario A must compare control fresh/upgrade
+  schemas like-for-like. Verify satellite-local identity, grants and absence of a
+  provider schema separately. B1 must cover all supported old control schemas;
+  B2 must preserve existing data/work. Only the focused `14_database` and
+  `72_multi_database_lifecycle` runs are currently known to pass; full gates are
+  being conducted separately, not certified by this documentation update.
+
+See [Upgrade and Migration](multi-database-installation.md#upgrade-and-migration)
+for lifecycle and compatibility boundaries.
+
+#### Loop API and lifetime
+
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent
   objects, then creates the single public

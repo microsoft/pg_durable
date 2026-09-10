@@ -74,9 +74,12 @@ pg_durable requires:
    available channels and their prerequisites.
 2. **PostgreSQL configuration**: Add `pg_durable` to `shared_preload_libraries` in `postgresql.conf`
 3. **Server restart**: Required after modifying `shared_preload_libraries`
-4. **Extension creation**: Run `CREATE EXTENSION pg_durable` in your database
+4. **Extension creation**: Install first in the control database named by
+    `pg_durable.database` (default `postgres`), then in any satellite databases
 
 ### Enable the Extension
+
+Connect to the control database first:
 
 ```sql
 CREATE EXTENSION pg_durable;
@@ -85,9 +88,16 @@ CREATE EXTENSION pg_durable;
 SELECT df.grant_usage('app_role');
 ```
 
-After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Until initialization completes, `df.*` functions will return: `"pg_durable background worker not yet initialized — try again in a moment"`. Simply retry after a short delay.
+After control `CREATE EXTENSION` commits, the background worker initializes the
+engine asynchronously (normally within a few seconds). Operations needing the
+engine report that it is not yet initialized until readiness is published. Once
+control is ready, run `CREATE EXTENSION pg_durable` and local usage grants in each
+satellite. Satellite installation checks control compatibility/readiness over SQLx
+and fails if control is unavailable. See [Multi-Database Support](#multi-database-support).
 
-> ⚠️ **Important**: If you include `pg_durable` in `shared_preload_libraries` but don't create the extension, the worker will remain idle and durable functions cannot execute.
+> **Important:** Preloading alone does not create provider objects or execute
+> workflows. Worker initialization and management/polling connections may still
+> consume resources while waiting for explicit control installation.
 
 ### Your First Durable Function
 
@@ -133,7 +143,8 @@ SELECT df.result('a1b2c3d4');
 
 ### Instance IDs
 
-Every durable function gets a unique 8-character hex ID (e.g., `a1b2c3d4`). Use this ID to:
+Every durable function gets an 8-character hex ID (e.g., `a1b2c3d4`), unique within
+its local installation. Use it in the database where the function was started to:
 - Check status: `SELECT df.status('a1b2c3d4')`
 - Get result: `SELECT df.result('a1b2c3d4')`
 - Cancel: `SELECT df.cancel('a1b2c3d4')`
@@ -210,7 +221,8 @@ the default, so a typo cannot silently produce a start that does not survive the
 rollback you expected it to.
 
 Under `'new'` the start runs under the calling role's identity and privileges,
-just as `'caller'` does. Three consequences follow from the separate session:
+just as `'caller'` does. The loopback session connects to the caller's database,
+even when `database` names a different SQL target. Consequences of the separate session:
 
 - **Variables are the committed snapshot.** The captured `df.vars` snapshot
   contains only *committed* variables. A `df.setvar()` issued earlier in the
@@ -218,7 +230,7 @@ just as `'caller'` does. Three consequences follow from the separate session:
   calling, or pass values inline.
 - **It costs an extra backend.** Each call opens (and closes) a PostgreSQL
   connection, so it counts against `max_connections`. pg_durable caps these
-  extra loopback sessions cluster-wide with
+    extra loopback sessions **per database** using advisory admission locks and
   `pg_durable.max_new_transaction_starts` (default `2`); additional callers
   wait up to `pg_durable.new_transaction_start_timeout` seconds (default `5`)
   before failing without opening a second backend. Prefer the default on hot
@@ -1538,7 +1550,23 @@ SELECT df.start(
 
 ## Multi-Database Support
 
-By default, all SQL in a durable function runs in the database where the extension is installed (the `pg_durable.database` GUC, typically `postgres`). You can target a different database on the same cluster by passing the `database` parameter to `df.start()`.
+pg_durable supports local installations in multiple databases with one shared
+runtime. Distinguish three roles:
+
+- **Control database:** selected by `pg_durable.database` (default `postgres`),
+    with the single runtime/provider store. Install the extension here explicitly
+    and wait for worker readiness before installing satellites.
+- **Origin database:** where `df.start()` is called. Each satellite has local
+    `df` APIs, instances, nodes, variables, grants, and RLS, but no `_duroxide` schema.
+- **Execution database:** all SQL nodes use the origin by default. An explicit
+    `database` argument selects another database on the same cluster; that target
+    does not need the extension unless the SQL itself calls `df` APIs.
+
+Satellite installation requires a compatible control worker with readiness schema
+version `2` (including its `_origins` registry). Provider migrations run only in
+control through the worker's `ApplyAll`; satellite creation never creates control
+automatically. The provider namespace is extension-owned, its contents are created
+by `pg_durable.worker_role`, and satellite objects belong to the local installer.
 
 ### Running SQL in Another Database
 
@@ -1562,9 +1590,35 @@ All SQL nodes in the function execute against the specified database. The DSL it
 ### Key Points
 
 - **One database per invocation.** All SQL in a single `df.start()` call targets the same database. For cross-database workflows, start separate durable functions per database, or use `dblink`/`postgres_fdw` within your SQL.
-- **Backwards compatible.** Omitting `database` (or passing NULL) uses the extension database — existing queries are unaffected.
+- **Origin-local defaults.** Omitting `database` (or passing NULL) uses the origin through activity routing; control-database behavior is unchanged.
 - **Validated at submission time.** If the database doesn't exist, `df.start()` raises an immediate error.
 - **Role isolation preserved.** The function runs as the user who called `df.start()`, not the background worker. The login role must be able to connect to the target database (`GRANT CONNECT`).
+- **Local APIs and variables.** Use status, result, explain, signal, cancel, await, and listing APIs in the origin. RLS and variable capture remain local. Public IDs stay eight characters; the engine privately namespaces satellite IDs by database OID and installation UUID.
+- **Local transactions.** Caller-mode starts retain local commit/rollback semantics. New-transaction starts launch in the caller's database and use a per-database admission cap. There is no cross-database atomicity between metadata, engine state, and SQL targets.
+
+### Worker Access and Lifecycle
+
+The default `pg_durable.worker_role` is the `postgres` superuser. A custom worker
+role needs `CONNECT` and the required local `df` metadata/guard privileges in each
+origin, plus access for origin-local HTTP privilege lookup. `BYPASSRLS` alone
+grants none of these privileges. Application grants, including HTTP access, are
+also database-local. A satellite admin granted `with_grant => true` can read
+`df.metrics()` totals for **all** users and origins in the shared engine.
+
+Dropping a satellite destroys only its work. Active activities hold `ACCESS SHARE`
+locks on `df._installation`, `df.instances`, and `df.nodes`, so drop waits for
+active operations, not all queued or sleeping instances. The UUID check prevents
+old work, including cached graphs, from executing after drop/recreate. Engine
+cleanup is eventual on reconciliation; an unreachable origin is not treated as
+absent. There is no DDL hook or cross-database reference count.
+
+**Dropping control destroys the shared engine for every satellite.** Local
+satellite metadata cannot recover that history. Remove satellites first, control
+last. Origin connections are bounded by
+[`pg_durable.max_origin_connections`](docs/api-reference.md#pg_durablemax_origin_connections),
+not by a ceiling on database names; idle satellites have no retained origin pool.
+See [Multi-Database Extension Installation](docs/multi-database-installation.md)
+for design and upgrade details.
 
 ### Example: Multi-Tenant Processing
 
@@ -1952,13 +2006,18 @@ This is useful for dashboards and operational queries that need to understand wh
 ### System Metrics (Explicit Grant Required)
 
 ```sql
--- Requires a direct admin grant; df.grant_usage() does not include it.
+-- Requires an admin grant, including df.grant_usage(..., with_grant => true).
 SELECT * FROM df.metrics();
 ```
 
 **Columns:** `total_instances`, `running_instances`, `completed_instances`, `failed_instances`, `total_executions`, `total_events`
 
-> **Note:** `df.metrics()` returns system-wide aggregate counts across all users and is omitted from an ordinary `df.grant_usage('role')`. It is granted automatically to pg_durable admins via `df.grant_usage('role', with_grant => true)`, or you can grant EXECUTE on `df.metrics()` directly to any role that may view cluster-wide pg_durable activity. Other users can call `df.list_instances()` to view a summary of their own workflows.
+> **Note:** `df.metrics()` returns aggregate totals for the shared engine across
+> all users and origins, even when called from a satellite. Ordinary
+> `df.grant_usage('role')` omits it; `with_grant => true` grants it automatically
+> along with local delegation rights. Granting satellite administration therefore
+> also exposes all-engine totals. A direct `EXECUTE` grant is another explicit
+> opt-in. `df.list_instances()` remains local and RLS-scoped.
 
 ### Quick Status Check
 
@@ -1985,7 +2044,7 @@ If you reuse a label across runs, multiple instances can match — pass the spec
 
 ### Worker Liveness
 
-Check whether the background worker is alive and healthy:
+In the **control database**, check whether the background worker is alive and healthy:
 
 ```sql
 SELECT started_at, last_seen_at,
@@ -1996,7 +2055,8 @@ SELECT started_at, last_seen_at,
 - `time_since_last_heartbeat < 15 seconds` → worker is alive (recent heartbeat)
 - No rows in `df._worker_epoch` → worker hasn't initialized yet
 
-The background worker updates `last_seen_at` every ~5 seconds as part of its normal operation.
+The background worker updates `last_seen_at` every ~5 seconds in control. An empty
+satellite `df._worker_epoch` is normal; satellites do not have separate workers.
 
 ### Automatic Reconciliation
 
@@ -2007,8 +2067,8 @@ worker runs a **best-effort reconciliation pass** that does two things:
 
 - **Removes expired terminal instances.** Old **terminal** instances (status
   `completed`, `failed`, or `cancelled`) and their `df.nodes` rows are deleted,
-  along with their engine records. Running and pending instances are **never**
-  removed, regardless of age.
+    along with their engine records. Retention does not remove running or pending
+    instances from an existing installation, regardless of age.
 - **Reclaims orphaned engine records.** `df.start()` writes the `df` rows in the
   caller's transaction but hands the workflow to the engine over a separate
   connection; if that transaction **rolls back**, the `df` rows vanish while the
@@ -2016,6 +2076,16 @@ worker runs a **best-effort reconciliation pass** that does two things:
   ends up failed). Reconciliation deletes such df-less engine records once they
   age past `retention_days`. Anything the engine is still tracking with a live
   `df` row is left untouched.
+
+Satellite maintenance visits `_origins` registrations made by activity routing for
+submitted work, in bounded batches under the shared origin connection budget.
+Registration is not synchronous with `df.start()`; unused installations are not
+discovered by an all-database scan. After confirmed removal or replacement,
+bounded reconciliation cancels running roots without waiting for retention;
+terminal engine deletion still respects retention. Connection failures defer
+cleanup rather than establish absence. Control removal is destructive to every
+origin's engine state. Retention resumes from a bounded cursor so undeletable
+engine records do not permanently block later candidates.
 
 Two Postmaster-context GUCs govern it (set in `postgresql.conf`, restart to apply):
 
@@ -2031,7 +2101,7 @@ pg_durable.retention_days = 30
 
 Retention combines that window with a fixed hard cap:
 
-- **Hard cap — at most 10,000 terminal instances are retained, regardless of
+- **Hard cap per origin — at most 10,000 terminal instances are retained, regardless of
   age.** The newest 10,000 terminal instances are kept; any beyond that are
   removed even if they are only minutes old. (This cap is fixed, not a GUC.)
 - **Retention window — `retention_days`.** Terminal instances older than the
@@ -2223,7 +2293,9 @@ own statement logging. Keep credentials out of SQL even when this setting is off
 
 ### Privilege Grants
 
-`CREATE EXTENSION pg_durable` does **not** grant privileges to `PUBLIC`. After installing the extension, the admin must explicitly grant access to each application role. RLS ensures per-user isolation even when multiple roles share the same grants.
+`CREATE EXTENSION pg_durable` does **not** grant general `df` usage to `PUBLIC`.
+After installing, an admin must grant application access in each origin database.
+RLS ensures per-user isolation even when multiple roles share the same local grants.
 
 **Recommended — use the built-in helper:**
 
@@ -2242,7 +2314,11 @@ SELECT df.grant_usage('admin_role', include_http => true, with_grant => true);
 
 This function is purely additive — it never issues REVOKE. To downgrade a role's privileges (e.g., remove HTTP access), call `df.revoke_usage()` first, then `df.grant_usage()` with the desired options.
 
-> **Granting to `PUBLIC`:** `df.grant_usage('public')` is allowed and grants `df` access to **every role in the cluster**, defeating the deny-by-default posture that a fresh install sets up. This is a deliberate, visible action (the same as any `GRANT ... TO PUBLIC`), not a mistake the helper blocks — use it only when you intend cluster-wide access. Naming a role that doesn't exist fails naturally on the first `GRANT`.
+> **Granting to `PUBLIC`:** `df.grant_usage('public')` grants every role access to
+> this database's `df` installation, not other installations. This defeats the
+> local deny-by-default posture. Combining it with `with_grant => true` also
+> exposes shared-engine metrics and delegation rights to every role. Naming a
+> role that does not exist fails on the first `GRANT`.
 
 **Parameters:**
 
@@ -2250,7 +2326,7 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 |-----------|---------|-------------|
 | `p_role` | *(required)* | Target role name |
 | `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
-| `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. Also grants EXECUTE on `df.metrics()` (system-wide aggregate counts), since `with_grant => true` designates a pg_durable admin. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
+| `with_grant` | `false` | Grant local privileges WITH GRANT OPTION and allow `df.grant_usage()` / `df.revoke_usage()` delegation. Also grants `df.metrics()`, exposing all-engine totals across users and origins even from a satellite. The caller must hold each underlying privilege WITH GRANT OPTION. |
 
 <details>
 <summary>Equivalent manual grants (for reference)</summary>
@@ -2363,22 +2439,27 @@ This postmaster setting requires a PostgreSQL restart. When it is empty or unset
 
 ## Connection Limits
 
-pg_durable uses multiple PostgreSQL connections for different purposes. Four GUCs let you control the connection budget to match your deployment's resources.
+pg_durable uses separate limits for control management, provider, origin metadata,
+SQL execution, and independent-start connections.
 
 ### Connection Architecture
 
-The background worker maintains three categories of connections, and
-`transaction_mode => 'new'` can transiently add a fourth category while starts
-are being launched:
+The main connection categories are:
 
 | Category | Purpose | GUC | Default |
 |----------|---------|-----|---------|
-| **Management pool** | Extension lifecycle checks, graph loading, status updates | `pg_durable.max_management_connections` | 6 |
+| **Management pool** | Control metadata, origin lookup and registration | `pg_durable.max_management_connections` | 6 |
+| **Origin routes** | Satellite guard and metadata connections, shared by activities and maintenance | `pg_durable.max_origin_connections` | 12 |
 | **Duroxide pool** | Orchestration state, LISTEN/NOTIFY for work dispatch | `pg_durable.max_duroxide_connections` | 10 |
 | **User-execution** | Per-SQL-node connections authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
-| **New-start loopback** | Extra sessions that persist `df.start(..., transaction_mode => 'new')` outside the caller's transaction | `pg_durable.max_new_transaction_starts` | 2 |
+| **New-start loopback** | Extra launch sessions in the caller's database, capped per database | `pg_durable.max_new_transaction_starts` | 2 |
 
-Each PG backend session (user calling `df.start()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
+The worker also has a dedicated one-connection control polling pool. Backend API
+calls need additional control-client connections and one cached control-state
+connection per satellite backend that uses the engine. Control-local readiness
+uses SPI in the caller's transaction. Each active satellite
+route reserves two origin slots (guard plus metadata); routes close afterward.
+There is no idle pool per satellite or fixed database-name count ceiling.
 
 ### GUC Reference
 
@@ -2387,9 +2468,13 @@ All connection-limit GUCs are **Postmaster-context** — set them in `postgresql
 ```ini
 # postgresql.conf
 
-# Management pool: graph loading, status updates, lifecycle polling
+# Control management pool: metadata, origin lookup and registration
 # Minimum: 1 (warning logged). Increase for high-concurrency workloads.
 pg_durable.max_management_connections = 6
+
+# Shared satellite connection budget for activities and maintenance.
+# Range: 2..1000. Each active route reserves 2 slots (guard + metadata).
+pg_durable.max_origin_connections = 12
 
 # Duroxide provider pool: orchestration state + LISTEN/NOTIFY
 # Minimum: 2 (1 reserved for listener). Worker refuses to start if < 2.
@@ -2403,7 +2488,7 @@ pg_durable.max_user_connections = 10
 # before failing with an error.
 pg_durable.execution_acquire_timeout = 30
 
-# Maximum concurrent transaction_mode => 'new' loopback launch sessions.
+# Maximum concurrent transaction_mode => 'new' launch sessions PER DATABASE.
 # Additional callers wait for a slot instead of opening more backends.
 pg_durable.max_new_transaction_starts = 2
 
@@ -2416,21 +2501,37 @@ pg_durable.new_transaction_start_timeout = 5
 
 ### Connection Budget Formula
 
-To calculate the total connections pg_durable will use:
+Budget the worker's configured ceilings separately from backend API calls and
+per-database launch sessions:
 
 ```
-Total = max_management_connections
+Worker ceiling = max_management_connections
+    + max_origin_connections
       + max_duroxide_connections
       + max_user_connections
-      + max_new_transaction_starts
-      + (active_backend_sessions × 1)
+    + 1 (dedicated polling connection)
+
+Additional = sum of active new-start loopbacks across databases
+         + backend control-client/readiness connections
 ```
 
-With defaults and 5 connected users: `6 + 10 + 10 + 2 + 5 = 33 connections`.
+The default worker ceiling is `6 + 12 + 10 + 10 + 1 = 39`, not an idle allocation.
+Each database can additionally admit up to two new-start loopbacks by default.
+Allow headroom for backend API connections as well as ordinary application sessions.
 
 > **Tip**: Ensure PostgreSQL's `max_connections` is large enough to accommodate pg_durable's budget plus your application's direct connections.
 
 ### Backpressure Behavior
+
+Origin routes and maintenance share a semaphore. Admission waits up to 30 seconds
+for origin slots before returning an error. Increasing
+`max_management_connections` does not raise this satellite budget.
+
+Origin metadata queries have a 1.5-second lock timeout and a 5-second statement
+timeout. These limits bound metadata contention and cancellation cleanup; they
+do not limit user SQL or HTTP duration. Remote control-state probes have 1.5-second
+server deadlines and a 5-second overall deadline. An unavailable control
+installation returns an error instead of reusing stale readiness.
 
 When all user-execution slots are occupied, additional SQL node executions **queue** (they don't fail immediately). The semaphore-based backpressure ensures:
 
@@ -2447,7 +2548,7 @@ For `df.start(..., transaction_mode => 'new')`, admission control applies
 *before* the loopback session is opened:
 
 - At most `pg_durable.max_new_transaction_starts` loopback launch sessions exist
-  at once (default `2`)
+    at once **per database** (default `2`), enforced with advisory locks
 - Extra callers wait up to `pg_durable.new_transaction_start_timeout` seconds
   (default `5`) for a slot
 - If the wait expires, `df.start()` raises:
@@ -2464,6 +2565,7 @@ The background worker validates GUC values at startup:
 
 - `max_duroxide_connections < 2` → worker **refuses to start** (logs error and exits)
 - `max_management_connections = 1` → worker starts but logs a **warning**
+- `max_origin_connections` accepts `2` through `1000` (default `12`)
 - Invalid values are caught before any connections are created
 
 ### Interaction with PostgreSQL CONNECTION LIMIT
@@ -2471,7 +2573,7 @@ The background worker validates GUC values at startup:
 PostgreSQL's per-role `CONNECTION LIMIT` (set via `ALTER ROLE ... CONNECTION LIMIT n`) counts against the **authenticating role** (the role in the connection string), not the role set via `SET ROLE`.
 
 For pg_durable, this means:
-- **Management and duroxide pools** authenticate as `pg_durable.worker_role` — all pool connections count against that role's limit
+- **Management, origin, polling, and duroxide pools** authenticate as `pg_durable.worker_role`; their connections count against that role's limit where PostgreSQL enforces it
 - **User-execution connections** authenticate as the submitting user (`submitted_by`) — these count against *that* role's limit
 - **Backend connections** authenticate as whatever role the application uses
 
@@ -2484,12 +2586,13 @@ If you use per-role connection limits, ensure each role's limit accounts for pg_
 pg_durable.max_management_connections = 3
 pg_durable.max_duroxide_connections = 5
 pg_durable.max_user_connections = 5
-# Budget: 3 + 5 + 5 + backends ≈ 15 connections
+# Worker ceiling including default origin budget and polling: 3 + 12 + 5 + 5 + 1 = 26
+# Add per-database loopbacks and backend API/application connections.
 ```
 
 **Medium deployment** (defaults — suitable for most workloads):
 ```ini
-# Use defaults: 6 + 10 + 10 + backends ≈ 28 connections
+# Default worker ceiling: 39; add loopbacks and backend API/application connections.
 ```
 
 **Large deployment** (high concurrency, many parallel workflows):
@@ -2498,7 +2601,8 @@ pg_durable.max_management_connections = 10
 pg_durable.max_duroxide_connections = 15
 pg_durable.max_user_connections = 50
 pg_durable.execution_acquire_timeout = 60
-# Budget: 10 + 15 + 50 + backends ≈ 80 connections
+# Worker ceiling including default origin budget and polling: 10 + 12 + 15 + 50 + 1 = 88
+# Add per-database loopbacks and backend API/application connections.
 ```
 
 ---
@@ -2537,7 +2641,7 @@ Failed to connect to duroxide store: ...
 
 **Possible Causes**:
 
-1. **Extension not created**: Run `CREATE EXTENSION pg_durable`
+1. **Control extension unavailable**: Install explicitly in `pg_durable.database` first, then in each satellite after control is ready. Recreating dropped control does not recover lost engine history.
 
 2. **Background worker not yet ready**: After `CREATE EXTENSION`, the background worker initializes the engine schema asynchronously (normally within a few seconds). Simply retry after a short delay — once the worker finishes, the error resolves on its own.
 
@@ -2555,31 +2659,31 @@ pg_durable: waiting for CREATE EXTENSION pg_durable...
 **Cause**: The background worker is waiting for the extension to be created in the database it's connected to.
 
 **Solution**:
-1. Verify you're creating the extension in the correct database
+1. Verify the control extension exists in `pg_durable.database`
 2. Check which database the background worker connects to:
    - Controlled by the `pg_durable.database` GUC (set in `postgresql.conf`); defaults to `postgres`
-   - The background worker only processes functions in **one** database
+    - One runtime serves control and all registered satellite origins
 3. If you need pg_durable in a different database:
-   - Create the extension in the database the background worker uses, OR
-   - Update `pg_durable.database` in `postgresql.conf` and restart PostgreSQL
+     - Wait for control readiness, then create a local satellite installation
+     - Verify worker-role access in both control and the satellite; changing
+         `pg_durable.database` is not a migration of existing engine state
 
 ### Extension Drop/Recreate Issues
 
 **Symptom**: After `DROP EXTENSION pg_durable CASCADE`, workflows still appear to be running or you see errors.
 
-**Explanation**: The background worker polls for extension existence every 5 seconds. After detecting a drop:
-- It shuts down the duroxide runtime (takes ~10 seconds)
-- Returns to waiting for extension creation
-- Any in-flight workflows are terminated
+**Satellite drop:** Active activities hold metadata/installation locks, so drop
+waits for those operations. Once dropped, the UUID fence prevents old work from
+executing after recreation, but its engine records can remain until reconciliation.
+The shared runtime and other origins continue. Satellites have no provider objects;
+`CASCADE` is needed only if other local dependencies require it.
 
-> ⚠️ **`CASCADE` is always required.** The duroxide schema contains tables and functions created by the background worker that are not directly owned by the extension. `DROP EXTENSION pg_durable` (without `CASCADE`) will fail with an error. Always use `DROP EXTENSION pg_durable CASCADE`.
-
-**Solution**: Wait 15-20 seconds after `DROP EXTENSION` before recreating:
-```sql
-DROP EXTENSION pg_durable CASCADE;
--- Wait ~20 seconds for background worker to fully shut down
-CREATE EXTENSION pg_durable;
-```
+**Control drop:** The worker polls control existence about every five seconds and
+tears down the runtime after detecting removal. Worker-created objects depend on
+the extension-owned provider namespace, so control removal requires `CASCADE`.
+This destroys engine history for every satellite. Do not use drop/recreate as an
+upgrade procedure; use `ALTER EXTENSION UPDATE`. After intentional recreation,
+wait for control readiness before starting new work or installing satellites.
 
 ### Functions Complete But Results Are Empty
 

@@ -885,6 +885,134 @@ test_b1_instance_info() {
     assert_sql_equals "SELECT lower(status) FROM df.instance_info('${B1_INSTANCE_ID}');" "completed"
 }
 
+test_b1_mixed_version_multidb() (
+    local control_db="$PG_DB"
+    local satellite_db="_upgrade_multidb_test"
+    local satellite_created=false
+    local control_table_created=false
+    local control_id satellite_id satellite_engine_id
+    local sql_client=("$PSQL" -X -h localhost -p "$PG_PORT" -U postgres -qAt -v ON_ERROR_STOP=1)
+    export PGCONNECT_TIMEOUT=3
+    export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=8000"
+
+    trap '
+        status=$?
+        if [[ "$satellite_created" == true ]]; then
+            "${sql_client[@]}" -d "$control_db" \
+                -c "DROP DATABASE IF EXISTS _upgrade_multidb_test WITH (FORCE);" >/dev/null || status=1
+        fi
+        if [[ "$control_table_created" == true ]]; then
+            "${sql_client[@]}" -d "$control_db" \
+                -c "DROP TABLE IF EXISTS public._upgrade_multidb_log;" >/dev/null || status=1
+        fi
+        exit "$status"
+    ' EXIT
+
+    assert_sql_equals "SELECT current_database() = df.target_database()
+        AND (SELECT extversion FROM pg_extension WHERE extname = 'pg_durable') = '${B1_VERSION}'
+        AND NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '_upgrade_multidb_test');" "t" || return 1
+    case "$B1_VERSION" in
+        0.2.[2-7])
+            assert_sql_equals "SELECT to_regclass('df._installation') IS NULL;" "t" || return 1
+            ;;
+    esac
+    if [[ "$B1_VERSION" == "0.2.2" ]]; then
+        assert_sql_equals "SELECT to_regprocedure('df.duroxide_schema()') IS NULL;" "t" || return 1
+    else
+        assert_sql_equals "SELECT df.duroxide_schema();" "duroxide" || return 1
+    fi
+    assert_sql_equals "SELECT to_regnamespace('_duroxide') IS NULL
+        AND EXISTS (SELECT 1 FROM duroxide._worker_ready WHERE schema_version >= 2);" "t" || return 1
+
+    run_sql_capture "DO \$\$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user') THEN
+            CREATE ROLE df_e2e_user LOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_e2e_user'
+            AND rolcanlogin AND NOT rolsuper AND NOT rolbypassrls) THEN
+            RAISE EXCEPTION 'df_e2e_user must be a non-superuser login without BYPASSRLS';
+        END IF;
+    END \$\$;" >/dev/null || return 1
+    run_sql_capture "CREATE TABLE public._upgrade_multidb_log (
+        marker TEXT PRIMARY KEY, database_name TEXT NOT NULL, role_name TEXT NOT NULL);" >/dev/null || return 1
+    control_table_created=true
+    run_sql_capture "SELECT df.grant_usage('df_e2e_user');
+        GRANT SELECT, INSERT ON public._upgrade_multidb_log TO df_e2e_user;" >/dev/null || return 1
+    run_sql_capture "CREATE DATABASE _upgrade_multidb_test TEMPLATE template0;" >/dev/null || return 1
+    satellite_created=true
+    PG_DB="$satellite_db" run_sql_capture "CREATE EXTENSION pg_durable VERSION '${CURRENT_VERSION}';
+        SELECT df.grant_usage('df_e2e_user');
+        GRANT CONNECT ON DATABASE _upgrade_multidb_test TO df_e2e_user;
+        CREATE TABLE public._upgrade_multidb_log (
+            marker TEXT PRIMARY KEY, database_name TEXT NOT NULL, role_name TEXT NOT NULL);
+        GRANT SELECT, INSERT ON public._upgrade_multidb_log TO df_e2e_user;" >/dev/null || return 1
+    PG_DB="$satellite_db" assert_sql_equals "SELECT
+        (SELECT extversion FROM pg_extension WHERE extname = 'pg_durable') = '${CURRENT_VERSION}'
+        AND (SELECT count(*) FROM df._installation WHERE singleton) = 1
+        AND df.duroxide_schema() = '_duroxide'
+        AND to_regnamespace('duroxide') IS NULL AND to_regnamespace('_duroxide') IS NULL;" "t" || return 1
+
+    control_id=$("${sql_client[@]}" -d "$control_db" -c "SET SESSION AUTHORIZATION df_e2e_user;" \
+        -c "SELECT df.start(df.wait_for_signal('b1-multidb-release') ~> 'INSERT INTO public._upgrade_multidb_log
+            SELECT ''control'', current_database()::text, current_user::text RETURNING database_name',
+            'b1-multidb-control');") || return 1
+    [[ "$control_id" =~ ^[0-9a-f]{8}$ ]] || return 1
+    run_sql_capture "DO \$\$ BEGIN
+        FOR attempt IN 1..200 LOOP
+            IF EXISTS (SELECT 1 FROM duroxide.history h JOIN duroxide.instances i
+                ON i.instance_id = h.instance_id AND i.current_execution_id = h.execution_id
+                WHERE h.instance_id = '${control_id}' AND h.event_data::jsonb->>'type' = 'ExternalSubscribed'
+                    AND h.event_data::jsonb->>'name' = 'b1-multidb-release')
+                AND EXISTS (SELECT 1 FROM duroxide.get_instance_info('${control_id}') WHERE status = 'Running') THEN
+                RETURN;
+            END IF;
+            PERFORM pg_sleep(0.01);
+        END LOOP;
+        RAISE EXCEPTION 'Legacy control root did not enter its signal wait';
+    END \$\$;" >/dev/null || return 1
+    satellite_id=$("${sql_client[@]}" -d "$satellite_db" -c "SET SESSION AUTHORIZATION df_e2e_user;" \
+        -c "SELECT df.start('WITH written AS (INSERT INTO public._upgrade_multidb_log
+            SELECT ''satellite'', current_database()::text, current_user::text RETURNING database_name)
+            SELECT database_name FROM written', 'b1-multidb-satellite');") || return 1
+    [[ "$satellite_id" =~ ^[0-9a-f]{8}$ ]] || return 1
+
+    PG_DB="$satellite_db" assert_sql_equals_ignoring_warnings \
+        "SELECT df.wait_for_completion('${satellite_id}', 5);" "completed" || return 1
+    assert_sql_equals "SELECT df.status('${control_id}') = 'running'
+        AND EXISTS (SELECT 1 FROM duroxide.get_instance_info('${control_id}') WHERE status = 'Running');" "t" || return 1
+    run_sql_capture "SELECT df.signal('${control_id}', 'b1-multidb-release');" >/dev/null || return 1
+    assert_sql_equals_ignoring_warnings \
+        "SELECT df.wait_for_completion('${control_id}', 5);" "completed" || return 1
+    assert_sql_equals "SELECT count(*) = 1 AND bool_and(marker = 'control'
+        AND database_name = current_database() AND role_name = 'df_e2e_user')
+        FROM public._upgrade_multidb_log;" "t" || return 1
+    PG_DB="$satellite_db" assert_sql_equals "SELECT count(*) = 1 AND bool_and(marker = 'satellite'
+        AND database_name = current_database() AND role_name = 'df_e2e_user')
+        FROM public._upgrade_multidb_log;" "t" || return 1
+    assert_sql_equals "SELECT EXISTS (SELECT 1 FROM df.instance_info('${control_id}') WHERE status = 'completed')
+        AND EXISTS (SELECT 1 FROM df.instances WHERE id = '${control_id}'
+            AND database IS NULL AND submitted_by = 'df_e2e_user'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM df.instances WHERE label = 'b1-multidb-satellite');" "t" || return 1
+    PG_DB="$satellite_db" assert_sql_equals "SELECT
+        EXISTS (SELECT 1 FROM df.instance_info('${satellite_id}') WHERE status = 'completed')
+        AND EXISTS (SELECT 1 FROM df.instances WHERE id = '${satellite_id}'
+            AND database IS NULL AND submitted_by = 'df_e2e_user'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM df.instances WHERE label = 'b1-multidb-control')
+        AND to_regnamespace('duroxide') IS NULL AND to_regnamespace('_duroxide') IS NULL;" "t" || return 1
+    satellite_engine_id=$(PG_DB="$satellite_db" run_sql_capture "SELECT 'pgdf-' ||
+        (SELECT oid::text FROM pg_database WHERE datname = current_database()) || '-' ||
+        replace(id::text, '-', '') || '-${satellite_id}' FROM df._installation WHERE singleton;") || return 1
+    [[ "$satellite_engine_id" =~ ^pgdf-[0-9]+-[0-9a-f]{32}-${satellite_id}$ ]] || return 1
+    assert_sql_equals "SELECT EXISTS (SELECT 1 FROM duroxide.get_instance_info('${control_id}') WHERE status = 'Completed')
+        AND EXISTS (SELECT 1 FROM duroxide.get_instance_info('${satellite_engine_id}') WHERE status = 'Completed')
+        AND (SELECT extversion FROM pg_extension WHERE extname = 'pg_durable') = '${B1_VERSION}';" "t" || return 1
+    case "$B1_VERSION" in
+        0.2.[2-7])
+            assert_sql_equals "SELECT to_regclass('df._installation') IS NULL;" "t" || return 1
+            ;;
+    esac
+)
+
 # Run B1 tests against each previous version's schema
 if [ ${#ALL_PREV_VERSIONS[@]} -eq 0 ]; then
     echo ""
@@ -919,6 +1047,7 @@ else
         run_test "B1 [v${B1_VERSION}]: df.status() on nonexistent" test_b1_status_nonexistent
         run_test "B1 [v${B1_VERSION}]: df.unsetvar()" test_b1_unsetvar
         run_test "B1 [v${B1_VERSION}]: df.clearvars()" test_b1_clearvars
+        run_test "B1 [v${B1_VERSION}]: Current satellite + legacy control overlap" test_b1_mixed_version_multidb
     done
 fi
 
