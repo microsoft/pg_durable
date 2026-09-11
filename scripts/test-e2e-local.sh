@@ -383,6 +383,68 @@ restart_server() {
     wait_for_server
 }
 
+assert_http_domains_startup_rejected() (
+    # Scope the restoration trap to this probe, leaving the runner's EXIT trap intact.
+    config_backup=$(mktemp "$DATA_DIR/http-domains-startup.XXXXXX") || exit 1
+    if ! cp "$CONF_FILE" "$config_backup"; then
+        rm -f -- "$config_backup"
+        exit 1
+    fi
+    startup_log="$config_backup.log"
+
+    restore_startup_config() {
+        result=$?
+        stop_server
+        if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+            echo "TEST FAILED: could not stop PostgreSQL after the invalid-config probe"
+            result=1
+        fi
+        if ! cp "$config_backup" "$CONF_FILE"; then
+            echo "TEST FAILED: could not restore $CONF_FILE; backup retained at $config_backup"
+            exit 1
+        fi
+        rm -f -- "$config_backup" "$startup_log" || result=1
+        exit "$result"
+    }
+
+    trap restore_startup_config EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    stop_server
+    if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+        echo "TEST FAILED: PostgreSQL must be stopped before the invalid-config probe"
+        exit 1
+    fi
+
+    # The last assignment wins. This must reach the preload check hook rather
+    # than ALTER SYSTEM validation or a postgresql.conf syntax error.
+    printf "\npg_durable.http_allowed_domains = 'example.com,https://api.github.com'\n" \
+        >> "$CONF_FILE" || exit 1
+
+    failed=false
+    if startup_output=$("$PG_CTL" -D "$DATA_DIR" -l "$startup_log" -w -t 15 start 2>&1); then
+        echo "TEST FAILED: PostgreSQL accepted a malformed startup domain allowlist"
+        failed=true
+    fi
+    if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+        echo "TEST FAILED: PostgreSQL is still running after the invalid-config startup"
+        failed=true
+    fi
+    if ! grep -Eq '(ERROR|FATAL):[[:space:]]+invalid value for parameter "pg_durable[.]http_allowed_domains"' "$startup_log"; then
+        echo "TEST FAILED: startup did not report the expected domain GUC error"
+        failed=true
+    fi
+
+    if [ "$failed" = true ] || [ "$VERBOSE" = true ]; then
+        printf '%s\n' "$startup_output"
+        if [ -f "$startup_log" ]; then
+            tail -40 "$startup_log"
+        fi
+    fi
+    [ "$failed" = false ]
+)
+
 build_extension() {
     echo "Building and installing extension..."
     cd "$PROJECT_DIR"
@@ -617,6 +679,11 @@ prepare_phase() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
         -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" \
         >/dev/null 2>&1 || true
+
+    if [ "$phase" = "http-custom-domains" ]; then
+        echo "Checking malformed HTTP allowlist startup rejection..."
+        assert_http_domains_startup_rejected || exit 1
+    fi
 
     if [ -f "$LOG_FILE" ]; then
         PHASE_LOG_MARK=$(wc -l < "$LOG_FILE")
