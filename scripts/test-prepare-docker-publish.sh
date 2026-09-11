@@ -70,13 +70,27 @@ assert_output() {
         fail "expected $key=$expected, got: $(tr '\n' ' ' < "$output_file")"
 }
 
-run_case manual env \
-    EVENT_NAME=workflow_dispatch INPUT_REF=v0.2.8 \
+run_case manual_dry_run_draft env \
+    EVENT_NAME=workflow_dispatch INPUT_REF=v0.2.8 INPUT_DRY_RUN=true \
+    GH_TEST_DRAFT=true GH_TEST_ASSETS="$all_assets" \
     "$resolver"
 assert_output tag v0.2.8
 assert_output version 0.2.8
 assert_output ready true
-echo "PASS: manual"
+echo "PASS: manual_dry_run_draft"
+
+run_case manual_push_draft env \
+    EVENT_NAME=workflow_dispatch INPUT_REF=v0.2.8 INPUT_DRY_RUN=false \
+    GH_TEST_DRAFT=true GH_TEST_ASSETS="$all_assets" \
+    "$resolver"
+assert_output ready false
+echo "PASS: manual_push_draft"
+
+run_failure_case manual_missing_assets env \
+    EVENT_NAME=workflow_dispatch INPUT_REF=v0.2.8 INPUT_DRY_RUN=true \
+    GH_TEST_DRAFT=true \
+    GH_TEST_ASSETS=pg-durable-postgresql-17_0.2.8_amd64.deb \
+    "$resolver"
 
 run_case draft env \
     EVENT_NAME=workflow_run WORKFLOW_RUN_EVENT=push \

@@ -16,6 +16,7 @@ write_outputs() {
 case "$EVENT_NAME" in
     workflow_dispatch)
         tag="$INPUT_REF"
+        manual_dry_run="$INPUT_DRY_RUN"
         ;;
     release)
         tag="$RELEASE_TAG"
@@ -43,18 +44,8 @@ case "$tag" in
         ;;
 esac
 
-if [ "$EVENT_NAME" = workflow_dispatch ]; then
-    write_outputs "$tag" "$version" true
-    exit 0
-fi
-
 is_draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
 assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-
-if [ "$is_draft" = true ]; then
-    write_outputs "$tag" "$version" false
-    exit 0
-fi
 
 has_pg17=false
 has_pg18=false
@@ -65,7 +56,17 @@ if grep -Eq '^pg-durable-postgresql-18_.*_amd64\.deb$' <<< "$assets"; then
     has_pg18=true
 fi
 
-if [ "$has_pg17" = true ] && [ "$has_pg18" = true ]; then
+if [ "$EVENT_NAME" = workflow_dispatch ] &&
+    { [ "$has_pg17" != true ] || [ "$has_pg18" != true ]; }; then
+    echo "release $tag is missing a PostgreSQL 17 or 18 package" >&2
+    exit 1
+elif [ "$is_draft" = true ]; then
+    if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$manual_dry_run" = true ]; then
+        write_outputs "$tag" "$version" true
+    else
+        write_outputs "$tag" "$version" false
+    fi
+elif [ "$has_pg17" = true ] && [ "$has_pg18" = true ]; then
     write_outputs "$tag" "$version" true
 elif [ "$EVENT_NAME" = release ]; then
     write_outputs "$tag" "$version" false
