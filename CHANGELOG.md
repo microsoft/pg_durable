@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.8] - 2026-09-10
+## [0.2.8] - 2026-09-11
 
 ### Added
 
@@ -20,13 +20,20 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   `continue_on_failure` syntax is experimental and may change in future
   releases.
 - **Workflow SQL logging control (#378):** the new
-  `pg_durable.log_workflow_sql` postmaster setting controls whether fully
-  substituted workflow SQL is written to PostgreSQL logs and defaults to off.
+  `pg_durable.log_workflow_sql` postmaster setting controls whether the
+  background worker writes fully substituted workflow SQL to PostgreSQL logs.
+  It defaults to `on`; set it to `off` and restart PostgreSQL to omit statement
+  text from worker traces.
 
 ### Changed
 
 - **Loop lifetime (#377):** raises the loop-iteration backstop from 100,000 to
   8,388,608 (`2^23`), approximately 80 years at five-minute ticks.
+
+> **Upgrade warning (#377):** A loop that already recorded the old
+> terminal-failure path at iteration 100,000 cannot replay under 0.2.8. Drain
+> such long-running loops before upgrading when continuity is required; see
+> [Upgrade Testing](docs/upgrade-testing.md#028).
 
 ### Fixed
 
@@ -46,6 +53,12 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   fragments, and URL-bearing HTTP client errors are redacted before reaching
   PostgreSQL logs, node errors, or durable execution history. Documentation now
   also describes the exposure model for `df.vars`.
+
+### Documentation
+
+- **PGXN installation and search (#373):** documented the PGXN source-install
+  and uninstall procedure and excluded internal development documents from
+  PGXN search indexing without removing them from release archives.
 
 ## [0.2.7] - 2026-08-31
 
