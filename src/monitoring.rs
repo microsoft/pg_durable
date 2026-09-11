@@ -154,6 +154,11 @@ fn fetch_instance_info_map(
     pg_conn_str: &str,
     provider_schema: &str,
 ) -> HashMap<String, (String, i64, Option<String>)> {
+    let engine_ids: Vec<String> = ids
+        .iter()
+        .map(|id| crate::origin::backend_engine_id(id))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| pgrx::error!("{e}"));
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -164,8 +169,6 @@ fn fetch_instance_info_map(
 
     rt.block_on(async {
         use sqlx::postgres::PgPoolOptions;
-
-        let mut info_by_id: HashMap<String, (String, i64, Option<String>)> = HashMap::new();
 
         let monitoring_conn_str =
             connection_url_with_application_name(pg_conn_str, BACKEND_MONITORING_APPLICATION_NAME);
@@ -182,7 +185,7 @@ fn fetch_instance_info_map(
             // looking like "no instances".
             Err(e) => {
                 pgrx::warning!("df.list_instances: could not connect to duroxide store: {e}");
-                return info_by_id;
+                return HashMap::new();
             }
         };
 
@@ -194,7 +197,7 @@ fn fetch_instance_info_map(
         );
 
         let rows = match sqlx::query_as::<_, (String, String, i64, Option<String>)>(&batch_sql)
-            .bind(ids)
+            .bind(&engine_ids)
             .fetch_all(&pool)
             .await
         {
@@ -209,12 +212,72 @@ fn fetch_instance_info_map(
             }
         };
 
-        for (id, function_name, execution_count, output) in rows {
-            info_by_id.insert(id, (function_name, execution_count, output));
-        }
-
-        info_by_id
+        pool.close().await;
+        local_instance_info_map(ids, &engine_ids, rows)
     })
+}
+
+fn local_instance_info_map(
+    local_ids: &[String],
+    engine_ids: &[String],
+    rows: Vec<(String, String, i64, Option<String>)>,
+) -> HashMap<String, (String, i64, Option<String>)> {
+    let local_by_engine: HashMap<_, _> = engine_ids.iter().zip(local_ids).collect();
+    rows.into_iter()
+        .filter_map(|(engine_id, function_name, execution_count, output)| {
+            let local_id = local_by_engine.get(&engine_id)?;
+            Some((
+                (*local_id).clone(),
+                (function_name, execution_count, output),
+            ))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod instance_info_map_tests {
+    use super::local_instance_info_map;
+
+    #[test]
+    fn maps_namespaced_rows_to_local_keys_without_relying_on_row_order() {
+        let local_ids = vec!["deadbeef".into(), "cafebabe".into(), "12345678".into()];
+        let engine_ids = vec![
+            "origin-a/deadbeef".into(),
+            "origin-a/cafebabe".into(),
+            "origin-a/12345678".into(),
+        ];
+        let rows = vec![
+            ("origin-a/cafebabe".into(), "second".into(), 2, None),
+            ("origin-b/deadbeef".into(), "foreign".into(), 9, None),
+            (
+                "origin-a/deadbeef".into(),
+                "first".into(),
+                1,
+                Some("result".into()),
+            ),
+        ];
+
+        let mapped = local_instance_info_map(&local_ids, &engine_ids, rows);
+
+        assert_eq!(mapped.len(), 2);
+        assert_eq!(
+            mapped["deadbeef"],
+            ("first".into(), 1, Some("result".into()))
+        );
+        assert_eq!(mapped["cafebabe"], ("second".into(), 2, None));
+        assert!(!mapped.contains_key("12345678"));
+    }
+
+    #[test]
+    fn preserves_legacy_control_ids() {
+        let ids = vec!["deadbeef".into()];
+        let rows = vec![("deadbeef".into(), "legacy".into(), 3, None)];
+
+        let mapped = local_instance_info_map(&ids, &ids, rows);
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped["deadbeef"], ("legacy".into(), 3, None));
+    }
 }
 
 /// List durable function instances, newest-first, optionally filtered by status.
@@ -243,9 +306,6 @@ pub fn list_instances(
     ),
 > {
     enforce_list_instances_limit(limit_count);
-
-    let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
 
     // Query df.instances via SPI first — RLS filters to calling user's rows only.
     // We also fetch status here so that all three monitoring APIs (df.status(),
@@ -284,6 +344,8 @@ pub fn list_instances(
     }
 
     let ids: Vec<String> = user_instances.iter().map(|(id, _, _)| id.clone()).collect();
+    let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
     let mut info_by_id = fetch_instance_info_map(&ids, &pg_conn_str, provider_schema);
 
     // Reassemble in df.instances order (created_at DESC). Instances with no
@@ -373,9 +435,6 @@ pub fn list_instances_paged(
         },
         None => None,
     };
-
-    let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
 
     // Query df.instances via SPI first — RLS filters to calling user's rows only.
     // We fetch status, created_at and completed_at here so that all three
@@ -507,6 +566,8 @@ pub fn list_instances_paged(
     // fetch_instance_info_map). The id set is the already RLS-filtered ids above,
     // and status is taken from df.instances so all monitoring APIs agree on it.
     let ids: Vec<String> = user_instances.iter().map(|(id, ..)| id.clone()).collect();
+    let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
     let mut info_by_id = fetch_instance_info_map(&ids, &pg_conn_str, provider_schema);
 
     // Reassemble in df.instances order (created_at DESC, id ASC). Instances with
@@ -569,8 +630,6 @@ pub fn instance_info(
         name!(output, Option<String>),
     ),
 > {
-    let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
     let instance_id_str = instance_id.to_string();
 
     // Ownership check: SPI goes through RLS, returning NULL for non-owned instances.
@@ -599,6 +658,10 @@ pub fn instance_info(
         None => return TableIterator::new(vec![]),
     };
 
+    let engine_id =
+        crate::origin::backend_engine_id(instance_id).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -615,9 +678,9 @@ pub fn instance_info(
 
         let client = Client::new(store);
 
-        match client.get_instance_info(&instance_id_str).await {
+        match client.get_instance_info(&engine_id).await {
             Ok(info) => vec![(
-                info.instance_id,
+                instance_id_str,
                 label,
                 info.orchestration_name,
                 info.orchestration_version,
@@ -665,10 +728,6 @@ pub fn instance_executions(
     // (PR5 / #146); give it its own bound if per-instance history ever needs one.
     let limit_count = limit_count.min(10000);
 
-    let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
-    let instance_id_owned = instance_id.to_string();
-
     // Ownership check: SPI goes through RLS, so non-owned instances are invisible.
     // A non-existent or non-owned instance legitimately has no history to show,
     // so an empty rowset (not an error) is the correct response here.
@@ -684,6 +743,10 @@ pub fn instance_executions(
         return TableIterator::new(vec![]);
     }
 
+    let engine_id =
+        crate::origin::backend_engine_id(instance_id).unwrap_or_else(|e| pgrx::error!("{e}"));
+    let pg_conn_str = postgres_connection_string();
+    let provider_schema = backend_duroxide_schema();
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -699,7 +762,7 @@ pub fn instance_executions(
             let client = Client::new(store);
 
             let execution_ids = client
-                .list_executions(&instance_id_owned)
+                .list_executions(&engine_id)
                 .await
                 .map_err(|e| format!("failed to list executions: {e:?}"))?;
 
@@ -710,7 +773,7 @@ pub fn instance_executions(
             let mut rows = Vec::new();
             for exec_id in limited {
                 let info = client
-                    .get_execution_info(&instance_id_owned, exec_id)
+                    .get_execution_info(&engine_id, exec_id)
                     .await
                     .map_err(|e| format!("failed to fetch info for execution {exec_id}: {e:?}"))?;
 
@@ -741,7 +804,8 @@ pub fn instance_executions(
 /// Access is controlled by PostgreSQL function privileges. Roles with ordinary
 /// df usage can call `df.list_instances()` to see counts scoped to their own
 /// workflows; `df.metrics()` should be granted only to roles that may see
-/// system-wide aggregate counts.
+/// system-wide aggregate counts. A database-local grant in any satellite exposes
+/// counts across every installation sharing the control database, not local counts.
 #[pg_extern(schema = "df")]
 pub fn metrics() -> TableIterator<
     'static,

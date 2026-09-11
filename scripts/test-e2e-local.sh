@@ -59,6 +59,7 @@ DEFAULT_BUILD_PHASES=(
     "host-guc"
     "superuser-guc-off"
     "connlimit-backpressure"
+    "force-drop"
     "connlimit-timeout"
     "new-start-limit"
     "connlimit-startup"
@@ -71,6 +72,7 @@ ALL_PHASES=(
     "host-guc"
     "superuser-guc-off"
     "connlimit-backpressure"
+    "force-drop"
     "connlimit-timeout"
     "new-start-limit"
     "connlimit-startup"
@@ -145,6 +147,9 @@ phase_label() {
         connlimit-backpressure)
             echo "connection limit backpressure"
             ;;
+        force-drop)
+            echo "force-drop execution fence"
+            ;;
         connlimit-timeout)
             echo "connection limit timeout"
             ;;
@@ -183,6 +188,9 @@ phase_for_test() {
         44_connection_limit_backpressure)
             echo "connlimit-backpressure"
             ;;
+        75_multi_database_force_drop)
+            echo "force-drop"
+            ;;
         45_connection_limit_timeout)
             echo "connlimit-timeout"
             ;;
@@ -192,7 +200,7 @@ phase_for_test() {
         46_connection_limit_startup_validation)
             echo "connlimit-startup"
             ;;
-        54_reconcile_orphans)
+        54_reconcile_orphans|73_multi_database_reconcile)
             echo "reconcile"
             ;;
         47_http_dsl_disabled)
@@ -514,13 +522,15 @@ configure_phase() {
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "2"
             ;;
-        connlimit-timeout)
+        force-drop|connlimit-timeout)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "1"
-            set_conf_line "pg_durable.execution_acquire_timeout" "2"
+            if [ "$phase" = "connlimit-timeout" ]; then
+                set_conf_line "pg_durable.execution_acquire_timeout" "2"
+            fi
             ;;
         new-start-limit)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -575,7 +585,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
+        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|force-drop|connlimit-timeout|connlimit-startup|reconcile)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -625,7 +635,7 @@ prepare_phase() {
                 wait_for_worker_ready
             fi
             ;;
-        host-guc|connlimit-backpressure|connlimit-timeout)
+        host-guc|connlimit-backpressure|force-drop|connlimit-timeout)
             ensure_e2e_role
             wait_for_worker_ready
             ;;

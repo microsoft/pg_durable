@@ -5,35 +5,20 @@
 
 use duroxide::ActivityContext;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::update-node-status";
 
-/// Process-global cache for whether df.nodes.status_details exists.
-///
-/// 0 = unknown, 1 = present, 2 = absent. The column is added by the
-/// 0.2.3 → 0.2.4 upgrade; a binary newer than the schema (Scenario B1) must run
-/// against an older schema that lacks it. We cache "present" permanently once
-/// seen, but re-probe on "unknown"/"absent" so an in-place ALTER EXTENSION
-/// UPDATE that adds the column is picked up without a worker restart.
-static STATUS_DETAILS_COL: AtomicU8 = AtomicU8::new(0);
-
 async fn status_details_present(pool: &PgPool) -> bool {
-    if STATUS_DETAILS_COL.load(Ordering::Relaxed) == 1 {
-        return true;
-    }
-    let present = sqlx::query_scalar::<_, bool>(
+    sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
          WHERE table_schema = 'df' AND table_name = 'nodes' \
          AND column_name = 'status_details')",
     )
     .fetch_one(pool)
     .await
-    .unwrap_or(false);
-    STATUS_DETAILS_COL.store(if present { 1 } else { 2 }, Ordering::Relaxed);
-    present
+    .unwrap_or(false)
 }
 
 fn execution_id_from_details(status_details: Option<&serde_json::Value>) -> Option<&str> {

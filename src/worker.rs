@@ -8,14 +8,18 @@
 
 use pgrx::bgworkers::*;
 use pgrx::prelude::*;
+use sqlx::Connection;
+use std::collections::{BTreeMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::runtime;
-use duroxide::{Client, InstanceFilter};
+use duroxide::{Client, ClientError, InstanceFilter};
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
+use crate::origin::{Origin, Router};
 use crate::registry::{create_activity_registry, create_orchestration_registry};
 use crate::types::{
     get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
@@ -319,8 +323,13 @@ async fn run_duroxide_runtime() {
         // Write the worker readiness record so backend sessions know the
         // duroxide schema is fully initialized for this schema version.
         // Skipped if the row already has the current WORKER_SCHEMA_VERSION.
-        if let Err(e) = write_worker_ready(&mgmt_pool, &duroxide_schema).await {
+        if let Err(e) = write_worker_ready(&mgmt_pool, &duroxide_schema, epoch_oid).await {
             log!("pg_durable: failed to write worker readiness record: {}", e);
+            teardown_runtime(duroxide_runtime, duroxide_store).await;
+            if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
+                break;
+            }
+            continue;
         }
 
         // Write a sentinel so we can detect drop+recreate even if the
@@ -795,7 +804,42 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
 /// `schema_version` differs from `WORKER_SCHEMA_VERSION`; if the row already
 /// matches, it is left untouched so `initialized_at` reflects when the current
 /// schema version was first established rather than the last BGW restart.
-async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<(), sqlx::Error> {
+async fn write_worker_ready(
+    pool: &sqlx::PgPool,
+    schema_name: &str,
+    epoch_oid: i64,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '1500ms'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("LOCK TABLE df.instances, df.nodes IN ACCESS SHARE MODE")
+        .execute(&mut *transaction)
+        .await?;
+    let current_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT oid::bigint FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+    )
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if current_epoch != Some(epoch_oid) {
+        return Err(sqlx::Error::Protocol(
+            "Control installation changed before readiness publication".to_string(),
+        ));
+    }
+    let schema_name = format!("\"{}\"", schema_name.replace('"', "\"\""));
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {schema_name}._origins (
+            database_oid BIGINT NOT NULL,
+            installation_id UUID NOT NULL,
+            PRIMARY KEY (database_oid, installation_id)
+        )"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(&format!("REVOKE ALL ON {schema_name}._origins FROM PUBLIC"))
+        .execute(&mut *transaction)
+        .await?;
+
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
             sentinel        BOOLEAN PRIMARY KEY DEFAULT TRUE,
@@ -805,7 +849,7 @@ async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<()
         )",
         schema = schema_name
     ))
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     // Allow non-superuser sessions to read the readiness record via
@@ -814,13 +858,13 @@ async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<()
         "GRANT USAGE ON SCHEMA {schema} TO PUBLIC",
         schema = schema_name
     ))
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
     sqlx::query(&format!(
         "GRANT SELECT ON {schema}._worker_ready TO PUBLIC",
         schema = schema_name
     ))
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     sqlx::query(&format!(
@@ -833,9 +877,25 @@ async fn write_worker_ready(pool: &sqlx::PgPool, schema_name: &str) -> Result<()
         schema = schema_name
     ))
     .bind(crate::WORKER_SCHEMA_VERSION)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn register_origin(pool: &sqlx::PgPool, origin: &Origin) -> Result<(), String> {
+    let schema = resolve_duroxide_schema_pool(pool).await;
+    let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    sqlx::query(&format!(
+        "INSERT INTO {schema}._origins (database_oid, installation_id)
+         VALUES ($1, $2) ON CONFLICT (database_oid, installation_id) DO NOTHING"
+    ))
+    .bind(i64::from(origin.database_oid))
+    .bind(origin.installation_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("register origin: {error}"))?;
     Ok(())
 }
 
@@ -864,6 +924,7 @@ async fn select_expired_instance_ids_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     retention_days: i32,
     max_keep: i64,
+    limit: Option<i64>,
 ) -> Result<Vec<String>, sqlx::Error> {
     let ids: Option<Vec<String>> = sqlx::query_scalar(
         r#"
@@ -894,14 +955,19 @@ async fn select_expired_instance_ids_tx(
         -- days). Retained rows are thus always within the newest $1 AND younger than
         -- the retention window, so the retained terminal count never exceeds $1.
         SELECT pg_catalog.array_agg(id)
-        FROM terminal_instances
-        WHERE terminal_rank OPERATOR(pg_catalog.>) $1
-           OR terminal_at OPERATOR(pg_catalog.<)
-              (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
+          FROM (
+                SELECT id FROM terminal_instances
+                WHERE terminal_rank OPERATOR(pg_catalog.>) $1
+                    OR terminal_at OPERATOR(pg_catalog.<)
+                        (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
+                ORDER BY terminal_rank DESC
+                LIMIT $3
+          ) expired
         "#,
     )
     .bind(max_keep)
     .bind(retention_days)
+    .bind(limit)
     .fetch_one(&mut **tx)
     .await?;
     Ok(ids.unwrap_or_default())
@@ -962,7 +1028,7 @@ async fn select_expired_instance_ids(
     max_keep: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let ids = select_expired_instance_ids_tx(&mut tx, retention_days, max_keep).await?;
+    let ids = select_expired_instance_ids_tx(&mut tx, retention_days, max_keep, None).await?;
     tx.commit().await?;
     Ok(ids)
 }
@@ -988,7 +1054,7 @@ pub(crate) async fn delete_expired_instances_transaction(
     retention_days: i32,
     max_keep: i64,
 ) -> Result<ExpiredDeletion, sqlx::Error> {
-    let ids = select_expired_instance_ids_tx(tx, retention_days, max_keep).await?;
+    let ids = select_expired_instance_ids_tx(tx, retention_days, max_keep, None).await?;
     delete_expired_instances_tx(tx, &ids).await
 }
 
@@ -1004,6 +1070,9 @@ async fn run_until_extension_dropped_or_shutdown(
     log!("pg_durable: processing durable functions...");
 
     let client = Client::new(duroxide_store.clone());
+    let router = Router::new(Arc::new(maintenance_pool.clone()));
+    let mut origin_cursor = OriginRetentionCursor::default();
+    let mut engine_cursor = String::new();
 
     let mut drop_check = tokio::time::interval(drop_poll_interval);
     drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1023,7 +1092,7 @@ async fn run_until_extension_dropped_or_shutdown(
     );
     reconcile_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    loop {
+    'processing: loop {
         tokio::select! {
             _ = tokio::time::sleep(shutdown_check_interval) => {
                 // is_shutdown_requested reads a volatile atomic; no spawn_blocking needed.
@@ -1043,6 +1112,7 @@ async fn run_until_extension_dropped_or_shutdown(
                 }
             }
             _ = reconcile_check.tick(), if reconcile_enabled => {
+                let maintenance = async {
                 let retention_days = get_retention_days();
 
                 // Engine-first: retire the engine record before the df row, so a
@@ -1088,11 +1158,487 @@ async fn run_until_extension_dropped_or_shutdown(
                     Ok(_) => {}
                     Err(e) => log!("pg_durable: reclaiming orphaned engine records failed: {e}"),
                 }
+
+                    let schema = resolve_duroxide_schema_pool(maintenance_pool).await;
+                    let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+                    if let Err(error) = sweep_registered_origins(
+                        maintenance_pool, &client, &router, &schema, retention_days, &mut origin_cursor,
+                    ).await {
+                        log!("pg_durable: origin retention failed: {error}");
+                    }
+                    if let Err(error) = reclaim_origin_instances(
+                        maintenance_pool, &client, &router, &schema, retention, &mut engine_cursor,
+                    ).await {
+                        log!("pg_durable: origin reconciliation failed: {error}");
+                    }
+                };
+                tokio::pin!(maintenance);
+                loop {
+                    tokio::select! {
+                        _ = &mut maintenance => break,
+                        _ = wait_for_shutdown() => break 'processing,
+                        _ = drop_check.tick() => {
+                            let still_valid = match epoch_id {
+                                Some(eid) => check_epoch_sentinel(poll_pool, eid).await,
+                                None => check_extension_exists(poll_pool).await,
+                            };
+                            if !still_valid {
+                                log!("pg_durable: control extension removed during maintenance");
+                                break 'processing;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
     teardown_runtime(duroxide_runtime, duroxide_store).await;
+}
+
+const ORIGIN_BATCH: i64 = 8;
+const ORIGIN_ENGINE_BATCH: i64 = 100;
+const ORIGIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Default)]
+struct OriginRetentionCursor {
+    origin: (i64, uuid::Uuid),
+    after_id: Option<String>,
+}
+
+impl OriginRetentionCursor {
+    fn enter(&mut self, origin: (i64, uuid::Uuid)) {
+        if self.origin != origin {
+            self.after_id = None;
+        }
+        self.origin = origin;
+    }
+
+    fn resume_after_pass(&mut self, previous_id: Option<String>) -> bool {
+        if self.after_id.is_some() && self.after_id != previous_id {
+            return true;
+        }
+        self.after_id = None;
+        false
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct OriginRetentionCandidate {
+    id: String,
+    terminal_rank: i64,
+    expired_by_age: bool,
+}
+
+impl OriginRetentionCandidate {
+    fn is_expired(&self, max_keep: i64) -> bool {
+        self.terminal_rank > max_keep || self.expired_by_age
+    }
+}
+
+async fn retire_origin_candidates<Retire, Retired>(
+    candidates: Vec<OriginRetentionCandidate>,
+    after_id: &mut Option<String>,
+    max_keep: i64,
+    mut retire: Retire,
+) -> Result<(), String>
+where
+    Retire: FnMut(String) -> Retired,
+    Retired: std::future::Future<Output = Result<(), String>>,
+{
+    if candidates.is_empty() {
+        *after_id = None;
+    }
+    for candidate in candidates {
+        *after_id = Some(candidate.id.clone());
+        if candidate.is_expired(max_keep) {
+            retire(candidate.id).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn sweep_registered_origins(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    router: &Router,
+    schema: &str,
+    retention_days: i32,
+    cursor: &mut OriginRetentionCursor,
+) -> Result<(), String> {
+    let origins: Vec<(i64, uuid::Uuid)> = sqlx::query_as(&format!(
+        "SELECT database_oid, installation_id FROM {schema}._origins
+         WHERE (database_oid, installation_id) > ($1, $2)
+            OR ((database_oid, installation_id) = ($1, $2) AND $4)
+         ORDER BY database_oid, installation_id LIMIT $3"
+    ))
+    .bind(cursor.origin.0)
+    .bind(cursor.origin.1)
+    .bind(ORIGIN_BATCH)
+    .bind(cursor.after_id.is_some())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("list registered origins: {error}"))?;
+    if origins.is_empty() {
+        *cursor = OriginRetentionCursor::default();
+    }
+    for (database_oid, installation_id) in origins {
+        cursor.enter((database_oid, installation_id));
+        let origin = Origin {
+            database_oid: u32::try_from(database_oid)
+                .map_err(|_| "Invalid registered database OID")?,
+            installation_id,
+        };
+        let previous_id = cursor.after_id.clone();
+        let result = tokio::time::timeout(ORIGIN_OPERATION_TIMEOUT, async {
+            let route = router.connect(&origin).await?;
+            let result = retire_origin_instances(
+                &route.pool,
+                client,
+                &origin,
+                retention_days,
+                &mut cursor.after_id,
+            )
+            .await;
+            route.close().await;
+            result
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log!("pg_durable: retention for origin {origin:?} deferred: {error}"),
+            Err(_) => log!("pg_durable: retention for origin {origin:?} timed out"),
+        }
+        if cursor.resume_after_pass(previous_id) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn retire_origin_instances(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    origin: &Origin,
+    retention_days: i32,
+    after_id: &mut Option<String>,
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    let candidates: Vec<OriginRetentionCandidate> = sqlx::query_as(
+        r#"
+        WITH terminal_instances AS (
+            SELECT id, COALESCE(completed_at, created_at) AS terminal_at,
+                pg_catalog.row_number() OVER (
+                    ORDER BY COALESCE(completed_at, created_at) DESC NULLS LAST, id DESC
+                ) AS terminal_rank
+            FROM df.instances
+            WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
+        )
+        SELECT id, terminal_rank,
+            terminal_at OPERATOR(pg_catalog.<)
+                (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $1::int))
+                AS expired_by_age
+        FROM terminal_instances
+        WHERE $2::text IS NULL OR id OPERATOR(pg_catalog.>) $2
+        ORDER BY id LIMIT $3
+        "#,
+    )
+    .bind(retention_days)
+    .bind(after_id.as_deref())
+    .bind(i64::from(RECLAIM_BATCH))
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    retire_origin_candidates(
+        candidates,
+        after_id,
+        TERMINAL_INSTANCE_MAX_KEEP,
+        |local_id| async move {
+            let engine_id = origin.engine_id(&local_id);
+            if origin_local_id(origin, &engine_id).is_none() {
+                return Ok(());
+            }
+            match client.delete_instance(&engine_id, false).await {
+                Ok(_) | Err(ClientError::InstanceNotFound { .. }) => {
+                    delete_expired_instances(pool, &[local_id])
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Err(ClientError::InstanceStillRunning { .. }) => {}
+                Err(error) => return Err(format!("retire origin engine record: {error}")),
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+fn origin_local_id<'a>(origin: &Origin, engine_id: &'a str) -> Option<&'a str> {
+    if engine_id.contains("::")
+        || Origin::from_engine_id(engine_id).ok().flatten().as_ref() != Some(origin)
+    {
+        return None;
+    }
+    engine_id.strip_prefix(&origin.engine_id(""))
+}
+
+fn select_origin_orphans(
+    origin: &Origin,
+    failed_ids: Vec<String>,
+    present_local_ids: &HashSet<String>,
+) -> Vec<String> {
+    failed_ids
+        .into_iter()
+        .filter(|engine_id| {
+            origin_local_id(origin, engine_id)
+                .is_some_and(|local_id| !present_local_ids.contains(local_id))
+        })
+        .collect()
+}
+
+async fn reclaim_origin_instances(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    router: &Router,
+    schema: &str,
+    retention: Duration,
+    cursor: &mut String,
+) -> Result<(), String> {
+    let candidates: Vec<(String, String)> = sqlx::query_as(&format!(
+        "SELECT i.instance_id, e.status FROM {schema}.instances i
+         JOIN {schema}.executions e ON e.instance_id = i.instance_id
+             AND e.execution_id = i.current_execution_id
+         WHERE i.instance_id > $1 AND i.parent_instance_id IS NULL
+             AND i.instance_id NOT LIKE '%::%'
+             AND EXISTS (SELECT 1 FROM {schema}._origins o
+                 WHERE i.instance_id LIKE 'pgdf-' || o.database_oid::text || '-' ||
+                     pg_catalog.replace(o.installation_id::text, '-', '') || '-%')
+         ORDER BY i.instance_id LIMIT $2"
+    ))
+    .bind(cursor.as_str())
+    .bind(ORIGIN_ENGINE_BATCH)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("list registered origin engine roots: {error}"))?;
+    if let Some((last_id, _)) = candidates.last() {
+        *cursor = last_id.clone();
+    } else {
+        cursor.clear();
+    }
+    let mut by_origin = BTreeMap::<(u32, uuid::Uuid), Vec<(String, String)>>::new();
+    for (engine_id, status) in candidates {
+        if let Ok(Some(origin)) = Origin::from_engine_id(&engine_id) {
+            by_origin
+                .entry((origin.database_oid, origin.installation_id))
+                .or_default()
+                .push((engine_id, status));
+        }
+    }
+    for ((database_oid, installation_id), records) in by_origin {
+        let origin = Origin {
+            database_oid,
+            installation_id,
+        };
+        let result = tokio::time::timeout(ORIGIN_OPERATION_TIMEOUT, async {
+            match router.connect(&origin).await {
+                Ok(route) => {
+                    let result =
+                        reclaim_existing_origin(&route.pool, client, &origin, records, retention)
+                            .await;
+                    route.close().await;
+                    result
+                }
+                Err(route_error) => {
+                    if origin_is_removed(pool, &origin).await? {
+                        reclaim_removed_origin(client, &origin, records, retention).await
+                    } else {
+                        Err(route_error)
+                    }
+                }
+            }
+        })
+        .await;
+        match result {
+            Ok(Ok(reclaimed)) if reclaimed > 0 => {
+                log!("pg_durable: reclaimed {reclaimed} engine record(s) for origin {origin:?}");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                log!("pg_durable: reconciliation for origin {origin:?} deferred: {error}")
+            }
+            Err(_) => log!("pg_durable: reconciliation for origin {origin:?} timed out"),
+        }
+    }
+    Ok(())
+}
+
+async fn reclaim_existing_origin(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    origin: &Origin,
+    records: Vec<(String, String)>,
+    retention: Duration,
+) -> Result<u64, String> {
+    let failed: Vec<String> = records
+        .into_iter()
+        .filter(|(_, status)| status == "Failed")
+        .map(|(engine_id, _)| engine_id)
+        .collect();
+    let local_ids: Vec<&str> = failed
+        .iter()
+        .filter_map(|engine_id| origin_local_id(origin, engine_id))
+        .collect();
+    if local_ids.is_empty() {
+        return Ok(0);
+    }
+    let present: HashSet<String> =
+        sqlx::query_scalar("SELECT id FROM df.instances WHERE id = ANY($1)")
+            .bind(&local_ids)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("cross-check origin df.instances: {error}"))?
+            .into_iter()
+            .collect();
+    let orphans = select_origin_orphans(origin, failed, &present);
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    client
+        .delete_instance_bulk(InstanceFilter {
+            instance_ids: Some(orphans),
+            completed_before: Some(retention_cutoff_ms(retention)),
+            limit: Some(RECLAIM_BATCH),
+        })
+        .await
+        .map(|result| result.instances_deleted)
+        .map_err(|error| format!("delete origin orphans: {error}"))
+}
+
+async fn reclaim_removed_origin(
+    client: &Client,
+    origin: &Origin,
+    records: Vec<(String, String)>,
+    retention: Duration,
+) -> Result<u64, String> {
+    let mut roots = Vec::new();
+    for (engine_id, status) in records {
+        if origin_local_id(origin, &engine_id).is_none() {
+            continue;
+        }
+        if status == "Running" {
+            client
+                .cancel_instance(&engine_id, "pg_durable origin installation removed")
+                .await
+                .map_err(|error| format!("cancel removed origin root: {error}"))?;
+        }
+        roots.push(engine_id);
+    }
+    if roots.is_empty() {
+        return Ok(0);
+    }
+    client
+        .delete_instance_bulk(InstanceFilter {
+            instance_ids: Some(roots),
+            completed_before: Some(retention_cutoff_ms(retention)),
+            limit: Some(RECLAIM_BATCH),
+        })
+        .await
+        .map(|result| result.instances_deleted)
+        .map_err(|error| format!("delete removed origin roots: {error}"))
+}
+
+async fn origin_is_removed(pool: &sqlx::PgPool, origin: &Origin) -> Result<bool, String> {
+    let database: Option<String> = sqlx::query_scalar(
+        "SELECT datname FROM pg_catalog.pg_database WHERE oid = $1::bigint::oid",
+    )
+    .bind(i64::from(origin.database_oid))
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("probe origin database: {error}"))?;
+    let Some(database) = database else {
+        return Ok(true);
+    };
+    let _permit = crate::origin::acquire_connections(1).await?;
+    let options = sqlx::postgres::PgConnectOptions::from_str(
+        &postgres_connection_string_with_application_name(WORKER_MANAGEMENT_APPLICATION_NAME),
+    )
+    .map_err(|error| error.to_string())?
+    .database(&database);
+    let mut probe = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::PgConnection::connect_with(&options),
+    )
+    .await
+    .map_err(|_| "Origin absence connection timed out".to_string())?
+    .map_err(|error| format!("connect origin absence probe: {error}"))?;
+    let result = probe_origin_installation(&mut probe, origin).await;
+    probe
+        .close()
+        .await
+        .map_err(|error| format!("close origin absence probe: {error}"))?;
+    result
+}
+
+async fn probe_origin_installation(
+    connection: &mut sqlx::PgConnection,
+    origin: &Origin,
+) -> Result<bool, String> {
+    let mut tx = connection
+        .begin()
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET LOCAL lock_timeout = '1500ms'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let database_oid: i64 = sqlx::query_scalar(
+        "SELECT oid::bigint FROM pg_catalog.pg_database
+         WHERE datname = pg_catalog.current_database()",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    if database_oid != i64::from(origin.database_oid) {
+        return Err("Origin database changed during absence probe".to_string());
+    }
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e
+         JOIN pg_catalog.pg_depend d ON d.refobjid = e.oid
+             AND d.refclassid = 'pg_catalog.pg_extension'::regclass AND d.deptype = 'e'
+         JOIN pg_catalog.pg_class c ON c.oid = d.objid
+             AND d.classid = 'pg_catalog.pg_class'::regclass
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE e.extname = 'pg_durable' AND n.nspname = 'df' AND c.relname = '_installation')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    if !owned {
+        return Ok(true);
+    }
+    sqlx::query("LOCK TABLE df._installation IN ACCESS SHARE MODE")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM df._installation i
+         JOIN pg_catalog.pg_depend d ON d.objid = 'df._installation'::regclass
+             AND d.classid = 'pg_catalog.pg_class'::regclass AND d.deptype = 'e'
+             AND d.refclassid = 'pg_catalog.pg_extension'::regclass
+         JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
+         WHERE i.id = $1)",
+    )
+    .bind(origin.installation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    Ok(!present)
 }
 
 /// Shut down a duroxide runtime and close its store pool.
@@ -1174,12 +1720,14 @@ fn retention_cutoff_ms(retention: Duration) -> u64 {
 /// df.instances row, select the orphans to reclaim: those with no df row and that
 /// are not sub-orchestrations. Both legacy engine-named children and current
 /// explicitly named composed children legitimately have no df row and must be kept.
+/// Namespaced IDs require a separate cross-check in their registered origin.
 pub(crate) fn select_orphans(
     failed_ids: Vec<String>,
     present: &std::collections::HashSet<String>,
 ) -> Vec<String> {
     failed_ids
         .into_iter()
+        .filter(|id| matches!(crate::origin::Origin::from_engine_id(id), Ok(None)))
         .filter(|id| !is_sub_orchestration(id) && !present.contains(id))
         .collect()
 }
@@ -1272,5 +1820,269 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
             log!("pg_durable: failed to retire engine records; deferring df removal: {e:?}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::origin::Origin;
+    use std::collections::HashSet;
+
+    #[test]
+    fn worker_origin_retention_advances_past_running_and_undecidable_prefix() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for undecidable_prefix in [false, true] {
+                    let mut after_id = None;
+                    let mut deleted = Vec::new();
+                    let mut attempts = Vec::new();
+                    let target = format!("{:08x}", RECLAIM_BATCH + 1);
+                    let mut passes = 0;
+                    while after_id.as_deref() != Some(target.as_str()) {
+                        let candidates: Vec<_> = (u32::from(!undecidable_prefix)
+                            ..=RECLAIM_BATCH + 1)
+                            .map(|index| OriginRetentionCandidate {
+                                id: format!("{index:08x}"),
+                                terminal_rank: i64::from(RECLAIM_BATCH + 2 - index),
+                                expired_by_age: true,
+                            })
+                            .filter(|candidate| {
+                                after_id.as_ref().is_none_or(|last| candidate.id > *last)
+                            })
+                            .take(RECLAIM_BATCH as usize)
+                            .collect();
+                        assert!(candidates.len() <= RECLAIM_BATCH as usize);
+                        let _ = retire_origin_candidates(candidates, &mut after_id, 10, |id| {
+                            attempts.push(id.clone());
+                            let result = if id == "00000000" {
+                                Err("engine state undecidable".to_string())
+                            } else {
+                                if id == target {
+                                    deleted.push(id);
+                                }
+                                Ok(())
+                            };
+                            std::future::ready(result)
+                        })
+                        .await;
+                        passes += 1;
+                        assert!(
+                            passes <= 3,
+                            "retention must not restart at the skipped prefix"
+                        );
+                    }
+                    assert_eq!(passes, if undecidable_prefix { 3 } else { 2 });
+                    assert_eq!(
+                        attempts.len(),
+                        RECLAIM_BATCH as usize + 1 + usize::from(undecidable_prefix)
+                    );
+                    assert_eq!(deleted, vec![target]);
+                }
+            });
+    }
+
+    #[test]
+    fn worker_origin_retention_timeout_keeps_candidate_progress() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut after_id = None;
+                let candidates = vec![OriginRetentionCandidate {
+                    id: "00000001".to_string(),
+                    terminal_rank: 1,
+                    expired_by_age: true,
+                }];
+                assert!(tokio::time::timeout(
+                    Duration::ZERO,
+                    retire_origin_candidates(candidates, &mut after_id, 10, |_| {
+                        std::future::pending::<Result<(), String>>()
+                    }),
+                )
+                .await
+                .is_err());
+                assert_eq!(after_id.as_deref(), Some("00000001"));
+
+                let mut cursor = OriginRetentionCursor {
+                    origin: (42, uuid::Uuid::from_u128(7)),
+                    after_id,
+                };
+                assert!(cursor.resume_after_pass(None));
+                let mut retired = Vec::new();
+                let candidates = ["00000001", "00000002"]
+                    .into_iter()
+                    .filter(|id| Some(*id) > cursor.after_id.as_deref())
+                    .map(|id| OriginRetentionCandidate {
+                        id: id.to_string(),
+                        terminal_rank: 1,
+                        expired_by_age: true,
+                    })
+                    .collect();
+                retire_origin_candidates(candidates, &mut cursor.after_id, 10, |id| {
+                    retired.push(id);
+                    std::future::ready(Ok(()))
+                })
+                .await
+                .unwrap();
+                assert_eq!(retired, vec!["00000002"]);
+
+                retire_origin_candidates(
+                    Vec::new(),
+                    &mut cursor.after_id,
+                    10,
+                    |_| -> std::future::Ready<Result<(), String>> {
+                        panic!("an exhausted page cannot retire an instance");
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(!cursor.resume_after_pass(Some("00000002".to_string())));
+                assert_eq!(cursor.after_id, None);
+                let candidates = vec![OriginRetentionCandidate {
+                    id: "00000001".to_string(),
+                    terminal_rank: 1,
+                    expired_by_age: true,
+                }];
+                retire_origin_candidates(candidates, &mut cursor.after_id, 10, |id| {
+                    retired.push(id);
+                    std::future::ready(Ok(()))
+                })
+                .await
+                .unwrap();
+                assert_eq!(retired, vec!["00000002", "00000001"]);
+            });
+    }
+
+    #[test]
+    fn worker_origin_retention_preserves_max_keep_and_age() {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let candidates = [(1, false), (10, false), (11, false), (2, true), (12, true)]
+                    .into_iter()
+                    .enumerate()
+                    .map(
+                        |(index, (terminal_rank, expired_by_age))| OriginRetentionCandidate {
+                            id: format!("{index:08x}"),
+                            terminal_rank,
+                            expired_by_age,
+                        },
+                    )
+                    .collect();
+                let mut after_id = None;
+                let mut retired = Vec::new();
+                retire_origin_candidates(candidates, &mut after_id, 10, |id| {
+                    retired.push(id);
+                    std::future::ready(Ok(()))
+                })
+                .await
+                .unwrap();
+                assert_eq!(retired, vec!["00000002", "00000003", "00000004"]);
+                assert_eq!(after_id.as_deref(), Some("00000004"));
+            });
+    }
+
+    #[test]
+    fn worker_origin_retention_cursor_is_scoped_to_installation() {
+        let first = (42, uuid::Uuid::from_u128(7));
+        let replacement = (42, uuid::Uuid::from_u128(8));
+        let mut cursor = OriginRetentionCursor::default();
+        cursor.enter(first);
+        cursor.after_id = Some("deadbeef".to_string());
+        cursor.enter(first);
+        assert_eq!(cursor.after_id.as_deref(), Some("deadbeef"));
+        cursor.enter(replacement);
+        assert_eq!(cursor.after_id, None);
+        cursor.after_id = Some("cafebabe".to_string());
+        cursor.enter((43, uuid::Uuid::from_u128(8)));
+        assert_eq!(cursor.after_id, None);
+        cursor.after_id = Some("deadbeef".to_string());
+        assert!(!cursor.resume_after_pass(Some("deadbeef".to_string())));
+        assert_eq!(cursor.after_id, None);
+    }
+
+    #[test]
+    fn worker_legacy_orphans_exclude_satellites_and_malformed_namespaces() {
+        let origin = Origin {
+            database_oid: 42,
+            installation_id: uuid::Uuid::from_u128(7),
+        };
+        let failed = vec![
+            "deadbeef".to_string(),
+            "cafebabe".to_string(),
+            origin.engine_id("deadbeef"),
+            format!("{}::2::cafebabe", origin.engine_id("deadbeef")),
+            "pgdf-invalid".to_string(),
+            "sub::child".to_string(),
+            "deadbeef::sub::child".to_string(),
+            "deadbeef::2::cafebabe".to_string(),
+        ];
+        assert_eq!(
+            select_orphans(failed, &HashSet::from(["cafebabe".to_string()])),
+            vec!["deadbeef".to_string()]
+        );
+    }
+
+    #[test]
+    fn worker_origin_orphans_require_matching_database_and_installation() {
+        let origin = Origin {
+            database_oid: 42,
+            installation_id: uuid::Uuid::from_u128(7),
+        };
+        let other_database = Origin {
+            database_oid: 43,
+            ..origin.clone()
+        };
+        let replacement = Origin {
+            installation_id: uuid::Uuid::from_u128(8),
+            ..origin.clone()
+        };
+        let candidates = vec![
+            origin.engine_id("deadbeef"),
+            origin.engine_id("cafebabe"),
+            other_database.engine_id("deadbeef"),
+            replacement.engine_id("deadbeef"),
+            "deadbeef".to_string(),
+            "pgdf-invalid".to_string(),
+            format!("{}::2::12345678", origin.engine_id("deadbeef")),
+            format!("{}::2::12345678::3::abcdef12", origin.engine_id("deadbeef")),
+        ];
+        assert_eq!(
+            select_origin_orphans(
+                &origin,
+                candidates,
+                &HashSet::from(["cafebabe".to_string()])
+            ),
+            vec![origin.engine_id("deadbeef")]
+        );
+    }
+
+    #[test]
+    fn worker_origin_local_id_accepts_only_canonical_roots() {
+        let origin = Origin {
+            database_oid: 42,
+            installation_id: uuid::Uuid::from_u128(7),
+        };
+        let root = origin.engine_id("deadbeef");
+        assert_eq!(origin_local_id(&origin, &root), Some("deadbeef"));
+        assert_eq!(
+            origin_local_id(&origin, &format!("{root}::1::cafebabe")),
+            None
+        );
+        assert_eq!(
+            origin_local_id(&origin, &origin.engine_id("invalid!")),
+            None
+        );
+        assert_eq!(origin_local_id(&origin, "deadbeef"), None);
+        assert_eq!(
+            origin_local_id(&origin, &root.replacen("pgdf-42-", "pgdf-042-", 1)),
+            None
+        );
     }
 }

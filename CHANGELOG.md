@@ -8,6 +8,16 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
+- **Multi-database installations:** explicitly install in `pg_durable.database`
+  first, then add satellites with local `df` APIs, metadata, variables, grants,
+  and RLS. All installations share one control runtime/provider; satellites create
+  no `_duroxide` schema. SQL defaults to its origin unless an explicit target is
+  supplied. Public eight-character IDs and recorded payloads are unchanged;
+  satellite engine IDs carry database OID and installation UUID for activity routing.
+- **Bounded origin connections:** `pg_durable.max_origin_connections` defaults to
+  `12` (range `2` to `1000`, restart required), shared by activities and maintenance.
+  Active routes reserve two slots; idle satellites retain no origin pool.
+
 - **Failure-isolated loops:** the unified
   `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`
   signature supports resilient infinite and conditional loops. With
@@ -21,6 +31,16 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   releases.
 
 ### Changed
+
+- **Satellite lifecycle:** active activities hold installation/metadata locks so
+  drop waits for active operations; UUID fencing prevents stale execution after
+  recreation. Satellite engine cleanup is eventual on reconciliation, and failed
+  connections are not treated as proof of removal. Dropping control destroys
+  shared engine state for every satellite.
+- **Independent-start scope:** `transaction_mode => 'new'` launches in the caller's
+  database, with `max_new_transaction_starts` enforced per database, not cluster-wide.
+- **Shared metrics:** `df.metrics()` exposes all-engine totals even from satellites.
+  Granting `with_grant => true` includes this access as well as local delegation.
 
 - **Loop lifetime:** raises the loop-iteration backstop from 100,000 to
   8,388,608 (`2^23`), approximately 80 years at five-minute ticks.

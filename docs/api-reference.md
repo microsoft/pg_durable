@@ -369,6 +369,12 @@ Returns the same envelope as `df.http()`.
 
 ## Control Functions
 
+Instance APIs use eight-character local IDs in the database where the workflow
+was started. Status, result, explain, signal, cancel, await, and listing operations
+authorize against local `df` metadata/RLS, while engine operations use the shared
+control store. Variables and HTTP grants are also origin-local. Satellite engine
+IDs are internally namespaced; callers continue to pass the short local ID.
+
 ### df.start(fut [, label] [, database] [, transaction_mode])
 
 Starts a durable function.
@@ -377,7 +383,7 @@ Starts a durable function.
 |-----------|------|-----------|-------------|
 | `fut` | TEXT | ✅ Auto-wrap | Root node of the function |
 | `label` | TEXT | ❌ Literal | (Optional) Human-readable label |
-| `database` | TEXT | ❌ Literal | (Optional) Target database on the cluster |
+| `database` | TEXT | ❌ Literal | (Optional) SQL target on the cluster; omitted/NULL defaults to the origin database where `df.start()` is called |
 | `transaction_mode` | TEXT | ❌ Literal | (Optional) `'caller'` (default) or `'new'` |
 
 ```sql
@@ -385,6 +391,13 @@ df.start('SELECT 1')                      -- auto-wrapped
 df.start(df.sleep(10) ~> 'SELECT 2')      -- explicit nodes
 df.start('SELECT 1', 'my-job')            -- with label
 ```
+
+All SQL nodes share the selected execution database; metadata and captured
+variables stay in the origin. The target does not need pg_durable unless the SQL
+uses its APIs. SQL executes as captured `current_user`, with that role's target
+database privileges. Install in `pg_durable.database` first and wait for control
+readiness before creating satellites; see
+[Multi-Database Support](../USER_GUIDE.md#multi-database-support).
 
 #### transaction_mode
 
@@ -394,7 +407,8 @@ the durable function that gets started.
 - `'caller'` (default) — the start joins the caller's transaction, so a
   `ROLLBACK` discards the durable function along with everything else.
 - `'new'` — the start runs in its own transaction on a separate PostgreSQL
-  session, so it commits independently and **survives a rollback of the
+  session in the caller's database, regardless of the SQL target. It commits
+  independently and **survives a rollback of the
   caller's transaction**. This provides the same rollback-survival outcome as
   an Oracle autonomous transaction for asynchronously started work. It is not a
   synchronous autonomous routine: the returned ID confirms the launch, while
@@ -413,7 +427,8 @@ An unrecognised value raises an error rather than falling back to the default.
 > **Note:** under `'new'` the separate session sees only *committed* rows, so
 > the captured `df.vars` snapshot excludes variables set earlier in the caller's
 > open transaction. Each admitted call also opens an extra backend connection,
-> capped cluster-wide by `pg_durable.max_new_transaction_starts` (default `2`);
+> capped **per database** by advisory admission locks using
+> `pg_durable.max_new_transaction_starts` (default `2`);
 > extra callers wait up to `pg_durable.new_transaction_start_timeout` seconds
 > (default `5`) before failing without opening the loopback session. The inner
 > `df.start()` statement itself is still bounded by a 30 s
@@ -422,7 +437,8 @@ An unrecognised value raises an error rather than falling back to the default.
 > Avoid per-row triggers and other high-fan-out call sites unless you have
 > validated them against that admission cap, and make target operations
 > idempotent because a connection failure can make launch outcome uncertain. See
-> the Transaction Semantics section of `USER_GUIDE.md` for details.
+> [Transaction Semantics](../USER_GUIDE.md#transaction-semantics) for details.
+> Neither mode provides cross-database atomicity with the control store or SQL target.
 
 ---
 
@@ -580,8 +596,10 @@ Return columns:
   encodes sub-orchestration lineage: it starts with the root function instance id and
   appends a `::{parent_generation}::{branch_or_loop_node_id}` segment for each nested
   `JOIN`/`RACE` branch and each non-root `df.loop()` (which runs as its own child
-  sub-orchestration). Instance ids and node ids are 8-char hex and never contain `::`,
-  so the path is unambiguous. Supersession is evaluated **per scope**: a node is
+  sub-orchestration). Public instance IDs and node IDs remain 8-char hex. Satellite
+  execution stamps instead start with the engine root
+  `pgdf-<databaseOID>-<installationUUID>-<localID>`; that root contains no `::`,
+  so existing child composition and path parsing are unchanged. Supersession is evaluated **per scope**: a node is
   superseded when a newer generation exists for its own `instance_path`, or when any
   ancestor scope in its path has advanced to a newer generation. For a plain root-level
   loop this reduces to the second `::`-token being the loop generation.
@@ -617,7 +635,7 @@ ORDER BY node_id;
 
 ### df.setvar(name, value)
 
-Sets a workflow variable for the current user (before `df.start()`). Each user has their own variable namespace — variables set by one user are invisible to others.
+Sets a workflow variable for the current user in this origin database (before `df.start()`). Each user has their own local variable namespace; variables are not shared between installations.
 `df.setvar` is a setup helper, not a workflow node: do not use it inside `df.seq`, `df.join`, `df.race`, etc.
 
 | Parameter | Type | Auto-wrap | Description |
@@ -698,15 +716,20 @@ SELECT df.clearvars();
 
 ### df.grant_usage(role_name [, include_http] [, with_grant])
 
-Grants the privileges a role needs to use pg_durable. By default this grants general `df` usage but does not grant `EXECUTE` on `df.http()`. Pass `include_http => true` to opt a role into HTTP access. Pass `with_grant => true` to allow the role to delegate access to others.
+Grants the privileges a role needs in this database's pg_durable installation.
+By default, this grants general `df` usage but no HTTP or global metrics access.
+`include_http => true` enables `df.http()` and `df.http_multipart()` in this origin.
+`with_grant => true` delegates local administration and also grants `df.metrics()`,
+exposing aggregate totals across **every origin and user** in the shared engine,
+even when the grant is issued in a satellite.
 
 Authorization is enforced by PostgreSQL’s native mechanisms: EXECUTE on this function is revoked from PUBLIC (so only roles explicitly granted access can call it), and the inner GRANT statements run as the caller via SECURITY INVOKER, so the caller must hold the underlying privileges WITH GRANT OPTION.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `role_name` | TEXT | The role to grant privileges to |
-| `include_http` | BOOLEAN | Optional, defaults to `false`; when `true`, also grants `EXECUTE` on `df.http(text, text, text, jsonb, integer)` |
-| `with_grant` | BOOLEAN | Optional, defaults to `false`; when `true`, grants all privileges WITH GRANT OPTION and retains EXECUTE on `df.grant_usage` / `df.revoke_usage` |
+| `include_http` | BOOLEAN | Optional, defaults to `false`; grants local `EXECUTE` on `df.http()` and `df.http_multipart()` |
+| `with_grant` | BOOLEAN | Optional, defaults to `false`; grants local privileges WITH GRANT OPTION, grant/revoke helper access, and shared-engine `df.metrics()` access |
 
 ```sql
 SELECT df.grant_usage('app_role');
@@ -726,11 +749,68 @@ Revokes all privileges previously granted by `df.grant_usage()`, including any `
 SELECT df.revoke_usage('app_role');
 ```
 
+### df.metrics()
+
+Returns shared-engine totals: `total_instances`, `running_instances`,
+`completed_instances`, `failed_instances`, `total_executions`, and `total_events`.
+These are not filtered by local RLS or origin database. `PUBLIC EXECUTE` is revoked;
+access requires a direct administrator grant or
+`df.grant_usage(..., with_grant => true)`. Ordinary usage grants omit this function.
+
 ---
 
 ## Server Configuration (GUCs)
 
 These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See each setting for reload or restart requirements.
+
+---
+
+### pg_durable.database
+
+Control database for the single runtime/provider store (default `postgres`,
+Postmaster context, restart required). Explicitly install pg_durable here before
+satellites. Satellite installs use SQLx with the worker credential to verify control
+readiness version `2` or later; extension version strings need not be identical.
+This setting is not the default SQL target for satellite starts; their origin is.
+
+### pg_durable.worker_role
+
+Connection role for worker management, origin routing, and provider operations
+(default `postgres`, a superuser; Postmaster context, restart required). A custom
+role needs `CONNECT` and required `df` metadata/guard rights in each origin, plus
+access for origin-local HTTP privilege lookup. `BYPASSRLS` grants no database,
+schema, table, or function privileges by itself. SQL nodes still authenticate as
+the captured submitting role in the execution database.
+
+### pg_durable.max_origin_connections
+
+Shared budget for satellite metadata connections across activities and maintenance.
+
+| Property | Value |
+|----------|-------|
+| Type | `integer` |
+| Default | `12` |
+| Range | `2` to `1000` |
+| Context | `POSTMASTER` (restart required) |
+
+Each active route reserves two slots: a guard transaction locking
+`df._installation`, `df.instances`, and `df.nodes` in `ACCESS SHARE` mode, and a
+metadata connection. Routes close after use; there is no idle pool per database
+or database-name count ceiling. Maintenance shares the same budget. The control
+pool's `pg_durable.max_management_connections` limit is unchanged and separate.
+Origin admission waits up to 30 seconds. Metadata connections use a 1.5-second
+lock timeout and a 5-second statement timeout; these are not user SQL timeouts.
+Guard transactions disable server idle-in-transaction and transaction timeouts
+so long-running activities retain their installation locks.
+See [Connection Limits](../USER_GUIDE.md#connection-limits) for total budgeting.
+
+### pg_durable.max_new_transaction_starts
+
+Maximum concurrent `transaction_mode => 'new'` loopback launches **per database**,
+enforced through advisory locks before connecting. Default `2`, range `1` to
+`1000`, Postmaster context (restart required). Launches connect to the caller's
+database, not the explicit SQL target. Excess callers wait up to
+`pg_durable.new_transaction_start_timeout` seconds (default `5`).
 
 ---
 
