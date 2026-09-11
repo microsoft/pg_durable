@@ -91,6 +91,8 @@ static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 /// The client owns reqwest's connection pool, so building it per request meant
 /// a fresh TCP and TLS handshake every time. Caching it keeps connections alive
 /// across requests and builds the SSRF-safe resolver and TLS connector once.
+/// Construction errors are also cached until the worker process restarts;
+/// request-time failures do not affect the cached client.
 pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
     HTTP_CLIENT
         .get_or_init(build_client)
@@ -284,6 +286,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct EnvGuard {
         name: &'static str,
@@ -534,6 +537,85 @@ mod tests {
         assert!(
             long_elapsed > Duration::from_millis(600),
             "second request inherited the first request's deadline: {long_elapsed:?}"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let body_server = async {
+            let mut connections = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let bytes_read = stream.read(&mut buffer).await.unwrap();
+                    assert!(bytes_read > 0, "connection closed before request headers");
+                    request.extend_from_slice(&buffer[..bytes_read]);
+                }
+                let is_long = request.starts_with(b"GET /long HTTP/1.1\r\n");
+                connections.push((stream, is_long));
+            }
+
+            for (stream, _) in &mut connections {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no")
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            for (stream, is_long) in &mut connections {
+                if *is_long {
+                    stream.write_all(b"k").await.unwrap();
+                }
+            }
+        };
+
+        let body_requests = async {
+            let started = std::time::Instant::now();
+            let (short_response, long_response) = tokio::join!(
+                http_client()
+                    .unwrap()
+                    .get(format!("{url}/short"))
+                    .timeout(Duration::from_millis(200))
+                    .send(),
+                http_client()
+                    .unwrap()
+                    .get(format!("{url}/long"))
+                    .timeout(Duration::from_secs(2))
+                    .send(),
+            );
+            let short_response =
+                short_response.expect("short request must receive headers before its deadline");
+            let long_response =
+                long_response.expect("long request must receive headers before its deadline");
+
+            tokio::join!(
+                async {
+                    let result = short_response.bytes().await;
+                    (result, started.elapsed())
+                },
+                long_response.text(),
+            )
+        };
+        let ((), ((short_body, short_elapsed), long_body)) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(body_server, body_requests)
+            })
+            .await
+            .expect("body deadline fixture did not finish");
+
+        let body_error = short_body.expect_err("a stalled response body must fail");
+        assert!(
+            body_error.is_timeout(),
+            "expected a body timeout error, got: {body_error}"
+        );
+        assert!(
+            short_elapsed < Duration::from_millis(600),
+            "body read overran the short request's 200ms deadline: {short_elapsed:?}"
+        );
+        assert_eq!(
+            long_body.expect("the overlapping long request must complete"),
+            "ok"
         );
     }
 }

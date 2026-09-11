@@ -344,6 +344,15 @@ inherit another's authentication by landing on a warm connection. The
 per-node timeout is applied to each request rather than to the client for the
 same reason — it is caller configuration, not connection state.
 
+Client construction is attempted on first use. If it fails with `Failed to
+create HTTP client`, that error is cached for the lifetime of the background
+worker process: subsequent HTTP and multipart activities return the same
+error without retrying construction. After addressing the cause, restart the
+background worker process (or PostgreSQL) to allow another construction attempt;
+retrying an activity alone does not clear the error. Ordinary DNS, connection,
+and request-timeout failures happen after construction and are not cached this
+way, so they do not require a worker restart.
+
 ---
 
 ## 7. Audit Logging
