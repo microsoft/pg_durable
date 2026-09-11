@@ -73,6 +73,7 @@ assert_output() {
 
 assert_workflow_configuration() {
     local prepare_job
+    local publish_job
     local workflow_permissions
     local expected_group
     local failures=0
@@ -82,6 +83,13 @@ assert_workflow_configuration() {
             /^  prepare:$/ { in_prepare = 1 }
             in_prepare && /^  [[:alnum:]_-]+:$/ && $0 != "  prepare:" { exit }
             in_prepare { print }
+        ' "$workflow"
+    )"
+    publish_job="$(
+        awk '
+            /^  publish:$/ { in_publish = 1 }
+            in_publish && /^  [[:alnum:]_-]+:$/ && $0 != "  publish:" { exit }
+            in_publish { print }
         ' "$workflow"
     )"
     workflow_permissions="$(
@@ -106,6 +114,32 @@ assert_workflow_configuration() {
         echo "PASS: workflow_least_privilege"
     else
         echo "FAIL: workflow permissions must retain contents: read and packages: write" >&2
+        failures=$((failures + 1))
+    fi
+
+    if [ "$(grep -Fxc "        if: steps.prepare.outputs.ready == 'true'" <<< "$prepare_job")" -eq 2 ] &&
+        grep -Fq '          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' <<< "$prepare_job" &&
+        grep -Fq '          TAG: ${{ steps.prepare.outputs.tag }}' <<< "$prepare_job" &&
+        grep -Fq '          gh release download "${TAG}" \' <<< "$prepare_job" &&
+        grep -Fq '            --pattern "pg-durable-postgresql-17_*_amd64.deb" \' <<< "$prepare_job" &&
+        grep -Fq '            --pattern "pg-durable-postgresql-18_*_amd64.deb" \' <<< "$prepare_job" &&
+        grep -Fq '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1' <<< "$prepare_job" &&
+        grep -Fq '          name: pg-durable-docker-packages-${{ github.run_id }}' <<< "$prepare_job" &&
+        grep -Fq '          path: dist/*.deb' <<< "$prepare_job"; then
+        echo "PASS: prepare_downloads_and_uploads_release_packages"
+    else
+        echo "FAIL: ready prepare job must download both release packages and upload one run-scoped artifact" >&2
+        failures=$((failures + 1))
+    fi
+
+    if grep -Fq '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1' <<< "$publish_job" &&
+        grep -Fq '          name: pg-durable-docker-packages-${{ github.run_id }}' <<< "$publish_job" &&
+        grep -Fq '          path: dist' <<< "$publish_job" &&
+        grep -Fq 'compgen -G "dist/pg-durable-postgresql-${PG_MAJOR}_*_amd64.deb"' <<< "$publish_job" &&
+        ! grep -Fq 'gh release download' <<< "$publish_job"; then
+        echo "PASS: publish_consumes_prepared_package_artifact"
+    else
+        echo "FAIL: publish matrix must consume the prepared artifact and only check its matrix package" >&2
         failures=$((failures + 1))
     fi
 
