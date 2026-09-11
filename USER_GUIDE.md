@@ -701,6 +701,24 @@ df.http(
 ) RETURNS TEXT                    -- JSON response object
 ```
 
+### df.with_http_options() Function
+
+`df.with_http_options(fut TEXT, options JSONB) RETURNS TEXT` is the entry point for
+HTTP modifiers beyond the arguments passed to `df.http` and `df.http_multipart`.
+
+```sql
+df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
+    |=> 'response'
+```
+
+In this version, only SQL `NULL` and an empty object (`{}`) are accepted as
+`options`; no option keys are supported yet. Other JSON values, including JSON
+`null`, are rejected. Empty options return the input text byte-for-byte.
+
+The input must be a single `HTTP` or `HTTP_MULTIPART` node, optionally named with
+`|=>`. SQL nodes and compound graphs are rejected, so apply the helper before
+combining nodes. It does not execute a request or change HTTP permissions.
+
 ### Response Format
 
 HTTP calls return a JSON object with full response details:

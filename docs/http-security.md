@@ -117,6 +117,12 @@ superusers always return `true`; regular roles return `true` only when an
 explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO <role>` (or a role that
 inherits one) is in effect.
 
+`df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
+Like other combinators, it uses ordinary `df` schema access and default PUBLIC
+`EXECUTE`. Wrapping a hand-crafted HTTP node does not bypass the activity's
+privilege check. No option keys are supported in this version; SQL `NULL` and
+`{}` preserve the original node text.
+
 ### 3.3 Managing access
 
 HTTP access is **opt-in** and separate from general `df` access.
