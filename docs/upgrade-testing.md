@@ -266,6 +266,10 @@ what the upgrade script handles, and any backward compatibility considerations.
   keys fails explicitly, without changing legacy requests on older schemas.
 - Named credentials use native `ADD`, `SET` and `DROP`; the B2 catalog test
   verifies that these preserve unrelated named values and endpoint-auth options.
+- Servers using `auth_scheme 'none'` may omit `base_url` for named-secret storage;
+  HTTP endpoint execution still requires a URL. This validator rule needs no
+  additional upgrade DDL and leaves existing server definitions valid. The B2
+  probe covers URL-less creation and removal of a URL when switching to `none`.
 
 #### Add `df.with_http_options()`
 - **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. SQL `NULL` and `{}` preserve input bytes; `secret_bindings` and `form_fields` configure references and literal form data. Other values and unsupported keys raise an error.

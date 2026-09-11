@@ -212,7 +212,7 @@ pub enum AuthScheme {
 
 #[derive(Clone)]
 pub struct EndpointConfig {
-    pub base_url: Url,
+    pub base_url: Option<Url>,
     pub auth_scheme: AuthScheme,
 }
 
@@ -249,26 +249,31 @@ impl EndpointConfig {
                     .into(),
             );
         }
-        let raw_url = required(&options, "base_url")?;
-        if raw_url
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-            || raw_url.contains(['{', '}', '\\'])
-        {
-            return Err("Endpoint base_url must be a literal HTTPS URL".into());
-        }
-        let base_url = Url::parse(raw_url).map_err(|_| "Invalid endpoint base_url")?;
-        if base_url.scheme() != "https"
-            || base_url.host_str().is_none()
-            || !base_url.username().is_empty()
-            || base_url.password().is_some()
-            || base_url.query().is_some()
-            || base_url.fragment().is_some()
-        {
-            return Err(
-                "Endpoint base_url must be HTTPS without userinfo, query or fragment".into(),
-            );
-        }
+        let base_url = if options.contains_key("base_url") {
+            let raw_url = required(&options, "base_url")?;
+            if raw_url
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+                || raw_url.contains(['{', '}', '\\'])
+            {
+                return Err("Endpoint base_url must be a literal HTTPS URL".into());
+            }
+            let base_url = Url::parse(raw_url).map_err(|_| "Invalid endpoint base_url")?;
+            if base_url.scheme() != "https"
+                || base_url.host_str().is_none()
+                || !base_url.username().is_empty()
+                || base_url.password().is_some()
+                || base_url.query().is_some()
+                || base_url.fragment().is_some()
+            {
+                return Err(
+                    "Endpoint base_url must be HTTPS without userinfo, query or fragment".into(),
+                );
+            }
+            Some(base_url)
+        } else {
+            None
+        };
         let auth_scheme = match required(&options, "auth_scheme")? {
             "none" => AuthScheme::None,
             "bearer" => AuthScheme::Bearer,
@@ -307,6 +312,9 @@ impl EndpointConfig {
         };
         if !matches!(auth_scheme, AuthScheme::Header(_)) && options.contains_key("header_name") {
             return Err("Endpoint header_name requires auth_scheme 'header'".into());
+        }
+        if base_url.is_none() && !matches!(auth_scheme, AuthScheme::None) {
+            return Err("Endpoint base_url is required unless auth_scheme is 'none'".into());
         }
         Ok(Self {
             base_url,
@@ -579,15 +587,17 @@ impl<'a> EndpointCatalog<'a> {
 
     pub async fn resolve_endpoint(&mut self, server: &str) -> Result<ResolvedEndpoint, String> {
         let config = self.load_server(server).await?.config.clone();
+        let base_url = config.base_url.ok_or_else(|| {
+            format!(
+                "Endpoint server {server:?} has no base_url; it can only be used for named secrets"
+            )
+        })?;
         let auth = if matches!(config.auth_scheme, AuthScheme::None) {
             EndpointAuth::None
         } else {
             resolve_auth(config.auth_scheme, self.load_mapping(server).await?)?
         };
-        Ok(ResolvedEndpoint {
-            base_url: config.base_url,
-            auth,
-        })
+        Ok(ResolvedEndpoint { base_url, auth })
     }
 
     pub async fn close(mut self) -> Result<(), String> {
@@ -763,6 +773,9 @@ mod unit_tests {
 
     #[test]
     fn endpoint_valid_options() {
+        let secrets_only = EndpointConfig::from_options(&options(&["auth_scheme=none"])).unwrap();
+        assert!(secrets_only.base_url.is_none());
+        assert!(matches!(secrets_only.auth_scheme, AuthScheme::None));
         for scheme in ["none", "bearer", "query"] {
             assert!(EndpointConfig::from_options(&options(&[
                 "base_url=https://api.github.com/v1",
@@ -785,6 +798,13 @@ mod unit_tests {
     #[test]
     fn endpoint_rejects_invalid_server_options() {
         for invalid in [
+            vec![],
+            vec!["auth_scheme=bearer"],
+            vec!["auth_scheme=query"],
+            vec!["auth_scheme=header", "header_name=x-api-key"],
+            vec!["auth_scheme=none", "base_url="],
+            vec!["auth_scheme=none", "base_url=not-a-url"],
+            vec!["auth_scheme=none", "header_name=x-api-key"],
             vec!["base_url=https://api.github.com"],
             vec!["base_url=http://api.github.com", "auth_scheme=none"],
             vec![
@@ -899,7 +919,7 @@ mod tests {
                 CREATE SERVER endpoint_snapshot FOREIGN DATA WRAPPER pg_durable_fdw
                     OPTIONS (base_url 'https://old.azurewebsites.net', auth_scheme 'bearer');
                 CREATE SERVER endpoint_snapshot_other FOREIGN DATA WRAPPER pg_durable_fdw
-                    OPTIONS (base_url 'https://other.azurewebsites.net', auth_scheme 'none');
+                    OPTIONS (auth_scheme 'none');
                 GRANT USAGE ON FOREIGN SERVER endpoint_snapshot, endpoint_snapshot_other TO endpoint_snapshot_user;
                 CREATE USER MAPPING FOR endpoint_snapshot_user SERVER endpoint_snapshot
                     OPTIONS (token 'OLD_TOKEN', "secret.generation" 'OLD_NAMED');
@@ -925,7 +945,7 @@ mod tests {
                 ).fetch_one(&mut connection).await.unwrap();
                 assert_eq!(connected, 0);
                 drop(occupied);
-                assert_eq!(waiting.await.unwrap().config.base_url.as_str(), "https://old.azurewebsites.net/");
+                assert_eq!(waiting.await.unwrap().config.base_url.as_ref().unwrap().as_str(), "https://old.azurewebsites.net/");
             }
             assert_eq!(semaphore.available_permits(), 0);
             let settings: (String, String) = sqlx::query_as(
@@ -1085,7 +1105,7 @@ mod tests {
                     GRANT USAGE ON FOREIGN SERVER endpoint_test TO "endpoint Alice", endpoint_bob;
                     GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO "endpoint Alice";
                     CREATE SERVER endpoint_none FOREIGN DATA WRAPPER pg_durable_fdw
-                        OPTIONS (base_url 'https://api.github.com', auth_scheme 'none');
+                        OPTIONS (auth_scheme 'none');
                     GRANT USAGE ON FOREIGN SERVER endpoint_none TO "endpoint Alice";
                     CREATE FOREIGN DATA WRAPPER endpoint_other_fdw;
                     CREATE SERVER endpoint_other FOREIGN DATA WRAPPER endpoint_other_fdw;
@@ -1130,6 +1150,8 @@ mod tests {
                 .await
                 .unwrap();
                 assert!(sqlx::raw_sql("ALTER SERVER endpoint_owned OPTIONS (DROP header_name)")
+                    .execute(&mut alice).await.is_err());
+                assert!(sqlx::raw_sql("ALTER SERVER endpoint_owned OPTIONS (DROP base_url)")
                     .execute(&mut alice).await.is_err());
                 assert!(sqlx::raw_sql("CREATE FOREIGN TABLE endpoint_table (value text) SERVER endpoint_owned")
                     .execute(&mut alice).await.is_err());
@@ -1249,8 +1271,29 @@ mod tests {
                 sqlx::raw_sql("ALTER SERVER endpoint_owned OPTIONS (SET auth_scheme 'bearer')")
                     .execute(&mut alice).await.unwrap();
                 assert!(resolve_endpoint("endpoint Alice", Some(&database), "endpoint_owned").await.err().unwrap().contains("'token' is required"));
+                let error = resolve_endpoint("endpoint Alice", Some(&database), "endpoint_none").await.err().unwrap();
+                assert!(error.contains("has no base_url"));
+                assert!(error.contains("endpoint_none"));
+                assert!(resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_none").await.err().unwrap().contains("mapping for the submitting role is required"));
+                sqlx::raw_sql(r#"CREATE USER MAPPING FOR CURRENT_USER SERVER endpoint_none OPTIONS ("secret.key" 'NONE_SECRET')"#)
+                    .execute(&mut alice).await.unwrap();
+                assert_eq!(resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_none").await.unwrap()["key"], "NONE_SECRET");
+                assert!(resolve_named_secrets("endpoint_bob", Some(&database), "endpoint_none").await.err().unwrap().contains("USAGE"));
+                for statement in [
+                    "ALTER SERVER endpoint_none OPTIONS (SET auth_scheme 'bearer')",
+                    "ALTER SERVER endpoint_none OPTIONS (ADD base_url 'http://api.github.com')",
+                    "ALTER SERVER endpoint_none OPTIONS (ADD base_url '')",
+                ] {
+                    assert!(sqlx::raw_sql(statement).execute(&mut connection).await.is_err());
+                }
+                sqlx::raw_sql("ALTER SERVER endpoint_none OPTIONS (ADD base_url 'https://api.github.com')")
+                    .execute(&mut connection).await.unwrap();
                 let resolved = resolve_endpoint("endpoint Alice", Some(&database), "endpoint_none").await.unwrap();
+                assert_eq!(resolved.base_url.as_str(), "https://api.github.com/");
                 assert!(matches!(resolved.auth, EndpointAuth::None));
+                sqlx::raw_sql("ALTER SERVER endpoint_none OPTIONS (DROP base_url)")
+                    .execute(&mut connection).await.unwrap();
+                assert_eq!(resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_none").await.unwrap()["key"], "NONE_SECRET");
                 assert!(resolve_endpoint("endpoint Alice", Some(&database), "endpoint_missing").await.err().unwrap().contains("does not exist"));
                 assert!(resolve_endpoint("endpoint Alice", Some(&database), "endpoint_other").await.err().unwrap().contains("must use pg_durable_fdw"));
 

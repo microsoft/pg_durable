@@ -792,14 +792,15 @@ Endpoint definitions use a handler-less `pg_durable_fdw`. A foreign server holds
 the base URL and authentication scheme; each caller's user mapping holds its
 credentials. There are no foreign tables or scans.
 
-`base_url` and `auth_scheme` are required server options. The base must be a
+`auth_scheme` is required. `base_url` may be omitted only with `auth_scheme 'none'`
+for a server used solely for named secrets. A supplied base URL must be a nonempty,
 literal HTTPS URL, optionally with a path prefix, without userinfo, query or
-fragment. Creating a server does not authorize network access or bypass HTTP
-destination restrictions.
+fragment. Using a server as an HTTP endpoint always requires a base URL. Creating
+a server does not authorize network access or bypass HTTP destination restrictions.
 
 | `auth_scheme` | Additional server option | Required user-mapping option |
 |---|---|---|
-| `none` | None | None; no mapping is needed |
+| `none` | None | None for endpoint authentication; named bindings require a mapping |
 | `bearer` | None | `token` (without the `Bearer ` prefix) |
 | `header` | `header_name`, such as `x-api-key` | `header_value` |
 | `query` | None | `query_string`, already URL-encoded, optionally starting with `?` |
@@ -959,7 +960,16 @@ cannot contain control characters or `=`. Quoted names follow PostgreSQL's norma
 identifier-length limit.
 
 The same plaintext, backup and provisioning-log caveats as other credentials
-apply. A server used only for named secrets can use `auth_scheme 'none'`.
+apply. A server used only for named secrets can omit `base_url`:
+
+```sql
+CREATE SERVER app_secrets FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (auth_scheme 'none');
+```
+
+Server `USAGE` and the caller's user mapping are still required. Such a server
+cannot be used as an HTTP endpoint until a valid `base_url` is added. A named
+secret's server URL, when present, does not restrict the request destination.
 
 An explicit header binding works with raw URLs or endpoint references:
 

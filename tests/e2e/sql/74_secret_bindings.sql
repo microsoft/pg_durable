@@ -1,7 +1,7 @@
 RESET SESSION AUTHORIZATION;
 DROP DATABASE IF EXISTS _test_binding_sql_target;
 CREATE DATABASE _test_binding_sql_target TEMPLATE template0;
-DROP SERVER IF EXISTS sb_service, sb_denied, sb_nomap, sb_auth CASCADE;
+DROP SERVER IF EXISTS sb_service, sb_endpoint, sb_denied, sb_nomap, sb_auth CASCADE;
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sb_no_http') THEN DROP OWNED BY sb_no_http; END IF;
 END $$;
@@ -11,14 +11,16 @@ GRANT CONNECT ON DATABASE _test_binding_sql_target TO df_e2e_user, sb_no_http;
 SELECT df.grant_usage('sb_no_http');
 SELECT df.grant_usage('df_e2e_user', include_http => true);
 CREATE SERVER sb_service FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (auth_scheme 'none');
+CREATE SERVER sb_endpoint FOREIGN DATA WRAPPER pg_durable_fdw
     OPTIONS (base_url 'https://httpbingo.org', auth_scheme 'none');
 CREATE SERVER sb_denied FOREIGN DATA WRAPPER pg_durable_fdw
-    OPTIONS (base_url 'https://httpbingo.org', auth_scheme 'none');
+    OPTIONS (auth_scheme 'none');
 CREATE SERVER sb_nomap FOREIGN DATA WRAPPER pg_durable_fdw
-    OPTIONS (base_url 'https://httpbingo.org', auth_scheme 'none');
+    OPTIONS (auth_scheme 'none');
 CREATE SERVER sb_auth FOREIGN DATA WRAPPER pg_durable_fdw
     OPTIONS (base_url 'https://httpbingo.org', auth_scheme 'bearer');
-GRANT USAGE ON FOREIGN SERVER sb_service, sb_nomap, sb_auth TO df_e2e_user;
+GRANT USAGE ON FOREIGN SERVER sb_service, sb_endpoint, sb_nomap, sb_auth TO df_e2e_user;
 GRANT USAGE ON FOREIGN SERVER sb_service TO sb_no_http;
 CREATE USER MAPPING FOR df_e2e_user SERVER sb_service OPTIONS
     ("secret.private" 'BINDING_PRIVATE_CREDENTIAL', "secret.probe" 'a&b+c= %',
@@ -41,7 +43,7 @@ DECLARE
     target_probe text := $probe$SELECT 1 / (pg_catalog.current_database() = '_test_binding_sql_target'
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'))::integer$probe$;
 BEGIN
-    FOREACH destination IN ARRAY ARRAY['https://httpbingo.org/status/204', df.endpoint('sb_service', '/status/204'), df.endpoint('sb_auth', '/status/204')] LOOP
+    FOREACH destination IN ARRAY ARRAY['https://httpbingo.org/status/204', df.endpoint('sb_endpoint', '/status/204'), df.endpoint('sb_auth', '/status/204')] LOOP
         bindings := jsonb_build_object(
             'headers', jsonb_build_object('X-Key', df.secret('sb_service', 'private') || '{"prefix":"Key "}'::jsonb),
             'query', jsonb_build_object('key', df.secret('sb_service', 'private')));
@@ -60,6 +62,9 @@ BEGIN
 END $$;
 
 INSERT INTO _binding_cases VALUES
+    (df.start(df.http(df.endpoint('sb_service', '/status/204'), 'GET'), 'binding-url-less-endpoint'), 'failed', '%has no base_url%', false),
+    (df.start(df.http_multipart(df.endpoint('sb_service', '/status/204'), parts => '[{"name":"file","data_b64":"aGVsbG8="}]'),
+        'binding-url-less-multipart-endpoint'), 'failed', '%has no base_url%', false),
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'GET'),
         jsonb_build_object('secret_bindings', jsonb_build_object('headers', jsonb_build_object('X-Key', df.secret('sb_service', 'missing'))))), 'binding-missing-key'), 'failed', '%secret key is missing%', false),
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'GET'),
@@ -155,7 +160,7 @@ BEGIN
 END $$;
 
 DROP TABLE _binding_cases;
-DROP SERVER sb_service, sb_denied, sb_nomap, sb_auth CASCADE;
+DROP SERVER sb_service, sb_endpoint, sb_denied, sb_nomap, sb_auth CASCADE;
 DROP OWNED BY sb_no_http;
 DROP ROLE sb_no_http;
 DROP DATABASE _test_binding_sql_target;

@@ -272,7 +272,9 @@ Activities validate field shapes, reject conflicts with ordinary fields and
 endpoint authentication, and resolve each referenced server under `submitted_by`
 in the request's control-database snapshot after destination policy checks.
 Server `USAGE` and a caller-owned mapping are
-required even for `auth_scheme 'none'`. Named values come only from individual
+required even for `auth_scheme 'none'`. With that scheme, a named-secret-only
+server may omit `base_url`; endpoint requests fail without it. A supplied URL
+still undergoes the standard validation. Named values come only from individual
 `"secret.<key>"` user-mapping options, not ambient identity, endpoint-authentication
 options or server options. The prefix is a credential namespace, not an instruction
 to interpret the value. Native `ADD`, `SET` and `DROP` update one credential

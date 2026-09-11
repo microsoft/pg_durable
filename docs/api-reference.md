@@ -349,7 +349,10 @@ the FDW validator invoked by PostgreSQL on creation and alteration; it returns
 `void` or raises an error without echoing credential values.
 
 The server options are `base_url`, `auth_scheme`, and `header_name` (only for
-header authentication). Mapping options are `token`, `header_value`,
+header authentication). `auth_scheme` is required; `base_url` may be omitted only
+with `auth_scheme 'none'` for named-secret storage. A supplied URL retains all
+validation requirements, and endpoint requests fail explicitly if it is absent.
+Mapping options are `token`, `header_value`,
 `query_string`, and individual `"secret.<key>"` values. Named credentials support
 native per-option `ADD`, `SET` and `DROP`. See
 [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
