@@ -235,8 +235,8 @@ BEGIN
     RAISE NOTICE 'TEST 3c PASSED: admin helpers are not executable by non-superusers by default';
 END $$;
 
--- Re-grant df privileges to the E2E user
-SELECT df.grant_usage('df_e2e_user');
+-- Restore the shared setup's privileges, including HTTP access for later tests.
+SELECT df.grant_usage('df_e2e_user', include_http => true);
 
 -- Test 4: df.grant_usage() does not grant EXECUTE on admin helpers to the target role
 DO $$
@@ -364,6 +364,24 @@ BEGIN
     END IF;
     
     RAISE NOTICE 'Extension restored successfully';
+END $$;
+
+-- Keep the shared setup's HTTP privileges intact for subsequent tests.
+DO $$
+BEGIN
+    IF NOT has_function_privilege(
+        'df_e2e_user', 'df.http(text, text, text, jsonb, integer)', 'EXECUTE'
+    ) THEN
+        RAISE EXCEPTION 'TEST SETUP FAILED: df.http() privilege not restored for df_e2e_user';
+    END IF;
+
+    IF NOT has_function_privilege(
+        'df_e2e_user', 'df.http_multipart(text, text, jsonb, jsonb, integer)', 'EXECUTE'
+    ) THEN
+        RAISE EXCEPTION 'TEST SETUP FAILED: df.http_multipart() privilege not restored for df_e2e_user';
+    END IF;
+
+    RAISE NOTICE 'Shared E2E HTTP privileges restored successfully';
 END $$;
 
 SELECT 'TEST PASSED' AS result;
