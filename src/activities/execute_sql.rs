@@ -209,24 +209,12 @@ pub async fn execute(
 
     // Acquire a permit from the user-connection semaphore. The permit is held
     // for the entire SQL execution and released automatically when dropped.
-    let timeout = get_execution_acquire_timeout();
-    let limit = get_max_user_connections();
-    let _permit = match tokio::time::timeout(timeout, semaphore.acquire()).await {
-        Ok(Ok(permit)) => permit,
-        Ok(Err(_)) => {
-            return Err(format!(
-                "pg_durable: connection limit reached (max_user_connections={limit}). \
-                 Semaphore closed unexpectedly."
-            ));
-        }
-        Err(_) => {
-            return Err(format!(
-                "pg_durable: connection limit reached (max_user_connections={limit}). \
-                 Timed out after {}s waiting for an available execution slot.",
-                timeout.as_secs()
-            ));
-        }
-    };
+    let _permit = crate::types::acquire_execution_permit(
+        &semaphore,
+        get_execution_acquire_timeout(),
+        get_max_user_connections(),
+    )
+    .await?;
 
     let mut conn = connect_as_user(&input.submitted_by, input.database.as_deref()).await?;
 

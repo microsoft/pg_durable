@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 
 use crate::ssrf::DomainAllowlist;
 use crate::types::HttpConfig;
@@ -105,6 +106,7 @@ pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
 pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
+    semaphore: Arc<Semaphore>,
     allowed_domains: Arc<DomainAllowlist>,
     config_json: String,
 ) -> Result<String, String> {
@@ -157,9 +159,9 @@ pub async fn execute(
         false,
         config.headers.as_ref(),
     )?;
+    let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
     let mut prepared = crate::endpoints::prepare_request(
-        audit_user,
-        config.database.as_deref(),
+        &mut catalog,
         config.endpoint.as_deref(),
         &config.url,
         config.headers.as_ref(),
@@ -193,13 +195,9 @@ pub async fn execute(
 
     let resolved = config
         .secret_options
-        .resolve(
-            audit_user,
-            config.database.as_deref(),
-            &mut prepared,
-            config.headers.as_ref(),
-        )
+        .resolve(&mut catalog, &mut prepared, config.headers.as_ref())
         .await?;
+    catalog.close().await?;
     let safe_url = if config
         .secret_options
         .secret_bindings

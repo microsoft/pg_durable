@@ -19,7 +19,9 @@ pub fn create_activity_registry(
     semaphore: Arc<Semaphore>,
     http_allowed_domains: Arc<DomainAllowlist>,
 ) -> ActivityRegistry {
-    let sql_semaphore = semaphore;
+    let sql_semaphore = semaphore.clone();
+    let http_semaphore = semaphore.clone();
+    let multipart_semaphore = semaphore;
     let graph_pool = pool.clone();
     let transaction_graph_pool = pool.clone();
     let status_pool = pool.clone();
@@ -56,13 +58,15 @@ pub fn create_activity_registry(
         })
         .register(activities::execute_http::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = http_pool.clone();
+            let semaphore = http_semaphore.clone();
             let allowed_domains = http_allowed_domains.clone();
-            async move { activities::execute_http::execute(ctx, pool, allowed_domains, config_json).await }
+            async move { activities::execute_http::execute(ctx, pool, semaphore, allowed_domains, config_json).await }
         })
         .register(activities::execute_multipart::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = multipart_pool.clone();
+            let semaphore = multipart_semaphore.clone();
             let allowed_domains = multipart_allowed_domains.clone();
-            async move { activities::execute_multipart::execute(ctx, pool, allowed_domains, config_json).await }
+            async move { activities::execute_multipart::execute(ctx, pool, semaphore, allowed_domains, config_json).await }
         })
         .build()
 }

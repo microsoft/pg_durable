@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use pgrx::prelude::*;
 use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
+use sqlx::Connection;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use url::Url;
 
 pub const FDW_NAME: &str = "pg_durable_fdw";
@@ -182,8 +184,7 @@ fn prepare_endpoint_request(
 }
 
 pub async fn prepare_request(
-    submitted_by: &str,
-    database: Option<&str>,
+    catalog: &mut EndpointCatalog<'_>,
     server: Option<&str>,
     url: &str,
     headers: Option<&serde_json::Value>,
@@ -191,7 +192,7 @@ pub async fn prepare_request(
     match server {
         Some(server) => {
             validate_endpoint_path(url)?;
-            let endpoint = resolve_endpoint(submitted_by, database, server).await?;
+            let endpoint = catalog.resolve_endpoint(server).await?;
             prepare_endpoint_request(endpoint, url, headers)
         }
         None => Ok(EndpointRequest {
@@ -201,6 +202,7 @@ pub async fn prepare_request(
     }
 }
 
+#[derive(Clone)]
 pub enum AuthScheme {
     None,
     Bearer,
@@ -208,6 +210,7 @@ pub enum AuthScheme {
     Query,
 }
 
+#[derive(Clone)]
 pub struct EndpointConfig {
     pub base_url: Url,
     pub auth_scheme: AuthScheme,
@@ -418,60 +421,185 @@ fn resolve_auth(config: AuthScheme, mapping: &[String]) -> Result<EndpointAuth, 
     }
 }
 
-async fn load_endpoint_catalog(
-    submitted_by: &str,
-    database: Option<&str>,
-    server: &str,
-) -> Result<(sqlx::PgConnection, i64, EndpointConfig), String> {
-    let mut connection = crate::types::connect_as_user(submitted_by, database)
-        .await
-        .map_err(|_| "Endpoint catalog connection failed")?;
-    let installed: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1 FROM pg_catalog.pg_foreign_data_wrapper AS wrapper
-            JOIN pg_catalog.pg_depend AS dependency
-              ON dependency.classid = 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass
-             AND dependency.objid = wrapper.oid
-             AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
-             AND dependency.deptype = 'e'
-            JOIN pg_catalog.pg_extension AS extension ON extension.oid = dependency.refobjid
-            WHERE wrapper.fdwname = $1 AND extension.extname = 'pg_durable'
-        )",
-    )
-    .bind(FDW_NAME)
-    .fetch_one(&mut connection)
-    .await
-    .map_err(|_| "Endpoint wrapper lookup failed")?;
-    if !installed {
-        return Err(
-            "Endpoint support is not installed; update the pg_durable extension schema".into(),
-        );
+struct CatalogServer {
+    oid: i64,
+    config: EndpointConfig,
+    mapping: Option<Vec<String>>,
+}
+
+pub struct EndpointCatalog<'a> {
+    submitted_by: &'a str,
+    database: Option<&'a str>,
+    semaphore: &'a Semaphore,
+    connection: Option<sqlx::PgConnection>,
+    permit: Option<SemaphorePermit<'a>>,
+    servers: BTreeMap<String, CatalogServer>,
+}
+
+impl<'a> EndpointCatalog<'a> {
+    pub fn new(submitted_by: &'a str, semaphore: &'a Semaphore) -> Self {
+        Self {
+            submitted_by,
+            database: None,
+            semaphore,
+            connection: None,
+            permit: None,
+            servers: BTreeMap::new(),
+        }
     }
 
-    let endpoint: Option<(i64, bool, bool, Option<Vec<String>>)> = sqlx::query_as(
-        "SELECT server.oid::pg_catalog.int8,
-                wrapper.fdwname = $2,
-                pg_catalog.has_server_privilege(server.oid, 'USAGE'),
-                server.srvoptions
-         FROM pg_catalog.pg_foreign_server AS server
-         JOIN pg_catalog.pg_foreign_data_wrapper AS wrapper ON wrapper.oid = server.srvfdw
-         WHERE server.srvname = $1",
-    )
-    .bind(server)
-    .bind(FDW_NAME)
-    .fetch_optional(&mut connection)
-    .await
-    .map_err(|_| "Endpoint server lookup failed")?;
-    let (server_oid, correct_wrapper, permitted, options) =
-        endpoint.ok_or("Endpoint server does not exist")?;
-    if !correct_wrapper {
-        return Err("Endpoint server must use pg_durable_fdw".into());
+    async fn connection(&mut self) -> Result<&mut sqlx::PgConnection, String> {
+        if self.connection.is_none() {
+            let permit = crate::types::acquire_execution_permit(
+                self.semaphore,
+                crate::types::get_execution_acquire_timeout(),
+                crate::types::get_max_user_connections(),
+            )
+            .await?;
+            let mut connection = crate::types::connect_as_user(self.submitted_by, self.database)
+                .await
+                .map_err(|error| format!("Endpoint catalog connection failed: {error}"))?;
+            sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut connection)
+                .await
+                .map_err(|_| "Endpoint catalog snapshot failed")?;
+            let identity_matches: bool = sqlx::query_scalar(
+                "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
+                    AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
+            )
+            .bind(self.submitted_by)
+            .fetch_one(&mut connection)
+            .await
+            .map_err(|_| "Endpoint catalog identity check failed")?;
+            if !identity_matches {
+                return Err(format!(
+                    "Endpoint catalog identity differs from submitting role {:?}",
+                    self.submitted_by
+                ));
+            }
+            let installed: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_foreign_data_wrapper AS wrapper
+                    JOIN pg_catalog.pg_depend AS dependency
+                      ON dependency.classid = 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass
+                     AND dependency.objid = wrapper.oid
+                     AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+                     AND dependency.deptype = 'e'
+                    JOIN pg_catalog.pg_extension AS extension ON extension.oid = dependency.refobjid
+                    WHERE wrapper.fdwname = $1 AND extension.extname = 'pg_durable'
+                )",
+            )
+            .bind(FDW_NAME)
+            .fetch_one(&mut connection)
+            .await
+            .map_err(|_| "Endpoint wrapper lookup failed")?;
+            if !installed {
+                return Err(
+                    "Endpoint support is not installed; update the pg_durable extension schema"
+                        .into(),
+                );
+            }
+            self.connection = Some(connection);
+            self.permit = Some(permit);
+        }
+        Ok(self.connection.as_mut().unwrap())
     }
-    if !permitted {
-        return Err("Permission denied: endpoint server USAGE is required".into());
+
+    async fn load_server(&mut self, server: &str) -> Result<&CatalogServer, String> {
+        if !self.servers.contains_key(server) {
+            let connection = self
+                .connection()
+                .await
+                .map_err(|error| format!("Endpoint server {server:?}: {error}"))?;
+            let endpoint: Option<(i64, bool, bool, Option<Vec<String>>)> = sqlx::query_as(
+                "SELECT server.oid::pg_catalog.int8,
+                        wrapper.fdwname = $2,
+                        pg_catalog.has_server_privilege(server.oid, 'USAGE'),
+                        server.srvoptions
+                 FROM pg_catalog.pg_foreign_server AS server
+                 JOIN pg_catalog.pg_foreign_data_wrapper AS wrapper ON wrapper.oid = server.srvfdw
+                 WHERE server.srvname = $1",
+            )
+            .bind(server)
+            .bind(FDW_NAME)
+            .fetch_optional(connection)
+            .await
+            .map_err(|_| "Endpoint server lookup failed")?;
+            let (oid, correct_wrapper, permitted, options) =
+                endpoint.ok_or("Endpoint server does not exist")?;
+            if !correct_wrapper {
+                return Err("Endpoint server must use pg_durable_fdw".into());
+            }
+            if !permitted {
+                return Err("Permission denied: endpoint server USAGE is required".into());
+            }
+            let config = EndpointConfig::from_options(options.as_deref().unwrap_or_default())?;
+            self.servers.insert(
+                server.to_owned(),
+                CatalogServer {
+                    oid,
+                    config,
+                    mapping: None,
+                },
+            );
+        }
+        Ok(self.servers.get(server).unwrap())
     }
-    let config = EndpointConfig::from_options(options.as_deref().unwrap_or_default())?;
-    Ok((connection, server_oid, config))
+
+    async fn load_mapping(&mut self, server: &str) -> Result<&[String], String> {
+        let entry = self.load_server(server).await?;
+        let oid = entry.oid;
+        if entry.mapping.is_none() {
+            let mapping = load_user_mapping(self.connection().await?, oid).await?;
+            self.servers.get_mut(server).unwrap().mapping = Some(mapping);
+        }
+        Ok(self
+            .servers
+            .get(server)
+            .unwrap()
+            .mapping
+            .as_deref()
+            .unwrap())
+    }
+
+    pub async fn resolve_named_secrets(
+        &mut self,
+        server: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mapping = self.load_mapping(server).await?;
+        let options = parse_options(mapping)?;
+        Ok(options
+            .into_iter()
+            .filter_map(|(name, value)| {
+                name.strip_prefix(crate::secrets::SECRET_OPTION_PREFIX)
+                    .map(|key| (key.to_owned(), value.to_owned()))
+            })
+            .collect())
+    }
+
+    pub async fn resolve_endpoint(&mut self, server: &str) -> Result<ResolvedEndpoint, String> {
+        let config = self.load_server(server).await?.config.clone();
+        let auth = if matches!(config.auth_scheme, AuthScheme::None) {
+            EndpointAuth::None
+        } else {
+            resolve_auth(config.auth_scheme, self.load_mapping(server).await?)?
+        };
+        Ok(ResolvedEndpoint {
+            base_url: config.base_url,
+            auth,
+        })
+    }
+
+    pub async fn close(mut self) -> Result<(), String> {
+        if let Some(connection) = self.connection.take() {
+            connection
+                .close()
+                .await
+                .map_err(|_| "Endpoint catalog connection close failed")?;
+        }
+        drop(self.permit.take());
+        Ok(())
+    }
 }
 
 async fn load_user_mapping(
@@ -497,43 +625,6 @@ async fn load_user_mapping(
     let mapping = mapping.ok_or("Endpoint credential options are missing or inaccessible")?;
     validate_mapping_options(&mapping)?;
     Ok(mapping)
-}
-
-pub async fn resolve_named_secrets(
-    submitted_by: &str,
-    database: Option<&str>,
-    server: &str,
-) -> Result<BTreeMap<String, String>, String> {
-    let (mut connection, server_oid, _) =
-        load_endpoint_catalog(submitted_by, database, server).await?;
-    let mapping = load_user_mapping(&mut connection, server_oid).await?;
-    let options = parse_options(&mapping)?;
-    Ok(options
-        .into_iter()
-        .filter_map(|(name, value)| {
-            name.strip_prefix(crate::secrets::SECRET_OPTION_PREFIX)
-                .map(|key| (key.to_owned(), value.to_owned()))
-        })
-        .collect())
-}
-
-pub async fn resolve_endpoint(
-    submitted_by: &str,
-    database: Option<&str>,
-    server: &str,
-) -> Result<ResolvedEndpoint, String> {
-    let (mut connection, server_oid, config) =
-        load_endpoint_catalog(submitted_by, database, server).await?;
-    let auth = if matches!(config.auth_scheme, AuthScheme::None) {
-        EndpointAuth::None
-    } else {
-        let mapping = load_user_mapping(&mut connection, server_oid).await?;
-        resolve_auth(config.auth_scheme, &mapping)?
-    };
-    Ok(ResolvedEndpoint {
-        base_url: config.base_url,
-        auth,
-    })
 }
 
 #[cfg(test)]
@@ -764,6 +855,162 @@ mod unit_tests {
 mod tests {
     use super::*;
 
+    async fn resolve_endpoint(
+        submitted_by: &str,
+        database: Option<&str>,
+        server: &str,
+    ) -> Result<ResolvedEndpoint, String> {
+        let semaphore = Semaphore::new(1);
+        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore);
+        catalog.database = database;
+        let endpoint = catalog.resolve_endpoint(server).await?;
+        catalog.close().await?;
+        Ok(endpoint)
+    }
+
+    async fn resolve_named_secrets(
+        submitted_by: &str,
+        database: Option<&str>,
+        server: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let semaphore = Semaphore::new(1);
+        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore);
+        catalog.database = database;
+        let values = catalog.resolve_named_secrets(server).await?;
+        catalog.close().await?;
+        Ok(values)
+    }
+
+    #[pg_test]
+    fn endpoint_catalog_snapshot_and_admission() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let admin = Spi::get_one::<String>("SELECT CURRENT_USER::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut connection = crate::types::connect_as_user(&admin, Some(&database)).await.unwrap();
+            sqlx::raw_sql(r#"
+                CREATE ROLE endpoint_snapshot_user LOGIN;
+                CREATE SERVER endpoint_snapshot FOREIGN DATA WRAPPER pg_durable_fdw
+                    OPTIONS (base_url 'https://old.azurewebsites.net', auth_scheme 'bearer');
+                CREATE SERVER endpoint_snapshot_other FOREIGN DATA WRAPPER pg_durable_fdw
+                    OPTIONS (base_url 'https://other.azurewebsites.net', auth_scheme 'none');
+                GRANT USAGE ON FOREIGN SERVER endpoint_snapshot, endpoint_snapshot_other TO endpoint_snapshot_user;
+                CREATE USER MAPPING FOR endpoint_snapshot_user SERVER endpoint_snapshot
+                    OPTIONS (token 'OLD_TOKEN', "secret.generation" 'OLD_NAMED');
+                CREATE USER MAPPING FOR endpoint_snapshot_user SERVER endpoint_snapshot_other
+                    OPTIONS ("secret.generation" 'OLD_OTHER');
+            "#).execute(&mut connection).await.unwrap();
+
+            let semaphore = Semaphore::new(1);
+            let occupied = crate::types::acquire_execution_permit(
+                &semaphore, std::time::Duration::from_secs(30), 1,
+            ).await.unwrap();
+            let mut catalog = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
+            catalog.database = Some(&database);
+            {
+                let waiting = catalog.load_server("endpoint_snapshot");
+                tokio::pin!(waiting);
+                std::future::poll_fn(|context| {
+                    assert!(waiting.as_mut().poll(context).is_pending());
+                    Poll::Ready(())
+                }).await;
+                let connected: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename = 'endpoint_snapshot_user'",
+                ).fetch_one(&mut connection).await.unwrap();
+                assert_eq!(connected, 0);
+                drop(occupied);
+                assert_eq!(waiting.await.unwrap().config.base_url.as_str(), "https://old.azurewebsites.net/");
+            }
+            assert_eq!(semaphore.available_permits(), 0);
+            let settings: (String, String) = sqlx::query_as(
+                "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')",
+            ).fetch_one(catalog.connection().await.unwrap()).await.unwrap();
+            assert_eq!(settings, ("repeatable read".into(), "on".into()));
+            sqlx::raw_sql(r#"
+                BEGIN;
+                ALTER SERVER endpoint_snapshot OPTIONS (SET base_url 'https://new.azurewebsites.net');
+                ALTER USER MAPPING FOR endpoint_snapshot_user SERVER endpoint_snapshot
+                    OPTIONS (SET token 'NEW_TOKEN', SET "secret.generation" 'NEW_NAMED');
+                ALTER USER MAPPING FOR endpoint_snapshot_user SERVER endpoint_snapshot_other
+                    OPTIONS (SET "secret.generation" 'NEW_OTHER');
+                COMMIT;
+            "#).execute(&mut connection).await.unwrap();
+
+            let endpoint = catalog.resolve_endpoint("endpoint_snapshot").await.unwrap();
+            assert_eq!(endpoint.base_url.as_str(), "https://old.azurewebsites.net/");
+            assert!(matches!(endpoint.auth, EndpointAuth::Bearer(value) if value == "Bearer OLD_TOKEN"));
+            assert_eq!(catalog.resolve_named_secrets("endpoint_snapshot").await.unwrap()["generation"], "OLD_NAMED");
+            assert_eq!(catalog.resolve_named_secrets("endpoint_snapshot_other").await.unwrap()["generation"], "OLD_OTHER");
+            let connected: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename = 'endpoint_snapshot_user'",
+            ).fetch_one(&mut connection).await.unwrap();
+            assert_eq!(connected, 1);
+            for multipart in [false, true] {
+                let mut binding_options = serde_json::json!({
+                    "secret_bindings": {
+                        "headers": {"X-Generation": {"server": "endpoint_snapshot", "key": "generation"}},
+                        "query": {"generation": {"server": "endpoint_snapshot_other", "key": "generation"}}
+                    }
+                });
+                if !multipart {
+                    binding_options["secret_bindings"]["form"] = serde_json::json!({
+                        "generation": {"server": "endpoint_snapshot", "key": "generation"}
+                    });
+                }
+                let options: crate::secrets::SecretOptions = serde_json::from_value(binding_options).unwrap();
+                options.validate(false, "POST", multipart, None).unwrap();
+                let mut request = prepare_request(&mut catalog, Some("endpoint_snapshot"), "/items", None).await.unwrap();
+                let resolved = options.resolve(&mut catalog, &mut request, None).await.unwrap();
+                assert_eq!(request.url.host_str(), Some("old.azurewebsites.net"));
+                assert_eq!(request.credential_header.as_ref().unwrap().1, "Bearer OLD_TOKEN");
+                assert_eq!(resolved.headers["x-generation"], "OLD_NAMED");
+                assert_eq!(request.url.query(), Some("generation=OLD_OTHER"));
+                assert_eq!(resolved.form_body.as_deref(), if multipart { None } else { Some("generation=OLD_NAMED") });
+            }
+            catalog.close().await.unwrap();
+            assert_eq!(semaphore.available_permits(), 1);
+
+            let mut next = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
+            next.database = Some(&database);
+            let endpoint = next.resolve_endpoint("endpoint_snapshot").await.unwrap();
+            assert_eq!(endpoint.base_url.as_str(), "https://new.azurewebsites.net/");
+            assert!(matches!(endpoint.auth, EndpointAuth::Bearer(value) if value == "Bearer NEW_TOKEN"));
+            assert_eq!(next.resolve_named_secrets("endpoint_snapshot").await.unwrap()["generation"], "NEW_NAMED");
+            assert_eq!(next.resolve_named_secrets("endpoint_snapshot_other").await.unwrap()["generation"], "NEW_OTHER");
+            drop(next);
+            assert_eq!(semaphore.available_permits(), 1);
+
+            let occupied = semaphore.acquire().await.unwrap();
+            let mut unused = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
+            let mut request = prepare_request(&mut unused, None, "https://api.github.com/", None).await.unwrap();
+            let options: crate::secrets::SecretOptions = serde_json::from_value(
+                serde_json::json!({"form_fields":{"literal":"$result"}}),
+            ).unwrap();
+            let resolved = options.resolve(&mut unused, &mut request, None).await.unwrap();
+            assert_eq!(resolved.form_body.as_deref(), Some("literal=%24result"));
+            assert!(unused.connection.is_none());
+            unused.close().await.unwrap();
+            drop(occupied);
+
+            {
+                let mut failed = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
+                failed.database = Some(&database);
+                assert!(failed.resolve_endpoint("endpoint_snapshot_missing").await.is_err());
+            }
+            assert_eq!(semaphore.available_permits(), 1);
+            sqlx::raw_sql(r#"
+                DROP SERVER endpoint_snapshot, endpoint_snapshot_other CASCADE;
+                DROP ROLE endpoint_snapshot_user;
+            "#).execute(&mut connection).await.unwrap();
+        });
+    }
+
     #[pg_test]
     fn endpoint_helper_is_lookup_free() {
         let reference = endpoint("missing_server", "/items/{item}");
@@ -855,6 +1102,14 @@ mod tests {
                     .await
                     .unwrap();
 
+                let error = resolve_endpoint("endpoint Alice", Some("endpoint_missing_database"), "endpoint_test")
+                    .await.err().unwrap();
+                assert!(error.contains("Endpoint catalog connection failed"));
+                assert!(error.contains("endpoint_test"));
+                assert!(error.contains("endpoint_missing_database"));
+                assert!(error.contains("endpoint Alice"));
+                assert!(error.contains("does not exist"));
+
                 for statement in [
                     "CREATE SERVER endpoint_invalid FOREIGN DATA WRAPPER pg_durable_fdw OPTIONS (base_url 'https://api.github.com', auth_scheme 'managed-identity')",
                     "CREATE SERVER endpoint_invalid FOREIGN DATA WRAPPER pg_durable_fdw OPTIONS (base_url 'https://api.github.com', auth_scheme 'none', scope 'TOP_SECRET')",
@@ -901,6 +1156,28 @@ mod tests {
                 }
                 let resolved = resolve_endpoint("endpoint_bob", Some(&database), "endpoint_test").await.unwrap();
                 assert!(matches!(resolved.auth, EndpointAuth::Bearer(value) if value == "Bearer BOB_TOKEN"));
+
+                sqlx::raw_sql(r#"ALTER ROLE "endpoint Alice" NOINHERIT;
+                    GRANT endpoint_bob TO "endpoint Alice";
+                    ALTER ROLE "endpoint Alice" SET role = 'endpoint_bob';"#)
+                    .execute(&mut connection).await.unwrap();
+                let mut changed_identity = crate::types::connect_as_user("endpoint Alice", Some(&database))
+                    .await.unwrap();
+                let effective_role: String = sqlx::query_scalar("SELECT CURRENT_USER::text")
+                    .fetch_one(&mut changed_identity).await.unwrap();
+                assert_eq!(effective_role, "endpoint_bob");
+                drop(changed_identity);
+                for error in [
+                    resolve_endpoint("endpoint Alice", Some(&database), "endpoint_test").await.err().unwrap(),
+                    resolve_named_secrets("endpoint Alice", Some(&database), "endpoint_test").await.err().unwrap(),
+                ] {
+                    assert!(error.contains("identity differs from submitting role"));
+                    assert!(!error.contains("BOB_TOKEN"));
+                }
+                sqlx::raw_sql(r#"ALTER ROLE "endpoint Alice" RESET role;
+                    REVOKE endpoint_bob FROM "endpoint Alice";
+                    ALTER ROLE "endpoint Alice" INHERIT;"#)
+                    .execute(&mut connection).await.unwrap();
 
                 sqlx::raw_sql("ALTER USER MAPPING FOR CURRENT_USER SERVER endpoint_test OPTIONS (SET token 'ROTATED_TOKEN')")
                     .execute(&mut alice).await.unwrap();

@@ -57,7 +57,9 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   named-header and query-string endpoint authentication. FDW creation authority
   is delegated with native grants. User mappings remain plaintext and may be
   included in dumps; `DROP EXTENSION ... CASCADE` removes dependent endpoints
-  and mappings.
+  and mappings. Catalogs live in the control database independently of SQL targets;
+  each request uses a consistent caller-authenticated snapshot and shares the SQL
+  connection budget, releasing its connection before HTTP I/O.
 - **Failure-isolated loops (#377):** the unified
   `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`
   signature supports resilient infinite and conditional loops. With
