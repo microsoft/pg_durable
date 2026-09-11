@@ -143,11 +143,11 @@ assert_workflow_configuration() {
         failures=$((failures + 1))
     fi
 
-    expected_group="  group: docker-publish-\${{ github.event.release.tag_name || github.event.inputs.ref || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch) || github.run_id }}"
+    expected_group="  group: docker-publish-\${{ github.event.release.tag_name || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true' && github.event.inputs.ref) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch) || github.run_id }}"
     if grep -Fxq "$expected_group" "$workflow"; then
-        echo "PASS: safe_workflow_run_concurrency"
+        echo "PASS: manual_dry_run_concurrency_isolated"
     else
-        echo "FAIL: concurrency must isolate ineligible workflow_run events by run ID" >&2
+        echo "FAIL: concurrency must isolate manual dry runs and ineligible workflow_run events by run ID" >&2
         failures=$((failures + 1))
     fi
 
@@ -204,6 +204,15 @@ run_case early_release env \
     "$resolver"
 assert_output ready false
 echo "PASS: early_release"
+
+run_case packages_first_release env \
+    EVENT_NAME=release RELEASE_TAG=v0.2.8 \
+    GH_TEST_DRAFT=false GH_TEST_ASSETS="$all_assets" \
+    "$resolver"
+assert_output tag v0.2.8
+assert_output version 0.2.8
+assert_output ready true
+echo "PASS: packages_first_release"
 
 run_case package_complete env \
     EVENT_NAME=workflow_run WORKFLOW_RUN_EVENT=push \
