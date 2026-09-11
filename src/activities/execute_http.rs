@@ -13,7 +13,7 @@
 //! See docs/http-security.md for the full security model.
 
 use duroxide::ActivityContext;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -50,6 +50,9 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 
 /// Build a reqwest Client with optional SSRF-safe DNS resolver.
 ///
+/// No client-level timeout is set: the timeout is per-node config, so callers
+/// apply it with `RequestBuilder::timeout`.
+///
 /// A default `User-Agent` is set so requests are not anonymous: some endpoints
 /// (e.g. fly.io-hosted services) reject requests that omit it. Nodes may still
 /// override it via an explicit `User-Agent` header.
@@ -62,9 +65,8 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
 /// Restricted builds also disable environment/system proxies. A proxy resolves
 /// the destination itself, which would bypass `SsrfSafeResolver`'s check of the
 /// address reqwest ultimately reaches.
-pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+fn build_client() -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
-        .timeout(timeout)
         .user_agent(concat!("pg_durable/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none());
 
@@ -80,6 +82,22 @@ pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String>
     builder
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))
+}
+
+static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+/// The process-wide HTTP client, built on first use.
+///
+/// The client owns reqwest's connection pool, so building it per request meant
+/// a fresh TCP and TLS handshake every time. Caching it keeps connections alive
+/// across requests and builds the SSRF-safe resolver and TLS connector once.
+/// Construction errors are also cached until the worker process restarts;
+/// request-time failures do not affect the cached client.
+pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
+    HTTP_CLIENT
+        .get_or_init(build_client)
+        .as_ref()
+        .map_err(|e| e.clone())
 }
 
 /// Execute an HTTP request and return the response as JSON
@@ -157,8 +175,9 @@ pub async fn execute(
         config.method
     ));
 
-    // Build client with SSRF-safe resolver (when feature enabled) and timeout
-    let client = build_client(Duration::from_secs(config.timeout_seconds))?;
+    // Shared client with SSRF-safe resolver (when feature enabled); the
+    // per-node timeout is applied to the request, not the client.
+    let client = http_client()?;
 
     // Build request based on method
     let mut request = match config.method.as_str() {
@@ -168,7 +187,8 @@ pub async fn execute(
         "DELETE" => client.delete(request_url),
         "PATCH" => client.patch(request_url),
         _ => return Err(format!("Unsupported HTTP method: {}", config.method)),
-    };
+    }
+    .timeout(Duration::from_secs(config.timeout_seconds));
 
     // Add headers
     if let Some(headers) = &config.headers {
@@ -266,6 +286,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct EnvGuard {
         name: &'static str,
@@ -330,9 +351,10 @@ mod tests {
             }
         });
 
-        let client = build_client(Duration::from_secs(1)).unwrap();
+        let client = build_client().unwrap();
         let _ = client
             .get("http://pg-durable-proxy-test.invalid/")
+            .timeout(Duration::from_secs(1))
             .send()
             .await;
         stop_tx.send(()).unwrap();
@@ -341,6 +363,259 @@ mod tests {
         assert!(
             !proxy_was_used,
             "restricted HTTP modes must bypass system proxies"
+        );
+    }
+
+    /// Kept as a single test because `http_client()` caches into a process-wide
+    /// `OnceLock`; a second `#[tokio::test]` touching it could reuse a client
+    /// bound to another test's runtime.
+    #[tokio::test]
+    async fn shared_client_reuses_connections_without_sharing_request_options() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+
+        let keep_alive_thread = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut connections = Vec::new();
+            let mut requests = Vec::new();
+            while requests.len() < 2 && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(20)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        connections.push((stream, Vec::new()));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("keep-alive listener failed: {error}"),
+                }
+                for (stream, request) in &mut connections {
+                    let mut buffer = [0; 1024];
+                    match stream.read(&mut buffer) {
+                        Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(error) => panic!("keep-alive read failed: {error}"),
+                    }
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        requests.push(std::mem::take(request));
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\
+                                  Set-Cookie: pooled=not-for-next-request; Path=/\r\n\r\nok",
+                            )
+                            .unwrap();
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            (connections.len(), requests)
+        });
+
+        // Reacquire the client and consume each body: retaining one local client
+        // or timing out both responses would not prove cross-lookup TCP reuse.
+        let responses = tokio::time::timeout(Duration::from_secs(5), async {
+            let first = http_client()
+                .unwrap()
+                .get(&url)
+                .header("Authorization", "Bearer first-only")
+                .header("Cookie", "caller=first-only")
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await?
+                .text()
+                .await?;
+            let second = http_client()
+                .unwrap()
+                .get(&url)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await?
+                .text()
+                .await?;
+            Ok::<_, reqwest::Error>([first, second])
+        })
+        .await;
+
+        let (connection_count, requests) = keep_alive_thread.join().unwrap();
+        assert_eq!(responses.unwrap().unwrap(), ["ok", "ok"]);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            connection_count, 1,
+            "separate client lookups must reuse TCP"
+        );
+        let first = String::from_utf8(requests[0].clone())
+            .unwrap()
+            .to_ascii_lowercase();
+        let second = String::from_utf8(requests[1].clone())
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(first.contains("\r\nauthorization: bearer first-only\r\n"));
+        assert!(first.contains("\r\ncookie: caller=first-only\r\n"));
+        assert!(!second.contains("\r\nauthorization:"));
+        assert!(!second.contains("\r\ncookie:"));
+
+        // Accept connections and never reply, so only the timeout can end a request.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let stall_thread = std::thread::spawn(move || {
+            let mut accepted = Vec::new();
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => accepted.push(stream),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if !matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("stall listener failed: {error}"),
+                }
+            }
+        });
+
+        // An IP-literal URL never reaches the DNS resolver, so loopback is
+        // reachable in this client-only test, unlike a validated HTTP activity.
+        let url = format!("http://{addr}/");
+
+        let timeouts = tokio::time::timeout(Duration::from_secs(5), async {
+            let short_started = std::time::Instant::now();
+            let short_result = http_client()
+                .unwrap()
+                .get(url.as_str())
+                .timeout(Duration::from_millis(200))
+                .send()
+                .await;
+            let short_elapsed = short_started.elapsed();
+
+            let long_started = std::time::Instant::now();
+            let long_result = http_client()
+                .unwrap()
+                .get(url.as_str())
+                .timeout(Duration::from_millis(900))
+                .send()
+                .await;
+            (
+                short_result,
+                short_elapsed,
+                long_result,
+                long_started.elapsed(),
+            )
+        })
+        .await;
+
+        stop_tx.send(()).unwrap();
+        stall_thread.join().unwrap();
+        let (short_result, short_elapsed, long_result, long_elapsed) = timeouts.unwrap();
+        let short_error = short_result.expect_err("a stalled response must fail");
+        let long_error = long_result.expect_err("a stalled response must fail");
+
+        // execute() branches on is_timeout() to build its error message.
+        assert!(
+            short_error.is_timeout(),
+            "expected a timeout error, got: {short_error}"
+        );
+        assert!(
+            long_error.is_timeout(),
+            "expected a timeout error, got: {long_error}"
+        );
+
+        assert!(
+            short_elapsed < Duration::from_millis(600),
+            "first request overran its 200ms deadline: {short_elapsed:?}"
+        );
+        assert!(
+            long_elapsed > Duration::from_millis(600),
+            "second request inherited the first request's deadline: {long_elapsed:?}"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let body_server = async {
+            let mut connections = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let bytes_read = stream.read(&mut buffer).await.unwrap();
+                    assert!(bytes_read > 0, "connection closed before request headers");
+                    request.extend_from_slice(&buffer[..bytes_read]);
+                }
+                let is_long = request.starts_with(b"GET /long HTTP/1.1\r\n");
+                connections.push((stream, is_long));
+            }
+
+            for (stream, _) in &mut connections {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no")
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            for (stream, is_long) in &mut connections {
+                if *is_long {
+                    stream.write_all(b"k").await.unwrap();
+                }
+            }
+        };
+
+        let body_requests = async {
+            let started = std::time::Instant::now();
+            let (short_response, long_response) = tokio::join!(
+                http_client()
+                    .unwrap()
+                    .get(format!("{url}/short"))
+                    .timeout(Duration::from_millis(200))
+                    .send(),
+                http_client()
+                    .unwrap()
+                    .get(format!("{url}/long"))
+                    .timeout(Duration::from_secs(2))
+                    .send(),
+            );
+            let short_response =
+                short_response.expect("short request must receive headers before its deadline");
+            let long_response =
+                long_response.expect("long request must receive headers before its deadline");
+
+            tokio::join!(
+                async {
+                    let result = short_response.bytes().await;
+                    (result, started.elapsed())
+                },
+                long_response.text(),
+            )
+        };
+        let ((), ((short_body, short_elapsed), long_body)) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(body_server, body_requests)
+            })
+            .await
+            .expect("body deadline fixture did not finish");
+
+        let body_error = short_body.expect_err("a stalled response body must fail");
+        assert!(
+            body_error.is_timeout(),
+            "expected a body timeout error, got: {body_error}"
+        );
+        assert!(
+            short_elapsed < Duration::from_millis(600),
+            "body read overran the short request's 200ms deadline: {short_elapsed:?}"
+        );
+        assert_eq!(
+            long_body.expect("the overlapping long request must complete"),
+            "ok"
         );
     }
 }

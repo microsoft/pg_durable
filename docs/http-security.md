@@ -333,6 +333,26 @@ prevents redirect-based bypasses where an attacker hosts a public server that
 returns a `302 Location: http://169.254.169.254/...` — since the redirect
 target is an IP literal, the DNS resolver would never be called.
 
+### 6.3 Shared connection pool
+
+The background worker builds one `reqwest::Client` for the whole process, so
+its connection pool is reused across every HTTP node — and therefore across
+database users. This is deliberate: a pooled connection carries no caller
+identity. Credentials travel as per-request headers (`Authorization`, SAS
+tokens in the URL), never as connection state, so one role's request cannot
+inherit another's authentication by landing on a warm connection. The
+per-node timeout is applied to each request rather than to the client for the
+same reason — it is caller configuration, not connection state.
+
+Client construction is attempted on first use. If it fails with `Failed to
+create HTTP client`, that error is cached for the lifetime of the background
+worker process: subsequent HTTP and multipart activities return the same
+error without retrying construction. After addressing the cause, restart the
+background worker process (or PostgreSQL) to allow another construction attempt;
+retrying an activity alone does not clear the error. Ordinary DNS, connection,
+and request-timeout failures happen after construction and are not cached this
+way, so they do not require a worker restart.
+
 ---
 
 ## 7. Audit Logging

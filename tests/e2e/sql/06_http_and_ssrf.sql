@@ -571,7 +571,7 @@ END $$;
 
 DROP TABLE _test_http_404;
 
--- Test 7: HTTP delay (tests timeout handling)
+-- Test 7: HTTP delay well inside the timeout still completes
 CREATE TEMP TABLE _test_http_delay (instance_id TEXT);
 
 INSERT INTO _test_http_delay SELECT df.start(
@@ -598,6 +598,132 @@ BEGIN
 END $$;
 
 DROP TABLE _test_http_delay;
+
+-- Test 7b: a response slower than timeout_seconds fails as a timeout.
+-- Together with 7c/7d, exercises both paths' timeout errors and successful
+-- delayed requests with larger configured budgets after earlier timeouts.
+CREATE TEMP TABLE _test_http_timeout (instance_id TEXT);
+
+INSERT INTO _test_http_timeout SELECT df.start(
+    df.http('https://httpbingo.org/delay/3', 'GET', timeout_seconds => 1),
+    'test-http-timeout'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_timeout;
+    RAISE NOTICE 'Testing HTTP timeout: %', inst_id;
+
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: 1s timeout against a 3s response should have failed, got status = %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%timeout%' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected "timeout" in error, got: %', node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_timeout';
+END $$;
+
+DROP TABLE _test_http_timeout;
+
+-- Test 7c: multipart applies the same per-request timeout independently.
+CREATE TEMP TABLE _test_multipart_timeout (instance_id TEXT);
+
+INSERT INTO _test_multipart_timeout SELECT df.start(
+    df.http_multipart(
+        'https://httpbingo.org/delay/3',
+        'POST',
+        jsonb_build_array(jsonb_build_object(
+            'name', 'message',
+            'data_b64', encode('timeout test'::bytea, 'base64')
+        )),
+        timeout_seconds => 1
+    ),
+    'test-multipart-timeout'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    node_result TEXT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_multipart_timeout;
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'failed' THEN
+        RAISE EXCEPTION 'TEST FAILED: multipart 1s timeout against a 3s response should have failed, got status = %', status;
+    END IF;
+
+    SELECT result::text INTO node_result
+    FROM df.nodes
+    WHERE instance_id = inst_id AND node_type = 'HTTP_MULTIPART';
+
+    IF node_result IS NULL OR node_result NOT ILIKE '%timeout%' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected multipart timeout error, got: %', node_result;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_multipart_timeout';
+END $$;
+
+DROP TABLE _test_multipart_timeout;
+
+-- Test 7d: neither failed request poisons the client or later timeout values.
+CREATE TEMP TABLE _test_http_timeout_recovery (instance_id TEXT);
+
+INSERT INTO _test_http_timeout_recovery SELECT df.start(
+    df.http('https://httpbingo.org/delay/3', 'GET', timeout_seconds => 15)
+    & df.http_multipart(
+        'https://httpbingo.org/delay/3',
+        'POST',
+        jsonb_build_array(jsonb_build_object(
+            'name', 'message',
+            'data_b64', encode('timeout test'::bytea, 'base64')
+        )),
+        timeout_seconds => 15
+    ),
+    'test-http-timeout-recovery'
+);
+
+DO $$
+DECLARE
+    inst_id TEXT;
+    status TEXT;
+    successful_nodes INT;
+BEGIN
+    SELECT instance_id INTO inst_id FROM _test_http_timeout_recovery;
+    SELECT df.await_instance(inst_id) INTO status;
+
+    IF status != 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: delayed requests with longer timeouts should recover, got status = %', status;
+    END IF;
+
+    SELECT count(*) INTO successful_nodes
+    FROM df.nodes
+    WHERE instance_id = inst_id
+      AND node_type IN ('HTTP', 'HTTP_MULTIPART')
+      AND result::jsonb->>'status' = '200'
+      AND result::jsonb->>'ok' = 'true';
+
+    IF successful_nodes != 2 THEN
+        RAISE EXCEPTION 'TEST FAILED: expected two successful delayed responses, got %', successful_nodes;
+    END IF;
+
+    RAISE NOTICE 'TEST PASSED: http_timeout_recovery';
+END $$;
+
+DROP TABLE _test_http_timeout_recovery;
 
 -- Test 8: HTTP with workflow variables
 SELECT df.clearvars();
