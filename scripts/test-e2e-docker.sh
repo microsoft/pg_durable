@@ -35,6 +35,8 @@ SKIP_TESTS=(
     "46_connection_limit_startup_validation"
     "66_new_transaction_launch_limit"
     "67_host_guc"
+    "69_http_allowed_domains"
+    "70_http_allowed_domains_empty"
     "47_http_dsl_disabled"
     "48_http_allow_all"
     # Needs the "reconcile" phase GUCs (reconcile_interval=2, retention_days=0)
@@ -212,7 +214,7 @@ for run in $(seq 1 $REPEAT_COUNT); do
         fi
 
         # Skip tests that require a different PostgreSQL startup mode or
-        # restart-sensitive connection-limit GUC changes.
+        # restart-sensitive GUC changes.
         skip=false
         for skip_test in "${SKIP_TESTS[@]}"; do
             if [[ "$test_name" == "$skip_test" ]]; then

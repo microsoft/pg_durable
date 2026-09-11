@@ -26,6 +26,7 @@
 #   ./scripts/test-e2e-local.sh --default-build-phases
 #   ./scripts/test-e2e-local.sh 00_requires_shared_preload
 #   ./scripts/test-e2e-local.sh 45_connection_limit_timeout
+#   ./scripts/test-e2e-local.sh http_allowed_domains
 #   ./scripts/test-e2e-local.sh --http-disabled 47_http_dsl_disabled
 #   ./scripts/test-e2e-local.sh --http-allow-all
 # END_USAGE
@@ -63,6 +64,8 @@ DEFAULT_BUILD_PHASES=(
     "new-start-limit"
     "connlimit-startup"
     "reconcile"
+    "http-custom-domains"
+    "http-empty-domains"
 )
 
 ALL_PHASES=(
@@ -75,6 +78,8 @@ ALL_PHASES=(
     "new-start-limit"
     "connlimit-startup"
     "reconcile"
+    "http-custom-domains"
+    "http-empty-domains"
     "http-disabled"
     "http-allow-all"
 )
@@ -157,6 +162,12 @@ phase_label() {
         reconcile)
             echo "reconcile orphans"
             ;;
+        http-custom-domains)
+            echo "HTTP custom domain allowlist"
+            ;;
+        http-empty-domains)
+            echo "HTTP empty domain allowlist (deny all)"
+            ;;
         http-disabled)
             echo "HTTP disabled (no http Cargo feature)"
             ;;
@@ -194,6 +205,12 @@ phase_for_test() {
             ;;
         54_reconcile_orphans)
             echo "reconcile"
+            ;;
+        69_http_allowed_domains)
+            echo "http-custom-domains"
+            ;;
+        70_http_allowed_domains_empty)
+            echo "http-empty-domains"
             ;;
         47_http_dsl_disabled)
             echo "http-disabled"
@@ -366,6 +383,68 @@ restart_server() {
     wait_for_server
 }
 
+assert_http_domains_startup_rejected() (
+    # Scope the restoration trap to this probe, leaving the runner's EXIT trap intact.
+    config_backup=$(mktemp "$DATA_DIR/http-domains-startup.XXXXXX") || exit 1
+    if ! cp "$CONF_FILE" "$config_backup"; then
+        rm -f -- "$config_backup"
+        exit 1
+    fi
+    startup_log="$config_backup.log"
+
+    restore_startup_config() {
+        result=$?
+        stop_server
+        if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+            echo "TEST FAILED: could not stop PostgreSQL after the invalid-config probe"
+            result=1
+        fi
+        if ! cp "$config_backup" "$CONF_FILE"; then
+            echo "TEST FAILED: could not restore $CONF_FILE; backup retained at $config_backup"
+            exit 1
+        fi
+        rm -f -- "$config_backup" "$startup_log" || result=1
+        exit "$result"
+    }
+
+    trap restore_startup_config EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    stop_server
+    if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+        echo "TEST FAILED: PostgreSQL must be stopped before the invalid-config probe"
+        exit 1
+    fi
+
+    # The last assignment wins. This must reach the preload check hook rather
+    # than ALTER SYSTEM validation or a postgresql.conf syntax error.
+    printf "\npg_durable.http_allowed_domains = 'example.com,https://api.github.com'\n" \
+        >> "$CONF_FILE" || exit 1
+
+    failed=false
+    if startup_output=$("$PG_CTL" -D "$DATA_DIR" -l "$startup_log" -w -t 15 start 2>&1); then
+        echo "TEST FAILED: PostgreSQL accepted a malformed startup domain allowlist"
+        failed=true
+    fi
+    if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
+        echo "TEST FAILED: PostgreSQL is still running after the invalid-config startup"
+        failed=true
+    fi
+    if ! grep -Eq '(ERROR|FATAL):[[:space:]]+invalid value for parameter "pg_durable[.]http_allowed_domains"' "$startup_log"; then
+        echo "TEST FAILED: startup did not report the expected domain GUC error"
+        failed=true
+    fi
+
+    if [ "$failed" = true ] || [ "$VERBOSE" = true ]; then
+        printf '%s\n' "$startup_output"
+        if [ -f "$startup_log" ]; then
+            tail -40 "$startup_log"
+        fi
+    fi
+    [ "$failed" = false ]
+)
+
 build_extension() {
     echo "Building and installing extension..."
     cd "$PROJECT_DIR"
@@ -477,6 +556,7 @@ configure_phase() {
     clear_connlimit_gucs
     remove_conf_key "log_connections"
     remove_conf_key "pg_durable.host"
+    remove_conf_key "pg_durable.http_allowed_domains"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
     set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
@@ -548,17 +628,19 @@ configure_phase() {
             set_conf_line "pg_durable.reconcile_interval" "2"
             set_conf_line "pg_durable.retention_days" "0"
             ;;
-        http-disabled)
+        http-custom-domains|http-disabled)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "pg_durable.http_allowed_domains" "'example.com'"
             ;;
-        http-allow-all)
+        http-empty-domains|http-allow-all)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "pg_durable.http_allowed_domains" "''"
             ;;
     esac
 }
@@ -575,7 +657,7 @@ prepare_phase() {
         http-allow-all)
             build_extension_http_allow_all
             ;;
-        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile)
+        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile|http-custom-domains|http-empty-domains)
             # Rebuild if previous phase changed the Cargo features
             if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
                 build_extension
@@ -597,6 +679,11 @@ prepare_phase() {
     "$PSQL" -h localhost -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
         -c "DROP EXTENSION IF EXISTS pg_durable CASCADE; DROP SCHEMA IF EXISTS duroxide CASCADE;" \
         >/dev/null 2>&1 || true
+
+    if [ "$phase" = "http-custom-domains" ]; then
+        echo "Checking malformed HTTP allowlist startup rejection..."
+        assert_http_domains_startup_rejected || exit 1
+    fi
 
     if [ -f "$LOG_FILE" ]; then
         PHASE_LOG_MARK=$(wc -l < "$LOG_FILE")
@@ -648,7 +735,7 @@ prepare_phase() {
         reconcile)
             wait_for_worker_ready
             ;;
-        http-disabled|http-allow-all)
+        http-custom-domains|http-empty-domains|http-disabled|http-allow-all)
             ensure_e2e_role
             wait_for_worker_ready
             ;;

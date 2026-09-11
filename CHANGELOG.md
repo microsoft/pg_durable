@@ -20,6 +20,8 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   `continue_on_failure` syntax is experimental and may change in future
   releases.
 
+- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
+
 ### Changed
 
 - **Loop lifetime:** raises the loop-iteration backstop from 100,000 to

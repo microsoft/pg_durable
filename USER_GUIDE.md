@@ -24,10 +24,11 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 14. [Monitoring](#monitoring)
 15. [User Isolation & Privileges](#user-isolation--privileges)
 16. [Connection Host](#connection-host)
-17. [Connection Limits](#connection-limits)
-18. [Troubleshooting](#troubleshooting)
-19. [Quick Reference Card](#quick-reference-card)
-20. [Appendix: Test Data Setup](#appendix-test-data-setup)
+17. [HTTP Allowed Domains](#http-allowed-domains)
+18. [Connection Limits](#connection-limits)
+19. [Troubleshooting](#troubleshooting)
+20. [Quick Reference Card](#quick-reference-card)
+21. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -2168,12 +2169,24 @@ If the user who submitted a function is dropped **before execution**:
 
 #### HTTP Requests
 
-HTTP requests (`df.http()`) currently execute with the **background worker's privileges**, not the submitting user's privileges:
+`df.http()` and `df.http_multipart()` share a server-wide destination policy.
+Permission to use each function is checked for the submitting role, but there
+are no per-role domain allowlists.
 
-- All users can make HTTP requests to the same endpoints
-- No user-specific URL allowlists
+**Security model:** Outbound HTTP availability and its security tier are
+controlled by compile-time Cargo features; HTTP is off when no HTTP feature is
+enabled. Restricted builds enforce a hardcoded SSRF IP blocklist and the
+[HTTP domain allow-list](#http-allowed-domains), which defaults to Azure service
+subdomains and `api.github.com`. Administrators can replace the domain list
+with `pg_durable.http_allowed_domains` and restart PostgreSQL. This does not
+relax the other restrictions or exempt superuser requests. Only the
+development-only `http-allow-all` build bypasses domain and IP restrictions.
 
-**Security model:** For pg_durable's built-in `df.http()` activity, outbound HTTP is controlled by compile-time Cargo features and is off by default. When enabled, a hardcoded SSRF IP blocklist and domain allow-list are enforced — all `df.http()` requests to private/reserved IP ranges are blocked and only approved Azure service domains are permitted (e.g. `*.blob.core.windows.net`, `*.openai.azure.com`). These `df.http()` restrictions cannot be bypassed by any database user, including superusers. They do not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that a workflow role can execute from SQL nodes; administrators must manage extension installation, function privileges, and network egress separately. See `docs/http-security.md` for the full security model and feature flag reference.
+These protections apply to the built-in HTTP activities, not arbitrary SQL
+functions, user-defined functions, or third-party Postgres extensions that a
+workflow role can execute from SQL nodes. Administrators must manage extension
+installation, function privileges, and network egress separately. See
+[HTTP security](docs/http-security.md) for the full security model.
 
 **Future:** Per-user HTTP isolation and URL allowlists are planned.
 
@@ -2358,6 +2371,43 @@ pg_durable.host = '/var/run/postgresql'
 ```
 
 This postmaster setting requires a PostgreSQL restart. When it is empty or unset, pg_durable uses `PGHOST`, falling back to `127.0.0.1` when `PGHOST` is also unset.
+
+---
+
+## HTTP Allowed Domains
+
+Since v0.2.8, administrators can replace the destination allow-list for
+`df.http()` and `df.http_multipart()` in restricted HTTP builds:
+
+```ini
+# postgresql.conf
+pg_durable.http_allowed_domains = 'api.github.com, *.blob.core.windows.net'
+```
+
+This server-wide **Postmaster-context** setting requires a PostgreSQL restart.
+It can also be configured through an authorized `ALTER SYSTEM SET`; a reload
+alone does not apply it. All users can inspect the active list with
+`SHOW pg_durable.http_allowed_domains`, but sessions and roles cannot override it.
+
+Use comma-separated hostnames. `api.example.com` matches only that host;
+`*.example.com` matches subdomains at any depth, but not `example.com` itself.
+Whitespace around entries is ignored, matching is case-insensitive, and
+internationalized hostnames can use UTF-8 or ASCII/Punycode. Do not include
+URLs, ports, IP addresses, or trailing dots.
+
+**The configured list replaces all defaults.** Without an override,
+`http-allow-azure-domains` permits the existing Azure service subdomains and
+`api.github.com`; `http-allow-test-domains` also permits `httpbingo.org`.
+An empty list (`''`) denies every domain in restricted builds. Malformed lists
+are rejected as a whole; an invalid startup value prevents PostgreSQL from
+starting rather than silently restoring defaults.
+
+This setting does not enable HTTP in a build without HTTP support, and
+`http-allow-all` continues to bypass it even when it is empty. The HTTPS
+requirement, IP blocklist, proxy and redirect restrictions, and HTTP function
+privileges are unchanged. After restart, pending requests and retries use the
+new list. See [HTTP security](docs/http-security.md#5-layer-2-endpoint-allow-list)
+for the full syntax and default domain list.
 
 ---
 

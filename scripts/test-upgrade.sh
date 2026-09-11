@@ -301,8 +301,9 @@ if [ -f "$DATA_DIR/postgresql.conf" ]; then
     # postgresql.conf. Without this, the connlimit-* phases' max_duroxide_connections=1
     # causes the BGW to refuse to start (breaking the B1 wait-for-readiness check),
     # and the reconcile phase's aggressive reconcile_interval/retention_days would
-    # remove terminal instances mid-test and make df.result() flaky.
-    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d' "$DATA_DIR/postgresql.conf"
+    # remove terminal instances mid-test and make df.result() flaky. HTTP phases
+    # can leave a custom or empty domain list instead of the build's defaults.
+    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d; /^[#[:space:]]*pg_durable\.http_allowed_domains[[:space:]]*=/d' "$DATA_DIR/postgresql.conf"
 fi
 
 # If the server is already running, restart it so both the freshly installed

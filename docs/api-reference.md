@@ -287,6 +287,10 @@ df.wait_for_signal('approval', 3600)   -- 1 hour timeout
 
 Makes an HTTP request.
 
+In restricted builds, the destination must be permitted by
+[`pg_durable.http_allowed_domains`](#pg_durablehttp_allowed_domains).
+The same policy applies to `df.http_multipart()`.
+
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
 | `url` | TEXT | ❌ Literal | Request URL (supports `$var` substitution) |
@@ -731,6 +735,46 @@ SELECT df.revoke_usage('app_role');
 ## Server Configuration (GUCs)
 
 These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See each setting for reload or restart requirements.
+
+---
+
+### pg_durable.http_allowed_domains
+
+The complete destination allow-list for `df.http()` and `df.http_multipart()`
+in restricted builds. Available since v0.2.8.
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | Azure subdomain patterns and `api.github.com` with `http-allow-azure-domains`; also `httpbingo.org` with `http-allow-test-domains`; empty otherwise |
+| Context | `POSTMASTER` (requires a PostgreSQL restart, not just a reload) |
+| Visibility | All users can read the active value |
+
+```ini
+# postgresql.conf
+pg_durable.http_allowed_domains = 'api.github.com, *.blob.core.windows.net'
+```
+
+Entries are comma-separated exact hostnames or `*.domain` patterns, with
+optional surrounding whitespace. A pattern permits subdomains at any depth,
+not the apex itself. Matching is case-insensitive and uses IDNA/Punycode
+normalization. Use UTF-8 internationalized names or ASCII/Punycode.
+
+An explicit value **replaces all defaults**, including test domains. An empty
+or whitespace-only value denies all domains in restricted builds. Malformed
+entries reject the whole setting; a malformed startup value prevents server
+startup. URLs, ports, IPs, CIDRs, percent escapes, trailing dots, standalone `*`,
+and empty entries within a nonempty list are not accepted.
+
+Session, role, and database settings cannot override this policy. An
+authorized `ALTER SYSTEM SET` can change the startup configuration, but
+PostgreSQL must restart before requests use it.
+
+The GUC does not override Cargo feature gates: HTTP remains disabled in builds
+without an HTTP feature, and `http-allow-all` bypasses the list even when it is
+empty. Other HTTP safeguards are unchanged. See
+[HTTP security](http-security.md#5-layer-2-endpoint-allow-list) for the default
+domains and execution-time behavior.
 
 ---
 

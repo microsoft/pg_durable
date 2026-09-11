@@ -1,8 +1,8 @@
 # HTTP Security in pg_durable
 
-This document describes the security model for `df.http()` — the durable HTTP
-activity that lets workflows make outbound HTTP(S) requests from within the
-PostgreSQL background worker.
+This document describes the security model for `df.http()` and
+`df.http_multipart()`, which make outbound HTTP(S) requests from within the
+PostgreSQL background worker. Both use the same destination policy.
 
 ---
 
@@ -22,22 +22,23 @@ PostgreSQL background worker.
 
 ## 1. Feature Flags
 
-Outbound HTTP access is controlled entirely by Cargo features at build time.
-The database cannot override these choices — they cannot be changed with GUCs
-or SQL.
+Cargo features select the outbound HTTP security tier at build time.
+In restricted builds, administrators can replace the domain allow-list with
+`pg_durable.http_allowed_domains` and restart PostgreSQL. That setting cannot
+enable HTTP in a disabled build or change the other protections.
 
 | Feature | What is allowed | Use case |
 |---------|-----------------|----------|
 | *(none)* | Nothing — `df.http()` errors immediately at DSL time **and** at execution time | Deployments that don't need HTTP |
-| `http-allow-azure-domains` | HTTPS to subdomains of the Azure allow-list plus `api.github.com`; bare IPs blocked; redirects blocked | Production |
-| `http-allow-test-domains` | HTTPS to everything in `http-allow-azure-domains` **plus** `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
+| `http-allow-azure-domains` | HTTPS to configured domains, defaulting to Azure subdomains plus `api.github.com`; bare IPs blocked; redirects blocked | Production |
+| `http-allow-test-domains` | Same restrictions; the default list also includes `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
 | `http-allow-all` | HTTP and HTTPS to all URLs; SSRF IP blocklist and allow-list are both disabled | Local development only |
 
 The scripts and CI use `http-allow-test-domains` so that the HTTP E2E tests
 pass — this includes the source-built `Dockerfile` used for local dev and CI.
 The released Debian packages are built with `http-allow-azure-domains`, so the
 published Docker image (`Dockerfile.release`, which installs that package)
-inherits the `http-allow-azure-domains` policy.
+inherits the `http-allow-azure-domains` tier and defaults.
 
 ### When no feature is set
 
@@ -84,8 +85,10 @@ block is enforced again at execution time inside `execute_http.rs` via
 └──────────────────────────────────────────────────────────┘
 ```
 
-All three layers run inside `execute_http.rs` before the request is sent.
-There is no GUC, no table override, no superuser bypass for Layers 1 and 2.
+Both HTTP activities enforce these layers before sending a request.
+The domain allow-list is configurable at server startup; the IP blocklist is
+not. Neither has a per-session or per-role override, and superuser HTTP requests
+are subject to the same destination policy.
 
 ---
 
@@ -239,42 +242,89 @@ would create false positives without any security benefit.
 
 Bare IP literals in URLs (e.g. `http://169.254.169.254/...`) bypass DNS
 entirely — `reqwest` connects directly without calling the resolver.
-`validate_allowlist` blocks all bare IPs unconditionally, so these never
-reach the resolver.
+`validate_allowlist` blocks all bare IPs in restricted builds, so these never
+reach the resolver. Only the development-only `http-allow-all` feature bypasses
+this rule.
 
 ---
 
 ## 5. Layer 2: Endpoint Allow-List
 
-### 5.1 Azure domains (always present with `http-allow-azure-domains`)
+### 5.1 Configuring allowed domains
 
-Only subdomains of the following suffixes are permitted.  Apex domains (e.g.
-`blob.core.windows.net` without a subdomain label) are rejected.
+Since v0.2.8, `pg_durable.http_allowed_domains` is the complete allow-list for
+both HTTP activities in restricted builds. For example, in `postgresql.conf`:
 
-| Suffix | Service |
+```ini
+pg_durable.http_allowed_domains = 'api.github.com, *.blob.core.windows.net'
+```
+
+An exact hostname allows only that host. `*.example.com` allows subdomains at
+any depth, such as `a.example.com` and `a.b.example.com`, but not `example.com`
+itself. Add a separate exact entry to allow the apex. Matching is
+case-insensitive and uses the same IDNA/Punycode representation as request URL
+parsing. Use UTF-8 internationalized names or their ASCII/Punycode spelling.
+
+Separate entries with commas; whitespace around entries is ignored. Entries
+must be DNS hostnames, optionally prefixed with `*.`. URLs, ports, IP addresses,
+CIDRs, percent escapes, trailing dots, other wildcard forms, and empty entries
+inside a nonempty list are rejected. A malformed value rejects the whole
+setting, not just the offending entry. A malformed startup value prevents
+PostgreSQL from starting rather than falling back to a potentially broader
+default.
+
+**An explicit value replaces all defaults.** It does not implicitly retain
+Azure, GitHub, or test domains. An empty or whitespace-only value denies all
+domains in restricted builds:
+
+```ini
+pg_durable.http_allowed_domains = ''
+```
+
+This is a **Postmaster-context** setting. Set it in `postgresql.conf` or through
+an authorized `ALTER SYSTEM SET`, then restart PostgreSQL; a reload alone is
+not enough. `SET`, `SET LOCAL`, and role/database settings cannot override it.
+All users can inspect the active value with
+`SHOW pg_durable.http_allowed_domains`.
+
+The restarted worker applies the new policy to requests it executes, including
+pending activities and retries. Previously recorded activity results replay
+normally. There is no per-workflow snapshot of the old policy.
+
+The setting does not relax HTTPS, IP blocking, proxy restrictions, redirects,
+or function privileges. A hostname that resolves to a blocked IP is still
+blocked. Builds without an HTTP feature remain disabled regardless of the
+list; `http-allow-all` bypasses it, even when it is empty.
+
+### 5.2 Default Azure domains (`http-allow-azure-domains`)
+
+With no override, the following subdomain patterns are allowed. Apex domains
+(e.g. `blob.core.windows.net`) require a separate exact entry.
+
+| Pattern | Service |
 |--------|---------|
-| `.blob.core.windows.net` | Azure Blob Storage |
-| `.blob.storage.azure.net` | Azure Blob Storage (secondary) |
-| `.queue.core.windows.net` | Azure Queue Storage |
-| `.table.core.windows.net` | Azure Table Storage |
-| `.file.core.windows.net` | Azure Files |
-| `.azurewebsites.net` | Azure App Service |
-| `.azure-api.net` | Azure API Management |
-| `.documents.azure.com` | Azure Cosmos DB |
-| `.servicebus.windows.net` | Azure Service Bus |
-| `.openai.azure.com` | Azure OpenAI |
-| `.cognitiveservices.azure.com` | Azure Cognitive Services |
-| `.vault.azure.net` | Azure Key Vault |
-| `.redis.cache.windows.net` | Azure Cache for Redis |
-| `.database.windows.net` | Azure SQL Database |
-| `.kusto.windows.net` | Azure Data Explorer |
-| `.azurefd.net` | Azure Front Door |
-| `.azureedge.net` | Azure CDN |
-| `.azure-devices.net` | Azure IoT Hub |
-| `.trafficmanager.net` | Azure Traffic Manager |
-| `.cloudapp.azure.com` | Azure Cloud App |
+| `*.blob.core.windows.net` | Azure Blob Storage |
+| `*.blob.storage.azure.net` | Azure Blob Storage (secondary) |
+| `*.queue.core.windows.net` | Azure Queue Storage |
+| `*.table.core.windows.net` | Azure Table Storage |
+| `*.file.core.windows.net` | Azure Files |
+| `*.azurewebsites.net` | Azure App Service |
+| `*.azure-api.net` | Azure API Management |
+| `*.documents.azure.com` | Azure Cosmos DB |
+| `*.servicebus.windows.net` | Azure Service Bus |
+| `*.openai.azure.com` | Azure OpenAI |
+| `*.cognitiveservices.azure.com` | Azure Cognitive Services |
+| `*.vault.azure.net` | Azure Key Vault |
+| `*.redis.cache.windows.net` | Azure Cache for Redis |
+| `*.database.windows.net` | Azure SQL Database |
+| `*.kusto.windows.net` | Azure Data Explorer |
+| `*.azurefd.net` | Azure Front Door |
+| `*.azureedge.net` | Azure CDN |
+| `*.azure-devices.net` | Azure IoT Hub |
+| `*.trafficmanager.net` | Azure Traffic Manager |
+| `*.cloudapp.azure.com` | Azure Cloud App |
 
-### 5.2 Exact-match domains (always present with `http-allow-azure-domains`)
+### 5.3 Default exact-match domains (`http-allow-azure-domains`)
 
 Matched exactly — subdomains and lookalikes are rejected.
 
@@ -282,20 +332,20 @@ Matched exactly — subdomains and lookalikes are rejected.
 |--------|---------|
 | `api.github.com` | GitHub API |
 
-### 5.3 Test domains (additional with `http-allow-test-domains`)
+### 5.4 Additional default test domains (`http-allow-test-domains`)
 
 | Domain | Purpose |
 |--------|---------|
 | `httpbingo.org` | HTTP echo service (used in HTTP E2E tests) |
 
-### 5.4 Bare IP rejection
+### 5.5 Bare IP rejection
 
-All bare IPv4 and IPv6 addresses are rejected by `validate_allowlist`
-regardless of feature flag — even under `http-allow-azure-domains`.
+All bare IPv4 and IPv6 addresses are rejected by `validate_allowlist` in
+restricted builds, regardless of the configured domain list.
 Because the allowlist blocks all bare IPs, there is no separate IP-literal
 check; the allowlist is the definitive gate for IP-literal URLs.
 
-### 5.4 One parse, one URL
+### 5.6 One parse, one URL
 
 The host judged by the allow-list is read from the `url::Url` that is then
 handed to `reqwest`, never from the caller's string. Comparing a separately
@@ -394,8 +444,9 @@ endpoint can echo them in its response.
 | HTTP disabled (no feature) | `Blocked: outbound HTTP requests are disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them.` |
 | Plaintext HTTP in a restricted build | `Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required.` |
 | Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |
-| Bare IP address | `Blocked: requests to bare IP addresses are not permitted. Use an approved Azure service hostname instead.` |
-| Non-allowed domain | `Blocked: '{host}' is not in the allowed endpoint list. Only requests to approved Azure service domains are permitted.` |
+| Bare IP address | `Blocked: requests to bare IP addresses are not permitted. Use an approved service hostname instead.` |
+| Non-allowed domain | `Blocked: '{host}' is not in the allowed endpoint list. Configure pg_durable.http_allowed_domains to allow this hostname.` |
+| Invalid domain-list configuration | `invalid value for parameter "pg_durable.http_allowed_domains"` with the offending entry and reason |
 | Blocked IP (literal or DNS) | `Blocked: the resolved IP address for '{host}' is in a restricted range. df.http() cannot access private or internal network addresses.` |
 | DSL-time (no feature) | `df.http() is disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable outbound HTTP requests.` |
 

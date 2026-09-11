@@ -4,7 +4,7 @@
 //! ExecuteMultipart activity - makes multipart/form-data HTTP requests.
 //!
 //! This is the file-upload / form-post counterpart to `execute_http`. It shares
-//! the same security model (privilege check, scheme validation, Azure
+//! the same security model (privilege check, scheme validation, domain
 //! allow-list, SSRF-safe DNS resolver, no redirects) and reuses
 //! `execute_http::build_client` so the two paths cannot drift on client
 //! configuration. The only differences are the body construction (a
@@ -22,6 +22,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use crate::activities::execute_http::build_client;
+use crate::ssrf::DomainAllowlist;
 use crate::types::MultipartConfig;
 
 /// Activity name for registration and scheduling
@@ -80,6 +81,7 @@ fn decode_part_data(data_b64: &str) -> Result<Vec<u8>, base64::DecodeError> {
 pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
+    allowed_domains: Arc<DomainAllowlist>,
     config_json: String,
 ) -> Result<String, String> {
     let config: MultipartConfig = serde_json::from_str(&config_json)
@@ -97,7 +99,7 @@ pub async fn execute(
     // Validation chain — order is security-critical and mirrors execute_http:
     //   0. Privilege: submitted_by must hold EXECUTE on df.http_multipart().
     //   1. Scheme:    blocks file://, gopher://, etc.
-    //   2. Allowlist: blocks ALL bare IPs (public and private) + non-Azure
+    //   2. Allowlist: blocks ALL bare IPs (public and private) + unlisted
     //                 domains. Fails-closed on malformed URLs.
     //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding.
 
@@ -123,8 +125,8 @@ pub async fn execute(
         ));
     })?;
 
-    // --- Azure endpoint allow-list ---
-    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
+    // --- Endpoint allow-list ---
+    crate::ssrf::validate_allowlist(&request_url, &allowed_domains).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));

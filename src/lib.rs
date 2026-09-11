@@ -22,6 +22,9 @@ pub static DATABASE: GucSetting<Option<CString>> =
 
 pub static HOST: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
 
+pub static HTTP_ALLOWED_DOMAINS: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(ssrf::DEFAULT_HTTP_ALLOWED_DOMAINS));
+
 pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
@@ -125,6 +128,21 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Postmaster,
         GucFlags::default(),
     );
+
+    // The callback is pg_guard-protected and only validates the proposed value.
+    unsafe {
+        GucRegistry::define_string_guc_with_hooks(
+            c"pg_durable.http_allowed_domains",
+            c"Hostnames allowed for outbound HTTP requests in restricted builds",
+            c"Comma-separated exact hostnames or *.domain subdomain patterns. Replaces the build's default list; an empty list denies all domains. Does not override HTTP feature gates or IP restrictions. Requires a server restart to change.",
+            &HTTP_ALLOWED_DOMAINS,
+            GucContext::Postmaster,
+            GucFlags::default(),
+            Some(ssrf::check_http_allowed_domains),
+            None,
+            None,
+        );
+    }
 
     GucRegistry::define_int_guc(
         c"pg_durable.max_management_connections",

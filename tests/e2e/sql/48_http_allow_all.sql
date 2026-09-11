@@ -7,6 +7,14 @@
 -- http-allow-all Cargo feature.  Domains that are normally blocked by the Azure
 -- allow-list (e.g. example.com) must be reachable (or at least not rejected by
 -- the allow-list — network/DNS failure is fine).
+-- An explicitly empty GUC must not restrict this build.
+
+DO $$
+BEGIN
+    IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM '' THEN
+        RAISE EXCEPTION 'TEST FAILED: http-allow-all phase requires an empty allowlist';
+    END IF;
+END $$;
 
 -- ============================================================================
 -- Test 1: Non-Azure domain passes allow-list when http-allow-all is set
@@ -15,24 +23,30 @@
 CREATE TEMP TABLE _test_allowall1 (instance_id TEXT);
 
 INSERT INTO _test_allowall1 SELECT df.start(
-    df.http('http://example.com/', 'GET'),
+    df.http('http://example.com/', 'GET', NULL, NULL, 5),
     'test-http-allow-all-non-azure'
 );
 
 DO $$
 DECLARE
     inst_id TEXT;
+    status TEXT;
     node_result TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_allowall1;
     RAISE NOTICE 'Testing non-Azure domain allowed under http-allow-all: %', inst_id;
 
-    PERFORM df.await_instance(inst_id);
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     -- Must NOT fail due to allow-list; network/DNS failure is acceptable
     SELECT result::text INTO node_result
     FROM df.nodes
     WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF status IS NULL OR status NOT IN ('completed', 'failed') OR node_result IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: allow-all request did not finish: status = %, result = %',
+            status, node_result;
+    END IF;
 
     IF node_result ILIKE '%not in the allowed%' THEN
         RAISE EXCEPTION 'TEST FAILED: allow-list should be bypassed under http-allow-all, got: %', node_result;
@@ -59,23 +73,29 @@ DROP TABLE _test_allowall1;
 CREATE TEMP TABLE _test_allowall2 (instance_id TEXT);
 
 INSERT INTO _test_allowall2 SELECT df.start(
-    df.http('https://8.8.8.8/', 'GET'),
+    df.http('https://8.8.8.8/', 'GET', NULL, NULL, 5),
     'test-http-allow-all-bare-ip'
 );
 
 DO $$
 DECLARE
     inst_id TEXT;
+    status TEXT;
     node_result TEXT;
 BEGIN
     SELECT instance_id INTO inst_id FROM _test_allowall2;
     RAISE NOTICE 'Testing bare public IP allowed under http-allow-all: %', inst_id;
 
-    PERFORM df.await_instance(inst_id);
+    SELECT df.await_instance(inst_id, 30) INTO status;
 
     SELECT result::text INTO node_result
     FROM df.nodes
     WHERE instance_id = inst_id AND node_type = 'HTTP';
+
+    IF status IS NULL OR status NOT IN ('completed', 'failed') OR node_result IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: allow-all IP request did not finish: status = %, result = %',
+            status, node_result;
+    END IF;
 
     -- Under http-allow-all the allow-list is entirely bypassed — no "bare IP" rejection
     IF node_result ILIKE '%bare IP%' THEN
