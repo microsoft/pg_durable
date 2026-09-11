@@ -575,6 +575,37 @@ pub fn http(
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
 ) -> String {
+    http_node(url, method, body, headers, timeout_seconds, None)
+}
+
+#[pg_extern(name = "http", schema = "df", requires = ["create_endpoint_type"])]
+pub fn http_endpoint(
+    url: pgrx::composite_type!("df.http_endpoint"),
+    method: default!(&str, "'POST'"),
+    body: default!(Option<&str>, "NULL"),
+    headers: default!(Option<pgrx::JsonB>, "NULL"),
+    timeout_seconds: default!(i32, "30"),
+) -> String {
+    let endpoint = crate::endpoints::EndpointReference::from_tuple(url)
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    http_node(
+        &endpoint.path,
+        method,
+        body,
+        headers,
+        timeout_seconds,
+        Some(&endpoint.server),
+    )
+}
+
+fn http_node(
+    url: &str,
+    method: &str,
+    body: Option<&str>,
+    headers: Option<pgrx::JsonB>,
+    timeout_seconds: i32,
+    endpoint: Option<&str>,
+) -> String {
     // Fail early when no http feature is compiled in — df.nodes can be inserted
     // by hand, so we also enforce this at execution time, but blocking at DSL
     // construction time gives a clearer error to developers.
@@ -590,7 +621,7 @@ pub fn http(
     // here surfaces the error before df.start() is ever called.
     // Skip the check when the URL contains variable placeholders ({...}) —
     // substitution happens at execution time so the scheme is not yet known.
-    if !url.contains('{') {
+    if endpoint.is_none() && !url.contains('{') {
         if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
             pgrx::error!("{}", e);
         }
@@ -616,8 +647,9 @@ pub fn http(
         "headers": headers.as_ref().map(|h| &h.0),
         "timeout_seconds": timeout_seconds
     });
-    crate::endpoints::configure_destination(&mut config, url)
-        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    if let Some(server) = endpoint {
+        config["endpoint"] = serde_json::Value::String(server.into());
+    }
 
     Durofut {
         node_type: "HTTP".to_string(),
@@ -663,6 +695,37 @@ pub fn http_multipart(
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
 ) -> String {
+    http_multipart_node(url, method, parts, headers, timeout_seconds, None)
+}
+
+#[pg_extern(name = "http_multipart", schema = "df", requires = ["create_endpoint_type"])]
+pub fn http_multipart_endpoint(
+    url: pgrx::composite_type!("df.http_endpoint"),
+    method: default!(&str, "'POST'"),
+    parts: default!(Option<pgrx::JsonB>, "NULL"),
+    headers: default!(Option<pgrx::JsonB>, "NULL"),
+    timeout_seconds: default!(i32, "30"),
+) -> String {
+    let endpoint = crate::endpoints::EndpointReference::from_tuple(url)
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    http_multipart_node(
+        &endpoint.path,
+        method,
+        parts,
+        headers,
+        timeout_seconds,
+        Some(&endpoint.server),
+    )
+}
+
+fn http_multipart_node(
+    url: &str,
+    method: &str,
+    parts: Option<pgrx::JsonB>,
+    headers: Option<pgrx::JsonB>,
+    timeout_seconds: i32,
+    endpoint: Option<&str>,
+) -> String {
     // Fail early when no http feature is compiled in — same guard as df.http.
     if !crate::ssrf::http_enabled() {
         pgrx::error!(
@@ -673,7 +736,7 @@ pub fn http_multipart(
 
     // Validate URL scheme at DSL time (skip when URL contains variable
     // placeholders — substitution happens at execution time). Mirrors df.http.
-    if !url.contains('{') {
+    if endpoint.is_none() && !url.contains('{') {
         if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
             pgrx::error!("{}", e);
         }
@@ -715,8 +778,9 @@ pub fn http_multipart(
         "headers": headers.as_ref().map(|h| &h.0),
         "timeout_seconds": timeout_seconds
     });
-    crate::endpoints::configure_destination(&mut config, url)
-        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    if let Some(server) = endpoint {
+        config["endpoint"] = serde_json::Value::String(server.into());
+    }
 
     Durofut {
         node_type: "HTTP_MULTIPART".to_string(),

@@ -22,36 +22,11 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
-use crate::activities::execute_http::build_client;
+use crate::activities::execute_http::{build_client, check_http_privilege};
 use crate::types::MultipartConfig;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-multipart";
-
-/// Check that `submitted_by` holds EXECUTE privilege on `df.http_multipart()`.
-///
-/// Mirrors `execute_http::check_http_privilege` — closes the bypass path where
-/// a user crafts a raw Durofut JSON and passes it directly to `df.start()`,
-/// inserting an HTTP_MULTIPART node without going through the DSL guard.
-async fn check_multipart_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
-    let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http_multipart(text,text,jsonb,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
-    )
-    .bind(submitted_by)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
-
-    match has_priv {
-        Some(true) => Ok(()),
-        _ => Err(format!(
-            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http_multipart(). \
-             Grant EXECUTE ON FUNCTION df.http_multipart(text,text,jsonb,jsonb,integer) TO {submitted_by} to allow multipart HTTP requests."
-        )),
-    }
-}
 
 /// Decode a part's `data_b64` payload, tolerating ASCII whitespace.
 ///
@@ -104,7 +79,7 @@ pub async fn execute(
     //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding.
 
     // --- Privilege check (Layer 0) ---
-    check_multipart_privilege(&pool, audit_user)
+    check_http_privilege(&pool, audit_user, config.endpoint.is_some(), true)
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(

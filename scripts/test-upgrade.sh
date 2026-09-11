@@ -584,10 +584,19 @@ WHERE n.nspname = 'df'
     AND NOT EXISTS (
             SELECT 1
             FROM pg_class c
-            WHERE c.reltype = t.oid
+            WHERE c.reltype = t.oid AND c.relkind <> 'c'
     )
 GROUP BY t.typname, t.typtype, t.typbasetype, t.typtypmod
 ORDER BY t.typname;
+
+SELECT 'composite_field', t.typname, a.attname,
+       pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnum::text
+FROM pg_catalog.pg_type t
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_catalog.pg_class c ON c.oid = t.typrelid AND c.relkind = 'c'
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+WHERE n.nspname = 'df' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY t.typname, a.attnum;
 
 -- Constraints
 --
@@ -1141,6 +1150,46 @@ test_b2_http_api_after_upgrade() {
             ) THEN
                 RAISE EXCEPTION 'Legacy HTTP calls or the additive helper failed after upgrade';
             END IF;
+        END
+        \$verify\$;
+
+        DO \$verify\$
+        DECLARE
+            signature text;
+        BEGIN
+            IF pg_catalog.pg_typeof(df.endpoint('missing_server', '/')) <> 'df.http_endpoint'::regtype THEN
+                RAISE EXCEPTION 'Endpoint type was not installed';
+            END IF;
+            FOREACH signature IN ARRAY ARRAY[
+                'df.http(df.http_endpoint,text,text,jsonb,integer)',
+                'df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)'
+            ] LOOP
+                IF pg_catalog.has_function_privilege('durable_b2_http_probe', signature, 'EXECUTE') THEN
+                    RAISE EXCEPTION 'Upgrade implicitly granted endpoint HTTP';
+                END IF;
+            END LOOP;
+        END
+        \$verify\$;
+        SELECT df.grant_usage('durable_b2_http_probe', include_http => true);
+        SET ROLE durable_b2_http_probe;
+        SELECT df.http(df.endpoint('missing_server', '/'), 'GET');
+        SELECT df.http_multipart(df.endpoint('missing_server', '/'), parts => '[{\"name\":\"field\",\"data_b64\":\"aGk=\"}]');
+        RESET ROLE;
+        SELECT df.revoke_usage('durable_b2_http_probe');
+        DO \$verify\$
+        DECLARE
+            signature text;
+        BEGIN
+            FOREACH signature IN ARRAY ARRAY[
+                'df.http(text,text,text,jsonb,integer)',
+                'df.http(df.http_endpoint,text,text,jsonb,integer)',
+                'df.http_multipart(text,text,jsonb,jsonb,integer)',
+                'df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)'
+            ] LOOP
+                IF pg_catalog.has_function_privilege('durable_b2_http_probe', signature, 'EXECUTE') THEN
+                    RAISE EXCEPTION 'HTTP permission remains after revoke_usage: %', signature;
+                END IF;
+            END LOOP;
         END
         \$verify\$;
 

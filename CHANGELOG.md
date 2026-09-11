@@ -15,11 +15,14 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   stays separate from references; activities encode fields and resolve credentials
   under the submitting role without scanning payloads for markers. Named-secret-only
   servers may omit `base_url` with `auth_scheme 'none'`.
-- **Endpoint HTTP requests:** `df.endpoint(server, path)` composes with both
-  `df.http` and `df.http_multipart`. Activities resolve per-role credentials,
+- **Endpoint HTTP requests:** `df.endpoint(server, path)` returns a typed
+  `df.http_endpoint` value accepted by `df.http` and `df.http_multipart`.
+  TEXT destinations remain URLs, never serialized endpoint references.
+  Activities resolve per-role credentials,
   enforce server `USAGE`, preserve the configured base URL and reject routing or
   credential overrides. Existing HTTP signatures and raw-URL workflow inputs
-  remain unchanged; general body secret interpolation is deferred.
+  remain unchanged; the grant/revoke helpers cover URLs and endpoints together.
+  General body secret interpolation is deferred.
 - **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
   option validator, and per-user catalog resolution for unauthenticated, bearer,
   named-header and query-string endpoint authentication. FDW creation authority

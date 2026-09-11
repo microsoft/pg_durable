@@ -702,6 +702,9 @@ df.http(
 ) RETURNS TEXT                    -- JSON response object
 ```
 
+The destination can also be the `df.http_endpoint` value returned by
+[`df.endpoint`](#calling-an-endpoint). All other request arguments are the same.
+
 ### df.with_http_options() Function
 
 `df.with_http_options(fut TEXT, options JSONB) RETURNS TEXT` is the entry point for
@@ -878,12 +881,20 @@ SELECT df.start(
 );
 ```
 
-`df.endpoint` constructs a JSON-encoded TEXT reference, not an HTTP request or a
-resolved URL. It does not look up the server or read credentials. The HTTP
+`df.endpoint` returns a `df.http_endpoint` value containing the server name and
+path, not an HTTP request or a resolved URL. It does not look up the server or
+read credentials. Pass this value directly to the HTTP constructor; keep it typed
+when storing it in a SQL variable or column. TEXT destinations are always treated
+as URLs, never as serialized endpoint references. The HTTP
 constructor records only the server name and path template; the activity checks
 the caller's HTTP grant and server `USAGE`, resolves the mapping, and applies
 normal HTTP destination checks. `df.explain` shows the server and path without
 resolving either.
+
+Use `df.grant_usage('app_role', include_http => true)` to enable HTTP access for
+URLs and endpoints. After upgrading an existing installation, run the helper for
+roles that need the newly added endpoint support. Existing URL calls retain their
+permissions.
 
 The path starts with one `/` and is appended to the server's base path prefix:
 `https://host/api/` plus `/items` becomes `https://host/api/items`. Absolute URLs,
@@ -2521,7 +2532,7 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `p_role` | *(required)* | Target role name |
-| `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
+| `include_http` | `false` | Enable `df.http()` and `df.http_multipart()` for URLs and endpoints (opt-in network access) |
 | `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. Also grants EXECUTE on `df.metrics()` (system-wide aggregate counts), since `with_grant => true` designates a pg_durable admin. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
 
 <details>
@@ -2533,7 +2544,7 @@ The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep Postgr
 -- Access gate: schema USAGE makes every ordinary df.* function callable
 GRANT USAGE ON SCHEMA df TO app_role;
 -- Optional: HTTP access (include_http => true)
--- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
+-- SELECT df.grant_usage('app_role', include_http => true);
 
 -- Optional: system-wide metrics access (also granted automatically by
 --           df.grant_usage(role, with_grant => true))

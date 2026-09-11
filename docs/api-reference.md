@@ -289,7 +289,7 @@ Makes an HTTP request.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
-| `url` | TEXT | ❌ Literal | Request URL (supports `$var` substitution) |
+| `url` | TEXT or `df.http_endpoint` | ❌ Literal | Request URL or `df.endpoint(...)` value (path supports workflow substitution) |
 | `method` | TEXT | ❌ Literal | HTTP method (default: POST) |
 | `body` | TEXT | ❌ Literal | Request body JSON (supports `$var`) |
 | `headers` | JSONB | ❌ Literal | Request headers |
@@ -318,17 +318,20 @@ bytes into a subsequent upload.
 
 ### df.endpoint(server, path)
 
-Returns a JSON-encoded TEXT destination reference for `df.http` or
-`df.http_multipart`. Both arguments are required. Construction reads no catalogs
-or credentials. The reference format is
-`{"type":"pg_durable.endpoint","server":"partner_api","path":"/v1/items"}`;
-use the helper to escape server names and paths correctly.
+Returns a `df.http_endpoint` composite value with `server TEXT` and `path TEXT`
+fields for `df.http` or `df.http_multipart`. Both arguments are required.
+Construction reads no endpoint catalogs or credentials. Pass the typed value
+directly to an HTTP constructor; TEXT arguments are URLs and are never interpreted
+as endpoint references. No implicit TEXT-to-endpoint conversion is installed.
 
 ```sql
 df.http(df.endpoint('partner_api', '/v1/items'), 'GET')
 df.http_multipart(df.endpoint('partner_api', '/upload'),
                   parts => '[{"name":"file","data_b64":"aGVsbG8="}]'::jsonb)
 ```
+
+Manage HTTP access with `df.grant_usage(..., include_http => true)` and
+`df.revoke_usage(...)`; the helpers cover URL and endpoint requests together.
 
 The server name is fixed; the path supports existing workflow substitutions and
 is appended to the base URL's path prefix. Invalid path shapes, traversal, routing
@@ -365,7 +368,7 @@ Makes an HTTP request with a `multipart/form-data` body. Requires the same
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
-| `url` | TEXT | ❌ Literal | Request URL (supports `$var` substitution) |
+| `url` | TEXT or `df.http_endpoint` | ❌ Literal | Request URL or `df.endpoint(...)` value (path supports workflow substitution) |
 | `method` | TEXT | ❌ Literal | HTTP method (default: POST) |
 | `parts` | JSONB | ❌ Literal | Array of part objects (see below) |
 | `headers` | JSONB | ❌ Literal | Request headers |

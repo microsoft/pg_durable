@@ -24,18 +24,35 @@ use crate::types::HttpConfig;
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-http";
 
-/// Check that `submitted_by` holds EXECUTE privilege on `df.http()`.
+/// Check the HTTP privilege required by the request's destination and body mode.
 ///
 /// This closes the bypass path where a user crafts a raw Durofut JSON and
 /// passes it directly to `df.start()`, inserting an HTTP node without going
 /// through the DSL guard in `df.http()`.
-async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
+pub(crate) async fn check_http_privilege(
+    pool: &PgPool,
+    submitted_by: &str,
+    endpoint: bool,
+    multipart: bool,
+) -> Result<(), String> {
+    let signature = match (multipart, endpoint) {
+        (false, false) => "df.http(text,text,text,jsonb,integer)",
+        (false, true) => "df.http(df.http_endpoint,text,text,jsonb,integer)",
+        (true, false) => "df.http_multipart(text,text,jsonb,jsonb,integer)",
+        (true, true) => "df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)",
+    };
+    let function = if multipart {
+        "df.http_multipart"
+    } else {
+        "df.http"
+    };
     let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http(text,text,text,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
+        "SELECT COALESCE(pg_catalog.has_function_privilege(
+             role.oid, pg_catalog.to_regprocedure($2)::pg_catalog.oid, 'EXECUTE'), false)
+         FROM pg_catalog.pg_roles AS role WHERE role.rolname OPERATOR(pg_catalog.=) $1",
     )
     .bind(submitted_by)
+    .bind(signature)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
@@ -43,8 +60,8 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
     match has_priv {
         Some(true) => Ok(()),
         _ => Err(format!(
-            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http(). \
-             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {submitted_by} to allow HTTP requests."
+            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on {function}() for this request. \
+             Required function: {signature}. Use df.grant_usage with include_http => true to allow HTTP requests."
         )),
     }
 }
@@ -125,7 +142,7 @@ pub async fn execute(
     // differential can separate what we approve from what we request.
 
     // --- Privilege check (Layer 0): submitted_by must have EXECUTE on df.http() ---
-    check_http_privilege(&pool, audit_user)
+    check_http_privilege(&pool, audit_user, config.endpoint.is_some(), false)
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(

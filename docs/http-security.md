@@ -109,22 +109,30 @@ sending a request. Revocation does not cancel a request already in progress.
 
 ### 3.2 Mechanism
 
-`execute_http` runs the following check before any network activity:
+The activity selects the required HTTP function signature from the node's actual
+destination and body mode, then checks the submitting role before network activity:
 
 ```sql
-SELECT has_function_privilege($submitted_by::regrole,
-    'df.http(text,text,text,jsonb,integer)'::regprocedure,
-    'EXECUTE')
+SELECT COALESCE(pg_catalog.has_function_privilege(
+  role.oid, pg_catalog.to_regprocedure($http_signature)::pg_catalog.oid,
+  'EXECUTE'), false)
+FROM pg_catalog.pg_roles AS role
+WHERE role.rolname OPERATOR(pg_catalog.=) $submitted_by;
 ```
+
+The signature is selected internally based on whether or not the node would
+have been created using a `df.http_endpoint` (the type that `df.endpoint`
+returns), not supplied as a permission override in node JSON. Role lookup
+uses the exact catalog name. Missing functions or roles fail closed;
+hand-crafted nodes cannot bypass the check.
 
 `has_function_privilege` honours PostgreSQL's standard privilege model:
 superusers always return `true`; regular roles return `true` only when an
 effective grant exists, whether direct, inherited from another role or granted
 to `PUBLIC`.
 
-Multipart activities perform the corresponding check on
-`df.http_multipart(text,text,jsonb,jsonb,integer)`. Restricting one function does
-not restrict the other.
+Multipart activities use the same check for `df.http_multipart`. Manage the full
+HTTP permission set through `df.grant_usage` and `df.revoke_usage`.
 
 `df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
 Like other combinators, it uses ordinary `df` schema access and default PUBLIC
@@ -139,17 +147,11 @@ HTTP access is **opt-in** and separate from general `df` access.
 
 #### Granting access
 
-Use `df.grant_usage()` with `include_http => true` to grant both HTTP functions:
+Use `df.grant_usage()` with `include_http => true` to enable normal and multipart
+HTTP with either URLs or endpoints:
 
 ```sql
 SELECT df.grant_usage('my_role', include_http => true);
-```
-
-Or grant directly:
-
-```sql
-GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO my_role;
-GRANT EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) TO my_role;
 ```
 
 `df.grant_usage('my_role')` (without `include_http`) grants all standard `df`
@@ -160,11 +162,12 @@ access. Ordinary helpers retain PostgreSQL's default `PUBLIC EXECUTE`; schema
 
 #### Revoking access
 
-To remove HTTP access without removing all `df` access:
+To remove HTTP access while retaining standard `df` access, revoke the current
+helper-managed grants and regrant without HTTP:
 
 ```sql
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM my_role;
-REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM my_role;
+SELECT df.revoke_usage('my_role');
+SELECT df.grant_usage('my_role');
 ```
 
 Once no effective HTTP grant remains, later execution attempts fail with a
@@ -192,6 +195,10 @@ Calling `df.grant_usage(role, include_http => false)` does not revoke the legacy
 grant or warn about residual access. Use `has_function_privilege` to check the
 role's effective permissions after changing grants.
 
+Endpoint support adds new functions without copying existing grants onto them.
+After upgrading, run `df.grant_usage(role, include_http => true)` for roles that
+need endpoint requests. Existing TEXT function OIDs and ACLs remain unchanged.
+
 ### 3.4 Admin function protection
 
 `df.grant_usage()` and `df.revoke_usage()` are admin-only functions.
@@ -207,7 +214,7 @@ does not confer the extension owner's privileges.
 
 `df.grant_usage` issues explicit schema, table and sensitive-function grants.
 It does not use a blanket function grant followed by revocations. When granting
-HTTP access, the caller must be able to grant both HTTP functions; otherwise the
+HTTP access, the caller must be able to grant the complete HTTP function set; otherwise the
 call fails rather than silently skipping the HTTP grant.
 
 ### 3.5 Feature-flag interaction
@@ -221,7 +228,9 @@ remains compiled in and still runs before any network activity.
 
 ### 3.6 Endpoint requests
 
-An endpoint reference does not grant authority. Normal and multipart activities
+`df.endpoint` returns the native `df.http_endpoint` type. TEXT arguments to the
+HTTP constructors are not decoded as endpoint references. An endpoint value does
+not grant authority. Normal and multipart activities
 first check their existing HTTP function grant, then resolve the foreign server
 and the submitting role's user mapping on a connection authenticated as that role.
 Server `USAGE` is mandatory. Catalogs are in the control database selected by
@@ -490,7 +499,7 @@ endpoint can echo them in its response.
 
 | Scenario | Message |
 |----------|---------|
-| No EXECUTE privilege on df.http() | `Blocked: role '{role}' does not have EXECUTE privilege on df.http(). Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {role} to allow HTTP requests.` |
+| No HTTP EXECUTE privilege | `Blocked: role '{role}' does not have EXECUTE privilege on {function}() for this request.` The error identifies the required signature and recommends `df.grant_usage` with `include_http => true`. |
 | HTTP disabled (no feature) | `Blocked: outbound HTTP requests are disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them.` |
 | Plaintext HTTP in a restricted build | `Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required.` |
 | Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |
