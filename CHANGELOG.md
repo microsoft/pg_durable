@@ -44,7 +44,8 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   Individual `"secret.<key>"` user-mapping options support per-key addition,
   rotation and removal. Literal form data
   stays separate from references; activities encode fields and resolve credentials
-  under the submitting role without scanning payloads for markers.
+  under the submitting role without scanning payloads for markers. Named-secret-only
+  servers may omit `base_url` with `auth_scheme 'none'`.
 - **Endpoint HTTP requests:** `df.endpoint(server, path)` composes with both
   `df.http` and `df.http_multipart`. Activities resolve per-role credentials,
   enforce server `USAGE`, preserve the configured base URL and reject routing or

@@ -1166,13 +1166,19 @@ test_b2_endpoint_catalog_after_upgrade() {
     assert_sql_equals "SELECT umoptions @> ARRAY['token=ROTATED_SENTINEL', 'secret.key=ROTATED_NAMED_SENTINEL', 'secret.other=UNCHANGED'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
     run_sql_capture "ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (DROP \"secret.other\");" >/dev/null || return 1
     assert_sql_equals "SELECT umoptions @> ARRAY['token=ROTATED_SENTINEL', 'secret.key=ROTATED_NAMED_SENTINEL'] AND NOT (umoptions @> ARRAY['secret.other=UNCHANGED']) FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "SET ROLE durable_b2_endpoint_probe;
+        CREATE SERVER durable_b2_secrets FOREIGN DATA WRAPPER pg_durable_fdw OPTIONS (auth_scheme 'none');
+        CREATE USER MAPPING FOR CURRENT_USER SERVER durable_b2_secrets OPTIONS (\"secret.key\" 'NAME_ONLY_SENTINEL');
+        ALTER SERVER durable_b2_endpoint OPTIONS (SET auth_scheme 'none', DROP base_url);" >/dev/null || return 1
+    assert_sql_equals "SELECT count(*) = 2 FROM pg_catalog.pg_foreign_server WHERE srvname IN ('durable_b2_secrets', 'durable_b2_endpoint') AND srvoptions = ARRAY['auth_scheme=none'];" "t" || return 1
+    assert_sql_equals "SELECT umoptions = ARRAY['secret.key=NAME_ONLY_SENTINEL'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_secrets';" "t" || return 1
     assert_sql_equals "SELECT df.secret('durable_b2_endpoint', 'key') = jsonb_build_object('server', 'durable_b2_endpoint', 'key', 'key');" "t" || return 1
     assert_sql_equals "SELECT ((df.with_http_options(
         df.http('https://api.github.com/', 'POST'),
         jsonb_build_object('secret_bindings', jsonb_build_object('form', jsonb_build_object('password', df.secret('durable_b2_endpoint', 'key'))),
             'form_fields', jsonb_build_object('ordinary', 'literal'))
         )::jsonb->>'query')::jsonb->'secret_bindings'->'form'->'password'->>'key') = 'key';" "t" || return 1
-    run_sql_capture "DROP SERVER durable_b2_endpoint CASCADE;
+    run_sql_capture "DROP SERVER durable_b2_endpoint, durable_b2_secrets CASCADE;
         DROP OWNED BY durable_b2_endpoint_probe;
         DROP ROLE durable_b2_endpoint_probe;" >/dev/null
 }
