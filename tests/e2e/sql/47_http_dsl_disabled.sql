@@ -31,6 +31,29 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: df.http() should raise at DSL time when HTTP is disabled';
     END IF;
 
+    caught := false;
+    BEGIN
+        PERFORM df.http(df.endpoint('missing_server', '/path'), 'GET');
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM ILIKE '%df.http() is disabled%' THEN
+            caught := true;
+        ELSE
+            RAISE;
+        END IF;
+    END;
+    IF NOT caught THEN RAISE EXCEPTION 'TEST FAILED: typed HTTP should be disabled'; END IF;
+    caught := false;
+    BEGIN
+        PERFORM df.http_multipart(df.endpoint('missing_server', '/path'), parts => '[{"name":"file","data_b64":"aA=="}]');
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM ILIKE '%df.http_multipart() is disabled%' THEN
+            caught := true;
+        ELSE
+            RAISE;
+        END IF;
+    END;
+    IF NOT caught THEN RAISE EXCEPTION 'TEST FAILED: typed multipart should be disabled'; END IF;
+
     RAISE NOTICE 'TEST PASSED: http_dsl_disabled_raises';
 END $$;
 
