@@ -36,7 +36,7 @@ when, so you only do by hand what isn't automated:
 | Trigger | Workflow | What it does |
 |---------|----------|--------------|
 | Push tag `v*` | **Package Release** (`.github/workflows/package-release.yml`) | Builds + validates the AMD64 `.deb` for PG 17 and 18, then **creates a *draft* GitHub Release** for the tag and attaches the `.deb` / source tarballs / `SHA256SUMS`. |
-| Release **published** | **Docker Publish** (`.github/workflows/docker-publish.yml`) | Builds `ghcr.io/microsoft/pg_durable` from the released `.deb` (PG 17 + 18, amd64) and pushes the immutable `X.Y.Z-pg<major>` tags plus floating `pg<major>`/`latest` when it's the highest stable release. **The `.deb` assets must already be attached before this runs.** |
+| Release **published** or **Package Release completed** | **Docker Publish** (`.github/workflows/docker-publish.yml`) | Checks that the Release is public and both PG 17 and 18 AMD64 `.deb` assets exist, then builds `ghcr.io/microsoft/pg_durable` and pushes the immutable `X.Y.Z-pg<major>` tags plus floating `pg<major>`/`latest` when it's the highest stable release. Only successful tag-push Package Release runs are eligible. |
 | Pull request | **CI** (`.github/workflows/ci.yml`), **Package Release** (PR validation), **Upgrade tests** | fmt/clippy, unit + E2E, `.deb` build validation, and `scripts/test-upgrade.sh`. |
 
 Key consequences:
@@ -46,6 +46,10 @@ Key consequences:
 - **Publishing is a manual gate.** Until you publish, nothing has reached GHCR
   and no consumer has seen the release, so a botched tag is still recoverable
   (see "If the tag run fails").
+- **Either event order is supported.** If Package Release finishes first, Docker
+  Publish waits for the Release to be published. If the Release is published
+  first, Docker Publish waits for Package Release to attach both `.deb` assets.
+  The readiness check prevents either early event from publishing an image.
 - **No testing happens at tag time.** Verify the checks were already green on the
   commit you are tagging.
 
@@ -307,8 +311,10 @@ don't move.
 
 ## Step 6: Confirm GHCR images
 
-Publishing the Release triggers **Docker Publish**. Confirm it pushed the image
-tags:
+Publishing the Release and successful completion of the tag-triggered **Package
+Release** can each trigger **Docker Publish**. The workflow publishes only after
+the Release is public and both PG 17 and 18 AMD64 `.deb` assets exist, so either
+event may arrive first. Confirm it pushed the image tags:
 
 ```bash
 gh run list --workflow docker-publish.yml --limit 1
@@ -319,7 +325,9 @@ Verify the tags at
 `X.Y.Z-pg17` / `X.Y.Z-pg18`, and floating `pg17`/`pg18`/`latest` if this is the
 highest stable release. To verify before publishing, you can dispatch Docker
 Publish manually with `ref=vX.Y.Z`, `dry_run=true` (builds + smoke-tests, pushes
-nothing).
+nothing). If neither automatic event produces images after the Release is
+public and both packages are attached, use the same manual dispatch as the
+recovery path; set `dry_run=false` only when ready to push.
 
 > **Update the tracking issue:** link the Docker Publish run and tick **GHCR
 > images confirmed**.
