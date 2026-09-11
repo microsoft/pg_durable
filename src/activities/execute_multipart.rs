@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 
 use crate::activities::execute_http::build_client;
 use crate::types::MultipartConfig;
@@ -80,6 +81,7 @@ fn decode_part_data(data_b64: &str) -> Result<Vec<u8>, base64::DecodeError> {
 pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
+    semaphore: Arc<Semaphore>,
     config_json: String,
 ) -> Result<String, String> {
     let config: MultipartConfig = serde_json::from_str(&config_json)
@@ -113,9 +115,9 @@ pub async fn execute(
     config
         .secret_options
         .validate(false, &config.method, true, config.headers.as_ref())?;
+    let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
     let mut prepared = crate::endpoints::prepare_request(
-        audit_user,
-        config.database.as_deref(),
+        &mut catalog,
         config.endpoint.as_deref(),
         &config.url,
         config.headers.as_ref(),
@@ -149,13 +151,9 @@ pub async fn execute(
 
     let resolved = config
         .secret_options
-        .resolve(
-            audit_user,
-            config.database.as_deref(),
-            &mut prepared,
-            config.headers.as_ref(),
-        )
+        .resolve(&mut catalog, &mut prepared, config.headers.as_ref())
         .await?;
+    catalog.close().await?;
     let safe_url = if config
         .secret_options
         .secret_bindings

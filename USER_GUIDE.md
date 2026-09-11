@@ -839,6 +839,10 @@ A caller with server `USAGE` can create and read its own mapping. Other ordinary
 roles cannot read its values, including a server owner who is not that mapped
 role. `PUBLIC` mappings are not a fallback for endpoint credential lookup.
 
+Server owners can change the destination, so they must be trusted with credentials
+sent through their servers. Catalog masking does not prevent an owner from
+redirecting a subsequent request to a destination they control.
+
 The catalog resolver checks server `USAGE` and reads the authenticated caller's
 mapping on every attempt. Rotation affects the next lookup, not an already-sent
 request. Missing or inaccessible credentials fail without privileged fallback.
@@ -895,10 +899,19 @@ Credential query values are appended without re-encoding and redacted in request
 diagnostics. Secret-looking body text is not expanded by endpoint authentication;
 ordinary workflow-variable substitution remains unchanged.
 
-Endpoints and mappings are looked up in the workflow's target database, or the
-extension database when no target was supplied. The FDW must be installed there,
-and the submitting role must be able to connect. Catalog lookup reads current
-permissions and credentials on each attempt, not at graph construction time.
+Endpoints and mappings live in the control database where `pg_durable` is installed
+(selected by `pg_durable.database`). The submitting role must be able to connect
+there. The `database` argument to `df.start` selects the SQL execution database;
+it does not change HTTP credential lookup or require installing the extension in
+that SQL target.
+
+Each HTTP attempt reads endpoint configuration and all referenced mappings in one
+consistent, read-only catalog snapshot under the submitting role. Atomic catalog
+updates cannot mix an old destination with new credentials within that request.
+Later attempts take new snapshots; completed results still replay from history.
+The catalog connection shares the SQL user-connection budget and is closed before
+HTTP I/O. Raw requests and literal forms without references need no catalog
+connection. No credentials are read at graph construction time.
 Returned or echoed credentials are still response data and can enter history;
 endpoint authentication does not redact response bodies or headers.
 
@@ -1002,9 +1015,11 @@ ordinary fields or endpoint authentication fail rather than overwrite values.
 Header matching is case-insensitive; query collision checks decode parameter names.
 
 Binding maps, names and prefixes are trusted workflow configuration: never source
-them from untrusted payloads. Only ordinary data belongs in `form_fields` or raw
-request fields. Activities re-check HTTP permission and `USAGE` on every referenced
-server, using the caller's mapping in the workflow's target database. Missing keys
+them from untrusted payloads. The destination of a credential-bearing request must
+also be trusted: a secret's server name selects its mapping, not the allowed
+recipient. Only ordinary data belongs in `form_fields` or raw request fields.
+Activities re-check HTTP permission and `USAGE` on every referenced
+server, using the caller's mapping in the control database. Missing keys
 or mappings fail explicitly, and resolved values are never recursively interpreted.
 
 Secret insertion into paths, raw bodies, nested JSON or multipart contents remains
@@ -2622,7 +2637,7 @@ are being launched:
 |----------|---------|-----|---------|
 | **Management pool** | Extension lifecycle checks, graph loading, status updates | `pg_durable.max_management_connections` | 6 |
 | **Duroxide pool** | Orchestration state, LISTEN/NOTIFY for work dispatch | `pg_durable.max_duroxide_connections` | 10 |
-| **User-execution** | Per-SQL-node connections authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
+| **User-execution** | SQL execution and HTTP credential catalog reads, authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
 | **New-start loopback** | Extra sessions that persist `df.start(..., transaction_mode => 'new')` outside the caller's transaction | `pg_durable.max_new_transaction_starts` | 2 |
 
 Each PG backend session (user calling `df.start()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
@@ -2642,11 +2657,11 @@ pg_durable.max_management_connections = 6
 # Minimum: 2 (1 reserved for listener). Worker refuses to start if < 2.
 pg_durable.max_duroxide_connections = 10
 
-# Maximum concurrent SQL node executions (user connections)
+# Maximum concurrent SQL execution and HTTP catalog connections
 # Additional executions queue until a slot frees up or timeout expires.
 pg_durable.max_user_connections = 10
 
-# How long (seconds) a SQL node waits for a user-execution slot
+# How long (seconds) SQL execution or HTTP catalog lookup waits for a slot
 # before failing with an error.
 pg_durable.execution_acquire_timeout = 30
 
@@ -2679,16 +2694,23 @@ With defaults and 5 connected users: `6 + 10 + 10 + 2 + 5 = 33 connections`.
 
 ### Backpressure Behavior
 
-When all user-execution slots are occupied, additional SQL node executions **queue** (they don't fail immediately). The semaphore-based backpressure ensures:
+SQL execution and HTTP credential lookup share user-execution slots. When all slots
+are occupied, additional work **queues** before opening a caller connection. The
+semaphore-based backpressure ensures:
 
 - Queued executions proceed as slots free up
-- If the wait exceeds `execution_acquire_timeout`, the SQL node fails with:
+- If the wait exceeds `execution_acquire_timeout`, the waiting node fails with:
   ```
   pg_durable: connection limit reached (max_user_connections=10).
   Timed out after 30s waiting for an available execution slot.
   ```
 - The failed node causes the workflow to enter `failed` status
 - Other nodes in the same workflow that have already acquired slots continue normally
+
+An HTTP request uses at most one catalog connection for its endpoint and named
+bindings, and releases that slot before sending the request. Network transfer does
+not occupy a database slot. Raw HTTP and literal forms without credential references
+do not acquire a slot.
 
 For `df.start(..., transaction_mode => 'new')`, admission control applies
 *before* the loopback session is opened:

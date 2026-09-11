@@ -333,8 +333,12 @@ df.http_multipart(df.endpoint('partner_api', '/upload'),
 The server name is fixed; the path supports existing workflow substitutions and
 is appended to the base URL's path prefix. Invalid path shapes, traversal, routing
 overrides and credential overrides fail explicitly. Resolution uses the submitting
-role in the workflow's target database and re-checks server `USAGE` in addition to
-the corresponding HTTP function grant. See [Calling an Endpoint](../USER_GUIDE.md#calling-an-endpoint).
+role in the control database where `pg_durable` is installed and re-checks server
+`USAGE` in addition to the corresponding HTTP function grant. The workflow's SQL
+target does not select the credential catalog. Each request resolves its endpoint
+and named bindings from one consistent catalog snapshot, using a shared
+user-connection slot that is released before HTTP I/O. See
+[Calling an Endpoint](../USER_GUIDE.md#calling-an-endpoint).
 
 ### Endpoint Credential Catalog
 

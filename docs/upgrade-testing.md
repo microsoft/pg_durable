@@ -258,7 +258,11 @@ what the upgrade script handles, and any backward compatibility considerations.
   gain binding/form fields and trusted target-database metadata. Existing HTTP
   signatures, grants and legacy raw-URL activity inputs remain unchanged.
 - Named credential lookup uses native catalogs, checks server `USAGE` and reads
-  the authenticated caller's mapping. Missing endpoint schema support or named
+  the authenticated caller's mapping in the control database, independently of
+  the SQL target. Endpoint and named-binding reads share one read-only consistent
+  snapshot and the existing user-connection budget, released before HTTP I/O.
+  No additional DDL, grant changes or replay-visible activity inputs are needed
+  for catalog snapshot or connection admission. Missing endpoint schema support or named
   keys fails explicitly, without changing legacy requests on older schemas.
 - Named credentials use native `ADD`, `SET` and `DROP`; the B2 catalog test
   verifies that these preserve unrelated named values and endpoint-auth options.

@@ -234,8 +234,7 @@ impl SecretOptions {
 
     pub async fn resolve(
         &self,
-        submitted_by: &str,
-        database: Option<&str>,
+        endpoint_catalog: &mut crate::endpoints::EndpointCatalog<'_>,
         request: &mut crate::endpoints::EndpointRequest,
         headers: Option<&Value>,
     ) -> Result<ResolvedBindings, String> {
@@ -252,7 +251,10 @@ impl SecretOptions {
             for server in servers {
                 catalog.insert(
                     server.to_owned(),
-                    crate::endpoints::resolve_named_secrets(submitted_by, database, server).await?,
+                    endpoint_catalog
+                        .resolve_named_secrets(server)
+                        .await
+                        .map_err(|error| format!("Secret server {server:?}: {error}"))?,
                 );
             }
         }
@@ -264,31 +266,42 @@ impl SecretOptions {
         request: &mut crate::endpoints::EndpointRequest,
         catalog: &BTreeMap<String, BTreeMap<String, String>>,
     ) -> Result<ResolvedBindings, String> {
-        let lookup = |reference: &SecretReference| -> Result<&str, String> {
-            catalog
-                .get(&reference.server)
-                .and_then(|values| values.get(&reference.key))
-                .map(String::as_str)
-                .ok_or_else(|| "Referenced secret key is missing".into())
-        };
+        let lookup =
+            |slot: &str, name: &str, reference: &SecretReference| -> Result<&str, String> {
+                catalog
+                    .get(&reference.server)
+                    .and_then(|values| values.get(&reference.key))
+                    .map(String::as_str)
+                    .ok_or_else(|| {
+                        format!(
+                        "Referenced secret key is missing: {slot}[{name:?}], server {:?}, key {:?}",
+                        reference.server, reference.key
+                    )
+                    })
+            };
         let mut headers = reqwest::header::HeaderMap::new();
         let mut fields = self.form_fields.clone().unwrap_or_default();
         if let Some(bindings) = &self.secret_bindings {
             for (name, reference) in &bindings.headers {
-                let name = credential_header_name(name)?;
+                let header_name = credential_header_name(name)?;
                 let mut value = reqwest::header::HeaderValue::from_str(&format!(
                     "{}{}",
                     reference.prefix,
-                    lookup(reference)?
+                    lookup("headers", name, reference)?
                 ))
-                .map_err(|_| "Resolved secret is not a valid HTTP header value")?;
+                .map_err(|_| {
+                    format!(
+                        "Resolved secret is not a valid HTTP header value: headers[{name:?}], server {:?}, key {:?}",
+                        reference.server, reference.key
+                    )
+                })?;
                 value.set_sensitive(true);
-                headers.insert(name, value);
+                headers.insert(header_name, value);
             }
             if !bindings.query.is_empty() {
                 let mut serializer = url::form_urlencoded::Serializer::new(String::new());
                 for (name, reference) in &bindings.query {
-                    serializer.append_pair(name, lookup(reference)?);
+                    serializer.append_pair(name, lookup("query", name, reference)?);
                 }
                 let encoded = serializer.finish();
                 let query = match request.url.query().filter(|query| !query.is_empty()) {
@@ -298,7 +311,7 @@ impl SecretOptions {
                 request.url.set_query(Some(&query));
             }
             for (name, reference) in &bindings.form {
-                fields.insert(name.clone(), lookup(reference)?.to_owned());
+                fields.insert(name.clone(), lookup("form", name, reference)?.to_owned());
             }
         }
         let form_body = if self.form_mode() {
@@ -471,11 +484,20 @@ mod unit_tests {
             "foo".into(),
             BTreeMap::from([("bar".into(), "PRIVATE_VALUE\r\n".into())]),
         )]);
-        assert!(!options
-            .materialize(&mut request, &catalog)
-            .err()
-            .unwrap()
-            .contains("PRIVATE_VALUE"));
+        let error = options.materialize(&mut request, &catalog).err().unwrap();
+        assert!(!error.contains("PRIVATE_VALUE"));
+        assert!(error.contains(r#"headers["x-key"], server "foo", key "bar""#));
+        for slot in ["headers", "query", "form"] {
+            let options: SecretOptions = serde_json::from_value(json!({
+                "secret_bindings": {slot: {"x-key": {"server": "missing\nserver", "key": "absent"}}}
+            }))
+            .unwrap();
+            let error = options.materialize(&mut request, &catalog).err().unwrap();
+            assert!(error.contains(&format!("{slot}[\"x-key\"]")));
+            assert!(error.contains(r#"server "missing\nserver", key "absent""#));
+            assert!(!error.contains('\n'));
+            assert!(!error.contains("PRIVATE_VALUE"));
+        }
     }
 
     #[test]

@@ -108,7 +108,7 @@ BEGIN
         IF test_case.error_pattern IS NOT NULL AND COALESCE(result_text, '') NOT LIKE test_case.error_pattern THEN
             RAISE EXCEPTION 'TEST FAILED: endpoint error did not match %: %', test_case.error_pattern, result_text;
         END IF;
-        IF test_case.expected = 'completed' AND (result_text::jsonb->>'status')::integer NOT IN (204, 400) THEN
+        IF test_case.expected = 'completed' AND ((result_text::jsonb->>'status')::integer IN (204, 400)) IS NOT TRUE THEN
             RAISE EXCEPTION 'TEST FAILED: non-echoing endpoint returned unexpected result %', result_text;
         END IF;
         attempts := 0;
