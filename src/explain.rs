@@ -674,6 +674,9 @@ fn format_node_display(node: &ExplainNode) -> String {
                 .map(|cfg| {
                     let method = cfg["method"].as_str().unwrap_or("POST");
                     let url = cfg["url"].as_str().unwrap_or("?");
+                    if let Some(server) = cfg["endpoint"].as_str() {
+                        return (method.to_string(), format!("endpoint {server:?} {url}"));
+                    }
                     // Truncate long URLs
                     let display_url = if url.len() > 40 {
                         format!("{}...", &url[..37])

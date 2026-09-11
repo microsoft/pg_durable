@@ -4,6 +4,10 @@ This document describes the security model for `df.http()` — the durable HTTP
 activity that lets workflows make outbound HTTP(S) requests from within the
 PostgreSQL background worker.
 
+The same HTTP policy applies to `df.http_multipart`, which has its own function
+privilege check. For endpoint credentials, see
+[the credential security contract](spec-security-model.md#44-endpoint-credentials).
+
 ---
 
 ## Table of Contents
@@ -100,22 +104,42 @@ hand-crafted `Durofut` JSON string, inserting an HTTP node without ever calling
 To close this gap, `execute_http` checks at execution time whether the
 `submitted_by` role recorded in the node still holds `EXECUTE` privilege on
 `df.http()`.  If the role's grant has been revoked since the node was created,
-the node fails immediately.
+and no other effective grant remains, the next execution attempt fails before
+sending a request. Revocation does not cancel a request already in progress.
 
 ### 3.2 Mechanism
 
-`execute_http` runs the following check before any network activity:
+The activity selects the required HTTP function signature from the node's actual
+destination and body mode, then checks the submitting role before network activity:
 
 ```sql
-SELECT has_function_privilege($submitted_by::regrole,
-    'df.http(text,text,text,jsonb,integer)'::regprocedure,
-    'EXECUTE')
+SELECT COALESCE(pg_catalog.has_function_privilege(
+  role.oid, pg_catalog.to_regprocedure($http_signature)::pg_catalog.oid,
+  'EXECUTE'), false)
+FROM pg_catalog.pg_roles AS role
+WHERE role.rolname OPERATOR(pg_catalog.=) $submitted_by;
 ```
+
+The signature is selected internally based on whether or not the node would
+have been created using a `df.http_endpoint` (the type that `df.endpoint`
+returns), not supplied as a permission override in node JSON. Role lookup
+uses the exact catalog name. Missing functions or roles fail closed;
+hand-crafted nodes cannot bypass the check.
 
 `has_function_privilege` honours PostgreSQL's standard privilege model:
 superusers always return `true`; regular roles return `true` only when an
-explicit `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO <role>` (or a role that
-inherits one) is in effect.
+effective grant exists, whether direct, inherited from another role or granted
+to `PUBLIC`.
+
+Multipart activities use the same check for `df.http_multipart`. Manage the full
+HTTP permission set through `df.grant_usage` and `df.revoke_usage`.
+
+`df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
+Like other combinators, it uses ordinary `df` schema access and default PUBLIC
+`EXECUTE`. Wrapping a hand-crafted HTTP node does not bypass the activity's
+privilege check. Supported keys are `secret_bindings` and `form_fields`, described
+in [Explicit secret bindings](#37-explicit-secret-bindings). SQL `NULL` and `{}`
+preserve the original node text.
 
 ### 3.3 Managing access
 
@@ -123,34 +147,36 @@ HTTP access is **opt-in** and separate from general `df` access.
 
 #### Granting access
 
-Use `df.grant_usage()` with `include_http => true`:
+Use `df.grant_usage()` with `include_http => true` to enable normal and multipart
+HTTP with either URLs or endpoints:
 
 ```sql
 SELECT df.grant_usage('my_role', include_http => true);
 ```
 
-Or grant directly:
-
-```sql
-GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO my_role;
-```
-
 `df.grant_usage('my_role')` (without `include_http`) grants all standard `df`
-privileges but **not** `df.http()`.  HTTP access must be explicitly opted in to.
+privileges but does not grant either HTTP function. The helper is **additive**:
+`include_http => false` does not revoke previously granted or inherited HTTP
+access. Ordinary helpers retain PostgreSQL's default `PUBLIC EXECUTE`; schema
+`USAGE` is their access gate. Sensitive functions are granted explicitly.
 
 #### Revoking access
 
-To remove HTTP access without removing all `df` access:
+To remove HTTP access while retaining standard `df` access, revoke the current
+helper-managed grants and regrant without HTTP:
 
 ```sql
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM my_role;
+SELECT df.revoke_usage('my_role');
+SELECT df.grant_usage('my_role');
 ```
 
-After this, any existing or future HTTP nodes submitted by `my_role` will fail
-at execution time with a "permission denied" error.  All other `df` functions
-remain accessible.
+Once no effective HTTP grant remains, later execution attempts fail with a
+privilege error. Other `df` functions remain accessible. Check for grants through
+`PUBLIC` or inherited roles: revoking a direct grant does not remove those paths.
 
-`df.revoke_usage('my_role')` removes all `df` access, including `df.http()`.
+`df.revoke_usage('my_role')` also revokes standard `df` access and sensitive
+function grants within the caller's grant authority. It does not erase
+independent grants through `PUBLIC` or other roles.
 
 #### PUBLIC grant and upgrades
 
@@ -165,23 +191,31 @@ run manually:
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 ```
 
-When `df.grant_usage(role, include_http => false)` is called and the role still
-has effective HTTP access via the PUBLIC grant (or another inherited grant), a
-`WARNING` is emitted to signal that the revocation had no net effect.
+Calling `df.grant_usage(role, include_http => false)` does not revoke the legacy
+grant or warn about residual access. Use `has_function_privilege` to check the
+role's effective permissions after changing grants.
+
+Endpoint support adds new functions without copying existing grants onto them.
+After upgrading, run `df.grant_usage(role, include_http => true)` for roles that
+need endpoint requests. Existing TEXT function OIDs and ACLs remain unchanged.
 
 ### 3.4 Admin function protection
 
 `df.grant_usage()` and `df.revoke_usage()` are admin-only functions.
-`EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, so only
-superusers can call them.
+`EXECUTE` is revoked from `PUBLIC` at `CREATE EXTENSION` time, but administration
+can be delegated. A role must have permission to call a helper, and its operations
+are additionally constrained by PostgreSQL's native grant authority because the
+helpers run as `SECURITY INVOKER`.
 
-> **Caution:** `df.grant_usage()` internally runs
-> `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA df`, which temporarily includes
-> `df.grant_usage()` and `df.revoke_usage()` themselves before the function
-> immediately revokes them from the target role.  If an admin replicates the
-> blanket `GRANT` manually without the matching `REVOKE`s, the target role
-> will gain access to these admin helpers.  Always use `df.grant_usage()`
-> rather than hand-crafting the equivalent `GRANT` statements.
+`df.grant_usage(..., with_grant => true)` grants privileges with `WITH GRANT
+OPTION`, including execution of the grant/revoke helpers. Such a delegated admin
+can grant only privileges it has authority to grant; execution permission alone
+does not confer the extension owner's privileges.
+
+`df.grant_usage` issues explicit schema, table and sensitive-function grants.
+It does not use a blanket function grant followed by revocations. When granting
+HTTP access, the caller must be able to grant the complete HTTP function set; otherwise the
+call fails rather than silently skipping the HTTP grant.
 
 ### 3.5 Feature-flag interaction
 
@@ -189,6 +223,81 @@ The privilege check runs regardless of which HTTP Cargo feature is enabled.
 When no HTTP feature is compiled in, the request is still blocked later by the
 DSL-time guard and by execution-time URL validation, but the privilege check
 remains compiled in and still runs before any network activity.
+
+---
+
+### 3.6 Endpoint requests
+
+`df.endpoint` returns the native `df.http_endpoint` type. TEXT arguments to the
+HTTP constructors are not decoded as endpoint references. An endpoint value does
+not grant authority. Normal and multipart activities
+first check their existing HTTP function grant, then resolve the foreign server
+and the submitting role's user mapping on a connection authenticated as that role.
+Server `USAGE` is mandatory. Catalogs are in the control database selected by
+`pg_durable.database`, regardless of the workflow's SQL target. Caller-supplied
+database/identity fields in node JSON cannot select another credential catalog or
+override the trusted submitting identity.
+
+One request uses one read-only `REPEATABLE READ` snapshot for endpoint configuration
+and all referenced mappings, including bindings from other servers. Catalog rows
+are reused within the attempt, not cached across attempts. This prevents atomic
+catalog updates from producing mixed destination/credential generations. The
+caller connection acquires the same admission slot as SQL execution and is closed,
+releasing the slot, before network I/O. Requests without catalog references open
+no caller connection.
+
+Server owners must be trusted with credentials sent through their endpoints:
+changing a destination can redirect subsequent authenticated requests, even when
+the owner's catalog view cannot reveal the caller's mapping values.
+
+Path composition preserves the base URL's authority and path prefix. Traversal,
+protocol-relative paths and encoded path separators are rejected after variable
+substitution as well as at construction. The final URL, including any credential
+query parameters, passes the same scheme, allow-list and DNS protections as a raw
+URL. Endpoint requests cannot supply `Host`, duplicate a configured credential
+header, or override credential query parameter names. Headers carrying resolved
+credentials are added only after destination validation.
+
+Only the server name and path template enter node configuration and recorded
+request inputs. Resolved credentials stay within the activity. Request diagnostics
+redact the composed URL; response echoes and response secrets remain outside that
+guarantee. Request bodies are not scanned for secret markers. See
+[Calling an Endpoint](../USER_GUIDE.md#calling-an-endpoint) for the API and catalog
+requirements.
+
+---
+
+### 3.7 Explicit secret bindings
+
+`df.secret(server, key)` returns a JSONB reference, not a value or an embeddable
+marker. Only named header/query/form slots in `secret_bindings` interpret these
+references. Ordinary request fields, literal `form_fields`, multipart bytes and
+resolved strings are never searched for secret markers. Binding maps are trusted
+workflow configuration, not untrusted payload data. Credential-bearing destinations
+must also be trusted; a reference's server name selects the credential namespace,
+not a restriction on which destination can receive it.
+
+Activities validate field shapes, reject conflicts with ordinary fields and
+endpoint authentication, and resolve each referenced server under `submitted_by`
+in the request's control-database snapshot after destination policy checks.
+Server `USAGE` and a caller-owned mapping are
+required even for `auth_scheme 'none'`. With that scheme, a named-secret-only
+server may omit `base_url`; endpoint requests fail without it. A supplied URL
+still undergoes the standard validation. Named values come only from individual
+`"secret.<key>"` user-mapping options, not ambient identity, endpoint-authentication
+options or server options. The prefix is a credential namespace, not an instruction
+to interpret the value. Native `ADD`, `SET` and `DROP` update one credential
+without rewriting unrelated options.
+
+Header values are validated and marked sensitive. Query/form names and values
+are form-urlencoded; query insertion cannot change the destination authority.
+Form mode owns body framing/content type, rejects raw body/multipart combinations,
+and leaves ordinary field values literal. Missing secrets fail without fallback
+or values in error messages. Request URL diagnostics are redacted after secret
+query insertion; response credentials remain outside this guarantee.
+
+See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings) for API
+examples and deferred general-composition cases.
 
 ---
 
@@ -390,7 +499,7 @@ endpoint can echo them in its response.
 
 | Scenario | Message |
 |----------|---------|
-| No EXECUTE privilege on df.http() | `Blocked: role '{role}' does not have EXECUTE privilege on df.http(). Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {role} to allow HTTP requests.` |
+| No HTTP EXECUTE privilege | `Blocked: role '{role}' does not have EXECUTE privilege on {function}() for this request.` The error identifies the required signature and recommends `df.grant_usage` with `include_http => true`. |
 | HTTP disabled (no feature) | `Blocked: outbound HTTP requests are disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them.` |
 | Plaintext HTTP in a restricted build | `Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required.` |
 | Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |

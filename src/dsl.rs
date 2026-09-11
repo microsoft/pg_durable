@@ -487,6 +487,72 @@ pub fn race(a: &str, b: &str) -> String {
     .to_json()
 }
 
+/// Applies HTTP options to a single HTTP or HTTP_MULTIPART node.
+#[pg_extern(schema = "df")]
+pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
+    use std::{collections::HashSet, sync::LazyLock};
+    static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        let allowed = [
+            // Keep alphabetical to simplify merge conflicts
+            "form_fields",
+            "secret_bindings",
+        ];
+        debug_assert!(allowed.is_sorted());
+        HashSet::from_iter(allowed)
+    });
+    let node = Durofut::try_from_json(fut).unwrap_or_else(|_| {
+        pgrx::error!("df.with_http_options(): expected an HTTP or HTTP_MULTIPART node")
+    });
+
+    if !matches!(node.node_type.as_str(), "HTTP" | "HTTP_MULTIPART")
+        || node.left_node.is_some()
+        || node.right_node.is_some()
+        || node.condition_node.is_some()
+        || !node.extra_nodes.is_empty()
+    {
+        pgrx::error!("df.with_http_options(): expected a single HTTP or HTTP_MULTIPART node");
+    }
+
+    let valid_config = match (node.node_type.as_str(), node.query.as_deref()) {
+        ("HTTP", Some(query)) => serde_json::from_str::<crate::types::HttpConfig>(query).is_ok(),
+        ("HTTP_MULTIPART", Some(query)) => {
+            serde_json::from_str::<crate::types::MultipartConfig>(query).is_ok()
+        }
+        _ => false,
+    };
+    if !valid_config {
+        pgrx::error!("df.with_http_options(): HTTP node config is malformed");
+    }
+
+    if let Some(options) = options {
+        let Some(map) = options.0.as_object() else {
+            pgrx::error!("df.with_http_options(): options must be a JSON object");
+        };
+        for key in map.keys() {
+            if !ALLOWED_KEYS.contains(key.as_str()) {
+                pgrx::error!("df.with_http_options(): unrecognised option '{key}'.");
+            }
+        }
+        if !map.is_empty() {
+            let config: serde_json::Value = serde_json::from_str(node.query.as_deref().unwrap())
+                .expect("Validated HTTP configuration");
+            let bindings = map
+                .get("secret_bindings")
+                .or_else(|| config.get("secret_bindings"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let form = map
+                .get("form_fields")
+                .or_else(|| config.get("form_fields"))
+                .cloned();
+            return crate::secrets::configure_bindings(fut, bindings, form)
+                .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
+        }
+    }
+
+    fut.to_string()
+}
+
 /// Creates an HTTP request node.
 /// Makes an HTTP request to the specified URL and returns the response.
 ///
@@ -509,6 +575,37 @@ pub fn http(
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
 ) -> String {
+    http_node(url, method, body, headers, timeout_seconds, None)
+}
+
+#[pg_extern(name = "http", schema = "df", requires = ["create_endpoint_type"])]
+pub fn http_endpoint(
+    url: pgrx::composite_type!("df.http_endpoint"),
+    method: default!(&str, "'POST'"),
+    body: default!(Option<&str>, "NULL"),
+    headers: default!(Option<pgrx::JsonB>, "NULL"),
+    timeout_seconds: default!(i32, "30"),
+) -> String {
+    let endpoint = crate::endpoints::EndpointReference::from_tuple(url)
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    http_node(
+        &endpoint.path,
+        method,
+        body,
+        headers,
+        timeout_seconds,
+        Some(&endpoint.server),
+    )
+}
+
+fn http_node(
+    url: &str,
+    method: &str,
+    body: Option<&str>,
+    headers: Option<pgrx::JsonB>,
+    timeout_seconds: i32,
+    endpoint: Option<&str>,
+) -> String {
     // Fail early when no http feature is compiled in — df.nodes can be inserted
     // by hand, so we also enforce this at execution time, but blocking at DSL
     // construction time gives a clearer error to developers.
@@ -524,7 +621,7 @@ pub fn http(
     // here surfaces the error before df.start() is ever called.
     // Skip the check when the URL contains variable placeholders ({...}) —
     // substitution happens at execution time so the scheme is not yet known.
-    if !url.contains('{') {
+    if endpoint.is_none() && !url.contains('{') {
         if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
             pgrx::error!("{}", e);
         }
@@ -543,13 +640,16 @@ pub fn http(
         pgrx::error!("Timeout must be positive");
     }
 
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "url": url,
         "method": method_upper,
         "body": body,
         "headers": headers.as_ref().map(|h| &h.0),
         "timeout_seconds": timeout_seconds
     });
+    if let Some(server) = endpoint {
+        config["endpoint"] = serde_json::Value::String(server.into());
+    }
 
     Durofut {
         node_type: "HTTP".to_string(),
@@ -595,6 +695,37 @@ pub fn http_multipart(
     headers: default!(Option<pgrx::JsonB>, "NULL"),
     timeout_seconds: default!(i32, "30"),
 ) -> String {
+    http_multipart_node(url, method, parts, headers, timeout_seconds, None)
+}
+
+#[pg_extern(name = "http_multipart", schema = "df", requires = ["create_endpoint_type"])]
+pub fn http_multipart_endpoint(
+    url: pgrx::composite_type!("df.http_endpoint"),
+    method: default!(&str, "'POST'"),
+    parts: default!(Option<pgrx::JsonB>, "NULL"),
+    headers: default!(Option<pgrx::JsonB>, "NULL"),
+    timeout_seconds: default!(i32, "30"),
+) -> String {
+    let endpoint = crate::endpoints::EndpointReference::from_tuple(url)
+        .unwrap_or_else(|error| pgrx::error!("{}", error));
+    http_multipart_node(
+        &endpoint.path,
+        method,
+        parts,
+        headers,
+        timeout_seconds,
+        Some(&endpoint.server),
+    )
+}
+
+fn http_multipart_node(
+    url: &str,
+    method: &str,
+    parts: Option<pgrx::JsonB>,
+    headers: Option<pgrx::JsonB>,
+    timeout_seconds: i32,
+    endpoint: Option<&str>,
+) -> String {
     // Fail early when no http feature is compiled in — same guard as df.http.
     if !crate::ssrf::http_enabled() {
         pgrx::error!(
@@ -605,7 +736,7 @@ pub fn http_multipart(
 
     // Validate URL scheme at DSL time (skip when URL contains variable
     // placeholders — substitution happens at execution time). Mirrors df.http.
-    if !url.contains('{') {
+    if endpoint.is_none() && !url.contains('{') {
         if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
             pgrx::error!("{}", e);
         }
@@ -640,13 +771,16 @@ pub fn http_multipart(
     };
     let _ = parts_arr; // shape validated; activity re-parses from the JSON below
 
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "url": url,
         "method": method_upper,
         "parts": parts_value,
         "headers": headers.as_ref().map(|h| &h.0),
         "timeout_seconds": timeout_seconds
     });
+    if let Some(server) = endpoint {
+        config["endpoint"] = serde_json::Value::String(server.into());
+    }
 
     Durofut {
         node_type: "HTTP_MULTIPART".to_string(),

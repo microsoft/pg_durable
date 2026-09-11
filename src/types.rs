@@ -71,6 +71,25 @@ pub fn get_execution_acquire_timeout() -> Duration {
     Duration::from_secs(crate::EXECUTION_ACQUIRE_TIMEOUT.get() as u64)
 }
 
+pub async fn acquire_execution_permit(
+    semaphore: &tokio::sync::Semaphore,
+    timeout: Duration,
+    limit: u32,
+) -> Result<tokio::sync::SemaphorePermit<'_>, String> {
+    match tokio::time::timeout(timeout, semaphore.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(format!(
+            "pg_durable: connection limit reached (max_user_connections={limit}). \
+             Semaphore closed unexpectedly."
+        )),
+        Err(_) => Err(format!(
+            "pg_durable: connection limit reached (max_user_connections={limit}). \
+             Timed out after {}s waiting for an available execution slot.",
+            timeout.as_secs()
+        )),
+    }
+}
+
 /// Get the transaction_mode => 'new' launch-slot timeout as a Duration.
 pub fn get_new_transaction_start_timeout() -> Duration {
     Duration::from_secs(crate::NEW_TRANSACTION_START_TIMEOUT.get() as u64)
@@ -1350,6 +1369,10 @@ pub(crate) fn string_map_to_json(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub method: String,
     #[serde(default)]
     pub body: Option<String>,
@@ -1360,6 +1383,8 @@ pub struct HttpConfig {
     /// Role that called df.start() (audit trail)
     #[serde(default)]
     pub submitted_by: Option<String>,
+    #[serde(flatten)]
+    pub secret_options: crate::secrets::SecretOptions,
 }
 
 fn default_http_timeout() -> u64 {
@@ -1385,6 +1410,10 @@ pub struct MultipartPart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultipartConfig {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub method: String,
     pub parts: Vec<MultipartPart>,
     #[serde(default)]
@@ -1394,6 +1423,8 @@ pub struct MultipartConfig {
     /// Role that called df.start() (audit trail)
     #[serde(default)]
     pub submitted_by: Option<String>,
+    #[serde(flatten)]
+    pub secret_options: crate::secrets::SecretOptions,
 }
 
 // ============================================================================
@@ -1788,6 +1819,48 @@ impl Durofut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn execution_admission_waits_and_releases() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let semaphore = tokio::sync::Semaphore::new(1);
+                let timeout = Duration::from_secs(30);
+                let first = acquire_execution_permit(&semaphore, timeout, 1)
+                    .await
+                    .unwrap();
+                let waiting = acquire_execution_permit(&semaphore, timeout, 1);
+                tokio::pin!(waiting);
+                std::future::poll_fn(|context| {
+                    assert!(waiting.as_mut().poll(context).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert_eq!(semaphore.available_permits(), 0);
+                assert!(acquire_execution_permit(&semaphore, Duration::ZERO, 1)
+                    .await
+                    .err()
+                    .unwrap()
+                    .contains("Timed out after 0s"));
+                drop(first);
+                let second = waiting.await.unwrap();
+                assert_eq!(semaphore.available_permits(), 0);
+                drop(second);
+                assert_eq!(semaphore.available_permits(), 1);
+                semaphore.close();
+                assert!(acquire_execution_permit(&semaphore, timeout, 1)
+                    .await
+                    .err()
+                    .unwrap()
+                    .contains("Semaphore closed unexpectedly"));
+            });
+    }
 
     #[test]
     fn loop_config_defaults_to_fail_fast() {

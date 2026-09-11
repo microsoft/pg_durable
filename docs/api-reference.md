@@ -289,7 +289,7 @@ Makes an HTTP request.
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
-| `url` | TEXT | ❌ Literal | Request URL (supports `$var` substitution) |
+| `url` | TEXT or `df.http_endpoint` | ❌ Literal | Request URL or `df.endpoint(...)` value (path supports workflow substitution) |
 | `method` | TEXT | ❌ Literal | HTTP method (default: POST) |
 | `body` | TEXT | ❌ Literal | Request body JSON (supports `$var`) |
 | `headers` | JSONB | ❌ Literal | Request headers |
@@ -316,6 +316,51 @@ bytes into a subsequent upload.
 
 ---
 
+### df.endpoint(server, path)
+
+Returns a `df.http_endpoint` composite value with `server TEXT` and `path TEXT`
+fields for `df.http` or `df.http_multipart`. Both arguments are required.
+Construction reads no endpoint catalogs or credentials. Pass the typed value
+directly to an HTTP constructor; TEXT arguments are URLs and are never interpreted
+as endpoint references. No implicit TEXT-to-endpoint conversion is installed.
+
+```sql
+df.http(df.endpoint('partner_api', '/v1/items'), 'GET')
+df.http_multipart(df.endpoint('partner_api', '/upload'),
+                  parts => '[{"name":"file","data_b64":"aGVsbG8="}]'::jsonb)
+```
+
+Manage HTTP access with `df.grant_usage(..., include_http => true)` and
+`df.revoke_usage(...)`; the helpers cover URL and endpoint requests together.
+
+The server name is fixed; the path supports existing workflow substitutions and
+is appended to the base URL's path prefix. Invalid path shapes, traversal, routing
+overrides and credential overrides fail explicitly. Resolution uses the submitting
+role in the control database where `pg_durable` is installed and re-checks server
+`USAGE` in addition to the corresponding HTTP function grant. The workflow's SQL
+target does not select the credential catalog. Each request resolves its endpoint
+and named bindings from one consistent catalog snapshot, using a shared
+user-connection slot that is released before HTTP I/O. See
+[Calling an Endpoint](../USER_GUIDE.md#calling-an-endpoint).
+
+### Endpoint Credential Catalog
+
+`pg_durable_fdw` stores endpoint configuration in native foreign servers and
+per-role credentials in user mappings. It has no handler and does not support
+foreign tables. `df.endpoint_option_validator(options text[], catalog oid)` is
+the FDW validator invoked by PostgreSQL on creation and alteration; it returns
+`void` or raises an error without echoing credential values.
+
+The server options are `base_url`, `auth_scheme`, and `header_name` (only for
+header authentication). `auth_scheme` is required; `base_url` may be omitted only
+with `auth_scheme 'none'` for named-secret storage. A supplied URL retains all
+validation requirements, and endpoint requests fail explicitly if it is absent.
+Mapping options are `token`, `header_value`,
+`query_string`, and individual `"secret.<key>"` values. Named credentials support
+native per-option `ADD`, `SET` and `DROP`. See
+[Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
+for option combinations, grants, rotation and backup implications.
+
 ### df.http_multipart(url [, method, parts, headers, timeout])
 
 Makes an HTTP request with a `multipart/form-data` body. Requires the same
@@ -323,7 +368,7 @@ Makes an HTTP request with a `multipart/form-data` body. Requires the same
 
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
-| `url` | TEXT | ❌ Literal | Request URL (supports `$var` substitution) |
+| `url` | TEXT or `df.http_endpoint` | ❌ Literal | Request URL or `df.endpoint(...)` value (path supports workflow substitution) |
 | `method` | TEXT | ❌ Literal | HTTP method (default: POST) |
 | `parts` | JSONB | ❌ Literal | Array of part objects (see below) |
 | `headers` | JSONB | ❌ Literal | Request headers |
@@ -364,6 +409,51 @@ valid base64, so pg_durable reports it as a node failure rather than sending a c
 part. Other fields (`url`, `name`, `filename`, headers) interpolate normally.
 
 Returns the same envelope as `df.http()`.
+
+---
+
+### df.secret(server, key)
+
+Returns JSONB `{"server":"...","key":"..."}` without reading credentials.
+Both arguments are required, nonempty and cannot contain control characters.
+`key` selects `"secret.<key>"` in the submitting role's user mapping. Keys are
+case-sensitive and cannot contain `=`; values are opaque text, including empty
+strings. Endpoint-authentication options are not searched as a fallback.
+Only explicit binding slots interpret this descriptor; ordinary values never do.
+Header slots may add a literal `prefix`; unknown descriptor fields are rejected.
+
+```sql
+df.secret('partner_api', 'api_key')
+df.secret('partner_api', 'token') || '{"prefix":"Bearer "}'::jsonb
+```
+
+See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings).
+
+### df.with_http_options(fut, options)
+
+HTTP-specific modifier entry point. Returns the JSON-encoded TEXT node for use in
+a workflow, not an HTTP response. Neither existing HTTP function changes signature.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `fut` | TEXT | ❌ Literal | A single `HTTP` or `HTTP_MULTIPART` node, optionally named with `\|=>` |
+| `options` | JSONB | ❌ Literal | Object containing `secret_bindings` and/or `form_fields`; SQL `NULL` and `{}` are no-ops |
+
+```sql
+df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
+  |=> 'response'
+```
+
+`secret_bindings` contains named `headers`, `query` and `form` reference maps.
+`form_fields` contains literal form strings. A supplied option replaces the entire
+previous option; omitted options remain intact. See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings)
+for shapes, encoding and conflict rules. Unknown keys, non-object JSON values (including
+JSON `null`), malformed nodes, SQL nodes, and compound graphs raise an error.
+SQL `NULL` and `{}` return the original node text byte-for-byte, preserving its
+config and result name. Apply the helper to each HTTP node before combining nodes.
+It neither resolves secrets nor grants HTTP access; activity-time permission and
+network checks still apply. Existing installations need `ALTER EXTENSION pg_durable
+UPDATE` to use this new helper, but not to keep using the original HTTP functions.
 
 ---
 

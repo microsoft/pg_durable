@@ -203,7 +203,41 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
-### 0.2.8
+### v0.2.7 → v0.2.8
+
+#### Typed HTTP endpoints
+
+- Adds composite type `df.http_endpoint(server text, path text)`,
+  `df.endpoint(text, text) RETURNS df.http_endpoint`, and typed destination
+  variants of both HTTP constructors. The existing TEXT signatures, wrapper
+  symbols, OIDs, ACLs, and dependent views are preserved. No implicit TEXT cast
+  is installed; TEXT constructor arguments remain raw URLs.
+- Endpoint nodes add a fixed `endpoint` server name and use
+  `url` for the path template; only these nodes receive the trusted target
+  `database` in activity inputs. Existing raw-URL nodes retain their serialized
+  inputs and activity names. Both HTTP activities resolve credentials locally,
+  using the same endpoint preparation and validation rules.
+- Adds the handler-less `pg_durable_fdw` and
+  `df.endpoint_option_validator(text[], oid)` in fresh and upgraded schemas.
+  FDW `USAGE` is not granted to `PUBLIC` or by `df.grant_usage`; administrators
+  delegate creation with a native FDW grant. The catalog resolver uses only
+  native catalogs, verifies extension ownership of the wrapper, and reports
+  unavailable endpoint support without changing legacy workflow execution.
+- Upgrade snapshots include FDW ownership, handler/validator, extension
+  membership and ACLs, the composite type's fields, plus endpoint server and mapping metadata. Mapping
+  credential values are excluded. B2 exercises delegated server/mapping DDL
+  after upgrade.
+- Fresh and upgraded schemas revoke PUBLIC EXECUTE on the typed HTTP functions.
+  `CREATE OR REPLACE` updates `df.grant_usage` and `df.revoke_usage` to cover URL
+  and endpoint requests while retaining the helper OIDs and grants. Existing
+  HTTP grants are not automatically copied to new functions: run
+  `df.grant_usage(role, include_http => true)` after upgrade to enable endpoints.
+- B1 raw HTTP requests keep checking only existing catalog functions; missing
+  endpoint functions fail closed. Activity names, scheduling and existing raw
+  request bytes are unchanged. B2 verifies typed construction, helper grant/revoke
+  coverage, and preservation of the original HTTP OIDs/ACLs.
+
+#### Loop failure continuation
 
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent
@@ -232,6 +266,32 @@ what the upgrade script handles, and any backward compatibility considerations.
   that recorded the previous terminal-failure path cannot replay under the new
   binary, which continues toward the higher backstop instead. Drain such
   long-running loops before upgrade when continuity is required.
+
+#### Add explicit secret bindings
+
+- Adds `df.secret(text, text) RETURNS jsonb` in fresh and upgraded schemas and
+  accepts individual `"secret.<key>"` user-mapping options. Only explicitly configured nodes
+  gain binding/form fields and trusted target-database metadata. Existing HTTP
+  signatures, grants and legacy raw-URL activity inputs remain unchanged.
+- Named credential lookup uses native catalogs, checks server `USAGE` and reads
+  the authenticated caller's mapping in the control database, independently of
+  the SQL target. Endpoint and named-binding reads share one read-only consistent
+  snapshot and the existing user-connection budget, released before HTTP I/O.
+  No additional DDL, grant changes or replay-visible activity inputs are needed
+  for catalog snapshot or connection admission. Missing endpoint schema support or named
+  keys fails explicitly, without changing legacy requests on older schemas.
+- Named credentials use native `ADD`, `SET` and `DROP`; the B2 catalog test
+  verifies that these preserve unrelated named values and endpoint-auth options.
+- Servers using `auth_scheme 'none'` may omit `base_url` for named-secret storage;
+  HTTP endpoint execution still requires a URL. This validator rule needs no
+  additional upgrade DDL and leaves existing server definitions valid. The B2
+  probe covers URL-less creation and removal of a URL when switching to `none`.
+
+#### Add `df.with_http_options()`
+- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. SQL `NULL` and `{}` preserve input bytes; `secret_bindings` and `form_fields` configure references and literal form data. Other values and unsupported keys raise an error.
+- **Upgrade script:** [sql/pg_durable--0.2.7--0.2.8.sql](../sql/pg_durable--0.2.7--0.2.8.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.
+- **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
+- **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
 
 ### v0.2.6 → v0.2.7
 

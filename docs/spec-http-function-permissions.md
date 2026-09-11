@@ -1,10 +1,11 @@
 # Spec: df.http() Function Permissions
 
-> **Status:** Implemented (see implementation plan below).
-> This spec is a retroactive design record for the changes landed in
-> PR #100. Once `docs/http-security.md` has been updated to reflect this
-> design, this file can be deleted — `http-security.md` is the authoritative
-> reference.
+> **Status:** Historical design record for PR #100.
+> [HTTP Security](http-security.md#3-layer-0-postgresql-privilege-check) is the
+> authoritative description of current behavior. The blanket-grant/revoke and
+> residual-warning sketches below are obsolete: current helpers use explicit,
+> additive grants and support delegated administration through native grant
+> options. The original bypass analysis and review history are retained here.
 
 ---
 

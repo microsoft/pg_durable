@@ -260,6 +260,7 @@ df.sql('SELECT 1') ~> df.sql('SELECT 2')
 | `df.sleep(seconds)` | Pause for N seconds | `df.sleep(60)` |
 | `df.wait_for_schedule(cron)` | Wait until cron matches | `df.wait_for_schedule('0 * * * *')` |
 | `df.http(url, method, body, headers, timeout)` | Make HTTP request | `df.http('https://api.example.com', 'POST', '{"key": "value"}')` |
+| `df.endpoint(server, path)` | Reference an endpoint destination | `df.http(df.endpoint('partner_api', '/v1/items'), 'GET')` |
 | `df.join(a, b)` | Execute in parallel, wait for all | `df.join('SELECT 1', 'SELECT 2')` |
 | `df.join3(a, b, c)` | Three in parallel | `df.join3(a, b, c)` |
 | `df.race(a, b)` | Execute in parallel, first wins | `df.race(fast_query, slow_query)` |
@@ -701,6 +702,29 @@ df.http(
 ) RETURNS TEXT                    -- JSON response object
 ```
 
+The destination can also be the `df.http_endpoint` value returned by
+[`df.endpoint`](#calling-an-endpoint). All other request arguments are the same.
+
+### df.with_http_options() Function
+
+`df.with_http_options(fut TEXT, options JSONB) RETURNS TEXT` is the entry point for
+HTTP modifiers beyond the arguments passed to `df.http` and `df.http_multipart`.
+
+```sql
+df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
+    |=> 'response'
+```
+
+Supported keys are `secret_bindings` and `form_fields`, described under
+[Explicit Secret Bindings](#explicit-secret-bindings). SQL `NULL` and `{}` return
+the input text byte-for-byte. Unknown keys and non-object JSON values, including
+JSON `null`, are rejected. Reapplying a supplied key replaces that entire option;
+omitted keys are retained.
+
+The input must be a single `HTTP` or `HTTP_MULTIPART` node, optionally named with
+`|=>`. SQL nodes and compound graphs are rejected, so apply the helper before
+combining nodes. It does not execute a request or change HTTP permissions.
+
 ### Response Format
 
 HTTP calls return a JSON object with full response details:
@@ -764,6 +788,265 @@ df.http('https://api.example.com/report.pdf', 'GET') |=> 'pdf'
 
 Because the body is *already* base64, it can be handed straight to a multipart upload with
 no round trip through a table — see [Multipart Uploads](#multipart-uploads).
+
+### Endpoint Credential Catalog
+
+Endpoint definitions use a handler-less `pg_durable_fdw`. A foreign server holds
+the base URL and authentication scheme; each caller's user mapping holds its
+credentials. There are no foreign tables or scans.
+
+`auth_scheme` is required. `base_url` may be omitted only with `auth_scheme 'none'`
+for a server used solely for named secrets. A supplied base URL must be a nonempty,
+literal HTTPS URL, optionally with a path prefix, without userinfo, query or
+fragment. Using a server as an HTTP endpoint always requires a base URL. Creating
+a server does not authorize network access or bypass HTTP destination restrictions.
+
+| `auth_scheme` | Additional server option | Required user-mapping option |
+|---|---|---|
+| `none` | None | None for endpoint authentication; named bindings require a mapping |
+| `bearer` | None | `token` (without the `Bearer ` prefix) |
+| `header` | `header_name`, such as `x-api-key` | `header_value` |
+| `query` | None | `query_string`, already URL-encoded, optionally starting with `?` |
+
+Unknown options and authentication schemes are rejected. `managed-identity` is
+reserved and rejected until its authentication controls are available. The
+catalog does not accept free-form `resource`, `scope` or `client_id` settings.
+Header names cannot override routing, framing or multipart content type.
+Credential values must be nonempty and valid for their transport; validation
+errors do not echo those values. The mapping validator checks individual options;
+resolution also requires the option for the server's selected scheme.
+
+Endpoint creation is delegated separately from HTTP execution:
+
+```sql
+SELECT df.grant_usage('endpoint_admin', include_http => true);
+GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO endpoint_admin;
+
+SET ROLE endpoint_admin;
+CREATE SERVER partner_api FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (base_url 'https://partner.azure-api.net', auth_scheme 'bearer');
+GRANT USAGE ON FOREIGN SERVER partner_api TO app_role;
+RESET ROLE;
+
+SELECT df.grant_usage('app_role', include_http => true);
+SET ROLE app_role;
+CREATE USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (token '<credential>');
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (SET token '<replacement-token>');
+RESET ROLE;
+```
+
+The roles above must already exist. `df.grant_usage` does not grant FDW creation
+authority, even with `with_grant => true`; use the native FDW grant explicitly.
+A caller with server `USAGE` can create and read its own mapping. Other ordinary
+roles cannot read its values, including a server owner who is not that mapped
+role. `PUBLIC` mappings are not a fallback for endpoint credential lookup.
+
+Server owners can change the destination, so they must be trusted with credentials
+sent through their servers. Catalog masking does not prevent an owner from
+redirecting a subsequent request to a destination they control.
+
+The catalog resolver checks server `USAGE` and reads the authenticated caller's
+mapping on every attempt. Rotation affects the next lookup, not an already-sent
+request. Missing or inaccessible credentials fail without privileged fallback.
+Mappings also accept individual `secret.<key>` options for explicit bindings.
+These are separate from `token`, `header_value` and `query_string`; other option
+names remain invalid. Named values may be empty or contain arbitrary text,
+including JSON or `=`; they are not parsed as JSON. Header bindings validate the
+resolved text before sending it.
+
+User mappings are plaintext in catalogs, WAL and backups. Superuser dumps include
+their credential values; less privileged dumps can omit options. Literal values
+in provisioning DDL can appear in PostgreSQL logs. Treat backup/restore and
+credential provisioning accordingly. Dropping the extension with `CASCADE`
+also removes dependent servers and mappings.
+
+### Calling an Endpoint
+
+Pass `df.endpoint(server, path)` as the destination of either HTTP constructor:
+
+```sql
+SELECT df.start(
+    df.http(df.endpoint('partner_api', '/v1/invoices?status=pending'), 'GET'),
+    'fetch-invoices'
+);
+
+SELECT df.start(
+    df.http_multipart(
+        df.endpoint('partner_api', '/v1/upload'),
+        parts => '[{"name":"file","filename":"hello.txt","data_b64":"aGVsbG8="}]'::jsonb
+    ),
+    'upload-file'
+);
+```
+
+`df.endpoint` returns a `df.http_endpoint` value containing the server name and
+path, not an HTTP request or a resolved URL. It does not look up the server or
+read credentials. Pass this value directly to the HTTP constructor; keep it typed
+when storing it in a SQL variable or column. TEXT destinations are always treated
+as URLs, never as serialized endpoint references. The HTTP
+constructor records only the server name and path template; the activity checks
+the caller's HTTP grant and server `USAGE`, resolves the mapping, and applies
+normal HTTP destination checks. `df.explain` shows the server and path without
+resolving either.
+
+Use `df.grant_usage('app_role', include_http => true)` to enable HTTP access for
+URLs and endpoints. After upgrading an existing installation, run the helper for
+roles that need the newly added endpoint support. Existing URL calls retain their
+permissions.
+
+The path starts with one `/` and is appended to the server's base path prefix:
+`https://host/api/` plus `/items` becomes `https://host/api/items`. Absolute URLs,
+protocol-relative paths (`//host`), backslashes, fragments, whitespace, dot
+traversal segments and percent-encoded path separators are rejected. Encode
+spaces and other URL data before supplying them. Existing `{var}` and `$result`
+substitution works in the path; validation runs again after substitution. Server
+names are fixed references, not workflow-variable templates.
+
+Caller headers cannot set `Host` or override the credential header (matching
+case-insensitively). For query authentication, caller query parameters cannot
+duplicate credential parameter names, including percent-encoded spellings.
+Credential query values are appended without re-encoding and redacted in request
+diagnostics. Secret-looking body text is not expanded by endpoint authentication;
+ordinary workflow-variable substitution remains unchanged.
+
+Endpoints and mappings live in the control database where `pg_durable` is installed
+(selected by `pg_durable.database`). The submitting role must be able to connect
+there. The `database` argument to `df.start` selects the SQL execution database;
+it does not change HTTP credential lookup or require installing the extension in
+that SQL target.
+
+Each HTTP attempt reads endpoint configuration and all referenced mappings in one
+consistent, read-only catalog snapshot under the submitting role. Atomic catalog
+updates cannot mix an old destination with new credentials within that request.
+Later attempts take new snapshots; completed results still replay from history.
+The catalog connection shares the SQL user-connection budget and is closed before
+HTTP I/O. Raw requests and literal forms without references need no catalog
+connection. No credentials are read at graph construction time.
+Returned or echoed credentials are still response data and can enter history;
+endpoint authentication does not redact response bodies or headers.
+
+### Explicit Secret Bindings
+
+`df.secret(server, key)` returns a JSONB descriptor such as
+`{"server":"partner_api","key":"api_key"}`, not a credential or an embeddable
+string marker. It performs no lookup. Use it in dedicated maps passed to
+`df.with_http_options`:
+
+| Option | Meaning |
+|---|---|
+| `secret_bindings.headers` | Header names mapped to descriptors, with an optional literal `prefix` |
+| `secret_bindings.query` | Query parameter names mapped to descriptors |
+| `secret_bindings.form` | Form field names mapped to descriptors |
+| `form_fields` | Ordinary form field names and string values, kept literal |
+
+Provision named values in the caller's user mapping:
+
+```sql
+CREATE USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS ("secret.api_key" '<api-key>');
+
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (ADD "secret.client_secret" '<client-secret>');
+
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (SET "secret.api_key" '<replacement-api-key>');
+```
+
+When a credential is no longer needed, remove it independently:
+
+```sql
+ALTER USER MAPPING FOR CURRENT_USER SERVER partner_api
+    OPTIONS (DROP "secret.client_secret");
+```
+
+If the mapping already exists, use `ADD` instead of creating another mapping.
+Each `ADD`, `SET` or `DROP` leaves other options unchanged; adding an existing
+option or changing/dropping a nonexistent option fails. Quote the entire option
+name because it contains a dot. The `secret.` prefix is reserved for named values:
+`df.secret('partner_api', 'api_key')` reads `"secret.api_key"`, not `token` or any
+other endpoint-authentication option. Keys are case-sensitive, nonempty and
+cannot contain control characters or `=`. Quoted names follow PostgreSQL's normal
+identifier-length limit.
+
+The same plaintext, backup and provisioning-log caveats as other credentials
+apply. A server used only for named secrets can omit `base_url`:
+
+```sql
+CREATE SERVER app_secrets FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (auth_scheme 'none');
+```
+
+Server `USAGE` and the caller's user mapping are still required. Such a server
+cannot be used as an HTTP endpoint until a valid `base_url` is added. A named
+secret's server URL, when present, does not restrict the request destination.
+
+An explicit header binding works with raw URLs or endpoint references:
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://partner.azure-api.net/v1/items', 'GET'),
+        jsonb_build_object('secret_bindings', jsonb_build_object(
+            'headers', jsonb_build_object('X-Api-Key', df.secret('partner_api', 'api_key'))
+        ))
+    ),
+    'fetch-items'
+);
+```
+
+For a header prefix, use
+`df.secret('partner_api', 'api_key') || '{"prefix":"Bearer "}'::jsonb`.
+Prefixes are literal text and allowed only on headers. Query/form bindings encode
+their values automatically; no encoding argument is needed.
+
+A form request keeps ordinary data separate from references:
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://partner.azure-api.net/oauth2/token', 'POST'),
+        jsonb_build_object(
+            'secret_bindings', jsonb_build_object(
+                'form', jsonb_build_object('client_secret', df.secret('partner_api', 'client_secret'))
+            ),
+            'form_fields', jsonb_build_object(
+                'grant_type', 'client_credentials',
+                'client_id', 'a1b2c3d4',
+                'state', '${secret:literal.text}'
+            )
+        )
+    ),
+    'token-request'
+);
+```
+
+The activity generates `application/x-www-form-urlencoded` and sets that content
+type. Both ordinary and secret fields are encoded, including Unicode, delimiters
+and empty values. `form_fields` are literal strings: `${secret:...}`, `$result`,
+`{var}` and reference-shaped text are not interpreted. Compute ordinary values at
+node construction; runtime result bindings for form fields are not supported.
+Existing raw-body substitution is unchanged.
+
+Form mode requires POST, PUT or PATCH and cannot accompany a raw `body` or
+multipart request. Multipart supports header/query bindings, not secret-valued
+parts. Conflicting content types, explicit form-body framing and collisions with
+ordinary fields or endpoint authentication fail rather than overwrite values.
+Header matching is case-insensitive; query collision checks decode parameter names.
+
+Binding maps, names and prefixes are trusted workflow configuration: never source
+them from untrusted payloads. The destination of a credential-bearing request must
+also be trusted: a secret's server name selects its mapping, not the allowed
+recipient. Only ordinary data belongs in `form_fields` or raw request fields.
+Activities re-check HTTP permission and `USAGE` on every referenced
+server, using the caller's mapping in the control database. Missing keys
+or mappings fail explicitly, and resolved values are never recursively interpreted.
+
+Secret insertion into paths, raw bodies, nested JSON or multipart contents remains
+out of scope. The OAuth example protects the outgoing client secret, but its
+returned access token is still response data recorded in history. Response-secret
+storage and endpoint-managed OAuth token acquisition are separate capabilities.
 
 ### Error Handling
 
@@ -2249,7 +2532,7 @@ This function is purely additive — it never issues REVOKE. To downgrade a role
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `p_role` | *(required)* | Target role name |
-| `include_http` | `false` | Grant EXECUTE on `df.http()` (opt-in — makes outbound network requests) |
+| `include_http` | `false` | Enable `df.http()` and `df.http_multipart()` for URLs and endpoints (opt-in network access) |
 | `with_grant` | `false` | Grant all privileges WITH GRANT OPTION and allow the role to call `df.grant_usage()` / `df.revoke_usage()` to manage other roles' access. Also grants EXECUTE on `df.metrics()` (system-wide aggregate counts), since `with_grant => true` designates a pg_durable admin. The caller must hold each underlying privilege WITH GRANT OPTION (automatically true for superusers and delegated admins). |
 
 <details>
@@ -2261,7 +2544,7 @@ The ordinary DSL functions (`df.sql`, `df.start`, `df.status`, etc.) keep Postgr
 -- Access gate: schema USAGE makes every ordinary df.* function callable
 GRANT USAGE ON SCHEMA df TO app_role;
 -- Optional: HTTP access (include_http => true)
--- GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO app_role;
+-- SELECT df.grant_usage('app_role', include_http => true);
 
 -- Optional: system-wide metrics access (also granted automatically by
 --           df.grant_usage(role, with_grant => true))
@@ -2375,7 +2658,7 @@ are being launched:
 |----------|---------|-----|---------|
 | **Management pool** | Extension lifecycle checks, graph loading, status updates | `pg_durable.max_management_connections` | 6 |
 | **Duroxide pool** | Orchestration state, LISTEN/NOTIFY for work dispatch | `pg_durable.max_duroxide_connections` | 10 |
-| **User-execution** | Per-SQL-node connections authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
+| **User-execution** | SQL execution and HTTP credential catalog reads, authenticated as the submitting user | `pg_durable.max_user_connections` | 10 |
 | **New-start loopback** | Extra sessions that persist `df.start(..., transaction_mode => 'new')` outside the caller's transaction | `pg_durable.max_new_transaction_starts` | 2 |
 
 Each PG backend session (user calling `df.start()`, `df.cancel()`, etc.) creates **1 additional connection** for duroxide client operations.
@@ -2395,11 +2678,11 @@ pg_durable.max_management_connections = 6
 # Minimum: 2 (1 reserved for listener). Worker refuses to start if < 2.
 pg_durable.max_duroxide_connections = 10
 
-# Maximum concurrent SQL node executions (user connections)
+# Maximum concurrent SQL execution and HTTP catalog connections
 # Additional executions queue until a slot frees up or timeout expires.
 pg_durable.max_user_connections = 10
 
-# How long (seconds) a SQL node waits for a user-execution slot
+# How long (seconds) SQL execution or HTTP catalog lookup waits for a slot
 # before failing with an error.
 pg_durable.execution_acquire_timeout = 30
 
@@ -2432,16 +2715,23 @@ With defaults and 5 connected users: `6 + 10 + 10 + 2 + 5 = 33 connections`.
 
 ### Backpressure Behavior
 
-When all user-execution slots are occupied, additional SQL node executions **queue** (they don't fail immediately). The semaphore-based backpressure ensures:
+SQL execution and HTTP credential lookup share user-execution slots. When all slots
+are occupied, additional work **queues** before opening a caller connection. The
+semaphore-based backpressure ensures:
 
 - Queued executions proceed as slots free up
-- If the wait exceeds `execution_acquire_timeout`, the SQL node fails with:
+- If the wait exceeds `execution_acquire_timeout`, the waiting node fails with:
   ```
   pg_durable: connection limit reached (max_user_connections=10).
   Timed out after 30s waiting for an available execution slot.
   ```
 - The failed node causes the workflow to enter `failed` status
 - Other nodes in the same workflow that have already acquired slots continue normally
+
+An HTTP request uses at most one catalog connection for its endpoint and named
+bindings, and releases that slot before sending the request. Network transfer does
+not occupy a database slot. Raw HTTP and literal forms without credential references
+do not acquire a slot.
 
 For `df.start(..., transaction_mode => 'new')`, admission control applies
 *before* the loopback session is opened:

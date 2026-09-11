@@ -17,24 +17,42 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 
 use crate::types::HttpConfig;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-http";
 
-/// Check that `submitted_by` holds EXECUTE privilege on `df.http()`.
+/// Check the HTTP privilege required by the request's destination and body mode.
 ///
 /// This closes the bypass path where a user crafts a raw Durofut JSON and
 /// passes it directly to `df.start()`, inserting an HTTP node without going
 /// through the DSL guard in `df.http()`.
-async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
+pub(crate) async fn check_http_privilege(
+    pool: &PgPool,
+    submitted_by: &str,
+    endpoint: bool,
+    multipart: bool,
+) -> Result<(), String> {
+    let signature = match (multipart, endpoint) {
+        (false, false) => "df.http(text,text,text,jsonb,integer)",
+        (false, true) => "df.http(df.http_endpoint,text,text,jsonb,integer)",
+        (true, false) => "df.http_multipart(text,text,jsonb,jsonb,integer)",
+        (true, true) => "df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)",
+    };
+    let function = if multipart {
+        "df.http_multipart"
+    } else {
+        "df.http"
+    };
     let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http(text,text,text,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
+        "SELECT COALESCE(pg_catalog.has_function_privilege(
+             role.oid, pg_catalog.to_regprocedure($2)::pg_catalog.oid, 'EXECUTE'), false)
+         FROM pg_catalog.pg_roles AS role WHERE role.rolname OPERATOR(pg_catalog.=) $1",
     )
     .bind(submitted_by)
+    .bind(signature)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
@@ -42,8 +60,8 @@ async fn check_http_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), S
     match has_priv {
         Some(true) => Ok(()),
         _ => Err(format!(
-            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http(). \
-             Grant EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer) TO {submitted_by} to allow HTTP requests."
+            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on {function}() for this request. \
+             Required function: {signature}. Use df.grant_usage with include_http => true to allow HTTP requests."
         )),
     }
 }
@@ -86,6 +104,7 @@ pub(crate) fn build_client(timeout: Duration) -> Result<reqwest::Client, String>
 pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
+    semaphore: Arc<Semaphore>,
     config_json: String,
 ) -> Result<String, String> {
     let config: HttpConfig =
@@ -123,7 +142,7 @@ pub async fn execute(
     // differential can separate what we approve from what we request.
 
     // --- Privilege check (Layer 0): submitted_by must have EXECUTE on df.http() ---
-    check_http_privilege(&pool, audit_user)
+    check_http_privilege(&pool, audit_user, config.endpoint.is_some(), false)
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
@@ -131,26 +150,62 @@ pub async fn execute(
             ));
         })?;
 
-    let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
+    config.secret_options.validate(
+        config.body.is_some(),
+        &config.method,
+        false,
+        config.headers.as_ref(),
+    )?;
+    let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
+    let mut prepared = crate::endpoints::prepare_request(
+        &mut catalog,
+        config.endpoint.as_deref(),
+        &config.url,
+        config.headers.as_ref(),
+    )
+    .await
+    .inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
+    let request_url = &prepared.url;
+    let safe_url = if config.endpoint.is_some() {
+        crate::redact::redact_url(request_url.as_str())
+    } else {
+        safe_url
+    };
 
     // --- Scheme validation (always enforced, regardless of feature flag) ---
-    crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list (blocks all bare IPs + non-Azure domains) ---
-    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
+    let resolved = config
+        .secret_options
+        .resolve(&mut catalog, &mut prepared, config.headers.as_ref())
+        .await?;
+    catalog.close().await?;
+    let safe_url = if config
+        .secret_options
+        .secret_bindings
+        .as_ref()
+        .is_some_and(|bindings| !bindings.query.is_empty())
+    {
+        crate::redact::redact_url(prepared.url.as_str())
+    } else {
+        safe_url
+    };
+    let request_url = prepared.url;
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
         "HTTP {} {safe_url} submitted_by={audit_user}",
@@ -174,6 +229,9 @@ pub async fn execute(
     if let Some(headers) = &config.headers {
         if let Some(obj) = headers.as_object() {
             for (key, value) in obj {
+                if resolved.form_body.is_some() && key.eq_ignore_ascii_case("content-type") {
+                    continue;
+                }
                 if let Some(v) = value.as_str() {
                     request = request.header(key, v);
                 }
@@ -181,8 +239,20 @@ pub async fn execute(
         }
     }
 
+    if let Some((name, value)) = prepared.credential_header {
+        request = request.header(name, value);
+    }
+    request = request.headers(resolved.headers);
+
     // Add body (for POST/PUT/PATCH)
-    if let Some(body) = &config.body {
+    if let Some(body) = resolved.form_body {
+        request = request
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(body);
+    } else if let Some(body) = &config.body {
         request = request.body(body.clone());
     }
 

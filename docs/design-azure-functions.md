@@ -2,6 +2,11 @@
 
 This document outlines the design for calling Azure Functions from pg_durable, with a focus on AI scenarios like RAG pipelines, embeddings, and intelligent data processing.
 
+> **Historical proposal; credential handling superseded (2026-09-10).**
+> The `df.azure` helper and `df.secrets` table below are unimplemented proposals. Their construction-time key lookup would embed credentials in workflow state and must not be used for the new implementation. [Endpoint credentials](spec-security-model.md#44-endpoint-credentials) instead store references to foreign servers and user mappings, resolving them inside HTTP activities.
+>
+> The scenarios remain design examples, not a statement that all shown APIs are supported. See the [API reference](api-reference.md) and [HTTP security documentation](http-security.md) for current behavior.
+
 ---
 
 ## Table of Contents
@@ -1427,6 +1432,8 @@ SELECT df.start(
 ## Configuration
 
 ### Secrets Table
+
+**Superseded:** The table and provisioning examples below belong to the historical proposal. The FDW store holds per-role credentials, which are readable by the mapped role with server `USAGE`; it does not implement opaque admin-managed shared secrets. See the [security contract and open decisions](spec-security-model.md#44-endpoint-credentials).
 
 ```sql
 CREATE TABLE df.secrets (

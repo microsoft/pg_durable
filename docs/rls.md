@@ -46,7 +46,7 @@ RLS solves this: keep the DML grants (users need them for the SPI calls inside `
 |----------------|-----|
 | `df._worker_epoch` | Internal sentinel; users should not have access at all (no GRANT) |
 | `duroxide.*` tables | Internal runtime state; accessed only by the background worker's pooled connection (worker role). Users should not have direct access. The monitoring functions (`df.list_instances()`, `df.metrics()`, etc.) access these via a dedicated sqlx pool authenticated as the worker role, not via SPI-as-calling-user |
-| `df.secrets` | Not yet implemented; when it lands, it should be admin-only (no user SELECT, no RLS — just REVOKE) |
+| HTTP endpoint servers and user mappings | Native PostgreSQL privileges and catalog-view masking, not extension RLS. A mapped role with server `USAGE` can read its own credential options. This supersedes the proposed `df.secrets` table; see [Endpoint Credentials](spec-security-model.md#44-endpoint-credentials). |
 
 ### Functions that need RLS-aware data access
 

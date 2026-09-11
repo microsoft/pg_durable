@@ -20,37 +20,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 
-use crate::activities::execute_http::build_client;
+use crate::activities::execute_http::{build_client, check_http_privilege};
 use crate::types::MultipartConfig;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-multipart";
-
-/// Check that `submitted_by` holds EXECUTE privilege on `df.http_multipart()`.
-///
-/// Mirrors `execute_http::check_http_privilege` — closes the bypass path where
-/// a user crafts a raw Durofut JSON and passes it directly to `df.start()`,
-/// inserting an HTTP_MULTIPART node without going through the DSL guard.
-async fn check_multipart_privilege(pool: &PgPool, submitted_by: &str) -> Result<(), String> {
-    let has_priv: Option<bool> = sqlx::query_scalar(
-        "SELECT has_function_privilege($1::regrole, \
-             'df.http_multipart(text,text,jsonb,jsonb,integer)'::regprocedure, \
-             'EXECUTE')",
-    )
-    .bind(submitted_by)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
-
-    match has_priv {
-        Some(true) => Ok(()),
-        _ => Err(format!(
-            "Blocked: role '{submitted_by}' does not have EXECUTE privilege on df.http_multipart(). \
-             Grant EXECUTE ON FUNCTION df.http_multipart(text,text,jsonb,jsonb,integer) TO {submitted_by} to allow multipart HTTP requests."
-        )),
-    }
-}
 
 /// Decode a part's `data_b64` payload, tolerating ASCII whitespace.
 ///
@@ -80,6 +56,7 @@ fn decode_part_data(data_b64: &str) -> Result<Vec<u8>, base64::DecodeError> {
 pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
+    semaphore: Arc<Semaphore>,
     config_json: String,
 ) -> Result<String, String> {
     let config: MultipartConfig = serde_json::from_str(&config_json)
@@ -102,7 +79,7 @@ pub async fn execute(
     //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding.
 
     // --- Privilege check (Layer 0) ---
-    check_multipart_privilege(&pool, audit_user)
+    check_http_privilege(&pool, audit_user, config.endpoint.is_some(), true)
         .await
         .inspect_err(|_| {
             ctx.trace_info(format!(
@@ -110,26 +87,59 @@ pub async fn execute(
             ));
         })?;
 
-    let request_url = crate::ssrf::parse_request_url(&config.url).inspect_err(|_| {
+    config
+        .secret_options
+        .validate(false, &config.method, true, config.headers.as_ref())?;
+    let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
+    let mut prepared = crate::endpoints::prepare_request(
+        &mut catalog,
+        config.endpoint.as_deref(),
+        &config.url,
+        config.headers.as_ref(),
+    )
+    .await
+    .inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (malformed) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
+    let request_url = &prepared.url;
+    let safe_url = if config.endpoint.is_some() {
+        crate::redact::redact_url(request_url.as_str())
+    } else {
+        safe_url
+    };
 
     // --- Scheme validation (always enforced) ---
-    crate::ssrf::validate_scheme(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Azure endpoint allow-list ---
-    crate::ssrf::validate_allowlist(&request_url).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
+    let resolved = config
+        .secret_options
+        .resolve(&mut catalog, &mut prepared, config.headers.as_ref())
+        .await?;
+    catalog.close().await?;
+    let safe_url = if config
+        .secret_options
+        .secret_bindings
+        .as_ref()
+        .is_some_and(|bindings| !bindings.query.is_empty())
+    {
+        crate::redact::redact_url(prepared.url.as_str())
+    } else {
+        safe_url
+    };
+    let request_url = prepared.url;
     let start = std::time::Instant::now();
     ctx.trace_info(format!(
         "HTTP_MULTIPART {} {safe_url} ({} parts) submitted_by={audit_user}",
@@ -171,6 +181,11 @@ pub async fn execute(
             }
         }
     }
+
+    if let Some((name, value)) = prepared.credential_header {
+        request = request.header(name, value);
+    }
+    request = request.headers(resolved.headers);
 
     // Build the multipart form from base64-encoded parts.
     let mut form = reqwest::multipart::Form::new();
