@@ -3,6 +3,8 @@
 
 -- Issue #375: the "http-custom-domains" phase restarts PostgreSQL with
 -- pg_durable.http_allowed_domains = 'example.com' and http-allow-test-domains.
+-- The local runner first checks rejection of a malformed postgresql.conf value,
+-- restores the configuration, and starts PostgreSQL with this valid allowlist.
 -- Allowed requests must reach HTTP transport; example.com need not provide a
 -- working POST endpoint. All other requests must fail before DNS or networking.
 
