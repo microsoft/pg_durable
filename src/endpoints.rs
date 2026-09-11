@@ -2,18 +2,19 @@ use std::collections::BTreeMap;
 
 use pgrx::prelude::*;
 use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
-use serde::{Deserialize, Serialize};
 use sqlx::Connection;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use url::Url;
 
 pub const FDW_NAME: &str = "pg_durable_fdw";
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+pgrx::extension_sql!(
+    "CREATE TYPE df.http_endpoint AS (server pg_catalog.text, path pg_catalog.text);",
+    name = "create_endpoint_type",
+    requires = [df]
+);
+
 pub struct EndpointReference {
-    #[serde(rename = "type")]
-    kind: String,
     pub server: String,
     pub path: String,
 }
@@ -44,21 +45,19 @@ fn validate_endpoint_path(path: &str) -> Result<(), String> {
 }
 
 impl EndpointReference {
-    pub fn parse(value: &str) -> Result<Option<Self>, String> {
-        if !value.trim_start().starts_with('{') {
-            return Ok(None);
-        }
-        let parsed: serde_json::Value = match serde_json::from_str(value) {
-            Ok(parsed) => parsed,
-            Err(_) => return Ok(None),
+    pub fn from_tuple(value: pgrx::composite_type!("df.http_endpoint")) -> Result<Self, String> {
+        let reference = Self {
+            server: value
+                .get_by_name::<String>("server")
+                .map_err(|_| "Invalid endpoint server field")?
+                .ok_or("Endpoint server must not be NULL")?,
+            path: value
+                .get_by_name::<String>("path")
+                .map_err(|_| "Invalid endpoint path field")?
+                .ok_or("Endpoint path must not be NULL")?,
         };
-        if parsed.get("type").and_then(serde_json::Value::as_str) != Some("pg_durable.endpoint") {
-            return Ok(None);
-        }
-        let reference: Self =
-            serde_json::from_value(parsed).map_err(|_| "Invalid endpoint reference")?;
         reference.validate()?;
-        Ok(Some(reference))
+        Ok(reference)
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -71,28 +70,24 @@ impl EndpointReference {
     }
 }
 
-#[pg_extern(schema = "df", immutable, parallel_safe)]
-pub fn endpoint(server: &str, path: &str) -> String {
+#[pg_extern(schema = "df", immutable, parallel_safe, requires = ["create_endpoint_type"])]
+pub fn endpoint(server: &str, path: &str) -> pgrx::composite_type!('static, "df.http_endpoint") {
     let reference = EndpointReference {
-        kind: "pg_durable.endpoint".into(),
         server: server.into(),
         path: path.into(),
     };
     reference
         .validate()
         .unwrap_or_else(|error| pgrx::error!("{}", error));
-    serde_json::to_string(&reference).expect("Endpoint reference serialization failed")
-}
-
-pub fn configure_destination(
-    config: &mut serde_json::Value,
-    destination: &str,
-) -> Result<(), String> {
-    if let Some(reference) = EndpointReference::parse(destination)? {
-        config["url"] = serde_json::Value::String(reference.path);
-        config["endpoint"] = serde_json::Value::String(reference.server);
-    }
-    Ok(())
+    let mut tuple = PgHeapTuple::new_composite_type("df.http_endpoint")
+        .expect("Endpoint type must be installed");
+    tuple
+        .set_by_name("server", reference.server)
+        .expect("Endpoint server field must exist");
+    tuple
+        .set_by_name("path", reference.path)
+        .expect("Endpoint path field must exist");
+    tuple
 }
 
 pub fn set_execution_context(
@@ -690,25 +685,20 @@ mod unit_tests {
     }
 
     #[test]
-    fn endpoint_reference_round_trip_and_raw_compatibility() {
-        let reference = serde_json::to_string(&EndpointReference {
-            kind: "pg_durable.endpoint".into(),
+    fn endpoint_reference_validation() {
+        let reference = EndpointReference {
             server: "server.with,\"punctuation".into(),
             path: "/items/{item}?version=1".into(),
-        })
-        .unwrap();
-        let mut config = serde_json::json!({"url": reference, "method": "GET"});
-        configure_destination(&mut config, &reference).unwrap();
-        assert_eq!(config["endpoint"], "server.with,\"punctuation");
-        assert_eq!(config["url"], "/items/{item}?version=1");
-        let mut legacy = serde_json::json!({"url": "{host}/data", "body": null});
-        let original = legacy.to_string();
-        configure_destination(&mut legacy, "{host}/data").unwrap();
-        assert_eq!(legacy.to_string(), original);
-        assert!(EndpointReference::parse(
-            r#"{"type":"pg_durable.endpoint","server":"api","path":"/","extra":true}"#
-        )
-        .is_err());
+        };
+        reference.validate().unwrap();
+        for server in ["", "invalid\nserver"] {
+            assert!(EndpointReference {
+                server: server.into(),
+                path: "/".into()
+            }
+            .validate()
+            .is_err());
+        }
     }
 
     #[test]
@@ -1034,10 +1024,25 @@ mod tests {
     #[pg_test]
     fn endpoint_helper_is_lookup_free() {
         let reference = endpoint("missing_server", "/items/{item}");
-        let decoded: serde_json::Value = serde_json::from_str(&reference).unwrap();
-        assert_eq!(decoded["type"], "pg_durable.endpoint");
-        assert_eq!(decoded["server"], "missing_server");
-        assert_eq!(decoded["path"], "/items/{item}");
+        assert_eq!(
+            reference
+                .get_by_name::<String>("server")
+                .unwrap()
+                .as_deref(),
+            Some("missing_server")
+        );
+        assert_eq!(
+            reference.get_by_name::<String>("path").unwrap().as_deref(),
+            Some("/items/{item}")
+        );
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT pg_catalog.pg_typeof(df.endpoint('missing_server', '/'))::text"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("df.http_endpoint")
+        );
     }
 
     #[cfg(any(
@@ -1047,16 +1052,15 @@ mod tests {
     ))]
     #[pg_test]
     fn endpoint_constructors_preserve_body_and_node_types() {
-        let destination = endpoint("missing_server", "/items/{item}");
-        let http = crate::dsl::http(
-            &destination,
+        let http = crate::dsl::http_endpoint(
+            endpoint("missing_server", "/items/{item}"),
             "POST",
             Some("${secret:literal.value}"),
             None,
             30,
         );
-        let multipart = crate::dsl::http_multipart(
-            &destination,
+        let multipart = crate::dsl::http_multipart_endpoint(
+            endpoint("missing_server", "/items/{item}"),
             "POST",
             Some(pgrx::JsonB(
                 serde_json::json!([{"name":"file","data_b64":"aGVsbG8="}]),
@@ -1075,6 +1079,130 @@ mod tests {
                 assert_eq!(config["body"], "${secret:literal.value}");
             }
         }
+        for constructor in ["df.http", "df.http_multipart"] {
+            let extra = if constructor == "df.http" {
+                ""
+            } else {
+                ", parts => '[{\"name\":\"file\",\"data_b64\":\"aA==\"}]'::jsonb"
+            };
+            let typed: String = Spi::get_one(&format!("SELECT {constructor}(df.endpoint('missing_server', '/items'), method => 'POST'{extra})")).unwrap().unwrap();
+            let node = crate::types::Durofut::from_json(&typed);
+            let config: serde_json::Value =
+                serde_json::from_str(node.query.as_deref().unwrap()).unwrap();
+            assert_eq!(config["endpoint"], "missing_server");
+            for raw in [
+                "https://api.github.com/items",
+                r#"{"type":"pg_durable.endpoint","server":"missing_server","path":"/items"}"#,
+            ] {
+                let raw_node: String = Spi::get_one(&format!(
+                    "SELECT {constructor}('{raw}', method => 'POST'{extra})"
+                ))
+                .unwrap()
+                .unwrap();
+                let node = crate::types::Durofut::from_json(&raw_node);
+                let config: serde_json::Value =
+                    serde_json::from_str(node.query.as_deref().unwrap()).unwrap();
+                assert_eq!(config["url"], raw);
+                assert!(config.get("endpoint").is_none());
+            }
+            Spi::run(&format!("PREPARE endpoint_text_probe(text) AS SELECT {constructor}($1, method => 'POST'{extra})")).unwrap();
+            let prepared: String = Spi::get_one(r#"EXECUTE endpoint_text_probe('{"type":"pg_durable.endpoint","server":"missing_server","path":"/items"}')"#).unwrap().unwrap();
+            Spi::run("DEALLOCATE endpoint_text_probe").unwrap();
+            let node = crate::types::Durofut::from_json(&prepared);
+            let config: serde_json::Value =
+                serde_json::from_str(node.query.as_deref().unwrap()).unwrap();
+            assert!(config.get("endpoint").is_none());
+        }
+        Spi::run(r#"
+            DO $test$
+            DECLARE
+                destination df.http_endpoint;
+                rejected boolean;
+            BEGIN
+                FOREACH destination IN ARRAY ARRAY[
+                    ROW(NULL, '/')::df.http_endpoint,
+                    ROW('server', NULL)::df.http_endpoint,
+                    ROW('', '/')::df.http_endpoint,
+                    ROW('server', '//other.example/path')::df.http_endpoint,
+                    ROW('server', 'https://other.example/path')::df.http_endpoint,
+                    ROW('server', '/../escape')::df.http_endpoint,
+                    NULL::df.http_endpoint
+                ] LOOP
+                    rejected := false;
+                    BEGIN
+                        PERFORM df.http(destination, 'POST');
+                    EXCEPTION WHEN OTHERS THEN
+                        rejected := true;
+                    END;
+                    IF NOT rejected THEN RAISE EXCEPTION 'Invalid HTTP endpoint accepted'; END IF;
+                    rejected := false;
+                    BEGIN
+                        PERFORM df.http_multipart(destination, parts => '[{"name":"file","data_b64":"aA=="}]');
+                    EXCEPTION WHEN OTHERS THEN
+                        rejected := true;
+                    END;
+                    IF NOT rejected THEN RAISE EXCEPTION 'Invalid multipart endpoint accepted'; END IF;
+                END LOOP;
+            END $test$;
+        "#).unwrap();
+    }
+
+    #[pg_test]
+    fn endpoint_http_grants() {
+        let admin = Spi::get_one::<String>("SELECT CURRENT_USER::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let options = sqlx::postgres::PgConnectOptions::new()
+                .username(&admin).database(&database)
+                .host(&crate::types::get_host()).port(crate::types::get_port());
+            let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+            sqlx::raw_sql(r#"
+                CREATE ROLE endpoint_grant_raw LOGIN;
+                CREATE ROLE endpoint_grant_typed LOGIN;
+                CREATE ROLE endpoint_grant_user LOGIN;
+                CREATE ROLE endpoint_grant_admin LOGIN;
+                GRANT EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer), df.http_multipart(text,text,jsonb,jsonb,integer) TO endpoint_grant_raw;
+                GRANT EXECUTE ON FUNCTION df.http(df.http_endpoint,text,text,jsonb,integer), df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer) TO endpoint_grant_typed;
+            "#).execute(&pool).await.unwrap();
+            for multipart in [false, true] {
+                for endpoint in [false, true] {
+                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_raw", endpoint, multipart).await.is_ok(), !endpoint);
+                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_typed", endpoint, multipart).await.is_ok(), endpoint);
+                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.is_err());
+                }
+            }
+            sqlx::raw_sql(r#"
+                SELECT df.grant_usage('endpoint_grant_admin', include_http => true, with_grant => true);
+                SET ROLE endpoint_grant_admin;
+                SELECT df.grant_usage('endpoint_grant_user', include_http => true);
+                SELECT df.grant_usage('endpoint_grant_user', include_http => false);
+                RESET ROLE;
+            "#).execute(&pool).await.unwrap();
+            for multipart in [false, true] {
+                for endpoint in [false, true] {
+                    crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.unwrap();
+                }
+            }
+            sqlx::raw_sql(r#"
+                SET ROLE endpoint_grant_admin;
+                SELECT df.revoke_usage('endpoint_grant_user');
+                RESET ROLE;
+            "#).execute(&pool).await.unwrap();
+            for multipart in [false, true] {
+                for endpoint in [false, true] {
+                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.is_err());
+                }
+            }
+            sqlx::raw_sql(r#"
+                DROP OWNED BY endpoint_grant_raw, endpoint_grant_typed, endpoint_grant_user, endpoint_grant_admin;
+                DROP ROLE endpoint_grant_raw, endpoint_grant_typed, endpoint_grant_user, endpoint_grant_admin;
+            "#).execute(&pool).await.unwrap();
+            pool.close().await;
+        });
     }
 
     #[pg_test]

@@ -26,12 +26,36 @@ CREATE SERVER eh_blocked FOREIGN DATA WRAPPER pg_durable_fdw
     OPTIONS (base_url 'https://127.0.0.1', auth_scheme 'none');
 GRANT USAGE ON FOREIGN SERVER eh_none, eh_bearer, eh_header, eh_query, eh_missing, eh_blocked TO df_e2e_user;
 GRANT USAGE ON FOREIGN SERVER eh_none TO eh_no_http;
+CREATE ROLE eh_raw_http LOGIN;
+CREATE ROLE eh_typed_http LOGIN;
+CREATE ROLE eh_revoked_http LOGIN;
+SELECT df.grant_usage('eh_raw_http');
+SELECT df.grant_usage('eh_typed_http');
+SELECT df.grant_usage('eh_revoked_http', include_http => true);
+GRANT EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer), df.http_multipart(text,text,jsonb,jsonb,integer) TO eh_raw_http;
+GRANT EXECUTE ON FUNCTION df.http(df.http_endpoint,text,text,jsonb,integer), df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer) TO eh_typed_http;
+GRANT USAGE ON FOREIGN SERVER eh_none TO eh_raw_http, eh_typed_http, eh_revoked_http;
 CREATE USER MAPPING FOR df_e2e_user SERVER eh_bearer OPTIONS (token 'ENDPOINT_PRIVATE_BEARER');
 CREATE USER MAPPING FOR df_e2e_user SERVER eh_header OPTIONS (header_value 'ENDPOINT_PRIVATE_HEADER');
 CREATE USER MAPPING FOR df_e2e_user SERVER eh_query OPTIONS (query_string 'sig=ENDPOINT_PRIVATE_QUERY&sv=1');
 
 CREATE TEMP TABLE _endpoint_http_cases (instance_id text, expected text, error_pattern text);
-GRANT SELECT, INSERT ON _endpoint_http_cases TO df_e2e_user, eh_no_http;
+GRANT SELECT, INSERT ON _endpoint_http_cases TO df_e2e_user, eh_no_http, eh_raw_http, eh_typed_http, eh_revoked_http;
+CREATE TEMP TABLE _endpoint_revoked_nodes (node text);
+GRANT SELECT, INSERT ON _endpoint_revoked_nodes TO eh_revoked_http;
+
+SET SESSION AUTHORIZATION eh_revoked_http;
+INSERT INTO _endpoint_revoked_nodes VALUES
+    (df.http('https://httpbingo.org/status/204', 'GET')),
+    (df.http(df.endpoint('eh_none', '/204'), 'GET')),
+    (df.http_multipart('https://httpbingo.org/status/204', parts => '[{"name":"file","data_b64":"aA=="}]')),
+    (df.http_multipart(df.endpoint('eh_none', '/204'), parts => '[{"name":"file","data_b64":"aA=="}]'));
+RESET SESSION AUTHORIZATION;
+SELECT df.revoke_usage('eh_revoked_http');
+SELECT df.grant_usage('eh_revoked_http');
+SET SESSION AUTHORIZATION eh_revoked_http;
+INSERT INTO _endpoint_http_cases SELECT df.start(node, 'endpoint-helper-revoked'), 'failed', '%EXECUTE%' FROM _endpoint_revoked_nodes;
+RESET SESSION AUTHORIZATION;
 
 SET SESSION AUTHORIZATION df_e2e_user;
 SELECT df.setvar('endpoint_status_code', '204');
@@ -61,6 +85,9 @@ BEGIN
 END $$;
 
 INSERT INTO _endpoint_http_cases VALUES
+    (df.start(df.http('{"type":"pg_durable.endpoint","server":"eh_bearer","path":"/status/204"}'::text, 'GET'), 'endpoint-text-json'), 'failed', '%malformed URL%'),
+    (df.start(df.http_multipart('{"type":"pg_durable.endpoint","server":"eh_bearer","path":"/status/204"}'::text,
+        parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-text-json-multipart'), 'failed', '%malformed URL%'),
     (df.start(df.http(df.endpoint('eh_missing', '/status/204'), 'GET'), 'endpoint-missing-mapping'), 'failed', '%mapping%required%'),
     (df.start(df.http(df.endpoint('eh_denied', '/status/204'), 'GET'), 'endpoint-server-denied'), 'failed', '%USAGE%'),
     (df.start(df.http_multipart(df.endpoint('eh_denied', '/status/204'), parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-multipart-denied'), 'failed', '%USAGE%'),
@@ -72,6 +99,20 @@ INSERT INTO _endpoint_http_cases VALUES
     (df.start(df.http(df.endpoint('eh_blocked', '/'), 'GET'), 'endpoint-ssrf'), 'failed', '%bare IP%'),
     (df.start(df.http(df.endpoint('eh_bearer', '/status/400'), 'GET'), 'endpoint-client-error'), 'completed', NULL);
 
+RESET SESSION AUTHORIZATION;
+SET SESSION AUTHORIZATION eh_raw_http;
+INSERT INTO _endpoint_http_cases VALUES
+    (df.start(df.http('https://httpbingo.org/status/204', 'GET'), 'endpoint-raw-grant'), 'completed', NULL),
+    (df.start(df.http_multipart('https://httpbingo.org/status/204', parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-raw-multipart-grant'), 'completed', NULL),
+    (df.start('{"node_type":"HTTP","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"GET\"}"}', 'endpoint-forged-raw-grant'), 'failed', '%EXECUTE%df.http()%'),
+    (df.start('{"node_type":"HTTP_MULTIPART","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}', 'endpoint-forged-raw-multipart-grant'), 'failed', '%EXECUTE%df.http_multipart()%');
+RESET SESSION AUTHORIZATION;
+SET SESSION AUTHORIZATION eh_typed_http;
+INSERT INTO _endpoint_http_cases VALUES
+    (df.start(df.http(df.endpoint('eh_none', '/204'), 'GET'), 'endpoint-typed-grant'), 'completed', NULL),
+    (df.start(df.http_multipart(df.endpoint('eh_none', '/204'), parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-typed-multipart-grant'), 'completed', NULL),
+    (df.start('{"node_type":"HTTP","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"GET\"}"}', 'endpoint-forged-typed-grant'), 'failed', '%EXECUTE%df.http()%'),
+    (df.start('{"node_type":"HTTP_MULTIPART","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}', 'endpoint-forged-typed-multipart-grant'), 'failed', '%EXECUTE%df.http_multipart()%');
 RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION eh_no_http;
 INSERT INTO _endpoint_http_cases VALUES
@@ -136,8 +177,8 @@ SET SESSION AUTHORIZATION df_e2e_user;
 SELECT df.unsetvar('endpoint_status_code');
 SELECT df.unsetvar('endpoint_bad_path');
 RESET SESSION AUTHORIZATION;
-DROP TABLE _endpoint_http_cases;
+DROP TABLE _endpoint_http_cases, _endpoint_revoked_nodes;
 DROP SERVER eh_none, eh_bearer, eh_header, eh_query, eh_missing, eh_denied, eh_blocked CASCADE;
-DROP OWNED BY eh_no_http;
-DROP ROLE eh_no_http;
+DROP OWNED BY eh_no_http, eh_raw_http, eh_typed_http, eh_revoked_http;
+DROP ROLE eh_no_http, eh_raw_http, eh_typed_http, eh_revoked_http;
 SELECT 'TEST PASSED' AS result;

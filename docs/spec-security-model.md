@@ -267,7 +267,7 @@ See [http-security.md](http-security.md) for the full specification, blocked IP 
 
 **Mitigation**:
 - `df.http()` has `EXECUTE` revoked from `PUBLIC` on fresh installs
-- DBA grants HTTP access explicitly, either with `df.grant_usage(role, include_http => true)` or a direct `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer)`
+- DBA grants HTTP access explicitly with `df.grant_usage(role, include_http => true)`.
 - The worker re-checks `EXECUTE` at execution time to block raw `df.start()` JSON injection
 - Audit logging records HTTP attempts
 
@@ -430,7 +430,7 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 **Intent**: Keep request credentials out of durable workflow state. An endpoint is a PostgreSQL `FOREIGN SERVER` using a handler-less `pg_durable_fdw`; per-role credentials are `USER MAPPING` options. This replaces the proposed `df.secrets` table and `df.setsecret`/`df.unsetsecret`/`df.clearsecrets` API for this work.
 
 **API**:
-- `df.endpoint(server text, path text)` constructs a tagged TEXT destination reference containing the server name and path template. Both `df.http` and `df.http_multipart` accept it, avoiding separate endpoint request constructors.
+- `df.endpoint(server text, path text)` returns a native `df.http_endpoint` composite containing the server name and path template. Both `df.http` and `df.http_multipart` accept it. TEXT destinations remain URLs and cannot implicitly select endpoint credentials.
 - `df.secret(server text, key text)` constructs a JSONB descriptor with `server` and `key`, interpreted only in explicit `secret_bindings.headers`, `.query` or `.form` slots supplied through `df.with_http_options`. It never returns a credential. Header descriptors may include a literal `prefix`.
 - Neither helper reads endpoint configuration or credentials. Ordinary data is not searched for descriptors or secret markers.
 
@@ -439,7 +439,7 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 **Body handling**: Explicit form-urlencoded fields are supported; general templates, JSON-body insertion and secret-valued multipart parts are deferred. `form_fields` contains literal strings and `secret_bindings.form` contains references. Both sets are serialized inside the activity without interpreting markers, descriptors or workflow placeholders in ordinary values. Whole-body marker scanning remains unsafe even when opted in, because untrusted data concatenated during graph construction is indistinguishable from intentional references.
 
 **Resolution and authorization**:
-- The activity re-checks `EXECUTE` on the corresponding HTTP function and `USAGE` on every referenced server for `submitted_by`. Hand-crafted node JSON and descriptors must pass the same checks as helper-produced references. Binding configuration itself must come from trusted workflow code, not untrusted request data.
+- The activity derives the required HTTP function from the actual destination/body mode and re-checks `EXECUTE`, then checks `USAGE` on every referenced server for `submitted_by`. Hand-crafted node JSON must pass the same checks as helper-produced requests. The grant/revoke helpers cover all HTTP variants; binding configuration itself must come from trusted workflow code, not untrusted request data.
 - Credential lookup uses `pg_user_mappings` over `connect_as_user(submitted_by)`, never the worker's privileged pool. Missing servers, mappings, options or masked values fail explicitly; there is no fallback to another role's mapping or an unauthenticated request.
 - Catalogs live in the control database where the extension is installed, independently of the workflow's SQL target. One read-only consistent snapshot supplies endpoint configuration and all named bindings for an attempt. The caller connection uses the shared SQL/catalog admission budget and closes before HTTP I/O; subsequent attempts start fresh snapshots.
 - Compose the destination without allowing a path or substituted value to replace the server's authority. Apply scheme, allow-list and SSRF checks to the actual destination, and keep redirects disabled. Secret substitutions in URL components require context-appropriate encoding.
@@ -528,7 +528,7 @@ See [Section 8: Implementation Specification](#8-implementation-specification) f
 
 HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF defenses. In the current implementation, security is enforced via:
 
-1. **Function-level permission**: `GRANT/REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer)`
+1. **Function-level permission**: managed through `df.grant_usage` and `df.revoke_usage` for the full HTTP function set
 2. **Execution-time privilege re-check**: the worker validates that `submitted_by` still has `EXECUTE` before any network activity
 3. **SSRF protection**: Block internal IPs at the code level
 4. **Compile-time endpoint allowlist**: allowed destinations depend on the HTTP Cargo feature
@@ -541,11 +541,7 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 │                                                                 │
 │  Layer 1: Function Permission (PostgreSQL native)              │
 │  ┌───────────────────────────────────────────────────────────┐ │
-│  │ REVOKE EXECUTE ON FUNCTION df.http(text, text, text,      │ │
-│  │     jsonb, integer) FROM PUBLIC;                          │ │
 │  │ SELECT df.grant_usage('api_users', include_http => true); │ │
-│  │ -- or GRANT EXECUTE ON FUNCTION df.http(text, text, text, │ │
-│  │ --     jsonb, integer) TO api_users;                      │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
 │  Layer 2: Execution-Time Privilege Check                       │
@@ -570,7 +566,6 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 
 ```sql
 -- Fresh installs: HTTP disabled by default
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 
 -- DBA enables HTTP for specific roles
 SELECT df.grant_usage('etl_service', include_http => true);
@@ -722,7 +717,9 @@ Credential values remain plaintext in catalogs, WAL and backups. Superuser dumps
 
 -- df.http() - disabled by default, DBA enables per-role
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http(df.http_endpoint, text, text, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(df.http_endpoint, text, jsonb, jsonb, integer) FROM PUBLIC;
 
 -- Convenience helper: grant standard df usage, excluding df.http() unless
 -- include_http => true is passed.

@@ -37,23 +37,31 @@ ALTER USER MAPPING FOR CURRENT_USER SERVER sb_service OPTIONS (DROP "secret.new_
 
 DO $$
 DECLARE
-    destination text;
+    server_name text;
     bindings jsonb;
     request_node text;
+    multipart_node text;
     target_probe text := $probe$SELECT 1 / (pg_catalog.current_database() = '_test_binding_sql_target'
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'))::integer$probe$;
 BEGIN
-    FOREACH destination IN ARRAY ARRAY['https://httpbingo.org/status/204', df.endpoint('sb_endpoint', '/status/204'), df.endpoint('sb_auth', '/status/204')] LOOP
+    FOREACH server_name IN ARRAY ARRAY[NULL, 'sb_endpoint', 'sb_auth'] LOOP
+        IF server_name IS NULL THEN
+            request_node := df.http('https://httpbingo.org/status/204', 'POST');
+            multipart_node := df.http_multipart('https://httpbingo.org/status/204', parts => '[{"name":"file","data_b64":"aGVsbG8="}]');
+        ELSE
+            request_node := df.http(df.endpoint(server_name, '/status/204'), 'POST');
+            multipart_node := df.http_multipart(df.endpoint(server_name, '/status/204'), parts => '[{"name":"file","data_b64":"aGVsbG8="}]');
+        END IF;
         bindings := jsonb_build_object(
             'headers', jsonb_build_object('X-Key', df.secret('sb_service', 'private') || '{"prefix":"Key "}'::jsonb),
             'query', jsonb_build_object('key', df.secret('sb_service', 'private')));
-        request_node := df.with_http_options(df.http(destination, 'POST'),
+        request_node := df.with_http_options(request_node,
             jsonb_build_object('secret_bindings', bindings || jsonb_build_object('form', jsonb_build_object('password', df.secret('sb_service', 'private'))),
                 'form_fields', jsonb_build_object('payload', '${secret:sb_service.private} $missing {missing}')));
         INSERT INTO _binding_cases VALUES (df.start(request_node, 'secret-form'), 'completed', NULL, false);
         INSERT INTO _binding_cases VALUES (df.start(target_probe ~> request_node, 'secret-form-other-database',
             database => '_test_binding_sql_target'), 'completed', NULL, false);
-        request_node := df.with_http_options(df.http_multipart(destination, parts => '[{"name":"file","data_b64":"aGVsbG8="}]'),
+        request_node := df.with_http_options(multipart_node,
             jsonb_build_object('secret_bindings', bindings));
         INSERT INTO _binding_cases VALUES (df.start(request_node, 'secret-multipart'), 'completed', NULL, false);
         INSERT INTO _binding_cases VALUES (df.start(target_probe ~> request_node, 'secret-multipart-other-database',

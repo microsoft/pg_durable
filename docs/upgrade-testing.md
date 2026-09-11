@@ -209,10 +209,14 @@ The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
 development cycle, not the published v0.2.8 release. Of these, only #380 changes
 the extension schema.
 
-#### HTTP endpoints
+#### Typed HTTP endpoints
 
-- Adds `df.endpoint(text, text)` without changing either HTTP constructor's
-  signature or grants. Endpoint nodes add a fixed `endpoint` server name and use
+- Adds composite type `df.http_endpoint(server text, path text)`,
+  `df.endpoint(text, text) RETURNS df.http_endpoint`, and typed destination
+  variants of both HTTP constructors. The existing TEXT signatures, wrapper
+  symbols, OIDs, ACLs, and dependent views are preserved. No implicit TEXT cast
+  is installed; TEXT constructor arguments remain raw URLs.
+- Endpoint nodes add a fixed `endpoint` server name and use
   `url` for the path template; only these nodes receive the trusted target
   `database` in activity inputs. Existing raw-URL nodes retain their serialized
   inputs and activity names. Both HTTP activities resolve credentials locally,
@@ -224,9 +228,18 @@ the extension schema.
   native catalogs, verifies extension ownership of the wrapper, and reports
   unavailable endpoint support without changing legacy workflow execution.
 - Upgrade snapshots include FDW ownership, handler/validator, extension
-  membership and ACLs, plus endpoint server and mapping metadata. Mapping
+  membership and ACLs, the composite type's fields, plus endpoint server and mapping metadata. Mapping
   credential values are excluded. B2 exercises delegated server/mapping DDL
-  after upgrade. Existing HTTP signatures, grants and activity inputs are unchanged.
+  after upgrade.
+- Fresh and upgraded schemas revoke PUBLIC EXECUTE on the typed HTTP functions.
+  `CREATE OR REPLACE` updates `df.grant_usage` and `df.revoke_usage` to cover URL
+  and endpoint requests while retaining the helper OIDs and grants. Existing
+  HTTP grants are not automatically copied to new functions: run
+  `df.grant_usage(role, include_http => true)` after upgrade to enable endpoints.
+- B1 raw HTTP requests keep checking only existing catalog functions; missing
+  endpoint functions fail closed. Activity names, scheduling and existing raw
+  request bytes are unchanged. B2 verifies typed construction, helper grant/revoke
+  coverage, and preservation of the original HTTP OIDs/ACLs.
 
 #### Add explicit secret bindings
 
