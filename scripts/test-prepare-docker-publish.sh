@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 resolver="$repo_root/scripts/prepare-docker-publish.sh"
+workflow="$repo_root/.github/workflows/docker-publish.yml"
 test_dir="$repo_root/.test-prepare-docker-publish.$$"
 fake_bin="$test_dir/bin"
 output_file="$test_dir/github-output"
@@ -68,6 +69,55 @@ assert_output() {
     local expected="$2"
     grep -Fxq "$key=$expected" "$output_file" ||
         fail "expected $key=$expected, got: $(tr '\n' ' ' < "$output_file")"
+}
+
+assert_workflow_configuration() {
+    local prepare_job
+    local workflow_permissions
+    local expected_group
+    local failures=0
+
+    prepare_job="$(
+        awk '
+            /^  prepare:$/ { in_prepare = 1 }
+            in_prepare && /^  [[:alnum:]_-]+:$/ && $0 != "  prepare:" { exit }
+            in_prepare { print }
+        ' "$workflow"
+    )"
+    workflow_permissions="$(
+        awk '
+            /^permissions:$/ { in_permissions = 1 }
+            in_permissions && /^env:$/ { exit }
+            in_permissions { print }
+        ' "$workflow"
+    )"
+
+    if grep -Fxq '    permissions:' <<< "$prepare_job" &&
+        grep -Fxq '      contents: write' <<< "$prepare_job" &&
+        [ "$(grep -Fxc '      contents: write' "$workflow")" -eq 1 ]; then
+        echo "PASS: prepare_draft_release_permission"
+    else
+        echo "FAIL: prepare must be the only job granted contents: write" >&2
+        failures=$((failures + 1))
+    fi
+
+    if grep -Fxq '  contents: read' <<< "$workflow_permissions" &&
+        grep -Fxq '  packages: write' <<< "$workflow_permissions"; then
+        echo "PASS: workflow_least_privilege"
+    else
+        echo "FAIL: workflow permissions must retain contents: read and packages: write" >&2
+        failures=$((failures + 1))
+    fi
+
+    expected_group="  group: docker-publish-\${{ github.event.release.tag_name || github.event.inputs.ref || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch) || github.run_id }}"
+    if grep -Fxq "$expected_group" "$workflow"; then
+        echo "PASS: safe_workflow_run_concurrency"
+    else
+        echo "FAIL: concurrency must isolate ineligible workflow_run events by run ID" >&2
+        failures=$((failures + 1))
+    fi
+
+    [ "$failures" -eq 0 ] || return 1
 }
 
 run_case manual_dry_run_draft env \
@@ -149,5 +199,7 @@ run_failure_case missing_pg18 env \
     GH_TEST_DRAFT=false \
     GH_TEST_ASSETS=pg-durable-postgresql-17_0.2.8_amd64.deb \
     "$resolver"
+
+assert_workflow_configuration
 
 echo "All prepare-docker-publish tests passed"

@@ -50,13 +50,15 @@ env:
   DEFAULT_PG_MAJOR: '17'
 
 concurrency:
-  group: docker-publish-${{ github.event.release.tag_name || github.event.workflow_run.head_branch || github.event.inputs.ref }}
+  group: docker-publish-${{ github.event.release.tag_name || github.event.inputs.ref || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch) || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   prepare:
     name: Prepare Docker publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.prepare.outputs.tag }}
       version: ${{ steps.prepare.outputs.version }}
