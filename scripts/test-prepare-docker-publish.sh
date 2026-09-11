@@ -100,6 +100,20 @@ run_case draft env \
 assert_output ready false
 echo "PASS: draft"
 
+run_failure_case draft_missing_pg18 env \
+    EVENT_NAME=workflow_run WORKFLOW_RUN_EVENT=push \
+    WORKFLOW_RUN_CONCLUSION=success WORKFLOW_RUN_TAG=v0.2.8 \
+    GH_TEST_DRAFT=true \
+    GH_TEST_ASSETS=pg-durable-postgresql-17_0.2.8_amd64.deb \
+    "$resolver"
+
+run_failure_case draft_missing_pg17 env \
+    EVENT_NAME=workflow_run WORKFLOW_RUN_EVENT=push \
+    WORKFLOW_RUN_CONCLUSION=success WORKFLOW_RUN_TAG=v0.2.8 \
+    GH_TEST_DRAFT=true \
+    GH_TEST_ASSETS=pg-durable-postgresql-18_0.2.8_amd64.deb \
+    "$resolver"
+
 run_case early_release env \
     EVENT_NAME=release RELEASE_TAG=v0.2.8 \
     GH_TEST_DRAFT=false GH_TEST_ASSETS="" \
