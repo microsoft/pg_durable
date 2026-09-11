@@ -1,10 +1,13 @@
 RESET SESSION AUTHORIZATION;
+DROP DATABASE IF EXISTS _test_binding_sql_target;
+CREATE DATABASE _test_binding_sql_target TEMPLATE template0;
 DROP SERVER IF EXISTS sb_service, sb_denied, sb_nomap, sb_auth CASCADE;
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sb_no_http') THEN DROP OWNED BY sb_no_http; END IF;
 END $$;
 DROP ROLE IF EXISTS sb_no_http;
 CREATE ROLE sb_no_http LOGIN;
+GRANT CONNECT ON DATABASE _test_binding_sql_target TO df_e2e_user, sb_no_http;
 SELECT df.grant_usage('sb_no_http');
 SELECT df.grant_usage('df_e2e_user', include_http => true);
 CREATE SERVER sb_service FOREIGN DATA WRAPPER pg_durable_fdw
@@ -35,8 +38,10 @@ DECLARE
     destination text;
     bindings jsonb;
     request_node text;
+    target_probe text := $probe$SELECT 1 / (pg_catalog.current_database() = '_test_binding_sql_target'
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'))::integer$probe$;
 BEGIN
-    FOREACH destination IN ARRAY ARRAY['https://httpbingo.org/status/204', df.endpoint('sb_service', '/status/204')] LOOP
+    FOREACH destination IN ARRAY ARRAY['https://httpbingo.org/status/204', df.endpoint('sb_service', '/status/204'), df.endpoint('sb_auth', '/status/204')] LOOP
         bindings := jsonb_build_object(
             'headers', jsonb_build_object('X-Key', df.secret('sb_service', 'private') || '{"prefix":"Key "}'::jsonb),
             'query', jsonb_build_object('key', df.secret('sb_service', 'private')));
@@ -44,9 +49,13 @@ BEGIN
             jsonb_build_object('secret_bindings', bindings || jsonb_build_object('form', jsonb_build_object('password', df.secret('sb_service', 'private'))),
                 'form_fields', jsonb_build_object('payload', '${secret:sb_service.private} $missing {missing}')));
         INSERT INTO _binding_cases VALUES (df.start(request_node, 'secret-form'), 'completed', NULL, false);
+        INSERT INTO _binding_cases VALUES (df.start(target_probe ~> request_node, 'secret-form-other-database',
+            database => '_test_binding_sql_target'), 'completed', NULL, false);
         request_node := df.with_http_options(df.http_multipart(destination, parts => '[{"name":"file","data_b64":"aGVsbG8="}]'),
             jsonb_build_object('secret_bindings', bindings));
         INSERT INTO _binding_cases VALUES (df.start(request_node, 'secret-multipart'), 'completed', NULL, false);
+        INSERT INTO _binding_cases VALUES (df.start(target_probe ~> request_node, 'secret-multipart-other-database',
+            database => '_test_binding_sql_target'), 'completed', NULL, false);
     END LOOP;
 END $$;
 
@@ -54,9 +63,11 @@ INSERT INTO _binding_cases VALUES
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'GET'),
         jsonb_build_object('secret_bindings', jsonb_build_object('headers', jsonb_build_object('X-Key', df.secret('sb_service', 'missing'))))), 'binding-missing-key'), 'failed', '%secret key is missing%', false),
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'GET'),
-        jsonb_build_object('secret_bindings', jsonb_build_object('query', jsonb_build_object('key', df.secret('sb_denied', 'private'))))), 'binding-denied-server'), 'failed', '%USAGE%', false),
+        jsonb_build_object('secret_bindings', jsonb_build_object('query', jsonb_build_object('key', df.secret('sb_denied', 'private'))))), 'binding-denied-server', database => '_test_binding_sql_target'), 'failed', '%USAGE%', false),
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'GET'),
-        jsonb_build_object('secret_bindings', jsonb_build_object('query', jsonb_build_object('key', df.secret('sb_nomap', 'private'))))), 'binding-no-mapping'), 'failed', '%mapping%required%', false),
+        jsonb_build_object('secret_bindings', jsonb_build_object('query', jsonb_build_object('key', df.secret('sb_nomap', 'private'))))), 'binding-no-mapping', database => '_test_binding_sql_target'), 'failed', '%mapping%required%', false),
+    (df.start(df.http(df.endpoint('sb_denied', '/status/204'), 'GET'), 'binding-endpoint-denied-other-database',
+        database => '_test_binding_sql_target'), 'failed', '%USAGE%', false),
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'GET'),
         jsonb_build_object('secret_bindings', jsonb_build_object('headers', jsonb_build_object('X-Key', df.secret('sb_service', 'invalid_header'))))), 'binding-invalid-header'), 'failed', '%not a valid HTTP header%', false),
     (df.start(df.with_http_options(df.http('https://httpbingo.org/status/204?%6bey=ordinary', 'GET'),
@@ -81,7 +92,7 @@ RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION sb_no_http;
 INSERT INTO _binding_cases VALUES (df.start(
     '{"node_type":"HTTP","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"GET\",\"secret_bindings\":{\"headers\":{\"X-Key\":{\"server\":\"sb_service\",\"key\":\"private\"}}}}"}',
-    'binding-forged-no-http'), 'failed', '%EXECUTE%df.http()%', false);
+    'binding-forged-no-http', database => '_test_binding_sql_target'), 'failed', '%EXECUTE%df.http()%', false);
 RESET SESSION AUTHORIZATION;
 
 DO $$
@@ -147,4 +158,5 @@ DROP TABLE _binding_cases;
 DROP SERVER sb_service, sb_denied, sb_nomap, sb_auth CASCADE;
 DROP OWNED BY sb_no_http;
 DROP ROLE sb_no_http;
+DROP DATABASE _test_binding_sql_target;
 SELECT 'TEST PASSED' AS result;

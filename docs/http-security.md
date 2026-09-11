@@ -129,8 +129,9 @@ not restrict the other.
 `df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
 Like other combinators, it uses ordinary `df` schema access and default PUBLIC
 `EXECUTE`. Wrapping a hand-crafted HTTP node does not bypass the activity's
-privilege check. No option keys are supported in this version; SQL `NULL` and
-`{}` preserve the original node text.
+privilege check. Supported keys are `secret_bindings` and `form_fields`, described
+in [Explicit secret bindings](#37-explicit-secret-bindings). SQL `NULL` and `{}`
+preserve the original node text.
 
 ### 3.3 Managing access
 
@@ -223,9 +224,22 @@ remains compiled in and still runs before any network activity.
 An endpoint reference does not grant authority. Normal and multipart activities
 first check their existing HTTP function grant, then resolve the foreign server
 and the submitting role's user mapping on a connection authenticated as that role.
-Server `USAGE` is mandatory. The workflow's recorded target database selects the
-catalog; caller-supplied database/identity fields in node JSON do not override the
-trusted execution context.
+Server `USAGE` is mandatory. Catalogs are in the control database selected by
+`pg_durable.database`, regardless of the workflow's SQL target. Caller-supplied
+database/identity fields in node JSON cannot select another credential catalog or
+override the trusted submitting identity.
+
+One request uses one read-only `REPEATABLE READ` snapshot for endpoint configuration
+and all referenced mappings, including bindings from other servers. Catalog rows
+are reused within the attempt, not cached across attempts. This prevents atomic
+catalog updates from producing mixed destination/credential generations. The
+caller connection acquires the same admission slot as SQL execution and is closed,
+releasing the slot, before network I/O. Requests without catalog references open
+no caller connection.
+
+Server owners must be trusted with credentials sent through their endpoints:
+changing a destination can redirect subsequent authenticated requests, even when
+the owner's catalog view cannot reveal the caller's mapping values.
 
 Path composition preserves the base URL's authority and path prefix. Traversal,
 protocol-relative paths and encoded path separators are rejected after variable
@@ -250,11 +264,14 @@ requirements.
 marker. Only named header/query/form slots in `secret_bindings` interpret these
 references. Ordinary request fields, literal `form_fields`, multipart bytes and
 resolved strings are never searched for secret markers. Binding maps are trusted
-workflow configuration, not untrusted payload data.
+workflow configuration, not untrusted payload data. Credential-bearing destinations
+must also be trusted; a reference's server name selects the credential namespace,
+not a restriction on which destination can receive it.
 
 Activities validate field shapes, reject conflicts with ordinary fields and
 endpoint authentication, and resolve each referenced server under `submitted_by`
-after destination policy checks. Server `USAGE` and a caller-owned mapping are
+in the request's control-database snapshot after destination policy checks.
+Server `USAGE` and a caller-owned mapping are
 required even for `auth_scheme 'none'`. Named values come only from individual
 `"secret.<key>"` user-mapping options, not ambient identity, endpoint-authentication
 options or server options. The prefix is a credential namespace, not an instruction

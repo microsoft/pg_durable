@@ -152,7 +152,7 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.max_user_connections",
-        c"Maximum number of concurrent user-execution connections for SQL node execution",
+        c"Maximum number of concurrent user connections for SQL execution and HTTP credential catalogs",
         c"",
         &MAX_USER_CONNECTIONS,
         1,
@@ -174,7 +174,7 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.execution_acquire_timeout",
-        c"Seconds to wait for an available execution slot before failing a SQL node",
+        c"Seconds to wait for a user connection slot before failing SQL execution or HTTP credential lookup",
         c"",
         &EXECUTION_ACQUIRE_TIMEOUT,
         1,
