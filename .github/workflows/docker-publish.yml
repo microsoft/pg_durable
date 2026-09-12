@@ -94,8 +94,10 @@ jobs:
 
           if [[ "${EVENT_NAME}" == "release" ]]; then
             tag="${RELEASE_TAG}"
+            max_attempts=60
           else
             tag="${INPUT_REF}"
+            max_attempts=1
           fi
 
           if [[ "${tag}" != v* ]]; then
@@ -107,10 +109,23 @@ jobs:
 
           mkdir -p dist
           echo "Downloading PG${PG_MAJOR} package for ${tag}..."
-          gh release download "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "pg-durable-postgresql-${PG_MAJOR}_*_amd64.deb" \
-            --dir dist
+          for attempt in $(seq 1 "$max_attempts"); do
+            if gh release download "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "pg-durable-postgresql-${PG_MAJOR}_*_amd64.deb" \
+              --dir dist \
+              --clobber; then
+              break
+            fi
+
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::PG${PG_MAJOR} package was not available after ${max_attempts} attempts."
+              exit 1
+            fi
+
+            echo "Package not available yet; retrying in 20 seconds (${attempt}/${max_attempts})..."
+            sleep 20
+          done
           ls -l dist
 
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
