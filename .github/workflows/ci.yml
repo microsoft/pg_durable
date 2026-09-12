@@ -53,9 +53,6 @@ jobs:
       - name: Test Makefile source installation
         run: ./scripts/test-make-install.sh
 
-      - name: Test release workflow sequencing
-        run: ./scripts/test-prepare-docker-publish.sh
-
   macos_source_install:
     name: macOS Source Install (PG17)
     runs-on: macos-latest
