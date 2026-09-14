@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [0.2.9] - Unreleased
+
+The changes below landed after the v0.2.8 tag and are not part of that release.
+
+### Added
+
+- **HTTP options helper (#380):** adds `df.with_http_options(fut, options)` for
+  single HTTP and multipart nodes. No option keys are supported yet: SQL `NULL`
+  and an empty JSON object return the original node unchanged; other values and
+  unsupported keys raise an error. Existing installations receive the helper
+  through the 0.2.8 to 0.2.9 extension upgrade.
+
+### Changed
+
+- **HTTP connection reuse (#379):** HTTP and multipart activities share one
+  process-wide client and connection pool, with timeouts applied per request.
+  Client-construction errors are cached until the background worker restarts;
+  ordinary request failures do not poison the shared client.
+- **Dependencies (#390):** updates `uuid` from 1.26.0 to 1.26.1 and `reqwest`
+  from 0.13.4 to 0.13.5. The latter uses `base64` 0.23.1; pg_durable's direct
+  `base64` dependency remains on 0.22.1, matching its existing manifest constraint.
+
+### Fixed
+
+- **Release automation (#389):** release-triggered Docker publication retries
+  package downloads while the package workflow attaches release assets. Manual
+  dispatch remains fail-fast when assets are missing.
+- **E2E test isolation (#388):** extension lifecycle tests restore the shared
+  test user's HTTP and multipart privileges so later tests do not depend on
+  whether setup has run again. This is a test-only change.
+
 ## [0.2.8] - 2026-09-11
 
 ### Added

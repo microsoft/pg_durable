@@ -203,6 +203,47 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
+### v0.2.8 → v0.2.9
+
+The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
+development cycle, not the published v0.2.8 release. Of these, only #380 changes
+the extension schema.
+
+#### Add `df.with_http_options()`
+- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. No option keys are supported yet: SQL `NULL` and `{}` return the original node text byte-for-byte; other values and unsupported keys raise an error.
+- **Upgrade script:** [sql/pg_durable--0.2.8--0.2.9.sql](../sql/pg_durable--0.2.8--0.2.9.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.
+- **Released-schema compatibility:** This helper landed after the v0.2.8 tag. The 0.2.7 to 0.2.8 script remains identical to the released version; the new DDL belongs in 0.2.8 to 0.2.9 so already-installed 0.2.8 schemas also receive it.
+- **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
+- **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
+
+#### Shared HTTP client (#379)
+
+- **Runtime change (no DDL):** HTTP and multipart activities reuse one client and
+  connection pool per background worker process. Timeouts remain per request.
+  Client construction is lazy; construction errors are cached until the worker
+  restarts, while request-time failures do not invalidate the client. See
+  [Shared connection pool](http-security.md#63-shared-connection-pool).
+- **Scenario B1 considerations:** The change applies when the new binary is
+  loaded, including against older supported schemas. It uses the existing HTTP
+  configuration and privilege checks; no schema-version detection is needed.
+- **Scenario A/B2 and replay considerations:** No upgrade DDL or persisted-data
+  migration is needed. Activity names, serialized inputs, and orchestration
+  scheduling are unchanged; the client cache is confined to activity execution.
+
+#### Other post-tag changes
+
+- **Dependencies (#390):** `uuid` 1.26.1 and `reqwest` 0.13.5 are binary updates,
+  not v0.2.8 dependencies. `reqwest` uses `base64` 0.23.1, while pg_durable's
+  direct dependency remains on 0.22.1. The `duroxide`/`duroxide-pg` pair and
+  provider compatibility line are unchanged.
+- **Test and release tooling (#388, #389):** shared E2E HTTP grants are restored
+  after lifecycle tests, and release-triggered Docker publication waits for
+  package assets. Neither change modifies the installed extension schema.
+- **Upgrade considerations:** These changes require no upgrade DDL, persisted
+  data migration, or runtime schema detection.
+
+<a id="028"></a>
+
 ### v0.2.7 → v0.2.8
 
 #### Loop failure continuation
@@ -234,12 +275,6 @@ what the upgrade script handles, and any backward compatibility considerations.
   that recorded the previous terminal-failure path cannot replay under the new
   binary, which continues toward the higher backstop instead. Drain such
   long-running loops before upgrade when continuity is required.
-
-#### Add `df.with_http_options()`
-- **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. No option keys are supported yet: SQL `NULL` and `{}` return the original node text byte-for-byte; other values and unsupported keys raise an error.
-- **Upgrade script:** [sql/pg_durable--0.2.7--0.2.8.sql](../sql/pg_durable--0.2.7--0.2.8.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.
-- **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
-- **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
 
 #### Configurable HTTP domains (#375)
 - **Runtime change (no DDL):** `pg_durable.http_allowed_domains` is a Postmaster-context string GUC that replaces the domain allow-list for both HTTP activities in restricted builds. The defaults preserve the existing Azure/GitHub policy, including `httpbingo.org` in test builds. Disabled and `http-allow-all` build behavior is unchanged.
