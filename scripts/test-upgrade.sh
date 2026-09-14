@@ -921,7 +921,7 @@ else
         run_test "B1 [v${B1_VERSION}]: df.sql() construction" test_b1_dsl_construction
         run_test "B1 [v${B1_VERSION}]: df.loop(body, condition)" test_b1_conditional_loop
         run_test "B1 [v${B1_VERSION}]: df.http() construction" test_b1_http_construction
-        if ! version_ge "$B1_VERSION" "0.2.8"; then
+        if ! version_ge "$B1_VERSION" "0.2.9"; then
             run_test "B1 [v${B1_VERSION}]: new HTTP options helper remains absent" test_b1_http_options_absent
         fi
         run_test "B1 [v${B1_VERSION}]: DSL chain (~>)" test_b1_dsl_chain
