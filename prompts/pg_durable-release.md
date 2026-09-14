@@ -12,13 +12,14 @@ prompt therefore:
 2. Confirms the version/upgrade-script metadata is consistent.
 3. Confirms the relevant CI workflows already **succeeded on the commit** being
    tagged (no fresh test runs required at tag time).
-4. Drives the **tag → draft GitHub Release → publish → GHCR image** automation.
+4. Drives the **tag → draft GitHub Release → publish → GHCR image + PGXN**
+   automation.
 5. Opens the **next-development-cycle** PR.
 
 > **This prompt owns a per-release tracking issue.** The prompt is the *procedure*
 > (static, reusable); the issue titled "Release vX.Y.Z" is the *state + audit
 > trail* for one release — a checklist of gates plus links (changelog PR, tag,
-> draft Release, GHCR run) and who approved tag/publish. Step 0 creates it from
+> draft Release, GHCR and PGXN runs) and who approved tag/publish. Step 0 creates it from
 > the checklist in that step, and every step ends by ticking its box. Keep the
 > issue to checkboxes + links; it must **not** re-narrate these instructions.
 
@@ -37,15 +38,23 @@ when, so you only do by hand what isn't automated:
 |---------|----------|--------------|
 | Push tag `v*` | **Package Release** (`.github/workflows/package-release.yml`) | Builds + validates the AMD64 `.deb` for PG 17 and 18, then **creates a *draft* GitHub Release** for the tag and attaches the `.deb` / source tarballs / `SHA256SUMS`. |
 | Release **published** | **Docker Publish** (`.github/workflows/docker-publish.yml`) | Builds `ghcr.io/microsoft/pg_durable` from the released `.deb` (PG 17 + 18, amd64) and pushes the immutable `X.Y.Z-pg<major>` tags plus floating `pg<major>`/`latest` when it's the highest stable release. **The `.deb` assets must already be attached before this runs.** |
+| Stable Release **published** | **PGXN Publish** (`.github/workflows/pgxn-publish.yml`) | Checks out the exact `vX.Y.Z` tag, generates and validates `META.json`, builds `make pgxn-zip`, validates the ZIP and uploads it to PGXN. Prereleases are excluded. Runs independently of Docker Publish. |
 | Pull request | **CI** (`.github/workflows/ci.yml`), **Package Release** (PR validation), **Upgrade tests** | fmt/clippy, unit + E2E, `.deb` build validation, and `scripts/test-upgrade.sh`. |
 
 Key consequences:
 
 - **Tagging is the action that builds the draft Release** — you don't create it
   by hand. You fill in its notes and click **Publish**.
-- **Publishing is a manual gate.** Until you publish, nothing has reached GHCR
-  and no consumer has seen the release, so a botched tag is still recoverable
+- **Publishing is a manual gate for both GHCR and PGXN.** Until you publish,
+  neither registry workflow uploads anything, so a botched tag is still recoverable
   (see "If the tag run fails").
+- **Publishing a stable GitHub Release authorizes the PGXN upload too.** There
+  is no second manual upload step. Explain this when asking for publish approval.
+  Publishing a draft in the GitHub UI (or with an authenticated maintainer's
+  `gh release edit vX.Y.Z --draft=false`) emits `release: published`. Do not use
+  an Actions job's `GITHUB_TOKEN` to publish: events generated with that token
+  do not start these downstream release workflows. The draft created by Package
+  Release is not itself a publish event.
 - **No testing happens at tag time.** Verify the checks were already green on the
   commit you are tagging.
 
@@ -70,10 +79,12 @@ Tracking issue for the **vX.Y.Z** release. Procedure: `prompts/pg_durable-releas
 - [ ] Cut line confirmed
 - [ ] Changelog merged (PR #…)
 - [ ] Version/upgrade-script sanity
+- [ ] PGXN credentials configured (secret names only; never record values)
 - [ ] CI green on tag commit (<sha>)
 - [ ] Tagged vX.Y.Z → draft Release (run #…, release: …)
 - [ ] Release published (approved by: …)
 - [ ] GHCR images confirmed (run #…)
+- [ ] PGXN release confirmed (run #…, distribution: …; N/A for prerelease)
 - [ ] Next-cycle PR opened (#…)
 EOF
 gh issue create --title "Release vX.Y.Z" --body-file /tmp/release-vX.Y.Z-checklist.md
@@ -134,9 +145,16 @@ Confirm these are consistent on the release commit:
 - Any version-stamped `expected/` fixtures are consistent.
 - `META.json.in` is present and `make META.json` renders the release
   version. The PGXN metadata is generated from `Cargo.toml`, so there is no
-  separate version to bump.
+  separate version to bump. Stable releases require `release_status: stable`
+  and an exact `vX.Y.Z` tag matching the crate and provided extension version.
+- Before a stable release, verify the repository Actions secrets
+  `PGXN_USERNAME` and `PGXN_PASSWORD` have been configured as described in
+  Step 6b. Never ask for the password in chat or put its value in the tracking
+  issue. Secret presence can be checked with
+  `gh secret list --repo microsoft/pg_durable`; this does not reveal values.
 
 > **Update the tracking issue:** tick **Version/upgrade-script sanity**.
+> Tick **PGXN credentials configured** after confirming setup (N/A for prerelease).
 
 ## Step 3: Confirm CI is green on the release commit
 
@@ -298,7 +316,8 @@ gh release edit vX.Y.Z --notes-file /tmp/release-body-X.Y.Z.md
   duplicate it.
 
 Review the draft in the GitHub UI, confirm the `.deb`/source assets are attached
-and ordered sensibly, then **Publish** (ask the user before publishing). For a
+and ordered sensibly, then **Publish** (ask the user before publishing, explicitly
+including the automatic PGXN upload for stable releases). For a
 pre-release (e.g. `vX.Y.Z-rc1`), mark it as a pre-release so floating image tags
 don't move.
 
@@ -324,76 +343,92 @@ nothing).
 > **Update the tracking issue:** link the Docker Publish run and tick **GHCR
 > images confirmed**.
 
-## Step 6b: Publish to PGXN
+## Step 6b: Confirm automated PGXN publication
 
-**This step is deliberately manual.** A PGXN upload is not a routine artifact
-push: it publishes to a public registry under an account the project owns, and
-the first upload permanently claims both the distribution name `pg_durable` and
-the extension name it provides. Keep a human watching it until the process has
-been run successfully a few times; automating it inside the Package Release
-workflow can come later, once there is nothing left to learn.
+Publishing a **stable** GitHub Release automatically starts **PGXN Publish**.
+Pushing a tag, creating/editing a draft, or editing an already-published release
+does not trigger it. Releases marked as prereleases are skipped; tags with
+prerelease/build suffixes are rejected even if incorrectly marked stable.
+The workflow must be merged to `main` before cutting the next release tag.
 
-Requires the `PGXN_USERNAME` and `PGXN_PASSWORD` credentials for the project's
-PGXN account.
+The workflow checks out the exact release tag separately from its current
+release tooling, then runs `make -B META.json`, `pgxn validate-meta META.json`,
+and `make pgxn-zip` using a digest-pinned PGXN tools image. It verifies the tag,
+crate and metadata versions, stable status, provided extension, documentation,
+and archive layout. `make pgxn-zip` explicitly includes the generated,
+gitignored metadata at `pg_durable-X.Y.Z/META.json`; do not replace it with a
+bare `git archive` or `pgxn-bundle` that omits that file.
 
-### First, build and validate without uploading
+The ZIP and `PGXN-SHA256SUMS` are retained for 30 days in the workflow's Actions
+artifact (not added to the GitHub Release's existing `SHA256SUMS`). A separate
+job downloads that artifact, verifies its checksum, and sends the exact ZIP to
+PGXN Manager using `pgxn-release`. Only that final step receives PGXN secrets.
+No PostgreSQL compilation or schema migration is involved.
 
-Nothing is uploaded by this step, and invalid metadata fails here rather than in
-front of an audience:
+### One-time credentials setup
 
-```bash
-git checkout vX.Y.Z
-docker run --rm -v "$PWD:/repo" -w /repo pgxn/pgxn-tools sh -c '
-  make META.json &&
-  pgxn validate-meta META.json &&
-  make pgxn-zip'
-```
+In [repository Actions secrets](https://github.com/microsoft/pg_durable/settings/secrets/actions),
+choose **New repository secret** and register:
 
-Expect `META.json is OK`. Then inspect what you are about to publish:
+| Name | Value |
+|------|-------|
+| `PGXN_USERNAME` | `Pino` |
+| `PGXN_PASSWORD` | The password for the PGXN Manager account `Pino` |
 
-```bash
-unzip -l pg_durable-X.Y.Z.zip | grep META.json   # must be at the archive root
-```
-
-Check that the version in `META.json` matches the tag, and that `provides`
-names the extension you intend to claim.
-
-> **Why not `pgxn-bundle`?** It is the upstream wrapper for exactly this step,
-> but it has two traps here, both verified against `pgxn/pgxn-tools`. It archives
-> only committed files unless `GIT_BUNDLE_OPTS` is set, and `META.json` is
-> generated and gitignored — so a plain `pgxn-bundle` silently produces an
-> archive containing **no `META.json` at all**, which is the one file PGXN
-> requires. It also ends with
-> `[ -n "${GITHUB_OUTPUT:-}" ] && echo ... >> "$GITHUB_OUTPUT"`, so outside
-> GitHub Actions it **exits 1 even on success**, which silently breaks any `&&`
-> chain built on it. `make pgxn-zip` already passes `--add-file META.json` and
-> exits 0, and `pgxn validate-meta` performs the same Meta Spec check.
-
-### Then upload
-
-Pass the zip built above explicitly, so the upload cannot be chained onto a
-command whose exit status is unreliable:
+Alternatively, from a trusted terminal authenticated to GitHub with repository
+secret-management permission:
 
 ```bash
-docker run --rm -v "$PWD:/repo" -w /repo \
-  -e PGXN_USERNAME -e PGXN_PASSWORD \
-  pgxn/pgxn-tools pgxn-release pg_durable-X.Y.Z.zip
+gh secret set PGXN_USERNAME --repo microsoft/pg_durable --body "Pino"
+gh secret set PGXN_PASSWORD --repo microsoft/pg_durable
 ```
 
-Confirm the distribution at <https://pgxn.org/dist/pg_durable/>, and check that
-the README and documentation render — PGXN indexes documentation for search, so
-a distribution whose docs fail to render is much harder to find.
+The second command prompts for the password with hidden input. Do **not** put
+the password in `--body`, an environment file, chat, logs, or a committed file.
+These are **repository Actions secrets**, not Dependabot or Codespaces secrets.
+The account must be allowed to release the existing `pg_durable` distribution
+and provided extension on PGXN. GitHub's `GITHUB_TOKEN` is not a PGXN credential.
+To rotate the password, update the same secret; no code change is needed.
+Missing/empty secrets cause a clear failure, not a silently skipped upload.
 
-### On the very first upload
+### Dry run and recovery
 
-Consider setting `release_status` to `testing` in `META.json.in` for the first
-release only. Per the Meta Spec, a `testing` distribution should not be
-installed over a stable release without an explicit request, and stays out of
-the default search index. That claims the name and exercises the whole path
-while keeping automated clients away from a release nobody has installed from
-PGXN yet. Switch to `stable` for the following release.
+Before publishing, run against the draft Release created by Package Release:
 
-> **Update the tracking issue:** tick **PGXN release confirmed**.
+```bash
+gh workflow run pgxn-publish.yml --repo microsoft/pg_durable --ref main \
+  -f tag=vX.Y.Z -f dry_run=true
+```
+
+Dry runs prepare, validate, and retain the bundle without PGXN credentials or
+upload. Relevant PRs also exercise bundle preparation without uploading.
+For an actual upload, the GitHub Release must already be published and stable,
+and a manual run must use `main` in `microsoft/pg_durable`.
+
+```bash
+gh run list --repo microsoft/pg_durable --workflow pgxn-publish.yml --limit 5
+gh run watch <run-id> --repo microsoft/pg_durable --exit-status
+```
+
+Confirm the run's tag, PGXN acceptance in its summary, and the version at
+`https://pgxn.org/dist/pg_durable/X.Y.Z/`. Indexing may lag upload acceptance;
+also check that the README and documentation render.
+
+If the workflow fails, the GitHub Release and GHCR publication are not rolled
+back. Fix the reported problem, then re-run failed jobs, or, with explicit user
+approval, dispatch with `-f tag=vX.Y.Z -f dry_run=false`. This also supports
+backfilling a previously published release whose tag contains PGXN packaging.
+Do not republish the GitHub Release just to retry PGXN.
+
+**Never blindly retry an ambiguous upload failure.** Check PGXN Manager and the
+public version page first: PGXN might have accepted the upload before the
+connection failed. Existing versions are not overwritten; a duplicate upload
+is an error, not a successful no-op. If the version already exists, verify it
+and record that outcome rather than uploading again. Use a new release version
+for changed source or metadata; never move a published tag.
+
+> **Update the tracking issue:** link the PGXN run and version page and tick
+> **PGXN release confirmed** (N/A for a prerelease).
 
 ## Step 7: Open the next development cycle
 
@@ -417,6 +452,7 @@ Do **not** perform these without explicit user confirmation, and never use
 - Committing or merging to `main`
 - Pushing commits or tags (including moving a tag with `-f`)
 - Publishing the GitHub Release
+- Manually dispatching a live PGXN upload (`dry_run=false`)
 - Pushing images / deploying
 
 ---

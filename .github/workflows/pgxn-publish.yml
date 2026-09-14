@@ -1,0 +1,153 @@
+name: PGXN Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Stable release tag to package, for example v0.2.8'
+        required: true
+        type: string
+      dry_run:
+        description: 'Prepare and validate only; do not upload to PGXN'
+        required: true
+        default: true
+        type: boolean
+  pull_request:
+    paths:
+      - '.github/workflows/pgxn-publish.yml'
+      - 'scripts/pgxn_release.py'
+      - 'scripts/test_pgxn_release.py'
+      - 'Makefile'
+      - 'META.json.in'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+env:
+  # pgxn/pgxn-tools 1.7.1: includes make, pgxn validate-meta and pgxn-release.
+  PGXN_TOOLS_IMAGE: pgxn/pgxn-tools:1.7.1@sha256:53e79ef1c8b9a0ee88b51e89b36fd30c46c9f2326aec0cde1d7f66e47ad719ff
+
+concurrency:
+  group: pgxn-publish-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: Prepare and validate PGXN bundle
+    if: github.event_name != 'release' || github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      # Release events use current default-branch tooling, even for older tags.
+      - name: Checkout tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
+          persist-credentials: false
+
+      - name: Test release validation
+        run: python3 -m unittest discover -s scripts -p test_pgxn_release.py -v
+
+      - name: Resolve release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          PUBLISH: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            TAG="$(python3 -c 'import tomllib; print("v" + tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          fi
+          version="$(python3 scripts/pgxn_release.py tag "$TAG")"
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            flags=()
+            if [[ "$PUBLISH" == "true" ]]; then
+              if [[ "$GITHUB_REPOSITORY" != "microsoft/pg_durable" ]] ||
+                 [[ "$EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+                echo "::error::Live PGXN uploads must run in microsoft/pg_durable using the default branch."
+                exit 1
+              fi
+              flags+=(--publish)
+            fi
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/pgxn-release.json"
+            python3 scripts/pgxn_release.py release "$TAG" "$RUNNER_TEMP/pgxn-release.json" "${flags[@]}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.ref || format('refs/tags/{0}', steps.release.outputs.tag) }}
+          path: source
+          persist-credentials: false
+
+      - name: Build and validate metadata
+        run: |
+          docker run --rm \
+            -v "$PWD/source:/repo" -w /repo \
+            "$PGXN_TOOLS_IMAGE" \
+            sh -ec 'make -B META.json; pgxn validate-meta META.json; make pgxn-zip'
+
+      - name: Validate archive and record checksum
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python3 scripts/pgxn_release.py bundle "$TAG" source
+          mkdir dist
+          cp "source/pg_durable-${VERSION}.zip" dist/
+          (cd dist && sha256sum -- *.zip > PGXN-SHA256SUMS)
+          cat dist/PGXN-SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain validated bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pgxn-${{ steps.release.outputs.tag }}-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Upload validated bundle to PGXN
+    needs: bundle
+    if: >-
+      github.repository == 'microsoft/pg_durable' &&
+      (github.event_name == 'release' ||
+       (github.event_name == 'workflow_dispatch' && !inputs.dry_run))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download validated bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgxn-${{ needs.bundle.outputs.tag }}-${{ github.run_id }}
+          path: dist
+
+      - name: Verify checksum
+        working-directory: dist
+        run: sha256sum --check PGXN-SHA256SUMS
+
+      - name: Upload to PGXN
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+          VERSION: ${{ needs.bundle.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${PGXN_USERNAME:?Set the PGXN_USERNAME Actions secret to Pino}"
+          : "${PGXN_PASSWORD:?Set the PGXN_PASSWORD Actions secret}"
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" -w /dist \
+            -e PGXN_USERNAME -e PGXN_PASSWORD \
+            "$PGXN_TOOLS_IMAGE" pgxn-release "pg_durable-${VERSION}.zip"
+          echo "PGXN accepted pg_durable ${VERSION}. Verify indexing at https://pgxn.org/dist/pg_durable/${VERSION}/" >> "$GITHUB_STEP_SUMMARY"
