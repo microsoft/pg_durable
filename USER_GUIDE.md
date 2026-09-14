@@ -703,6 +703,9 @@ df.http(
 
 ### df.with_http_options() Function
 
+**Added in 0.2.9.** Existing installations must update the extension schema to
+0.2.9 or later to use this helper; replacing the binary alone is not enough.
+
 `df.with_http_options(fut TEXT, options JSONB) RETURNS TEXT` is the entry point for
 HTTP modifiers beyond the arguments passed to `df.http` and `df.http_multipart`.
 

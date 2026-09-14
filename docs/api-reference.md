@@ -369,6 +369,8 @@ Returns the same envelope as `df.http()`.
 
 ### df.with_http_options(fut, options)
 
+**Added in 0.2.9.**
+
 HTTP-specific modifier entry point. Returns the JSON-encoded TEXT node for use in
 a workflow, not an HTTP response. Neither existing HTTP function changes signature.
 
@@ -387,8 +389,9 @@ JSON `null`), malformed nodes, SQL nodes, and compound graphs raise an error.
 SQL `NULL` and `{}` return the original node text byte-for-byte, preserving its
 config and result name. Apply the helper to each HTTP node before combining nodes.
 It neither resolves secrets nor grants HTTP access; activity-time permission and
-network checks still apply. Existing installations need `ALTER EXTENSION pg_durable
-UPDATE` to use this new helper, but not to keep using the original HTTP functions.
+network checks still apply. Existing installations must update the extension
+schema to 0.2.9 or later to use this helper, but not to keep using the original
+HTTP functions. Replacing the binary alone does not add the helper.
 
 ---
 
