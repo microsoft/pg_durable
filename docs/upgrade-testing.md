@@ -216,6 +216,13 @@ the extension schema.
 - **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
 - **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
 
+#### Configurable HTTP domains (#375)
+- **Runtime change (no DDL):** `pg_durable.http_allowed_domains` is a Postmaster-context string GUC that replaces the domain allow-list for both HTTP activities in restricted builds. The defaults preserve the existing Azure/GitHub policy, including `httpbingo.org` in test builds. Disabled and `http-allow-all` build behavior is unchanged.
+- **Configuration migration:** None is required to retain existing behavior. Administrators can configure exact hostnames and `*.domain` patterns, then restart PostgreSQL. An explicit value replaces all defaults; an empty list denies all domains in restricted builds. Malformed values are rejected, including at server startup.
+- **Scenario A/B2 considerations:** No upgrade-script DDL, schema changes, or data migration. Existing graphs, activity names, and serialized activity inputs are unchanged.
+- **Scenario B1 considerations:** The new `.so` works against all previous supported schemas without `ALTER EXTENSION UPDATE` or runtime schema detection. The policy is read from the GUC, not extension tables.
+- **Replay compatibility:** The policy is evaluated only when an HTTP activity executes, not by orchestration code. Pending requests and retries use the new list after restart; already-recorded activity results replay normally.
+
 #### Shared HTTP client (#379)
 
 - **Runtime change (no DDL):** HTTP and multipart activities reuse one client and
@@ -275,13 +282,6 @@ the extension schema.
   that recorded the previous terminal-failure path cannot replay under the new
   binary, which continues toward the higher backstop instead. Drain such
   long-running loops before upgrade when continuity is required.
-
-#### Configurable HTTP domains (#375)
-- **Runtime change (no DDL):** `pg_durable.http_allowed_domains` is a Postmaster-context string GUC that replaces the domain allow-list for both HTTP activities in restricted builds. The defaults preserve the existing Azure/GitHub policy, including `httpbingo.org` in test builds. Disabled and `http-allow-all` build behavior is unchanged.
-- **Configuration migration:** None is required to retain existing behavior. Administrators can configure exact hostnames and `*.domain` patterns, then restart PostgreSQL. An explicit value replaces all defaults; an empty list denies all domains in restricted builds. Malformed values are rejected, including at server startup.
-- **Scenario A/B2 considerations:** No upgrade-script DDL, schema changes, or data migration. Existing graphs, activity names, and serialized activity inputs are unchanged.
-- **Scenario B1 considerations:** The new `.so` works against all previous supported schemas without `ALTER EXTENSION UPDATE` or runtime schema detection. The policy is read from the GUC, not extension tables.
-- **Replay compatibility:** The policy is evaluated only when an HTTP activity executes, not by orchestration code. Pending requests and retries use the new list after restart; already-recorded activity results replay normally.
 
 ### v0.2.6 → v0.2.7
 

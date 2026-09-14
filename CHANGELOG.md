@@ -16,6 +16,8 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   unsupported keys raise an error. Existing installations receive the helper
   through the 0.2.8 to 0.2.9 extension upgrade.
 
+- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
+
 ### Changed
 
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one
@@ -55,8 +57,6 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   background worker writes fully substituted workflow SQL to PostgreSQL logs.
   It defaults to `on`; set it to `off` and restart PostgreSQL to omit statement
   text from worker traces.
-
-- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
 
 ### Changed
 

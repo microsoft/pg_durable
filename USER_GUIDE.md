@@ -2397,7 +2397,7 @@ This postmaster setting requires a PostgreSQL restart. When it is empty or unset
 
 ## HTTP Allowed Domains
 
-Since v0.2.8, administrators can replace the destination allow-list for
+Since v0.2.9, administrators can replace the destination allow-list for
 `df.http()` and `df.http_multipart()` in restricted HTTP builds:
 
 ```ini

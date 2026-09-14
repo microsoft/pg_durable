@@ -769,7 +769,7 @@ These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See e
 ### pg_durable.http_allowed_domains
 
 The complete destination allow-list for `df.http()` and `df.http_multipart()`
-in restricted builds. Available since v0.2.8.
+in restricted builds. Available since v0.2.9.
 
 | Property | Value |
 |----------|-------|

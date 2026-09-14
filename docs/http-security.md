@@ -258,7 +258,7 @@ this rule.
 
 ### 5.1 Configuring allowed domains
 
-Since v0.2.8, `pg_durable.http_allowed_domains` is the complete allow-list for
+Since v0.2.9, `pg_durable.http_allowed_domains` is the complete allow-list for
 both HTTP activities in restricted builds. For example, in `postgresql.conf`:
 
 ```ini
