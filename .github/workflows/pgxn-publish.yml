@@ -21,6 +21,8 @@ on:
       - 'scripts/test_pgxn_release.py'
       - 'Makefile'
       - 'META.json.in'
+      - 'pgxn/**'
+      - 'scripts/render-pgxn-meta.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
 

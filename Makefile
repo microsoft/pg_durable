@@ -10,7 +10,7 @@ EXTRA_FEATURES ?=
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install pgxn-zip install-pgrx pgrx-init
+.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install META.json pgxn-zip install-pgrx pgrx-init
 
 # Default target
 all: package
@@ -151,19 +151,33 @@ pgrx-init:
 # ============================================================================
 # The distribution version is read from Cargo.toml so the PGXN metadata can
 # never drift from the crate version. META.json is generated, not committed.
-DISTNAME    = pg_durable
-DISTVERSION = $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+DISTNAME = pg_durable
+PGXN_TREEISH ?= HEAD
+DISTVERSION = $(shell git show "$(PGXN_TREEISH):Cargo.toml" \
+	| sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+PGXN_META ?= $(CURDIR)/META.json
+PGXN_ARCHIVE ?= $(CURDIR)/$(DISTNAME)-$(DISTVERSION).zip
+PGXN_README_TEMPLATE = pgxn/README.md.in
+PGXN_INDEXED_DOCS = pgxn/indexed-docs.txt
 
-# Render the PGXN metadata, stamping in the Cargo.toml version. This reuses the
-# same @CARGO_VERSION@ token that pgrx substitutes into pg_durable.control.
-META.json: META.json.in Cargo.toml
-	sed 's/@CARGO_VERSION@/$(DISTVERSION)/g' $< > $@
+# Render the PGXN metadata, stamping in the Cargo.toml version and deriving
+# no_index from the explicit reader-facing documentation allowlist.
+META.json: META.json.in Cargo.toml $(PGXN_INDEXED_DOCS) scripts/render-pgxn-meta.sh
+	./scripts/render-pgxn-meta.sh \
+	    META.json.in $(PGXN_INDEXED_DOCS) "$(DISTVERSION)" "$(PGXN_TREEISH)" "$(PGXN_META)"
 
-# Build the PGXN release bundle. git archive ships only committed files, so the
-# generated META.json is added explicitly.
+# Build the PGXN release bundle. The PGXN-only README is added at the archive
+# root in place of the repository README; every other tracked source file stays.
 pgxn-zip: META.json
+	@set -eu; \
+	tmp_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT HUP INT TERM; \
+	sed 's/@CARGO_VERSION@/$(DISTVERSION)/g' \
+	    "$(PGXN_README_TEMPLATE)" > "$$tmp_dir/README.md"; \
 	git archive --format zip --prefix $(DISTNAME)-$(DISTVERSION)/ \
-	    --add-file META.json -o $(DISTNAME)-$(DISTVERSION).zip HEAD
+	    --add-file "$$tmp_dir/README.md" \
+	    --add-file "$(PGXN_META)" \
+	    -o "$(PGXN_ARCHIVE)" "$(PGXN_TREEISH)" ':(exclude)README.md'
 
 # ============================================================================
 # pg_regress (PGXS) configuration

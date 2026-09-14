@@ -405,6 +405,11 @@ upload. Relevant PRs also exercise bundle preparation without uploading.
 For an actual upload, the GitHub Release must already be published and stable,
 and a manual run must use `main` in `microsoft/pg_durable`.
 
+The generated `no_index.file` must be the complement of
+`pgxn/indexed-docs.txt`. The bundle intentionally replaces only its root
+`README.md` with the compact PGXN landing page; ordinary GitHub source archives
+still contain the repository README.
+
 ```bash
 gh run list --repo microsoft/pg_durable --workflow pgxn-publish.yml --limit 5
 gh run watch <run-id> --repo microsoft/pg_durable --exit-status

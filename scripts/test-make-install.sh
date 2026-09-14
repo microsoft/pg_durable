@@ -346,4 +346,74 @@ test -n "$pgrx_version"
 make --no-print-directory install-pgrx CARGO="$FAKE_CARGO" > /dev/null 2>&1
 grep -F "install --locked cargo-pgrx --version $pgrx_version" "$CARGO_LOG" > /dev/null
 
+# The PGXN bundle keeps the complete tracked source tree, substitutes only its
+# root README, and exposes exactly the curated documentation allowlist.
+pgxn_meta="$TEST_DIR/META.json"
+pgxn_archive="$TEST_DIR/pg_durable.zip"
+make --no-print-directory pgxn-zip \
+    PGXN_META="$pgxn_meta" \
+    PGXN_ARCHIVE="$pgxn_archive"
+
+python3 - "$ROOT_DIR" "$pgxn_meta" "$pgxn_archive" <<'PY'
+import json
+import re
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+meta_path = Path(sys.argv[2])
+archive_path = Path(sys.argv[3])
+
+cargo_toml = (root / "Cargo.toml").read_text()
+version = re.search(r'^version = "([^"]+)"$', cargo_toml, re.MULTILINE).group(1)
+prefix = f"pg_durable-{version}/"
+
+allowed = {
+    line
+    for raw in (root / "pgxn/indexed-docs.txt").read_text().splitlines()
+    if (line := raw.strip()) and not line.startswith("#")
+}
+tracked = set(
+    subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=root,
+        text=True,
+    ).splitlines()
+)
+meta = json.loads(meta_path.read_text())
+excluded = set(meta["no_index"]["file"])
+
+assert meta["version"] == version
+assert meta["provides"]["pg_durable"]["version"] == version
+assert tracked - excluded == allowed
+assert allowed == {
+    "README.md",
+    "USER_GUIDE.md",
+    "CHANGELOG.md",
+    "docs/api-reference.md",
+    "docs/http-security.md",
+    "examples/README.md",
+}
+
+with zipfile.ZipFile(archive_path) as bundle:
+    members = {
+        name[len(prefix):]
+        for name in bundle.namelist()
+        if name.startswith(prefix) and not name.endswith("/")
+    }
+    assert members == tracked | {"META.json"}
+    packaged_readme = bundle.read(prefix + "README.md").decode()
+
+expected_readme = (root / "pgxn/README.md.in").read_text().replace(
+    "@CARGO_VERSION@", version
+)
+assert packaged_readme == expected_readme
+assert packaged_readme != (root / "README.md").read_text()
+assert f"/pg_durable/{version}/USER_GUIDE.html" in packaged_readme
+assert f"/pg_durable/{version}/docs/api-reference.html" in packaged_readme
+assert not re.search(r"\]\((?!https://)[^)]+\)", packaged_readme)
+PY
+
 echo "Makefile source installation checks passed"
