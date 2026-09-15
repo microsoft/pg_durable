@@ -1,0 +1,54 @@
+# pg_durable
+
+pg_durable adds durable, fault-tolerant SQL workflows to PostgreSQL. Workflow
+state is stored in PostgreSQL, and a background worker resumes execution after
+crashes, restarts, and transient failures without an external orchestrator.
+
+```sql
+SELECT df.start(
+    'SELECT id FROM documents WHERE processed = false LIMIT 100' |=> 'batch'
+    ~> 'UPDATE documents SET processed = true WHERE id IN (SELECT id FROM $batch.*)'
+);
+```
+
+Start with the
+[User Guide](https://pgxn.org/dist/pg_durable/@CARGO_VERSION@/USER_GUIDE.html)
+and [API Reference](https://pgxn.org/dist/pg_durable/@CARGO_VERSION@/docs/api-reference.html).
+See the
+[examples overview](https://pgxn.org/dist/pg_durable/@CARGO_VERSION@/examples/README.html),
+[HTTP security guide](https://pgxn.org/dist/pg_durable/@CARGO_VERSION@/docs/http-security.html),
+and [changelog](https://pgxn.org/dist/pg_durable/@CARGO_VERSION@/CHANGELOG.html)
+for focused guidance. The project website is
+[microsoft.github.io/pg_durable](https://microsoft.github.io/pg_durable/).
+
+## Install from PGXN
+
+PGXN distributes source, not binaries. Installation requires PostgreSQL 17 or
+18 development files, Rust, pgxnclient, and cargo-pgrx 0.16.1:
+
+```bash
+cargo install --locked cargo-pgrx --version 0.16.1
+pgxn install --sudo -- pg_durable
+```
+
+The `--` separator prevents `pg_durable` from being consumed as the optional
+program argument to `--sudo`. The build runs as your user; only installation
+into PostgreSQL's system directories is elevated.
+
+Add `pg_durable` to `shared_preload_libraries`, restart PostgreSQL, and enable
+the extension:
+
+```sql
+CREATE EXTENSION pg_durable;
+SELECT df.grant_usage('app_role');
+```
+
+When upgrading, install the new files, restart PostgreSQL, then update the
+extension schema in the configured pg_durable database:
+
+```sql
+ALTER EXTENSION pg_durable UPDATE TO '@CARGO_VERSION@';
+```
+
+Prebuilt Debian packages and evaluation Docker images are available from
+[GitHub releases](https://github.com/microsoft/pg_durable/releases).

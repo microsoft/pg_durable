@@ -24,6 +24,10 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   process-wide client and connection pool, with timeouts applied per request.
   Client-construction errors are cached until the background worker restarts;
   ordinary request failures do not poison the shared client.
+- **PGXN documentation:** limits the PGXN documentation index to the user guide,
+  API reference, changelog, HTTP security guide, examples overview, and a compact
+  PGXN-specific README. Internal documents remain in the source distribution but
+  no longer appear as published documentation.
 - **Dependencies (#390):** updates `uuid` from 1.26.0 to 1.26.1 and `reqwest`
   from 0.13.4 to 0.13.5. The latter uses `base64` 0.23.1; pg_durable's direct
   `base64` dependency remains on 0.22.1, matching its existing manifest constraint.

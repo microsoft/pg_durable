@@ -1,0 +1,8 @@
+# PGXN reader-facing documentation. Every other tracked path is emitted in
+# META.json no_index.file but remains present in the source distribution.
+README.md
+USER_GUIDE.md
+CHANGELOG.md
+docs/api-reference.md
+docs/http-security.md
+examples/README.md
