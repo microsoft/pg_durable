@@ -3,6 +3,7 @@
 # Licensed under the PostgreSQL License.
 
 set -euo pipefail
+export LC_ALL=C
 
 if [[ $# -ne 5 ]]; then
     echo "usage: $0 TEMPLATE ALLOWLIST VERSION TREEISH OUTPUT" >&2
@@ -18,7 +19,7 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
 grep -Ev '^[[:space:]]*(#|$)' "$allowlist" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | LC_ALL=C sort > "$tmp_dir/allowed"
+    | sort > "$tmp_dir/allowed"
 
 if [[ "$(wc -l < "$tmp_dir/allowed")" -ne "$(sort -u "$tmp_dir/allowed" | wc -l)" ]]; then
     echo "$allowlist contains duplicate paths" >&2
@@ -32,7 +33,7 @@ for required in README.md USER_GUIDE.md; do
     fi
 done
 
-git ls-tree -r --name-only "$treeish" | LC_ALL=C sort > "$tmp_dir/tracked"
+git ls-tree -r --name-only "$treeish" | sort > "$tmp_dir/tracked"
 missing="$(comm -23 "$tmp_dir/allowed" "$tmp_dir/tracked")"
 if [[ -n "$missing" ]]; then
     echo "PGXN indexed documentation is not present in $treeish:" >&2
