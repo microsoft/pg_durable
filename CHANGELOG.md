@@ -10,11 +10,35 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
 
 ### Added
 
+- **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB
+  descriptor for named header/query/form fields through `df.with_http_options`.
+  Individual `"secret.<key>"` user-mapping options support per-key addition,
+  rotation and removal. Literal form data
+  stays separate from references; activities encode fields and resolve credentials
+  under the submitting role without scanning payloads for markers. Named-secret-only
+  servers may omit `base_url` with `auth_scheme 'none'`.
+- **Endpoint HTTP requests:** `df.endpoint(server, path)` returns a typed
+  `df.http_endpoint` value accepted by `df.http` and `df.http_multipart`.
+  TEXT destinations remain URLs, never serialized endpoint references.
+  Activities resolve per-role credentials,
+  enforce server `USAGE`, preserve the configured base URL and reject routing or
+  credential overrides. Existing HTTP signatures and raw-URL workflow inputs
+  remain unchanged; the grant/revoke helpers cover URLs and endpoints together.
+  General body secret interpolation is deferred.
+- **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
+  option validator, and per-user catalog resolution for unauthenticated, bearer,
+  named-header and query-string endpoint authentication. FDW creation authority
+  is delegated with native grants. User mappings remain plaintext and may be
+  included in dumps; `DROP EXTENSION ... CASCADE` removes dependent endpoints
+  and mappings. Catalogs live in the control database independently of SQL targets;
+  each request uses a consistent caller-authenticated snapshot and shares the SQL
+  connection budget, releasing its connection before HTTP I/O.
 - **HTTP options helper (#380):** adds `df.with_http_options(fut, options)` for
-  single HTTP and multipart nodes. No option keys are supported yet: SQL `NULL`
-  and an empty JSON object return the original node unchanged; other values and
-  unsupported keys raise an error. Existing installations receive the helper
-  through the 0.2.8 to 0.2.9 extension upgrade.
+  single HTTP and multipart nodes. `secret_bindings` and `form_fields` configure
+  references and literal form data. SQL `NULL` and an empty JSON object return
+  the original node unchanged; other values and unsupported keys raise an error.
+  Existing installations receive the helper through the 0.2.8 to 0.2.9 extension
+  upgrade.
 
 ### Changed
 
@@ -39,29 +63,6 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
 
 ### Added
 
-- **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB
-  descriptor for named header/query/form fields through `df.with_http_options`.
-  Individual `"secret.<key>"` user-mapping options support per-key addition,
-  rotation and removal. Literal form data
-  stays separate from references; activities encode fields and resolve credentials
-  under the submitting role without scanning payloads for markers. Named-secret-only
-  servers may omit `base_url` with `auth_scheme 'none'`.
-- **Endpoint HTTP requests:** `df.endpoint(server, path)` returns a typed
-  `df.http_endpoint` value accepted by `df.http` and `df.http_multipart`.
-  TEXT destinations remain URLs, never serialized endpoint references.
-  Activities resolve per-role credentials,
-  enforce server `USAGE`, preserve the configured base URL and reject routing or
-  credential overrides. Existing HTTP signatures and raw-URL workflow inputs
-  remain unchanged; the grant/revoke helpers cover URLs and endpoints together.
-  General body secret interpolation is deferred.
-- **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
-  option validator, and per-user catalog resolution for unauthenticated, bearer,
-  named-header and query-string endpoint authentication. FDW creation authority
-  is delegated with native grants. User mappings remain plaintext and may be
-  included in dumps; `DROP EXTENSION ... CASCADE` removes dependent endpoints
-  and mappings. Catalogs live in the control database independently of SQL targets;
-  each request uses a consistent caller-authenticated snapshot and shares the SQL
-  connection budget, releasing its connection before HTTP I/O.
 - **Failure-isolated loops (#377):** the unified
   `df.loop(body, condition DEFAULT NULL, continue_on_failure DEFAULT false)`
   signature supports resilient infinite and conditional loops. With
