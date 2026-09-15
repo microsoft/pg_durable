@@ -14,7 +14,9 @@ use crate::orchestrations;
 
 /// Create the activity registry with all registered activities
 pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) -> ActivityRegistry {
-    let sql_semaphore = semaphore;
+    let sql_semaphore = semaphore.clone();
+    let http_semaphore = semaphore.clone();
+    let multipart_semaphore = semaphore;
     let graph_pool = pool.clone();
     let transaction_graph_pool = pool.clone();
     let status_pool = pool.clone();
@@ -50,11 +52,13 @@ pub fn create_activity_registry(pool: Arc<PgPool>, semaphore: Arc<Semaphore>) ->
         })
         .register(activities::execute_http::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = http_pool.clone();
-            async move { activities::execute_http::execute(ctx, pool, config_json).await }
+            let semaphore = http_semaphore.clone();
+            async move { activities::execute_http::execute(ctx, pool, semaphore, config_json).await }
         })
         .register(activities::execute_multipart::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = multipart_pool.clone();
-            async move { activities::execute_multipart::execute(ctx, pool, config_json).await }
+            let semaphore = multipart_semaphore.clone();
+            async move { activities::execute_multipart::execute(ctx, pool, semaphore, config_json).await }
         })
         .build()
 }

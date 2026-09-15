@@ -66,12 +66,14 @@ pub static LOG_WORKFLOW_SQL: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub mod activities;
 pub mod client;
 pub mod dsl;
+pub mod endpoints;
 pub mod explain;
 pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
 pub mod redact;
 pub mod registry;
+pub mod secrets;
 pub mod ssrf;
 pub mod types;
 pub mod worker;
@@ -150,7 +152,7 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.max_user_connections",
-        c"Maximum number of concurrent user-execution connections for SQL node execution",
+        c"Maximum number of concurrent user connections for SQL execution and HTTP credential catalogs",
         c"",
         &MAX_USER_CONNECTIONS,
         1,
@@ -172,7 +174,7 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.execution_acquire_timeout",
-        c"Seconds to wait for an available execution slot before failing a SQL node",
+        c"Seconds to wait for a user connection slot before failing SQL execution or HTTP credential lookup",
         c"",
         &EXECUTION_ACQUIRE_TIMEOUT,
         1,
@@ -549,8 +551,10 @@ BEGIN
     -- df.http() — opt-in because it makes outbound network requests.
     IF include_http THEN
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http(df.http_endpoint, text, text, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
         -- df.http_multipart() shares the same opt-in (HTTP egress is one privilege).
         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION df.http_multipart(df.http_endpoint, text, jsonb, jsonb, integer) TO %I', p_role) OPERATOR(pg_catalog.||) grant_opt;
     END IF;
 
     -- Admin helpers and system-wide metrics — with_grant => true marks a
@@ -596,12 +600,22 @@ BEGIN
         NULL;
     END;
     BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http(df.http_endpoint, text, text, jsonb, integer) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.metrics() FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
     BEGIN
         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM %I CASCADE', p_role);
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION df.http_multipart(df.http_endpoint, text, jsonb, jsonb, integer) FROM %I CASCADE', p_role);
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
@@ -660,8 +674,10 @@ END $$;
 -- functions explicitly to authorized roles; df.metrics() is granted to
 -- with_grant => true admins or by a direct administrator GRANT.
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http(df.http_endpoint, text, text, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.metrics() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(df.http_endpoint, text, jsonb, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.grant_usage(text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 "#,
@@ -669,7 +685,9 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
     requires = [
         "create_tables",
         dsl::http,
+        dsl::http_endpoint,
         dsl::http_multipart,
+        dsl::http_multipart_endpoint,
         monitoring::metrics
     ]
 );

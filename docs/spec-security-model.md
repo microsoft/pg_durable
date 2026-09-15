@@ -3,7 +3,9 @@
 **Status**: Implementation in progress  
 **Authors**: pg_durable Team  
 **Created**: 2025-12-25  
-**Last Updated**: 2026-03-11
+**Last Updated**: 2026-09-10
+
+The endpoint credential design in [Section 4.4](#44-endpoint-credentials) supersedes the earlier `df.secrets` table proposal. See [HTTP Security](http-security.md) for HTTP access controls.
 
 ---
 
@@ -74,7 +76,7 @@ The security guarantee is: **only superusers can install the extension**, theref
 - **NG1**: Supporting different users for different nodes within a single function graph
 - **NG2**: Cross-database durable function execution
 - **NG3**: Supporting untrusted extension installation (pg_durable remains SUPERUSER-install)
-- **NG4**: Real-time privilege revocation (in-flight executions complete with original privileges)
+- **NG4**: Cancelling an already-running HTTP request immediately on privilege revocation. HTTP permissions are checked against the live catalog before each execution attempt; a previously granted workflow does not retain HTTP access indefinitely.
 
 ---
 
@@ -96,8 +98,8 @@ The security guarantee is: **only superusers can install the extension**, theref
 |--------|----------|--------|-------|
 | **T8**: SSRF via HTTP Activity | **CRITICAL** | Implemented | Dataplane protection — see [http-security.md](http-security.md) |
 | **T4**: Information Disclosure via df.* Tables | **HIGH** | Implemented | RLS on `df.instances` and `df.nodes` — see [rls.md](rls.md) |
-| **T9**: Unauthorized HTTP Access | **HIGH** | Not implemented | `REVOKE EXECUTE` + admin allowlist (future spec) |
-| **T11**: Secret Exfiltration | **HIGH** | Not implemented | Additive feature; no table/API exists yet |
+| **T9**: Unauthorized HTTP Access | **HIGH** | Partially implemented | Opt-in function grants and execution-time checks; endpoint access requires server `USAGE` |
+| **T11**: Credential Exposure | **HIGH** | In progress | Endpoint credentials and secret references; see Section 4.4 |
 | **T10**: Cross-User Variable Injection | **MEDIUM-HIGH** | Implemented | Per-user `df.vars` scoping via `owner` column + RLS — see [rls.md](rls.md) |
 | **T5**: Denial of Service | **MEDIUM** | Not implemented | Rate limiting; deferred |
 | **T6**: Worker Code Vulnerability | **MEDIUM** | Mitigated by design | Relies on code review |
@@ -265,7 +267,7 @@ See [http-security.md](http-security.md) for the full specification, blocked IP 
 
 **Mitigation**:
 - `df.http()` has `EXECUTE` revoked from `PUBLIC` on fresh installs
-- DBA grants HTTP access explicitly, either with `df.grant_usage(role, include_http => true)` or a direct `GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer)`
+- DBA grants HTTP access explicitly with `df.grant_usage(role, include_http => true)`.
 - The worker re-checks `EXECUTE` at execution time to block raw `df.start()` JSON injection
 - Audit logging records HTTP attempts
 
@@ -289,18 +291,21 @@ See [http-security.md](http-security.md) for the full specification, blocked IP 
 
 ---
 
-#### T11: Secret Exfiltration via df.secrets
+#### T11: Credential Exposure in Durable HTTP Workflows
 
-**Severity**: HIGH  |  **Status**: Not implemented (additive feature)
+**Severity**: HIGH
 
-**Threat**: `df.secrets` are intended to be admin-managed values (API keys, shared tokens) that workflows can use without hard-coding secrets into graphs. If secrets are directly readable by all users, they are not secrets. Without this feature, users must embed credentials directly in function graphs, where they are stored in `df.nodes` and potentially visible in logs.
+**Threat**: Credentials supplied in HTTP request configuration can be copied into `df.nodes`, durable history and logs. Putting them in `df.vars` does not solve this: variables are captured in workflow state and substituted before the HTTP activity is scheduled.
 
 **Mitigation**:
-- Secrets MUST NOT be directly selectable by non-admin users
-- Secrets MUST NOT be returned in results or error strings
-- Secrets should be resolved only inside the worker execution path and substituted into SQL/HTTP requests at execution time
+- Persist endpoint and secret references, not resolved credentials, in request configuration and activity inputs.
+- Resolve references only inside the HTTP or multipart activity, after authorization, using a connection authenticated as `submitted_by`.
+- Never resolve credentials during graph construction, in orchestration code, or in a separate activity that returns a credential as its result.
+- Exclude resolved credentials from request diagnostics and errors. Response bodies and headers require their own handling; an endpoint can echo a request credential.
 
-**Residual Risk**: Medium (by design secrets are high-impact); mitigated by least-privilege, auditing, and never exposing plaintext to users.
+**Boundary**: Per-role user mappings isolate credentials from other ordinary roles, but the mapped role with server `USAGE` can read its own values. This is credential-persistence reduction, not a guarantee that callers can use an admin's shared secret without reading it. See [Section 4.4](#44-endpoint-credentials).
+
+**Residual Risk**: Mapping values remain plaintext in PostgreSQL catalogs and backups. Literal credentials and credentials returned by remote services remain separate exposure paths. Neither RLS nor user mappings protect against superusers.
 
 ---
 
@@ -420,35 +425,35 @@ pg_durable supports workflow variables via `df.setvar()/df.getvar()/df.unsetvar(
 
 ---
 
-### 4.4 Shared Secrets (df.secrets)
+### 4.4 Endpoint Credentials
 
-pg_durable supports shared secrets for workflows.
+**Intent**: Keep request credentials out of durable workflow state. An endpoint is a PostgreSQL `FOREIGN SERVER` using a handler-less `pg_durable_fdw`; per-role credentials are `USER MAPPING` options. This replaces the proposed `df.secrets` table and `df.setsecret`/`df.unsetsecret`/`df.clearsecrets` API for this work.
 
-**Intent**: Provide admin-managed secrets (API keys, bearer tokens, shared credentials) that workflows can reference without embedding secrets in the function graph.
+**API**:
+- `df.endpoint(server text, path text)` returns a native `df.http_endpoint` composite containing the server name and path template. Both `df.http` and `df.http_multipart` accept it. TEXT destinations remain URLs and cannot implicitly select endpoint credentials.
+- `df.secret(server text, key text)` constructs a JSONB descriptor with `server` and `key`, interpreted only in explicit `secret_bindings.headers`, `.query` or `.form` slots supplied through `df.with_http_options`. It never returns a credential. Header descriptors may include a literal `prefix`.
+- Neither helper reads endpoint configuration or credentials. Ordinary data is not searched for descriptors or secret markers.
 
-**Key security property**: Secrets are **usable** by workflows but are **not directly readable** by non-admin users.
+**Catalog options**: Servers require `auth_scheme`; `base_url` may be omitted only with `auth_scheme 'none'` for named-secret storage. A supplied URL retains all validation requirements, and HTTP endpoint execution always requires one. `header_name` is required only for header authentication. Schemes are `none` (no mapping required for endpoint authentication), `bearer` (`token` mapping option), `header` (`header_value`), and `query` (`query_string`). Named bindings read individual `"secret.<key>"` mapping options, allowing native per-key addition, rotation and removal without rewriting other credentials. Values are opaque text, not JSON. The prefix is accepted only in user mappings and confers no endpoint-authentication or ambient-identity behavior; server options remain closed. See [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog). FDW creation authority uses a native grant separate from `df.grant_usage`.
 
-**API surface (proposed)**:
-- `df.setsecret(name text, value text)` (admin-only)
-- `df.unsetsecret(name text)` (admin-only)
-- `df.clearsecrets()` (admin-only)
-- No general-purpose `df.getsecret()` for non-admins
+**Body handling**: Explicit form-urlencoded fields are supported; general templates, JSON-body insertion and secret-valued multipart parts are deferred. `form_fields` contains literal strings and `secret_bindings.form` contains references. Both sets are serialized inside the activity without interpreting markers, descriptors or workflow placeholders in ordinary values. Whole-body marker scanning remains unsafe even when opted in, because untrusted data concatenated during graph construction is indistinguishable from intentional references.
 
-**How users consume secrets**:
-- Secrets are referenced by name inside node queries/config and resolved by the worker at execution time.
-- Example placeholder (conceptual): `${secret:stripe_api_key}`.
+**Resolution and authorization**:
+- The activity derives the required HTTP function from the actual destination/body mode and re-checks `EXECUTE`, then checks `USAGE` on every referenced server for `submitted_by`. Hand-crafted node JSON must pass the same checks as helper-produced requests. The grant/revoke helpers cover all HTTP variants; binding configuration itself must come from trusted workflow code, not untrusted request data.
+- Credential lookup uses `pg_user_mappings` over `connect_as_user(submitted_by)`, never the worker's privileged pool. Missing servers, mappings, options or masked values fail explicitly; there is no fallback to another role's mapping or an unauthenticated request.
+- Catalogs live in the control database where the extension is installed, independently of the workflow's SQL target. One read-only consistent snapshot supplies endpoint configuration and all named bindings for an attempt. The caller connection uses the shared SQL/catalog admission budget and closes before HTTP I/O; subsequent attempts start fresh snapshots.
+- Compose the destination without allowing a path or substituted value to replace the server's authority. Apply scheme, allow-list and SSRF checks to the actual destination, and keep redirects disabled. Secret substitutions in URL components require context-appropriate encoding.
+- Resolved credentials exist only within the executing HTTP activity. Do not put them in orchestration inputs, activity results or request diagnostics. Log the submitting role and reference names rather than resolved values.
+- Secret resolution is an HTTP request feature, not general SQL substitution. Managed-identity tokens belong to endpoint authentication, not the named-secret resolver. Binding field names and reference metadata remain fixed; ordinary form strings are not runtime templates.
 
-**Permissions**:
-- Only admins are granted `EXECUTE` on secret mutators (`df.setsecret`, `df.unsetsecret`, `df.clearsecrets`).
-- Non-admins should not have `SELECT` on `df.secrets`.
-- The worker (trusted code) may read `df.secrets` to perform substitution.
+**Readability and lifetime**:
+- A mapped role with server `USAGE` can read its own credential options through PostgreSQL's [pg_user_mappings view](https://www.postgresql.org/docs/17/view-pg-user-mappings.html). Core masking protects other roles' mappings; it does not hide a role's own credentials from that role.
+- `PUBLIC` mappings are unsupported by this per-user resolution design: server `USAGE` alone does not make their options visible to ordinary grantees.
+- Resolve against current permissions and mapping values on each attempt. Rotation affects the next resolution without rewriting workflow history; it does not change a request already sent or a completion replayed from history.
 
-**Audit**:
-- Log secret *name* usage for traceability (never log values).
+**Limits**: Literal credentials supplied outside this mechanism remain unsafe. A response may contain a retrieved or echoed secret, so request-side resolution alone cannot promise that no secret ever appears in results or logs. Secret-bearing paths need diagnostic protection after resolution; the current URL redactor preserves paths. See [HTTP redaction coverage](http-security.md#71-url-redaction).
 
-**Scenarios that this enables**:
-- Any user granted `EXECUTE` on `df.http(text, text, text, jsonb, integer)` can run a workflow that calls `df.http()` to an allowed host and uses an Authorization header populated from `df.secrets`.
-- Any user can run a workflow that queries an external FDW/API gateway where the credential is provided by the worker.
+The authorization baseline accepts caller-readable mapping credentials ([OQ5](#oq5-opaque-shared-http-credentials)) and uses existing HTTP function grants plus server `USAGE` ([OQ6](#oq6-endpoint-only-http-access)). Opaque shared credentials and endpoint-only access are outside this work.
 
 ---
 
@@ -523,7 +528,7 @@ See [Section 8: Implementation Specification](#8-implementation-specification) f
 
 HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF defenses. In the current implementation, security is enforced via:
 
-1. **Function-level permission**: `GRANT/REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer)`
+1. **Function-level permission**: managed through `df.grant_usage` and `df.revoke_usage` for the full HTTP function set
 2. **Execution-time privilege re-check**: the worker validates that `submitted_by` still has `EXECUTE` before any network activity
 3. **SSRF protection**: Block internal IPs at the code level
 4. **Compile-time endpoint allowlist**: allowed destinations depend on the HTTP Cargo feature
@@ -536,11 +541,7 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 │                                                                 │
 │  Layer 1: Function Permission (PostgreSQL native)              │
 │  ┌───────────────────────────────────────────────────────────┐ │
-│  │ REVOKE EXECUTE ON FUNCTION df.http(text, text, text,      │ │
-│  │     jsonb, integer) FROM PUBLIC;                          │ │
 │  │ SELECT df.grant_usage('api_users', include_http => true); │ │
-│  │ -- or GRANT EXECUTE ON FUNCTION df.http(text, text, text, │ │
-│  │ --     jsonb, integer) TO api_users;                      │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
 │  Layer 2: Execution-Time Privilege Check                       │
@@ -565,7 +566,6 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 
 ```sql
 -- Fresh installs: HTTP disabled by default
-REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 
 -- DBA enables HTTP for specific roles
 SELECT df.grant_usage('etl_service', include_http => true);
@@ -650,7 +650,7 @@ SELECT df.start(
 
 - **Safety notes**:
     - For control-plane connections, prefer socket path (not `127.0.0.1`) for `peer` to apply.
-    - This model still assumes trusted extension code; the worker can connect as any user for `execute_sql`, but only that activity should do so.
+    - This model still assumes trusted extension code. User SQL uses `execute_sql`'s per-user connection; HTTP credential resolution must use the same authenticated-user boundary for catalog access, not the worker's ambient privileges.
     - If sockets/`peer` are unavailable (managed services), fall back to client cert or AAD/Managed Identity as a "passwordless" token, while keeping the DB role scoped to df.* + duroxide.
 
 ---
@@ -691,46 +691,35 @@ See [rls.md](rls.md) for the full design including:
 
 Per-user scoping of `df.vars` (adding an `owner` column + RLS) is deferred to a follow-up PR. See [rls.md, Decision 5](rls.md) for the design.
 
-#### df.secrets Table (admin-managed, workflow-usable)
+#### Endpoint Catalog Objects
 
-`df.secrets` stores shared secrets that are referenced by workflows but not directly readable by non-admins.
+Per-role HTTP credentials use native user mappings, not a `df.secrets` table. The extension installs `pg_durable_fdw`, its option validator and reference helpers; endpoint owners manage foreign servers and user mappings using native PostgreSQL DDL. The validator must ship with the wrapper and reject unsupported options and authentication schemes. Managed identity must remain unavailable until its authorization controls are implemented.
 
-```sql
-CREATE TABLE IF NOT EXISTS df.secrets (
-    name  TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_by REGROLE NOT NULL DEFAULT current_user::regrole
-);
+Credential values remain plaintext in catalogs, WAL and backups. Superuser dumps include user-mapping credentials; dumps by less privileged roles can omit mapping options. Document and test backup/restore behavior. Dropping the extension with `CASCADE` can remove dependent endpoints and mappings. Supplying literal credentials in mapping DDL can also expose them through statement logging.
 
--- Permissions
-REVOKE ALL ON TABLE df.secrets FROM PUBLIC;
--- Only the worker and admins can read to perform substitution
-GRANT SELECT ON TABLE df.secrets TO duroxide;
--- Secret mutators are admin-only
-REVOKE EXECUTE ON FUNCTION df.setsecret(name text, value text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION df.unsetsecret(name text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION df.clearsecrets() FROM PUBLIC;
-```
+#### Upgrade & Migration
 
-Additional requirements:
-- Secrets must never be returned in results, status, or logs (only secret *names* may be logged for audit).
-- If secrets are stored in plaintext, storage must be restricted to trusted roles as above; encrypt-at-rest may be added later but is not assumed by this spec.
-- Secret substitution occurs inside the worker; users cannot `SELECT` `df.secrets`.
+- Add the FDW, validator, helpers and their grants to the extension upgrade script as well as fresh installation. Existing HTTP function signatures and grants must remain intact.
+- The new binary must work against all previous schemas in the same major version without requiring `ALTER EXTENSION UPDATE`. Detect unavailable endpoint objects when a reference is used and fail clearly; existing raw-URL workflows must continue working on older schemas.
+- Preserve the serialized activity inputs and durable operation sequence for existing workflows. Add endpoint handling without changing the representation of legacy HTTP nodes.
+- Extend upgrade comparisons to cover FDW/validator definitions and grants, not just objects in the `df` schema. Include representative customer servers and mappings in upgrade tests.
 
 ### 8.2 Function Permissions (Extension Installation)
 
 ```sql
 -- Called during CREATE EXTENSION pg_durable
 
--- Default: all df functions require explicit grant
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA df FROM PUBLIC;
+-- Ordinary helpers retain PUBLIC EXECUTE; schema USAGE is their access gate.
+-- Sensitive functions have PUBLIC EXECUTE revoked and are granted explicitly.
 
 -- df.sql() - available to anyone who can use df.start()
 -- (actual SQL permission checked via per-user sqlx connection)
 
 -- df.http() - disabled by default, DBA enables per-role
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http(df.http_endpoint, text, text, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(df.http_endpoint, text, jsonb, jsonb, integer) FROM PUBLIC;
 
 -- Convenience helper: grant standard df usage, excluding df.http() unless
 -- include_http => true is passed.
@@ -740,7 +729,7 @@ REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC
 -- DBA grants these: GRANT EXECUTE ON FUNCTION df.start TO app_role;
 
 -- df.vars - normal users may set/get their own variables (enforced by RLS)
--- df.secrets - admin-only mutators; no generic getter for non-admins
+-- Endpoint helpers construct references; HTTP activities enforce access (Section 4.4).
 ```
 
 ### 8.3 Earlier GUC Proposal (Not Implemented)
@@ -1769,9 +1758,14 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 
 **Secrets tests (design-level)**
 
-- Verify non-admin cannot `EXECUTE df.setsecret/df.unsetsecret/df.clearsecrets`
-- Verify non-admin cannot `SELECT` from `df.secrets`
-- Verify workflows can reference a secret by name and the secret value is not returned/logged
+- Verify `df.endpoint` and `df.secret` construct references without looking up credentials; test concatenation, escaping and malformed references.
+- Verify a mapped role with server `USAGE` can read its own options, other ordinary roles cannot read them, and unsupported `PUBLIC` mappings produce an explicit error.
+- Verify HTTP function and server permissions are checked on each attempt, including hand-crafted node JSON, forged references and grants revoked after submission.
+- Verify missing or masked credentials fail without privileged fallback or silently sending an unauthenticated request.
+- Verify rotation changes the next attempt's credential without changing recorded request configuration. Resolved values containing placeholder-like text must not trigger recursive expansion.
+- With a non-echoing test endpoint, inspect node configuration, durable inputs and request errors/logs for plaintext and encoded sentinel credentials. Cover URL paths, queries, headers and both ordinary and multipart HTTP.
+- Test response echo/retrieval separately against the selected response policy; do not use request-side non-persistence as evidence of response secrecy. Verify SQL nodes do not expand secret markers.
+- Verify legacy HTTP replay inputs and older-schema execution remain unchanged, and test fresh-install/upgrade parity for the new catalog objects and grants.
 
 ---
 
@@ -1828,6 +1822,22 @@ These tests validate behavior when `execute_sql` fails due to expected errors an
 - BYPASSRLS roles can forge `submitted_by` to a superuser OID, making this a privilege escalation vector in multi-tenant environments
 
 **Resolution**: Gated behind `pg_durable.enable_superuser_instances` (default `off`). When `off`, `df.start()` immediately rejects any submission whose `current_user` is a superuser, and the background worker rejects any instance whose `submitted_by` resolves to a superuser at execution time (closing the BYPASSRLS forgery path). When `on`, superuser submissions are allowed as before. The GUC is `SUSET` / `SUPERUSER_ONLY` and hidden from `SHOW ALL`. See [superuser_guc.md](superuser_guc.md) for full design rationale.
+
+---
+
+### OQ5: Opaque Shared HTTP Credentials
+
+**Question**: Must an administrator be able to provide credentials that workflows can use but their callers cannot read?
+
+**Resolution (2026-09-10)**: No. Callers may read their own mapping credentials. Opaque shared secrets are outside this work. An admin-only table plus unrestricted SQL/HTTP substitution would not provide that stronger property anyway: callers could return the substituted value or send it to a destination they control.
+
+---
+
+### OQ6: Endpoint-Only HTTP Access
+
+**Question**: Must roles be able to call approved endpoints without permission to use raw-URL HTTP?
+
+**Resolution (2026-09-10)**: Use existing HTTP function grants plus server `USAGE`. `df.endpoint` composes with the existing HTTP constructors; it does not remove the role's ability to make raw-URL requests allowed by HTTP policy. Endpoint-only authorization is outside this work.
 
 ---
 

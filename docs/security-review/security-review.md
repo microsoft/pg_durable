@@ -7,6 +7,10 @@
 **Reviewer**: Security Review Agent (SDL methodology)  
 **Companion**: [ThreatModelDFD.md](ThreatModelDFD.md) | [threat-model.tm7](threat-model.tm7)
 
+> **Follow-up (2026-09-10):** Status tables below are historical. HTTP opt-in grants and execution-time privilege checks are implemented; see [HTTP Security](../http-security.md) for current behavior.
+>
+> Recommendation 8 follows the [endpoint credential design](../spec-security-model.md#44-endpoint-credentials), replacing the `df.secrets` table recommendation with per-role foreign-server/user-mapping references resolved inside HTTP activities. This is not encryption or a guarantee that callers cannot read their own mapping values. Response credentials remain a separate exposure path.
+
 ---
 
 ## 1. Executive Summary
@@ -255,7 +259,7 @@ The extension demonstrates strong security design for its core threat model:
 | # | Recommendation | Effort | Related Finding |
 |---|---|---|---|
 | 7 | **Document TLS requirements**: Add production deployment guide requiring TLS on the PostgreSQL wire protocol | Low | I-5 |
-| 8 | **Credential separation for HTTP headers**: Store auth tokens separately from df.nodes query column (future df.secrets table) | High | I-4 |
+| 8 | **Credential separation for HTTP requests**: [Endpoint and secret references](../spec-security-model.md#44-endpoint-credentials), resolved inside HTTP activities using per-role user mappings (updated 2026-09-10) | High | I-4 |
 | 9 | **Centralized audit log table**: Create df.audit_log for security-relevant events (SSRF blocks, auth failures, cancellations) | Medium | R-3 |
 | 10 | **REVOKE EXECUTE on df.* from PUBLIC**: Default to a `df_user` role; require explicit GRANT | Low | E-4 |
 | 11 | **Add SAST scanning to CI**: Integrate cargo-audit and/or cargo-deny for supply chain and vulnerability scanning | Low | — |

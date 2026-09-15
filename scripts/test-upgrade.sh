@@ -495,6 +495,61 @@ create_extension_at_version() {
 # ordinal_position) don't cause spurious diffs between the upgrade and
 # fresh-install snapshots.
 SCHEMA_QUERY="
+SELECT 'fdw' AS obj_type,
+             wrapper.fdwname,
+             pg_catalog.pg_get_userbyid(wrapper.fdwowner),
+             wrapper.fdwhandler::pg_catalog.regprocedure::text,
+             wrapper.fdwvalidator::pg_catalog.regprocedure::text,
+             wrapper.fdwoptions::text,
+             EXISTS (
+                     SELECT 1 FROM pg_catalog.pg_depend dependency
+                     JOIN pg_catalog.pg_extension extension ON extension.oid = dependency.refobjid
+                     WHERE dependency.classid = 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass
+                         AND dependency.objid = wrapper.oid
+                         AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+                         AND dependency.deptype = 'e' AND extension.extname = 'pg_durable'
+             )::text
+FROM pg_catalog.pg_foreign_data_wrapper wrapper
+WHERE wrapper.fdwname = 'pg_durable_fdw';
+
+SELECT 'grant_fdw', wrapper.fdwname,
+             CASE WHEN privilege.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(privilege.grantee) END,
+             privilege.privilege_type, privilege.is_grantable::text,
+             pg_catalog.pg_get_userbyid(privilege.grantor), ''
+FROM pg_catalog.pg_foreign_data_wrapper wrapper
+CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(wrapper.fdwacl, pg_catalog.acldefault('F', wrapper.fdwowner))) privilege
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY 2, 3, 4, 6;
+
+SELECT 'endpoint_server', server.srvname,
+             pg_catalog.pg_get_userbyid(server.srvowner),
+             server.srvtype, server.srvversion,
+             ARRAY(SELECT option_name || '=' || option_value FROM pg_catalog.pg_options_to_table(server.srvoptions) ORDER BY option_name)::text, ''
+FROM pg_catalog.pg_foreign_server server
+JOIN pg_catalog.pg_foreign_data_wrapper wrapper ON wrapper.oid = server.srvfdw
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY server.srvname;
+
+SELECT 'grant_endpoint_server', server.srvname,
+             CASE WHEN privilege.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(privilege.grantee) END,
+             privilege.privilege_type, privilege.is_grantable::text,
+             pg_catalog.pg_get_userbyid(privilege.grantor), ''
+FROM pg_catalog.pg_foreign_server server
+JOIN pg_catalog.pg_foreign_data_wrapper wrapper ON wrapper.oid = server.srvfdw
+CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(server.srvacl, pg_catalog.acldefault('S', server.srvowner))) privilege
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY 2, 3, 4, 6;
+
+SELECT 'endpoint_mapping', server.srvname,
+             CASE WHEN mapping.umuser = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(mapping.umuser) END,
+             ARRAY(SELECT option_name FROM pg_catalog.pg_options_to_table(mapping.umoptions) ORDER BY option_name)::text,
+             '', '', ''
+FROM pg_catalog.pg_user_mapping mapping
+JOIN pg_catalog.pg_foreign_server server ON server.oid = mapping.umserver
+JOIN pg_catalog.pg_foreign_data_wrapper wrapper ON wrapper.oid = server.srvfdw
+WHERE wrapper.fdwname = 'pg_durable_fdw'
+ORDER BY 2, 3;
+
 -- Tables and columns (ordinal_position renumbered to avoid dropped-column gaps)
 SELECT 'column' AS obj_type,
        c.table_name,
@@ -529,10 +584,19 @@ WHERE n.nspname = 'df'
     AND NOT EXISTS (
             SELECT 1
             FROM pg_class c
-            WHERE c.reltype = t.oid
+            WHERE c.reltype = t.oid AND c.relkind <> 'c'
     )
 GROUP BY t.typname, t.typtype, t.typbasetype, t.typtypmod
 ORDER BY t.typname;
+
+SELECT 'composite_field', t.typname, a.attname,
+       pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnum::text
+FROM pg_catalog.pg_type t
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_catalog.pg_class c ON c.oid = t.typrelid AND c.relkind = 'c'
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+WHERE n.nspname = 'df' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY t.typname, a.attnum;
 
 -- Constraints
 --
@@ -1089,9 +1153,83 @@ test_b2_http_api_after_upgrade() {
         END
         \$verify\$;
 
+        DO \$verify\$
+        DECLARE
+            signature text;
+        BEGIN
+            IF pg_catalog.pg_typeof(df.endpoint('missing_server', '/')) <> 'df.http_endpoint'::regtype THEN
+                RAISE EXCEPTION 'Endpoint type was not installed';
+            END IF;
+            FOREACH signature IN ARRAY ARRAY[
+                'df.http(df.http_endpoint,text,text,jsonb,integer)',
+                'df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)'
+            ] LOOP
+                IF pg_catalog.has_function_privilege('durable_b2_http_probe', signature, 'EXECUTE') THEN
+                    RAISE EXCEPTION 'Upgrade implicitly granted endpoint HTTP';
+                END IF;
+            END LOOP;
+        END
+        \$verify\$;
+        SELECT df.grant_usage('durable_b2_http_probe', include_http => true);
+        SET ROLE durable_b2_http_probe;
+        SELECT df.http(df.endpoint('missing_server', '/'), 'GET');
+        SELECT df.http_multipart(df.endpoint('missing_server', '/'), parts => '[{\"name\":\"field\",\"data_b64\":\"aGk=\"}]');
+        RESET ROLE;
+        SELECT df.revoke_usage('durable_b2_http_probe');
+        DO \$verify\$
+        DECLARE
+            signature text;
+        BEGIN
+            FOREACH signature IN ARRAY ARRAY[
+                'df.http(text,text,text,jsonb,integer)',
+                'df.http(df.http_endpoint,text,text,jsonb,integer)',
+                'df.http_multipart(text,text,jsonb,jsonb,integer)',
+                'df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)'
+            ] LOOP
+                IF pg_catalog.has_function_privilege('durable_b2_http_probe', signature, 'EXECUTE') THEN
+                    RAISE EXCEPTION 'HTTP permission remains after revoke_usage: %', signature;
+                END IF;
+            END LOOP;
+        END
+        \$verify\$;
+
         DROP OWNED BY durable_b2_http_probe;
         DROP ROLE durable_b2_http_probe;
     ") || { echo "$output"; return 1; }
+}
+
+test_b2_endpoint_catalog_after_upgrade() {
+    run_sql_capture "CREATE ROLE durable_b2_endpoint_probe LOGIN;
+        SELECT df.grant_usage('durable_b2_endpoint_probe');" >/dev/null || return 1
+    assert_sql_equals "SELECT pg_catalog.has_foreign_data_wrapper_privilege('durable_b2_endpoint_probe', 'pg_durable_fdw', 'USAGE');" "f" || return 1
+    run_sql_capture "GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO durable_b2_endpoint_probe;
+        SET ROLE durable_b2_endpoint_probe;
+        CREATE SERVER durable_b2_endpoint FOREIGN DATA WRAPPER pg_durable_fdw
+            OPTIONS (base_url 'https://api.github.com', auth_scheme 'bearer');
+        CREATE USER MAPPING FOR CURRENT_USER SERVER durable_b2_endpoint OPTIONS (token 'UPGRADE_SENTINEL');
+        ALTER USER MAPPING FOR CURRENT_USER SERVER durable_b2_endpoint OPTIONS (SET token 'ROTATED_SENTINEL');" >/dev/null || return 1
+    assert_sql_equals "SELECT fdwhandler = 0 AND fdwvalidator = pg_catalog.to_regprocedure('df.endpoint_option_validator(text[],oid)')::oid FROM pg_catalog.pg_foreign_data_wrapper WHERE fdwname = 'pg_durable_fdw';" "t" || return 1
+    assert_sql_equals "SELECT umoptions = ARRAY['token=ROTATED_SENTINEL'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (ADD \"secret.key\" 'NAMED_SENTINEL', ADD \"secret.other\" 'UNCHANGED');
+        ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (SET \"secret.key\" 'ROTATED_NAMED_SENTINEL');" >/dev/null || return 1
+    assert_sql_equals "SELECT umoptions @> ARRAY['token=ROTATED_SENTINEL', 'secret.key=ROTATED_NAMED_SENTINEL', 'secret.other=UNCHANGED'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "ALTER USER MAPPING FOR durable_b2_endpoint_probe SERVER durable_b2_endpoint OPTIONS (DROP \"secret.other\");" >/dev/null || return 1
+    assert_sql_equals "SELECT umoptions @> ARRAY['token=ROTATED_SENTINEL', 'secret.key=ROTATED_NAMED_SENTINEL'] AND NOT (umoptions @> ARRAY['secret.other=UNCHANGED']) FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_endpoint';" "t" || return 1
+    run_sql_capture "SET ROLE durable_b2_endpoint_probe;
+        CREATE SERVER durable_b2_secrets FOREIGN DATA WRAPPER pg_durable_fdw OPTIONS (auth_scheme 'none');
+        CREATE USER MAPPING FOR CURRENT_USER SERVER durable_b2_secrets OPTIONS (\"secret.key\" 'NAME_ONLY_SENTINEL');
+        ALTER SERVER durable_b2_endpoint OPTIONS (SET auth_scheme 'none', DROP base_url);" >/dev/null || return 1
+    assert_sql_equals "SELECT count(*) = 2 FROM pg_catalog.pg_foreign_server WHERE srvname IN ('durable_b2_secrets', 'durable_b2_endpoint') AND srvoptions = ARRAY['auth_scheme=none'];" "t" || return 1
+    assert_sql_equals "SELECT umoptions = ARRAY['secret.key=NAME_ONLY_SENTINEL'] FROM pg_catalog.pg_user_mappings WHERE srvname = 'durable_b2_secrets';" "t" || return 1
+    assert_sql_equals "SELECT df.secret('durable_b2_endpoint', 'key') = jsonb_build_object('server', 'durable_b2_endpoint', 'key', 'key');" "t" || return 1
+    assert_sql_equals "SELECT ((df.with_http_options(
+        df.http('https://api.github.com/', 'POST'),
+        jsonb_build_object('secret_bindings', jsonb_build_object('form', jsonb_build_object('password', df.secret('durable_b2_endpoint', 'key'))),
+            'form_fields', jsonb_build_object('ordinary', 'literal'))
+        )::jsonb->>'query')::jsonb->'secret_bindings'->'form'->'password'->>'key') = 'key';" "t" || return 1
+    run_sql_capture "DROP SERVER durable_b2_endpoint, durable_b2_secrets CASCADE;
+        DROP OWNED BY durable_b2_endpoint_probe;
+        DROP ROLE durable_b2_endpoint_probe;" >/dev/null
 }
 
 if [ "$HAS_COMPAT_PREV" = true ]; then
@@ -1102,6 +1240,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: New data and execution after upgrade" test_b2_new_data_after_upgrade
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
     run_test "B2: HTTP OIDs, grants and dependent views survive upgrade" test_b2_http_api_after_upgrade
+    run_test "B2: Endpoint FDW, validator and delegated catalog DDL work after upgrade" test_b2_endpoint_catalog_after_upgrade
 fi
 
 # ============================================================================
