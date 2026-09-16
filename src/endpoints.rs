@@ -466,6 +466,10 @@ impl<'a> EndpointCatalog<'a> {
                 .execute(&mut connection)
                 .await
                 .map_err(|_| "Endpoint catalog snapshot failed")?;
+            sqlx::query("SET LOCAL search_path = pg_catalog")
+                .execute(&mut connection)
+                .await
+                .map_err(|_| "Endpoint catalog search path setup failed")?;
             let identity_matches: bool = sqlx::query_scalar(
                 "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
                     AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
