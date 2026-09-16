@@ -341,6 +341,14 @@ Complex local integration tests with pgrx PostgreSQL:
 
 See [tests/e2e/](tests/e2e/) for details.
 
+### Benchmarks
+
+The reusable pgbench harness measures completed SQL, HTTP, and multipart HTTP
+workflows with configurable concurrency, warmups, and repetitions. See
+[benchmarks/README.md](benchmarks/README.md) for setup, result interpretation,
+and adding workloads. Benchmark correctness tests run in CI; performance
+measurements are opt-in.
+
 ## Documentation
 
 - [User Guide](USER_GUIDE.md) — Complete usage guide with examples

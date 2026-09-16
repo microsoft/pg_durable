@@ -44,6 +44,20 @@ jobs:
             bash "$smoke_check"
           done
 
+  benchmark_harness:
+    name: Benchmark Harness Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Test benchmark harness
+        run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
+
   make_install_smoke:
     name: Source Install Checks
     runs-on: ubuntu-latest
