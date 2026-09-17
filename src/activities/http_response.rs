@@ -34,6 +34,27 @@
 //! rejected by the part decoder.
 
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
+
+use crate::types::{
+    HttpBodyOptions, HttpResponseHeaderPreset, HttpResponseHeaders, HttpResponseMode,
+};
+
+const SAFE_RESPONSE_HEADERS: &[&str] = &[
+    "content-type",
+    "content-length",
+    "etag",
+    "last-modified",
+    "x-ms-request-id",
+    "x-ms-version",
+    "x-request-id",
+    "content-md5",
+    "x-ms-content-crc64",
+    "x-ms-blob-content-md5",
+    "digest",
+    "content-digest",
+    "repr-digest",
+];
 
 /// Maximum number of bytes of a response body to embed in a 5xx error message.
 /// Without a cap, a large binary error response would be base64-encoded into the
@@ -157,41 +178,107 @@ fn text_from_bytes(bytes: &[u8]) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
-/// Read a response body as text or base64, preferring the declared type and
-/// falling back to inspecting the bytes.
-pub async fn read_body(response: reqwest::Response) -> Result<ResponseBody, String> {
+pub struct ResponseContent {
+    inline: Option<ResponseBody>,
+    bytes: u64,
+    sha256: Option<String>,
+}
+
+impl ResponseContent {
+    pub fn encoding(&self) -> &'static str {
+        self.inline.as_ref().map_or("omitted", |body| body.encoding)
+    }
+
+    pub fn error_preview(&self) -> String {
+        self.inline.as_ref().map_or_else(
+            || format!("response body omitted ({} bytes)", self.bytes),
+            ResponseBody::error_preview,
+        )
+    }
+}
+
+pub async fn read_body(
+    mut response: reqwest::Response,
+    options: &HttpBodyOptions,
+) -> Result<ResponseContent, String> {
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // A declared textual type is decoded by reqwest, which honours the `charset`
-    // parameter. Decoding these ourselves would silently narrow them to UTF-8.
-    if is_declared_textual(content_type.as_deref()) {
-        let text = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read response body: {}", e.without_url()))?;
-        return Ok(ResponseBody::text(text));
+        .cloned();
+    let mode = options.response.unwrap_or_default();
+    let limit = options.max_response_bytes.unwrap_or(u64::MAX);
+    let exceeded = || format!("HTTP response body exceeds max_response_bytes ({limit} bytes)");
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        return Err(exceeded());
     }
 
-    let bytes = response
-        .bytes()
+    let mut bytes = Vec::new();
+    let mut total_bytes = 0;
+    let mut sha256 = (mode == HttpResponseMode::Metadata).then(Sha256::new);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("Failed to read response body: {}", e.without_url()))?;
-    Ok(match text_from_bytes(&bytes) {
-        Some(text) => ResponseBody::text(text),
-        None => ResponseBody::base64(&bytes),
+        .map_err(|error| format!("Failed to read response body: {}", error.without_url()))?
+    {
+        if chunk.len() as u64 > limit - total_bytes {
+            return Err(exceeded());
+        }
+        total_bytes += chunk.len() as u64;
+        if mode == HttpResponseMode::Inline {
+            bytes.extend_from_slice(&chunk);
+        }
+        if let Some(hasher) = &mut sha256 {
+            hasher.update(&chunk);
+        }
+    }
+    let inline = if mode != HttpResponseMode::Inline {
+        None
+    } else if is_declared_textual(content_type.as_ref().and_then(|value| value.to_str().ok())) {
+        let mut buffered = http::Response::new(bytes);
+        if let Some(content_type) = content_type {
+            buffered
+                .headers_mut()
+                .insert(reqwest::header::CONTENT_TYPE, content_type);
+        }
+        let text = reqwest::Response::from(buffered)
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read response body: {}", error.without_url()))?;
+        Some(ResponseBody::text(text))
+    } else {
+        Some(match text_from_bytes(&bytes) {
+            Some(text) => ResponseBody::text(text),
+            None => ResponseBody::base64(&bytes),
+        })
+    };
+    Ok(ResponseContent {
+        inline,
+        bytes: total_bytes,
+        sha256: sha256.map(|hasher| format!("{:x}", hasher.finalize())),
     })
 }
 
 /// Collect response headers into a JSON object, skipping any that are not valid
 /// UTF-8.
-pub fn collect_headers(response: &reqwest::Response) -> serde_json::Map<String, serde_json::Value> {
+pub fn collect_headers(
+    response: &reqwest::Response,
+    options: &HttpBodyOptions,
+) -> serde_json::Map<String, serde_json::Value> {
     response
         .headers()
         .iter()
+        .filter(|(name, _)| match &options.response_headers {
+            None | Some(HttpResponseHeaders::Preset(HttpResponseHeaderPreset::All)) => true,
+            Some(HttpResponseHeaders::Preset(HttpResponseHeaderPreset::Safe)) => {
+                SAFE_RESPONSE_HEADERS.contains(&name.as_str())
+            }
+            Some(HttpResponseHeaders::AllowList(names)) => names
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(name.as_str())),
+        })
         .filter_map(|(k, v)| {
             v.to_str()
                 .ok()
@@ -203,24 +290,264 @@ pub fn collect_headers(response: &reqwest::Response) -> serde_json::Map<String, 
 /// Build the JSON envelope returned by both HTTP activities.
 pub fn build_envelope(
     status_code: u16,
-    body: &ResponseBody,
+    content: &ResponseContent,
     headers: serde_json::Map<String, serde_json::Value>,
     is_ok: bool,
     duration_ms: u64,
 ) -> serde_json::Value {
-    serde_json::json!({
+    if let Some(body) = &content.inline {
+        return serde_json::json!({
+            "status": status_code,
+            "body": body.body,
+            "encoding": body.encoding,
+            "headers": headers,
+            "ok": is_ok,
+            "duration_ms": duration_ms
+        });
+    }
+    let mut envelope = serde_json::json!({
         "status": status_code,
-        "body": body.body,
-        "encoding": body.encoding,
-        "headers": headers,
         "ok": is_ok,
-        "duration_ms": duration_ms
-    })
+        "bytes": content.bytes,
+        "headers": headers,
+        "duration_ms": duration_ms,
+    });
+    if let Some(sha256) = &content.sha256 {
+        envelope["sha256"] = serde_json::Value::String(sha256.clone());
+    }
+    envelope
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn raw_response(wire_bytes: &'static [u8]) -> reqwest::Response {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut connection = BufReader::new(connection);
+            loop {
+                let mut line = String::new();
+                if connection.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            connection.get_mut().write_all(wire_bytes).unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/?sig=PRIVATE"))
+            .send()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_accepts_exact_limit_and_empty_bodies() {
+        let response = raw_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n",
+        )
+        .await;
+        let options = HttpBodyOptions {
+            max_response_bytes: Some(4),
+            ..Default::default()
+        };
+        let content = read_body(response, &options).await.unwrap();
+        assert_eq!(content.inline.unwrap().body, "abcd");
+        assert_eq!(content.bytes, 4);
+
+        let response = raw_response(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+        let options = HttpBodyOptions {
+            max_response_bytes: Some(0),
+            ..Default::default()
+        };
+        assert!(read_body(response, &options)
+            .await
+            .unwrap()
+            .inline
+            .unwrap()
+            .body
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_rejects_oversized_bodies_without_finishing_them() {
+        for wire_bytes in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabcde\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcde".as_slice(),
+        ] {
+            for mode in [
+                HttpResponseMode::Inline,
+                HttpResponseMode::Metadata,
+                HttpResponseMode::Discard,
+            ] {
+                let response = raw_response(wire_bytes).await;
+                let options = HttpBodyOptions {
+                    max_response_bytes: Some(4),
+                    response: Some(mode),
+                    ..Default::default()
+                };
+                let error = read_body(response, &options).await.err().unwrap();
+                assert_eq!(
+                    error,
+                    "HTTP response body exceeds max_response_bytes (4 bytes)"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_and_discard_omit_bodies_from_results_and_errors() {
+        for mode in [HttpResponseMode::Metadata, HttpResponseMode::Discard] {
+            let response =
+                raw_response(b"HTTP/1.1 500 Error\r\nContent-Length: 3\r\n\r\nabc").await;
+            let options = HttpBodyOptions {
+                response: Some(mode),
+                ..Default::default()
+            };
+            let content = read_body(response, &options).await.unwrap();
+            assert!(content.inline.is_none());
+            assert_eq!(content.error_preview(), "response body omitted (3 bytes)");
+            let envelope = build_envelope(500, &content, serde_json::Map::new(), false, 1);
+            assert_eq!(envelope["bytes"], 3);
+            assert!(envelope.get("body").is_none());
+            assert!(envelope.get("encoding").is_none());
+            if mode == HttpResponseMode::Metadata {
+                assert_eq!(
+                    envelope["sha256"],
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                );
+            } else {
+                assert!(envelope.get("sha256").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_limit_counts_decompressed_bytes_in_every_mode() {
+        let wire_bytes = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: 24\r\n\r\n\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x33\x30\x18\x58\x00\x00\xe6\x98\x02\x4d\x80\x00\x00\x00";
+        for mode in [
+            HttpResponseMode::Inline,
+            HttpResponseMode::Metadata,
+            HttpResponseMode::Discard,
+        ] {
+            let mut options = HttpBodyOptions {
+                max_response_bytes: Some(127),
+                response: Some(mode),
+                ..Default::default()
+            };
+            let error = read_body(raw_response(wire_bytes).await, &options)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.contains("max_response_bytes (127 bytes)"), "{error}");
+            options.max_response_bytes = Some(128);
+            let content = read_body(raw_response(wire_bytes).await, &options)
+                .await
+                .unwrap();
+            assert_eq!(content.bytes, 128);
+            if mode == HttpResponseMode::Inline {
+                assert_eq!(content.inline.unwrap().body, "0".repeat(128));
+            } else {
+                assert!(content.inline.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_limit_counts_binary_bytes_before_base64_encoding() {
+        let response = reqwest::Response::from(http::Response::new(vec![0u8, 1, 255]));
+        let options = HttpBodyOptions {
+            max_response_bytes: Some(3),
+            ..Default::default()
+        };
+        let content = read_body(response, &options).await.unwrap();
+        assert_eq!(content.bytes, 3);
+        let body = content.inline.unwrap();
+        assert_eq!(body.encoding, "base64");
+        assert_eq!(body.body, "AAH/");
+    }
+
+    #[tokio::test]
+    async fn bounded_text_decoding_matches_reqwest() {
+        for (content_type, bytes) in [
+            ("text/plain; charset=iso-8859-1", b"caf\xe9".as_slice()),
+            ("text/plain; charset=utf-16le", b"\xff\xfeh\0i\0".as_slice()),
+            ("application/json", b"\xef\xbb\xbf{}".as_slice()),
+            ("text/plain", b"\xf0\x9f\x98\x80".as_slice()),
+        ] {
+            let response = || {
+                reqwest::Response::from(
+                    http::Response::builder()
+                        .header(reqwest::header::CONTENT_TYPE, content_type)
+                        .body(bytes.to_vec())
+                        .unwrap(),
+                )
+            };
+            let expected = response().text().await.unwrap();
+            let options = HttpBodyOptions {
+                max_response_bytes: Some(bytes.len() as u64),
+                ..Default::default()
+            };
+            let content = read_body(response(), &options).await.unwrap();
+            assert_eq!(content.inline.unwrap().body, expected, "{content_type}");
+            assert_eq!(content.bytes, bytes.len() as u64);
+        }
+    }
+
+    #[test]
+    fn response_header_filtering_is_explicit_and_case_insensitive() {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "text/plain")
+                .header("x-request-id", "request")
+                .header("set-cookie", "private")
+                .header("x-custom", "custom")
+                .body(Vec::<u8>::new())
+                .unwrap(),
+        );
+        for (selection, expected) in [
+            (
+                serde_json::Value::Null,
+                vec!["content-type", "set-cookie", "x-custom", "x-request-id"],
+            ),
+            (
+                serde_json::json!("all"),
+                vec!["content-type", "set-cookie", "x-custom", "x-request-id"],
+            ),
+            (
+                serde_json::json!("safe"),
+                vec!["content-type", "x-request-id"],
+            ),
+            (serde_json::json!(["X-Custom"]), vec!["x-custom"]),
+            (serde_json::json!([]), vec![]),
+        ] {
+            let options: HttpBodyOptions = serde_json::from_value(serde_json::json!({
+                "response_headers": selection
+            }))
+            .unwrap();
+            options.validate().unwrap();
+            let headers = collect_headers(&response, &options);
+            let mut names: Vec<_> = headers.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            assert_eq!(names, expected);
+        }
+    }
 
     #[tokio::test]
     async fn response_read_errors_omit_credentials() {
@@ -259,7 +586,10 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            let error = read_body(response).await.err().unwrap();
+            let error = read_body(response, &HttpBodyOptions::default())
+                .await
+                .err()
+                .unwrap();
             server.join().unwrap();
             assert!(
                 error.starts_with("Failed to read response body:"),
@@ -402,7 +732,12 @@ mod tests {
     #[test]
     fn envelope_carries_encoding_alongside_existing_fields() {
         let body = ResponseBody::base64(b"abc");
-        let envelope = build_envelope(200, &body, serde_json::Map::new(), true, 12);
+        let content = ResponseContent {
+            inline: Some(body),
+            bytes: 3,
+            sha256: None,
+        };
+        let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 12);
         assert_eq!(envelope["status"], 200);
         assert_eq!(envelope["encoding"], "base64");
         assert_eq!(envelope["ok"], true);

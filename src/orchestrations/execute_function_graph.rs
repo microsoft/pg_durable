@@ -1962,6 +1962,8 @@ async fn execute_http_node(
         config["headers"] = serde_json::Value::Object(new_headers);
     }
 
+    crate::types::check_http_request_size(&config, false).map_err(NodeError::Application)?;
+
     // Inject audit context from the function node
     crate::endpoints::set_execution_context(
         &mut config,
@@ -2070,6 +2072,8 @@ async fn execute_http_multipart_node(
             }
         }
     }
+
+    crate::types::check_http_request_size(&config, false).map_err(NodeError::Application)?;
 
     // Inject audit context from the function node.
     crate::endpoints::set_execution_context(
