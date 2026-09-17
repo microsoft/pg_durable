@@ -719,8 +719,8 @@ df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
     |=> 'response'
 ```
 
-Supported keys are `secret_bindings` and `form_fields`, described under
-[Explicit Secret Bindings](#explicit-secret-bindings). SQL `NULL` and `{}` return
+Supported keys configure [body limits and response retention](#body-limits-and-response-retention)
+or [explicit secret bindings](#explicit-secret-bindings). SQL `NULL` and `{}` return
 the input text byte-for-byte. Unknown keys and non-object JSON values, including
 JSON `null`, are rejected. Reapplying a supplied key replaces that entire option;
 omitted keys are retained.
@@ -731,7 +731,7 @@ combining nodes. It does not execute a request or change HTTP permissions.
 
 ### Response Format
 
-HTTP calls return a JSON object with full response details:
+By default, HTTP calls return an `inline` JSON response:
 
 ```json
 {
@@ -752,6 +752,72 @@ HTTP calls return a JSON object with full response details:
 | `headers` | Response headers object |
 | `ok` | `true` for 2xx status codes |
 | `duration_ms` | Request duration in milliseconds |
+
+### Body Limits and Response Retention
+
+Use the same options for ordinary and multipart HTTP requests, including calls
+to endpoints:
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://api.github.com/repos/microsoft/pg_durable', 'GET'),
+        '{"max_request_bytes":0,"max_response_bytes":8388608,
+          "response":"metadata","response_headers":"safe"}'::jsonb
+    )
+);
+```
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `max_request_bytes` | Non-negative integer; maximum request body size | No limit |
+| `max_response_bytes` | Non-negative integer; maximum response body size | No limit |
+| `response` | `inline`, `metadata`, or `discard` | `inline` |
+| `response_headers` | `all`, `safe`, or an array of header names | `all` |
+
+These four options also accept JSON `null` to restore their defaults. A zero-byte
+cap permits only an empty body. Limits are opt-in: existing calls keep their
+response shape and headers, and a response never changes mode automatically
+because of its size.
+
+The request limit applies to the completed body after substitutions and secret
+resolution. It includes URL-encoding of form fields and multipart boundaries and
+part headers. Known oversized payloads are rejected before graph submission;
+expanded payloads are checked before scheduling the HTTP activity, and the
+completed request is checked again before sending. For capped multipart requests,
+the client generates `Content-Length`; a supplied value cannot override it.
+
+The response limit is enforced while reading, even without `Content-Length` or
+with chunked transfer encoding. It counts bytes after any automatic HTTP
+decompression, but before text decoding or base64 encoding. Oversized bodies fail
+the HTTP node rather than returning truncated content. This applies to every
+response mode and to error responses as well.
+
+| Mode | Result Fields |
+|------|---------------|
+| `inline` | `status`, `body`, `encoding`, `headers`, `ok`, `duration_ms` |
+| `metadata` | `status`, `ok`, `bytes`, `sha256`, `headers`, `duration_ms` |
+| `discard` | `status`, `ok`, `bytes`, `headers`, `duration_ms` |
+
+`bytes` and the lowercase hexadecimal SHA-256 digest describe the response bytes
+before text or base64 encoding. `metadata` and `discard` do not retain the body
+in durable history, node results, or 5xx error previews. They do not store a copy
+elsewhere: `$response.body` and `$response.encoding` are absent. Use `inline` when
+later workflow steps need the body. HTTP 4xx responses still return an envelope;
+5xx responses still fail the node.
+
+Header selection is independent of the response mode. An array is a
+case-insensitive allow-list; `[]` retains no headers. The `safe` preset retains
+`content-type`, `content-length`, `etag`, `last-modified`, `x-ms-request-id`,
+`x-ms-version`, `x-request-id`, `content-md5`, `x-ms-content-crc64`,
+`x-ms-blob-content-md5`, `digest`, `content-digest`, and `repr-digest`.
+`all` retains the existing behavior. Header values are not redacted, so only
+retain headers appropriate for your data policy.
+
+These are body-transfer limits, not total history-size or memory quotas.
+Request templates, captured variables, and earlier SQL results can already be
+in history; base64 and JSON encoding can also make stored values larger than
+the original bytes. Omitting a response body does not remove those other copies.
 
 ### Reading Response Fields
 

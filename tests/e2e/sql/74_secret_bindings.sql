@@ -69,6 +69,21 @@ BEGIN
     END LOOP;
 END $$;
 
+INSERT INTO _binding_cases
+SELECT df.start(df.with_http_options(df.http('https://httpbingo.org/status/204', 'POST'),
+           jsonb_build_object(
+               'response', 'metadata', 'response_headers', '[]'::jsonb,
+               'max_request_bytes', byte_limit, 'max_response_bytes', 0,
+               'secret_bindings', jsonb_build_object('form',
+                   jsonb_build_object('password', df.secret('sb_service', secret_key)))
+           )), 'binding-capped-form-' || secret_key || '-' || byte_limit),
+       expected_status, error_pattern, false
+FROM (VALUES
+    ('probe', 25, 'completed', NULL),
+    ('probe', 24, 'failed', '%max_request_bytes%'),
+    ('private', 4, 'failed', '%max_request_bytes%')
+) AS cases(secret_key, byte_limit, expected_status, error_pattern);
+
 INSERT INTO _binding_cases VALUES
     (df.start(df.http(df.endpoint('sb_service', '/status/204'), 'GET'), 'binding-url-less-endpoint'), 'failed', '%has no base_url%', false),
     (df.start(df.http_multipart(df.endpoint('sb_service', '/status/204'), parts => '[{"name":"file","data_b64":"aGVsbG8="}]'),

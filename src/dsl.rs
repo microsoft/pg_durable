@@ -495,6 +495,10 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
         let allowed = [
             // Keep alphabetical to simplify merge conflicts
             "form_fields",
+            "max_request_bytes",
+            "max_response_bytes",
+            "response",
+            "response_headers",
             "secret_bindings",
         ];
         debug_assert!(allowed.is_sorted());
@@ -534,8 +538,30 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
             }
         }
         if !map.is_empty() {
-            let config: serde_json::Value = serde_json::from_str(node.query.as_deref().unwrap())
-                .expect("Validated HTTP configuration");
+            let mut config: serde_json::Value =
+                serde_json::from_str(node.query.as_deref().unwrap())
+                    .expect("Validated HTTP configuration");
+            for (key, value) in map {
+                if !matches!(key.as_str(), "secret_bindings" | "form_fields") {
+                    config[key] = value.clone();
+                }
+            }
+            let body_options: crate::types::HttpBodyOptions =
+                serde::Deserialize::deserialize(&config).unwrap_or_else(|error| {
+                    pgrx::error!("df.with_http_options(): invalid body options: {}", error)
+                });
+            body_options
+                .validate()
+                .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
+            let mut configured: serde_json::Value =
+                serde_json::from_str(fut).expect("Validated HTTP node");
+            configured["query"] = serde_json::Value::String(config.to_string());
+            let configured = configured.to_string();
+            if !map.contains_key("secret_bindings") && !map.contains_key("form_fields") {
+                crate::types::check_http_request_size(&config, true)
+                    .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
+                return configured;
+            }
             let bindings = map
                 .get("secret_bindings")
                 .or_else(|| config.get("secret_bindings"))
@@ -545,7 +571,7 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
                 .get("form_fields")
                 .or_else(|| config.get("form_fields"))
                 .cloned();
-            return crate::secrets::configure_bindings(fut, bindings, form)
+            return crate::secrets::configure_bindings(&configured, bindings, form)
                 .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
         }
     }
@@ -1333,6 +1359,19 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         Ok(flattened) => flattened,
         Err(e) => pgrx::error!("Invalid durable function graph: {}", e),
     };
+
+    for node in &nodes {
+        if matches!(node.node_type.as_str(), "HTTP" | "HTTP_MULTIPART") {
+            if let Some(config) = node
+                .query
+                .as_deref()
+                .and_then(|query| serde_json::from_str::<serde_json::Value>(query).ok())
+            {
+                crate::types::check_http_request_size(&config, true)
+                    .unwrap_or_else(|error| pgrx::error!("Invalid HTTP request: {}", error));
+            }
+        }
+    }
 
     // Reserve the instance ID before inserting nodes so node rows can reference
     // it. Collisions on the 8-hex ID space are rare, but we reserve via

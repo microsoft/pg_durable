@@ -369,6 +369,7 @@ pub fn configure_bindings(
     if let Some(fields) = options.form_fields {
         config["form_fields"] = serde_json::to_value(fields).map_err(|_| "Invalid form fields")?;
     }
+    crate::types::check_http_request_size(&config, true)?;
     node["query"] = Value::String(config.to_string());
     Ok(node.to_string())
 }
@@ -590,7 +591,11 @@ mod tests {
         );
         let options = serde_json::json!({
             "secret_bindings":{"form":{"password":secret("missing", "key").0}},
-            "form_fields":{"payload":"${secret:missing.key} $result {variable}"}
+            "form_fields":{"payload":"${secret:missing.key} $result {variable}"},
+            "max_request_bytes": 256,
+            "max_response_bytes": 4096,
+            "response": "metadata",
+            "response_headers": []
         });
         let configured = crate::dsl::with_http_options(&request, Some(pgrx::JsonB(options)));
         let node = crate::types::Durofut::from_json(&configured);
@@ -620,5 +625,22 @@ mod tests {
             "key"
         );
         assert_eq!(replaced_config["form_fields"]["payload"], "replacement");
+        assert_eq!(replaced_config["max_request_bytes"], 256);
+        assert_eq!(replaced_config["max_response_bytes"], 4096);
+        assert_eq!(replaced_config["response"], "metadata");
+        assert_eq!(replaced_config["response_headers"], serde_json::json!([]));
+        let replaced = crate::dsl::with_http_options(
+            &replaced,
+            Some(pgrx::JsonB(serde_json::json!({"response":"discard"}))),
+        );
+        let replaced_node = crate::types::Durofut::from_json(&replaced);
+        let replaced_config: Value =
+            serde_json::from_str(replaced_node.query.as_ref().unwrap()).unwrap();
+        assert_eq!(replaced_config["response"], "discard");
+        assert_eq!(replaced_config["form_fields"]["payload"], "replacement");
+        assert_eq!(
+            replaced_config["secret_bindings"]["form"]["password"]["key"],
+            "key"
+        );
     }
 }

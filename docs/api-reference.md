@@ -443,12 +443,31 @@ a workflow, not an HTTP response. Neither existing HTTP function changes signatu
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
 | `fut` | TEXT | ❌ Literal | A single `HTTP` or `HTTP_MULTIPART` node, optionally named with `\|=>` |
-| `options` | JSONB | ❌ Literal | Object containing `secret_bindings` and/or `form_fields`; SQL `NULL` and `{}` are no-ops |
+| `options` | JSONB | ❌ Literal | HTTP body policies and/or secret bindings; SQL `NULL` and `{}` are no-ops |
 
 ```sql
 df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
   |=> 'response'
 ```
+
+| Option | Accepted Values | Default |
+|--------|-----------------|---------|
+| `max_request_bytes` | Non-negative integer, including multipart framing and encoded form data | Unlimited |
+| `max_response_bytes` | Non-negative integer, enforced during reads after automatic decompression and before text/base64 encoding | Unlimited |
+| `response` | `inline`, `metadata`, `discard` | `inline` |
+| `response_headers` | `all`, `safe`, or an array of header names; `[]` keeps none | `all` |
+| `secret_bindings` | Object containing named `headers`, `query`, and `form` references | None |
+| `form_fields` | Object of literal form strings | None |
+
+The four body-policy options accept JSON `null` to restore the default. A byte
+cap of zero accepts only empty bodies. Oversized bodies are rejected rather than
+truncated; response mode never switches automatically. `metadata` returns
+`{status, ok, bytes, sha256, headers, duration_ms}`; `discard` omits `sha256`.
+Neither includes `body` or `encoding`, stores the body elsewhere, or includes
+body previews in 5xx errors. `inline` preserves the existing response envelope.
+Header selection is independent of the mode and case-insensitive. See
+[Body Limits and Response Retention](../USER_GUIDE.md#body-limits-and-response-retention)
+for byte-counting semantics, the `safe` header list, and persistence limitations.
 
 `secret_bindings` contains named `headers`, `query` and `form` reference maps.
 `form_fields` contains literal form strings. A supplied option replaces the entire
