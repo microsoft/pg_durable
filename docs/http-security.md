@@ -584,6 +584,27 @@ request templates, captured variables, or earlier results from history, and
 do not automatically redact secrets from inline responses. See
 [Body Limits and Response Retention](../USER_GUIDE.md#body-limits-and-response-retention).
 
+### 7.3 Table sinks
+
+`response: "sink"` with `into` stores raw response bytes in a caller-provided
+table, keeping them out of durable activity results and 5xx previews. Writes
+authenticate as the submitting role and obey table privileges and RLS. The
+target database comes from the workflow's captured execution context; a forged
+database or submitting-role field in an HTTP node cannot redirect sink writes.
+
+Only permanent, logged storage is accepted. The row's key and body digest are
+verified before commit, so an insert suppressed or altered by a trigger fails
+instead of producing an invalid reference. Database failures expose the operation
+and SQLSTATE, not messages or details that might include response bytes.
+
+This is a data-placement control, not encryption or automatic response-secret
+handling. Table access, backups, replication, database logging, and sink triggers
+remain subject to the deployment's data policy. PostgreSQL logging or trigger
+messages can expose values just as with ordinary table writes. Response headers
+are controlled separately. The caller owns sink retention, including rows left
+by attempts whose completion was never recorded. See
+[Storing Responses in a Table](../USER_GUIDE.md#storing-responses-in-a-table).
+
 ---
 
 ## 8. Error Messages
@@ -601,6 +622,8 @@ do not automatically redact secrets from inline responses. See
 | DSL-time (no feature) | `df.http() is disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable outbound HTTP requests.` |
 | Request body too large | `HTTP request body exceeds max_request_bytes ({limit} bytes)` |
 | Response body too large | `HTTP response body exceeds max_response_bytes ({limit} bytes)` |
+| Sink database failure | `HTTP response sink {operation} failed (SQLSTATE {code})` |
+| Sink storage timeout | `HTTP response sink timed out before completion` |
 
 ---
 

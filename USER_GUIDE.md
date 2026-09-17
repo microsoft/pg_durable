@@ -772,10 +772,12 @@ SELECT df.start(
 |--------|--------|---------|
 | `max_request_bytes` | Non-negative integer; maximum request body size | No limit |
 | `max_response_bytes` | Non-negative integer; maximum response body size | No limit |
-| `response` | `inline`, `metadata`, or `discard` | `inline` |
+| `response` | `inline`, `metadata`, `discard`, or `sink` | `inline` |
 | `response_headers` | `all`, `safe`, or an array of header names | `all` |
+| `into` | Schema-qualified table name; required only for `sink` | None |
 
-These four options also accept JSON `null` to restore their defaults. A zero-byte
+These options also accept JSON `null` to restore their defaults. Switching away
+from `sink` requires clearing `into` in the same call. A zero-byte
 cap permits only an empty body. Limits are opt-in: existing calls keep their
 response shape and headers, and a response never changes mode automatically
 because of its size.
@@ -798,12 +800,14 @@ response mode and to error responses as well.
 | `inline` | `status`, `body`, `encoding`, `headers`, `ok`, `duration_ms` |
 | `metadata` | `status`, `ok`, `bytes`, `sha256`, `headers`, `duration_ms` |
 | `discard` | `status`, `ok`, `bytes`, `headers`, `duration_ms` |
+| `sink` | `status`, `ok`, `bytes`, `sha256`, `headers`, `duration_ms`, `sink`, `sink_key`, `sink_database` |
 
 `bytes` and the lowercase hexadecimal SHA-256 digest describe the response bytes
 before text or base64 encoding. `metadata` and `discard` do not retain the body
 in durable history, node results, or 5xx error previews. They do not store a copy
-elsewhere: `$response.body` and `$response.encoding` are absent. Use `inline` when
-later workflow steps need the body. HTTP 4xx responses still return an envelope;
+elsewhere: `$response.body` and `$response.encoding` are absent. Use `inline` for
+body access through a named result, or `sink` for explicit SQL access to a stored
+body. HTTP 4xx responses still return an envelope;
 5xx responses still fail the node.
 
 Header selection is independent of the response mode. An array is a
@@ -818,6 +822,85 @@ These are body-transfer limits, not total history-size or memory quotas.
 Request templates, captured variables, and earlier SQL results can already be
 in history; base64 and JSON encoding can also make stored values larger than
 the original bytes. Omitting a response body does not remove those other copies.
+
+### Storing Responses in a Table
+
+`response: "sink"` stores the response as raw `bytea` in a table you provide,
+and returns metadata plus a row reference. It supports ordinary and multipart
+requests. The body is buffered, subject to `max_response_bytes`; this is not a
+streaming or resumable transfer. Bytes are stored after automatic HTTP
+decompression, without text decoding or base64 encoding.
+
+Create the destination in the workflow's target database, with these columns:
+
+```sql
+CREATE TABLE public.http_payloads (
+    sink_key UUID PRIMARY KEY,
+    body BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+`sink_key` and `body` are required. Additional columns must have defaults or allow
+NULL. The table and any destination partition must be permanent, logged tables;
+temporary tables, unlogged tables, views, and foreign tables are not sinks.
+The submitting role needs schema `USAGE` and table `INSERT` and `SELECT` privileges.
+RLS must permit both inserting and reading the new row. Triggers and rules must
+not suppress the insert or change its key or body.
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://api.github.com/repos/microsoft/pg_durable', 'GET'),
+        '{"response":"sink","into":"public.http_payloads",
+          "max_response_bytes":8388608,"response_headers":["content-type","etag"]}'::jsonb
+    ) |=> 'download'
+    ~> 'SELECT sink_key, octet_length(body) AS bytes
+        FROM public.http_payloads WHERE sink_key = $download.sink_key::uuid'
+);
+```
+
+`into` is a literal, schema-qualified PostgreSQL table name. Quoted identifiers
+are supported; variable substitution is not performed in this option. The
+destination is resolved when the activity stores its response. It uses the
+database passed to `df.start`, or the configured workflow database when omitted,
+not the endpoint credential catalog's database.
+
+| Reference Field | Meaning |
+|-----------------|---------|
+| `sink` | Canonical, schema-qualified table name |
+| `sink_key` | UUID string identifying this attempt's row |
+| `sink_database` | Database containing the row |
+
+The activity commits the row before returning its reference. Writes use the
+submitting role, share `pg_durable.max_user_connections`, and enable synchronous
+commit for the storage transaction. The storage phase has its own
+`timeout_seconds` budget, including connection admission; `duration_ms` includes
+both the HTTP request and storage. A permission, constraint, verification, or
+storage-timeout failure fails the node. HTTP 4xx bodies are stored; 5xx responses
+still fail without storing a body or including a body preview in the error.
+
+Each attempt inserts a fresh key rather than replacing another attempt's row.
+This prevents overlapping attempts with different responses from invalidating
+a recorded reference. A crash or cancellation after commit but before completion
+is recorded can leave an unreferenced row. Sink rows are not covered by
+pg_durable's history cleanup: manage their retention yourself, retaining rows
+while workflows still need them. Deleting or changing them can invalidate saved
+references.
+
+The returned envelope has no `body` or `encoding` field. Later SQL can use the
+stored bytes directly, for example in `INSERT ... SELECT body`, but there is no
+automatic `$download.body` lookup. Returning the bytes as text or base64 from a
+later SQL node puts that value back into durable history. Header retention still
+follows `response_headers` independently of body storage.
+
+#### Upgrade & Migration
+
+Table sinks use the existing `df.with_http_options` helper, available with the
+0.2.9 extension schema. There are no additional extension objects or signature
+changes. Create and grant access to your destination tables before submitting
+sink workflows. Existing workflows and recorded activity inputs remain unchanged;
+previously stored bodies are not moved out of history automatically.
 
 ### Reading Response Fields
 

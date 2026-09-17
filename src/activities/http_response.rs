@@ -35,6 +35,9 @@
 
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
+use sqlx::Connection;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
 use crate::types::{
     HttpBodyOptions, HttpResponseHeaderPreset, HttpResponseHeaders, HttpResponseMode,
@@ -182,6 +185,145 @@ pub struct ResponseContent {
     inline: Option<ResponseBody>,
     bytes: u64,
     sha256: Option<String>,
+    sink_body: Option<Vec<u8>>,
+    sink: Option<StoredResponse>,
+}
+
+struct StoredResponse {
+    table: String,
+    key: uuid::Uuid,
+    database: String,
+}
+
+fn sink_error(operation: &str, error: sqlx::Error) -> String {
+    match error.as_database_error().and_then(|error| error.code()) {
+        Some(code) => format!("HTTP response sink {operation} failed (SQLSTATE {code})"),
+        None => format!("HTTP response sink {operation} failed (connection or protocol error)"),
+    }
+}
+
+async fn store_response(
+    table: &str,
+    body: &[u8],
+    sha256: &str,
+    submitted_by: &str,
+    database: Option<&str>,
+    semaphore: &Semaphore,
+    timeout: Duration,
+) -> Result<StoredResponse, String> {
+    let _permit = crate::types::acquire_execution_permit(
+        semaphore,
+        crate::types::get_execution_acquire_timeout(),
+        crate::types::get_max_user_connections(),
+    )
+    .await?;
+    let mut connection = crate::types::connect_as_user(submitted_by, database).await?;
+    let mut transaction = connection
+        .begin()
+        .await
+        .map_err(|error| sink_error("transaction", error))?;
+    sqlx::query(
+        "SELECT pg_catalog.set_config('search_path', 'pg_catalog', true),
+                pg_catalog.set_config('synchronous_commit', 'on', true),
+                pg_catalog.set_config('statement_timeout', $1, true)",
+    )
+    .bind(format!("{}ms", timeout.as_millis().min(i32::MAX as u128)))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("transaction setup", error))?;
+    let identity_matches: bool = sqlx::query_scalar(
+        "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
+            AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
+    )
+    .bind(submitted_by)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("identity check", error))?;
+    if !identity_matches {
+        return Err("HTTP response sink connection does not match the submitting role".into());
+    }
+    let qualified: Option<String> = sqlx::query_scalar(
+        "SELECT CASE WHEN pg_catalog.cardinality(parts) OPERATOR(pg_catalog.=) 2
+                THEN pg_catalog.format('%I.%I', parts[1], parts[2]) END
+         FROM (SELECT pg_catalog.parse_ident($1, true) AS parts) AS parsed",
+    )
+    .bind(table)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("table name validation", error))?;
+    let qualified =
+        qualified.ok_or("HTTP response sink 'into' must be a schema-qualified table")?;
+    sqlx::query(&format!("LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE"))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("table lock", error))?;
+    let destination: Option<(String, String)> = sqlx::query_as(
+        "SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname),
+                pg_catalog.current_database()::pg_catalog.text
+         FROM pg_catalog.pg_class AS relation
+         JOIN pg_catalog.pg_namespace AS namespace
+           ON namespace.oid OPERATOR(pg_catalog.=) relation.relnamespace
+         WHERE relation.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)
+           AND relation.relkind IN ('r', 'p') AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'",
+    )
+    .bind(&qualified)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("table validation", error))?;
+    let (table, database) = destination.ok_or("HTTP response sink requires a permanent table")?;
+    let key = uuid::Uuid::new_v4();
+    let inserted = sqlx::query(&format!(
+        "INSERT INTO {table} (sink_key, body) VALUES ($1::pg_catalog.uuid, $2::pg_catalog.bytea)"
+    ))
+    .bind(key)
+    .bind(body)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("insert", error))?;
+    if inserted.rows_affected() != 1 {
+        return Err("HTTP response sink did not insert exactly one row".into());
+    }
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("constraint check", error))?;
+    let matches: bool = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
+            AND COALESCE(pg_catalog.bool_and(
+                pg_catalog.encode(pg_catalog.sha256(stored.body), 'hex')
+                    OPERATOR(pg_catalog.=) $2::pg_catalog.text
+                AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'), false)
+         FROM {table} AS stored
+         JOIN pg_catalog.pg_class AS relation ON relation.oid OPERATOR(pg_catalog.=) stored.tableoid
+         WHERE stored.sink_key OPERATOR(pg_catalog.=) $1::pg_catalog.uuid"
+    ))
+    .bind(key)
+    .bind(sha256)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("stored body verification", error))?;
+    if !matches {
+        return Err(
+            "HTTP response sink row is missing, not durable, or its key or body was changed".into(),
+        );
+    }
+    sqlx::query("SET LOCAL synchronous_commit = on")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("commit setup", error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| sink_error("commit", error))?;
+    connection
+        .close()
+        .await
+        .map_err(|error| sink_error("connection close", error))?;
+    Ok(StoredResponse {
+        table,
+        key,
+        database,
+    })
 }
 
 impl ResponseContent {
@@ -194,6 +336,44 @@ impl ResponseContent {
             || format!("response body omitted ({} bytes)", self.bytes),
             ResponseBody::error_preview,
         )
+    }
+
+    pub async fn store_in_sink(
+        &mut self,
+        options: &HttpBodyOptions,
+        submitted_by: &str,
+        database: Option<&str>,
+        semaphore: &Semaphore,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let Some(body) = self.sink_body.as_deref() else {
+            return Ok(());
+        };
+        let table = options
+            .into
+            .as_deref()
+            .ok_or("HTTP response sink is missing 'into'")?;
+        let sha256 = self
+            .sha256
+            .as_deref()
+            .ok_or("HTTP response sink is missing its digest")?;
+        let stored = tokio::time::timeout(
+            timeout,
+            store_response(
+                table,
+                body,
+                sha256,
+                submitted_by,
+                database,
+                semaphore,
+                timeout,
+            ),
+        )
+        .await
+        .map_err(|_| "HTTP response sink timed out before completion")??;
+        self.sink = Some(stored);
+        self.sink_body = None;
+        Ok(())
     }
 }
 
@@ -217,7 +397,8 @@ pub async fn read_body(
 
     let mut bytes = Vec::new();
     let mut total_bytes = 0;
-    let mut sha256 = (mode == HttpResponseMode::Metadata).then(Sha256::new);
+    let mut sha256 =
+        matches!(mode, HttpResponseMode::Metadata | HttpResponseMode::Sink).then(Sha256::new);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -227,13 +408,14 @@ pub async fn read_body(
             return Err(exceeded());
         }
         total_bytes += chunk.len() as u64;
-        if mode == HttpResponseMode::Inline {
+        if matches!(mode, HttpResponseMode::Inline | HttpResponseMode::Sink) {
             bytes.extend_from_slice(&chunk);
         }
         if let Some(hasher) = &mut sha256 {
             hasher.update(&chunk);
         }
     }
+    let sink_body = (mode == HttpResponseMode::Sink).then(|| std::mem::take(&mut bytes));
     let inline = if mode != HttpResponseMode::Inline {
         None
     } else if is_declared_textual(content_type.as_ref().and_then(|value| value.to_str().ok())) {
@@ -258,6 +440,8 @@ pub async fn read_body(
         inline,
         bytes: total_bytes,
         sha256: sha256.map(|hasher| format!("{:x}", hasher.finalize())),
+        sink_body,
+        sink: None,
     })
 }
 
@@ -315,12 +499,44 @@ pub fn build_envelope(
     if let Some(sha256) = &content.sha256 {
         envelope["sha256"] = serde_json::Value::String(sha256.clone());
     }
+    if let Some(sink) = &content.sink {
+        envelope["sink"] = serde_json::Value::String(sink.table.clone());
+        envelope["sink_key"] = serde_json::Value::String(sink.key.to_string());
+        envelope["sink_database"] = serde_json::Value::String(sink.database.clone());
+    }
     envelope
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sink_buffers_raw_bytes_without_decoding_or_error_previews() {
+        let bytes = b"\0\xffHTTP_SINK_PRIVATE";
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "text/plain; charset=utf-16")
+                .body(bytes.to_vec())
+                .unwrap(),
+        );
+        let options = HttpBodyOptions {
+            response: Some(HttpResponseMode::Sink),
+            into: Some("public.payloads".into()),
+            max_response_bytes: Some(bytes.len() as u64),
+            ..Default::default()
+        };
+        let content = read_body(response, &options).await.unwrap();
+        assert!(content.inline.is_none());
+        assert_eq!(content.sink_body.as_deref(), Some(bytes.as_slice()));
+        assert_eq!(content.bytes, bytes.len() as u64);
+        assert_eq!(content.sha256, Some(format!("{:x}", Sha256::digest(bytes))));
+        assert!(!content.error_preview().contains("HTTP_SINK_PRIVATE"));
+        let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 1);
+        assert!(envelope.get("body").is_none());
+        assert!(envelope.get("encoding").is_none());
+        assert!(envelope.get("sink_key").is_none());
+    }
 
     async fn raw_response(wire_bytes: &'static [u8]) -> reqwest::Response {
         use std::io::{BufRead, BufReader, Write};
@@ -395,6 +611,7 @@ mod tests {
                 HttpResponseMode::Inline,
                 HttpResponseMode::Metadata,
                 HttpResponseMode::Discard,
+                HttpResponseMode::Sink,
             ] {
                 let response = raw_response(wire_bytes).await;
                 let options = HttpBodyOptions {
@@ -445,6 +662,7 @@ mod tests {
             HttpResponseMode::Inline,
             HttpResponseMode::Metadata,
             HttpResponseMode::Discard,
+            HttpResponseMode::Sink,
         ] {
             let mut options = HttpBodyOptions {
                 max_response_bytes: Some(127),
@@ -736,6 +954,8 @@ mod tests {
             inline: Some(body),
             bytes: 3,
             sha256: None,
+            sink_body: None,
+            sink: None,
         };
         let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 12);
         assert_eq!(envelope["status"], 200);

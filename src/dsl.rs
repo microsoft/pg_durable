@@ -495,6 +495,7 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
         let allowed = [
             // Keep alphabetical to simplify merge conflicts
             "form_fields",
+            "into",
             "max_request_bytes",
             "max_response_bytes",
             "response",
