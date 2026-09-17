@@ -281,8 +281,20 @@ pub async fn execute(
         crate::activities::http_response::collect_headers(&response, &config.body_options);
 
     // Text or base64 depending on Content-Type — see activities::http_response.
-    let response_body =
+    let mut response_body =
         crate::activities::http_response::read_body(response, &config.body_options).await?;
+
+    if !status.is_server_error() {
+        response_body
+            .store_in_sink(
+                &config.body_options,
+                audit_user,
+                config.database.as_deref(),
+                &semaphore,
+                Duration::from_secs(config.timeout_seconds),
+            )
+            .await?;
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_ok = status.is_success();

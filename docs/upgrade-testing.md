@@ -268,6 +268,24 @@ the extension schema.
 - **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
 - **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
 
+#### HTTP body policies and table sinks (#376)
+
+- **Upgrade & Migration:** No additional extension DDL or schema detection is
+  needed. Body policies use `df.with_http_options`; destination tables are
+  caller-provisioned in the workflow's target database. Existing HTTP defaults,
+  signatures, grants, and previously persisted response bodies are unchanged.
+- **Binary compatibility:** The new `.so` continues to work with supported older
+  extension schemas. Sink writes use native PostgreSQL functionality through a
+  caller-authenticated connection, without relying on new extension tables.
+- **Replay compatibility:** Only new `response: "sink"` nodes gain trusted
+  target-database metadata. Older request configurations preserve their activity
+  input bytes. Table writes and attempt-key generation happen inside HTTP
+  activities; replay uses the recorded reference without fetching the body.
+- **Retention:** A sink write and its durable activity completion are not one
+  transaction. Each attempt uses a fresh UUID, so a losing attempt cannot
+  overwrite a completed attempt's body. A committed but unrecorded attempt can
+  leave a row for the application's retention policy to remove.
+
 #### Configurable HTTP domains (#375)
 - **Runtime change (no DDL):** `pg_durable.http_allowed_domains` is a Postmaster-context string GUC that replaces the domain allow-list for both HTTP activities in restricted builds. The defaults preserve the existing Azure/GitHub policy, including `httpbingo.org` in test builds. Disabled and `http-allow-all` build behavior is unchanged.
 - **Configuration migration:** None is required to retain existing behavior. Administrators can configure exact hostnames and `*.domain` patterns, then restart PostgreSQL. An explicit value replaces all defaults; an empty list denies all domains in restricted builds. Malformed values are rejected, including at server startup.

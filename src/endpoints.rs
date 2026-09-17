@@ -99,6 +99,7 @@ pub fn set_execution_context(
     if config.get("endpoint").is_some()
         || config.get("secret_bindings").is_some()
         || config.get("form_fields").is_some()
+        || config.get("response").and_then(serde_json::Value::as_str) == Some("sink")
     {
         config["database"] = database.map_or(serde_json::Value::Null, |database| {
             serde_json::Value::String(database.into())
@@ -684,6 +685,15 @@ mod unit_tests {
         assert_eq!(config["database"], "trusted_database");
         assert_eq!(config["submitted_by"], "caller");
         assert_eq!(config["endpoint"], "fixed_{server}");
+        set_execution_context(&mut config, "caller", None);
+        assert!(config["database"].is_null());
+        let mut config = serde_json::json!({
+            "response": "sink", "into": "public.payloads",
+            "database": "forged", "submitted_by": "forged"
+        });
+        set_execution_context(&mut config, "caller", Some("trusted_database"));
+        assert_eq!(config["database"], "trusted_database");
+        assert_eq!(config["submitted_by"], "caller");
         set_execution_context(&mut config, "caller", None);
         assert!(config["database"].is_null());
     }

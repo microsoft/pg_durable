@@ -1372,6 +1372,7 @@ pub enum HttpResponseMode {
     Inline,
     Metadata,
     Discard,
+    Sink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1398,10 +1399,23 @@ pub struct HttpBodyOptions {
     pub response: Option<HttpResponseMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_headers: Option<HttpResponseHeaders>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
 }
 
 impl HttpBodyOptions {
     pub fn validate(&self) -> Result<(), String> {
+        match (self.response.unwrap_or_default(), self.into.as_deref()) {
+            (HttpResponseMode::Sink, Some(table))
+                if !table.trim().is_empty() && !table.contains('\0') => {}
+            (HttpResponseMode::Sink, _) => {
+                return Err(
+                    "response 'sink' requires 'into' naming a schema-qualified table".into(),
+                );
+            }
+            (_, Some(_)) => return Err("'into' is only valid with response 'sink'".into()),
+            (_, None) => {}
+        }
         if let Some(HttpResponseHeaders::AllowList(names)) = &self.response_headers {
             for name in names {
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
@@ -1956,6 +1970,31 @@ impl Durofut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn http_sink_options_require_an_explicit_destination() {
+        for invalid in [
+            json!({"response": "sink"}),
+            json!({"response": "sink", "into": ""}),
+            json!({"response": "sink", "into": "  "}),
+            json!({"response": "sink", "into": "public.\u{0}payloads"}),
+            json!({"into": "public.payloads"}),
+            json!({"response": "inline", "into": "public.payloads"}),
+            json!({"response": "metadata", "into": "public.payloads"}),
+            json!({"response": "discard", "into": "public.payloads"}),
+        ] {
+            let options: HttpBodyOptions = serde_json::from_value(invalid.clone()).unwrap();
+            assert!(options.validate().is_err(), "{invalid}");
+        }
+        let valid = json!({"response": "sink", "into": "public.payloads"});
+        let options: HttpBodyOptions = serde_json::from_value(valid.clone()).unwrap();
+        options.validate().unwrap();
+        assert_eq!(serde_json::to_value(options).unwrap(), valid);
+        assert_eq!(
+            serde_json::to_value(HttpBodyOptions::default()).unwrap(),
+            json!({})
+        );
+    }
 
     #[test]
     fn http_body_options_preserve_defaults_and_validate_values() {
