@@ -19,6 +19,7 @@ Thumbs.db
 *.so
 *.dylib
 *.dll
+/benchmarks/__pycache__/
 
 # Environment files (secrets)
 .env
