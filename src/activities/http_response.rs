@@ -242,21 +242,19 @@ async fn store_response(
     if !identity_matches {
         return Err("HTTP response sink connection does not match the submitting role".into());
     }
-    let qualified: Option<String> = sqlx::query_scalar(
-        "SELECT CASE WHEN pg_catalog.cardinality(parts) OPERATOR(pg_catalog.=) 2
-                THEN pg_catalog.format('%I.%I', parts[1], parts[2]) END
-         FROM (SELECT pg_catalog.parse_ident($1, true) AS parts) AS parsed",
-    )
-    .bind(table)
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(|error| sink_error("table name validation", error))?;
+    let qualified: Option<String> = sqlx::query_scalar(crate::types::HTTP_SINK_TABLE_NAME_SQL)
+        .bind(table)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("table name validation", error))?;
     let qualified =
         qualified.ok_or("HTTP response sink 'into' must be a schema-qualified table")?;
-    sqlx::query(&format!("LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE"))
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| sink_error("table lock", error))?;
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {qualified} IN ROW EXCLUSIVE MODE"
+    ))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("table lock", error))?;
     let destination: Option<(String, String)> = sqlx::query_as(
         "SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname),
                 pg_catalog.current_database()::pg_catalog.text
@@ -292,7 +290,8 @@ async fn store_response(
             AND COALESCE(pg_catalog.bool_and(
                 pg_catalog.encode(pg_catalog.sha256(stored.body), 'hex')
                     OPERATOR(pg_catalog.=) $2::pg_catalog.text
-                AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'), false)
+                AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'
+                AND relation.relkind OPERATOR(pg_catalog.=) 'r'), false)
          FROM {table} AS stored
          JOIN pg_catalog.pg_class AS relation ON relation.oid OPERATOR(pg_catalog.=) stored.tableoid
          WHERE stored.sink_key OPERATOR(pg_catalog.=) $1::pg_catalog.uuid"

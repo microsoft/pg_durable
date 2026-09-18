@@ -33,7 +33,9 @@ DROP TABLE IF EXISTS public._http_sink, public._http_sink_denied,
     public._http_sink_insert_only, public._http_sink_rls_denied, public._http_sink_unlogged,
     public._http_sink_mutated, public._http_sink_skipped, public._http_sink_constraint,
     public._http_sink_trigger_error, public._http_sink_hidden, public._http_sink_slow,
-    public._http_sink_partitioned, public._http_sink_partitioned_unlogged;
+    public._http_sink_partitioned, public._http_sink_partitioned_unlogged,
+    public._http_sink_partitioned_foreign, public._http_sink_foreign_data;
+DROP SERVER IF EXISTS _http_sink_loopback CASCADE;
 CREATE TABLE public._http_sink (
     sink_key UUID PRIMARY KEY,
     body BYTEA NOT NULL,
@@ -58,13 +60,29 @@ CREATE TABLE public._http_sink_trigger_error (LIKE public._http_sink INCLUDING A
 CREATE TABLE public._http_sink_hidden (LIKE public._http_sink INCLUDING ALL);
 CREATE TABLE public._http_sink_slow (LIKE public._http_sink INCLUDING ALL);
 CREATE TABLE public._http_sink_partitioned (LIKE public._http_sink INCLUDING ALL)
-    PARTITION BY HASH (sink_key);
-CREATE TABLE public._http_sink_partition PARTITION OF public._http_sink_partitioned
-    FOR VALUES WITH (MODULUS 1, REMAINDER 0);
+    PARTITION BY LIST (sink_key);
+CREATE TABLE public._http_sink_cold_partition PARTITION OF public._http_sink_partitioned
+    FOR VALUES IN ('00000000-0000-0000-0000-000000000000');
+CREATE TABLE public._http_sink_partition PARTITION OF public._http_sink_partitioned DEFAULT;
 CREATE TABLE public._http_sink_partitioned_unlogged (LIKE public._http_sink INCLUDING ALL)
     PARTITION BY HASH (sink_key);
 CREATE UNLOGGED TABLE public._http_sink_unlogged_partition PARTITION OF public._http_sink_partitioned_unlogged
     FOR VALUES WITH (MODULUS 1, REMAINDER 0);
+CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+DO $$
+BEGIN
+    EXECUTE format('CREATE SERVER _http_sink_loopback FOREIGN DATA WRAPPER postgres_fdw
+        OPTIONS (host ''127.0.0.1'', port %L, dbname %L)', current_setting('port'), current_database());
+END $$;
+CREATE USER MAPPING FOR df_e2e_user SERVER _http_sink_loopback
+    OPTIONS (user 'df_e2e_user', password_required 'false');
+GRANT USAGE ON FOREIGN SERVER _http_sink_loopback TO df_e2e_user;
+CREATE UNLOGGED TABLE public._http_sink_foreign_data (sink_key UUID PRIMARY KEY, body BYTEA NOT NULL);
+CREATE TABLE public._http_sink_partitioned_foreign (sink_key UUID, body BYTEA NOT NULL)
+    PARTITION BY HASH (sink_key);
+CREATE FOREIGN TABLE public._http_sink_foreign_partition PARTITION OF public._http_sink_partitioned_foreign
+    FOR VALUES WITH (MODULUS 1, REMAINDER 0)
+    SERVER _http_sink_loopback OPTIONS (schema_name 'public', table_name '_http_sink_foreign_data');
 ALTER TABLE public._http_sink_hidden ENABLE ROW LEVEL SECURITY;
 CREATE POLICY http_sink_insert ON public._http_sink_hidden FOR INSERT WITH CHECK (true);
 CREATE POLICY http_sink_hide ON public._http_sink_hidden FOR SELECT USING (false);
@@ -99,13 +117,21 @@ REVOKE ALL ON public._http_sink, public._http_sink_denied, public._http_sink_ins
     public._http_sink_skipped, public._http_sink_constraint, public._http_sink_trigger_error,
     public._http_sink_hidden, public._http_sink_slow, public._http_sink_partitioned,
     public._http_sink_partitioned_unlogged, public._http_sink_partition,
-    public._http_sink_unlogged_partition FROM PUBLIC, df_e2e_user;
+    public._http_sink_unlogged_partition, public._http_sink_cold_partition,
+    public._http_sink_partitioned_foreign, public._http_sink_foreign_partition,
+    public._http_sink_foreign_data FROM PUBLIC, df_e2e_user;
 GRANT SELECT, INSERT ON public._http_sink, public._http_sink_rls_denied,
     public._http_sink_unlogged, public._http_sink_mutated, public._http_sink_skipped,
     public._http_sink_constraint, public._http_sink_trigger_error, public._http_sink_hidden,
-    public._http_sink_slow, public._http_sink_partitioned, public._http_sink_partitioned_unlogged TO df_e2e_user;
+    public._http_sink_slow, public._http_sink_partitioned, public._http_sink_partitioned_unlogged,
+    public._http_sink_partitioned_foreign, public._http_sink_foreign_data TO df_e2e_user;
 GRANT INSERT ON public._http_sink_insert_only TO df_e2e_user;
 SELECT df.grant_usage('df_e2e_user', include_http => true);
+
+SELECT dblink_connect('_http_sink_partition_lock', format('host=127.0.0.1 port=%s dbname=%L user=%L',
+    current_setting('port'), current_database(), CURRENT_USER));
+SELECT dblink_exec('_http_sink_partition_lock', 'BEGIN');
+SELECT dblink_exec('_http_sink_partition_lock', 'LOCK TABLE ONLY public._http_sink_cold_partition IN SHARE MODE');
 
 CREATE TEMP TABLE _http_sink_cases (
     instance_id TEXT,
@@ -123,6 +149,7 @@ DO $$
 DECLARE
     request_node TEXT;
     invalid_options JSONB;
+    invalid_name TEXT;
     actual_error TEXT;
 BEGIN
     FOREACH request_node IN ARRAY ARRAY[
@@ -134,7 +161,11 @@ BEGIN
             '{"response":"sink","into":""}'::jsonb,
             '{"response":"metadata","into":"public._http_sink"}'::jsonb,
             '{"into":"public._http_sink"}'::jsonb,
-            '{"response":"sink","into":42}'::jsonb
+            '{"response":"sink","into":42}'::jsonb,
+            '{"response":"sink","into":"_http_sink"}'::jsonb,
+            '{"response":"sink","into":"public."}'::jsonb,
+            '{"response":"sink","into":"database.public._http_sink"}'::jsonb,
+            '{"response":"sink","into":"public._http_sink; DROP TABLE public._http_sink"}'::jsonb
         ] LOOP
             actual_error := NULL;
             BEGIN
@@ -146,7 +177,27 @@ BEGIN
                 RAISE EXCEPTION 'TEST FAILED: invalid sink options accepted: %', invalid_options;
             END IF;
         END LOOP;
+        FOREACH invalid_name IN ARRAY ARRAY[
+            '_http_sink', 'public.', 'database.public._http_sink',
+            'public._http_sink; DROP TABLE public._http_sink'
+        ] LOOP
+            actual_error := NULL;
+            BEGIN
+                PERFORM df.start(jsonb_set(request_node::jsonb, '{query}',
+                    to_jsonb(((request_node::jsonb->>'query')::jsonb ||
+                        jsonb_build_object('response', 'sink', 'into', invalid_name))::text)
+                )::text, 'test-http-sink-invalid-name');
+            EXCEPTION WHEN others THEN
+                actual_error := SQLERRM;
+            END;
+            IF actual_error IS NULL THEN
+                RAISE EXCEPTION 'TEST FAILED: invalid raw sink destination was submitted: %', invalid_name;
+            END IF;
+        END LOOP;
     END LOOP;
+    IF EXISTS (SELECT 1 FROM df.instances WHERE label = 'test-http-sink-invalid-name') THEN
+        RAISE EXCEPTION 'TEST FAILED: invalid sink destination was persisted';
+    END IF;
 END $$;
 
 INSERT INTO _http_sink_cases
@@ -199,16 +250,22 @@ SELECT df.start(
            jsonb_build_object('node_type', node_type, 'query', jsonb_build_object(
                'url', 'https://httpbingo.org/base64/AP9TSU5LX1BSSVZBVEVfMzc2',
                'method', 'POST', 'parts', '[{"name":"field","data_b64":"YWJj"}]'::jsonb,
-               'response', 'sink', 'into', 'public._http_sink_target',
+               'response', response_mode, 'into', table_name,
                'response_headers', '[]'::jsonb, 'max_response_bytes', 18,
-               'submitted_by', 'postgres', 'database', current_database()
+               'submitted_by', 'postgres', 'database',
+                   CASE WHEN target_database IS NULL THEN '_test_http_sink_target' ELSE current_database() END
            )::text)::text |=> 'payload'
-           ~> 'SELECT octet_length(body) AS bytes, owner, encode(sha256(body), ''hex'') AS digest
-               FROM public._http_sink_target WHERE sink_key = $payload.sink_key::uuid',
-           'test-http-sink-target-database', database => '_test_http_sink_target'),
+           ~> format('SELECT octet_length(body) AS bytes, owner, encode(sha256(body), ''hex'') AS digest
+               FROM %s WHERE sink_key = $payload.sink_key::uuid', table_name),
+           'test-http-sink-target-database', database => target_database),
        'completed', 200, decode('AP9TSU5LX1BSSVZBVEVfMzc2', 'base64'), NULL,
-       'public._http_sink_target', '_test_http_sink_target'
-FROM (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS requests(node_type);
+       table_name, COALESCE(target_database, current_database())
+FROM (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS requests(node_type)
+CROSS JOIN (VALUES ('"sink"'::jsonb), ('{"sink":null}'::jsonb)) AS modes(response_mode)
+CROSS JOIN (VALUES
+    ('public._http_sink_target', '_test_http_sink_target'),
+    ('public._http_sink', NULL)
+) AS destinations(table_name, target_database);
 
 INSERT INTO _http_sink_cases
 SELECT df.start(df.with_http_options(df.http('https://httpbingo.org/base64/AP9TSU5LX1BSSVZBVEVfMzc2', 'GET'),
@@ -222,14 +279,13 @@ FROM (VALUES
     ('public._http_sink_rls_denied', '%SQLSTATE 42501%'),
     ('public._http_sink_unlogged', '%requires a permanent table%'),
     ('public._http_sink_partitioned_unlogged', '%not durable%'),
+    ('public._http_sink_partitioned_foreign', '%not durable%'),
     ('public._http_sink_mutated', '%key or body was changed%'),
     ('public._http_sink_skipped', '%did not insert exactly one row%'),
     ('public._http_sink_constraint', '%SQLSTATE 23514%'),
     ('public._http_sink_trigger_error', '%SQLSTATE P0001%'),
     ('public._http_sink_hidden', '%row is missing%'),
-    ('public._http_sink_missing', '%SQLSTATE 42P01%'),
-    ('_http_sink', '%schema-qualified table%'),
-    ('public._http_sink; DROP TABLE public._http_sink', '%table name validation failed%')
+    ('public._http_sink_missing', '%SQLSTATE 42P01%')
 ) AS destinations(sink_table, error_pattern);
 
 DO $$
@@ -297,6 +353,9 @@ BEGIN
 END $$;
 RESET SESSION AUTHORIZATION;
 
+SELECT dblink_exec('_http_sink_partition_lock', 'ROLLBACK');
+SELECT dblink_disconnect('_http_sink_partition_lock');
+
 DO $$
 DECLARE
     test_case RECORD;
@@ -315,7 +374,8 @@ BEGIN
     OR EXISTS (SELECT 1 FROM public._http_sink_trigger_error)
     OR EXISTS (SELECT 1 FROM public._http_sink_hidden)
     OR EXISTS (SELECT 1 FROM public._http_sink_slow)
-    OR EXISTS (SELECT 1 FROM public._http_sink_partitioned_unlogged) THEN
+    OR EXISTS (SELECT 1 FROM public._http_sink_partitioned_unlogged)
+    OR EXISTS (SELECT 1 FROM public._http_sink_foreign_data) THEN
         RAISE EXCEPTION 'TEST FAILED: a rejected sink write committed data';
     END IF;
     FOR test_case IN SELECT * FROM _http_sink_cases LOOP
@@ -355,7 +415,9 @@ DROP TABLE public._http_sink, public._http_sink_denied, public._http_sink_insert
     public._http_sink_rls_denied, public._http_sink_unlogged, public._http_sink_mutated,
     public._http_sink_skipped, public._http_sink_constraint, public._http_sink_trigger_error,
     public._http_sink_hidden, public._http_sink_slow, public._http_sink_partitioned,
-    public._http_sink_partitioned_unlogged;
+    public._http_sink_partitioned_unlogged, public._http_sink_partitioned_foreign,
+    public._http_sink_foreign_data;
+DROP SERVER _http_sink_loopback CASCADE;
 DROP FUNCTION public._http_sink_mutate(), public._http_sink_skip(), public._http_sink_trigger_fail(), public._http_sink_wait();
 DROP SCHEMA "Sink.Schema" CASCADE;
 DROP DATABASE _test_http_sink_target;

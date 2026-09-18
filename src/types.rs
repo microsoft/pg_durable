@@ -1389,6 +1389,11 @@ pub enum HttpResponseHeaders {
     AllowList(Vec<String>),
 }
 
+pub(crate) const HTTP_SINK_TABLE_NAME_SQL: &str =
+    "SELECT CASE WHEN pg_catalog.cardinality(parts) OPERATOR(pg_catalog.=) 2
+            THEN pg_catalog.format('%I.%I', parts[1], parts[2]) END
+     FROM (SELECT pg_catalog.parse_ident($1, true) AS parts) AS parsed";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HttpBodyOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]

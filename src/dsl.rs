@@ -487,6 +487,20 @@ pub fn race(a: &str, b: &str) -> String {
     .to_json()
 }
 
+fn validate_http_sink_name(config: &serde_json::Value) -> Result<(), String> {
+    let Some(table) = config.get("into").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let table = table
+        .as_str()
+        .filter(|table| !table.trim().is_empty() && !table.contains('\0'))
+        .ok_or("HTTP response sink 'into' must name a schema-qualified table")?;
+    Spi::get_one_with_args::<String>(crate::types::HTTP_SINK_TABLE_NAME_SQL, &[table.into()])
+        .map_err(|error| format!("HTTP response sink table name validation failed: {error}"))?
+        .ok_or("HTTP response sink 'into' must be a schema-qualified table")?;
+    Ok(())
+}
+
 /// Applies HTTP options to a single HTTP or HTTP_MULTIPART node.
 #[pg_extern(schema = "df")]
 pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
@@ -553,6 +567,8 @@ pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
                 });
             body_options
                 .validate()
+                .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
+            validate_http_sink_name(&config)
                 .unwrap_or_else(|error| pgrx::error!("df.with_http_options(): {}", error));
             let mut configured: serde_json::Value =
                 serde_json::from_str(fut).expect("Validated HTTP node");
@@ -1368,6 +1384,8 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                 .as_deref()
                 .and_then(|query| serde_json::from_str::<serde_json::Value>(query).ok())
             {
+                validate_http_sink_name(&config)
+                    .unwrap_or_else(|error| pgrx::error!("Invalid HTTP request: {}", error));
                 crate::types::check_http_request_size(&config, true)
                     .unwrap_or_else(|error| pgrx::error!("Invalid HTTP request: {}", error));
             }
