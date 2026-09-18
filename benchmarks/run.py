@@ -9,9 +9,11 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import statistics
 import subprocess
 import sys
+import traceback
 import uuid
 
 from http_server import HttpFixture
@@ -68,10 +70,27 @@ def psql(query, variables):
     command = ["psql", "-X", "-w", "-A", "-t", "-v", "ON_ERROR_STOP=1"]
     for name, value in variables.items():
         command.extend(["-v", f"{name}={value}"])
-    return subprocess.run(
-        command, input=query, text=True, capture_output=True, check=True,
-        timeout=30,
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            command, input=query, text=True, capture_output=True, check=True,
+            timeout=30,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"psql failed: {error.stderr.strip()}") from error
+
+
+def cancel_instances(variables):
+    responses = json.loads(psql(
+        "SELECT coalesce(json_agg(json_build_object('id', id, 'result', "
+        "df.cancel(id, 'Benchmark stopped'))), '[]'::json) FROM df.instances "
+        "WHERE label = :'run_label' AND lower(status) IN ('pending', 'running');", variables,
+    ))
+    remaining = json.loads(psql(
+        "SELECT coalesce(json_agg(id), '[]'::json) FROM df.instances "
+        "WHERE label = :'run_label' AND lower(status) IN ('pending', 'running');", variables,
+    ))
+    if remaining or any(response["result"].startswith("Failed to cancel:") for response in responses):
+        raise RuntimeError(f"Benchmark cancellation failed: responses={responses}, active_instances={remaining}")
 
 
 def git_output(*arguments):
@@ -162,7 +181,7 @@ def benchmark(args):
         "request_bytes": args.request_bytes,
     }
     script = directory / "workload.sql"
-    script.write_text(source + "\nSELECT :bench_schema.await(':instance_id', :timeout_seconds, :poll_ms);\n")
+    script.write_text(source + "\nSELECT :bench_schema.await(:'instance_id', :timeout_seconds, :poll_ms);\n")
     setup = (ROOT / "await.sql").read_text()
     (directory / "await.sql").write_text(setup)
     report = {
@@ -175,6 +194,7 @@ def benchmark(args):
         "status": "running",
         "runs": [],
     }
+    (directory / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"Results: {directory}", flush=True)
     try:
         with ExitStack() as cleanup:
@@ -207,12 +227,8 @@ def benchmark(args):
                 }
                 print("Loopback HTTP requires a development-only http-allow-all build.", flush=True)
             psql(setup, variables)
-            cleanup.callback(
-                psql,
-                "SELECT df.cancel(id, 'Benchmark stopped') FROM df.instances "
-                "WHERE label = :'run_label' AND lower(status) IN ('pending', 'running');\n"
-                'DROP SCHEMA :"bench_schema" CASCADE;', variables,
-            )
+            cleanup.callback(psql, 'DROP SCHEMA :"bench_schema" CASCADE;', variables)
+            cleanup.callback(cancel_instances, variables)
             for clients in args.clients:
                 if args.warmup:
                     run_pgbench(
@@ -235,16 +251,21 @@ def benchmark(args):
         report["status"] = "completed"
     except BaseException as error:
         report["status"] = "failed"
-        report["error"] = str(error)
+        report["error"] = "".join(traceback.format_exception(type(error), error, error.__traceback__))
         raise
     finally:
         (directory / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
 
+def terminate(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main():
     os.environ.setdefault("PGCONNECT_TIMEOUT", "10")
     os.environ["LC_ALL"] = "C"
+    previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     try:
         benchmark(parser().parse_args())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
@@ -252,6 +273,8 @@ def main():
         if isinstance(error, subprocess.CalledProcessError) and error.stderr:
             print(error.stderr, file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 
