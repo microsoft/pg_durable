@@ -176,6 +176,7 @@ pub async fn execute(
         false,
         config.headers.as_ref(),
     )?;
+    config.body_options.validate()?;
     let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
     let mut prepared = crate::endpoints::prepare_request(
         &mut catalog,
@@ -268,6 +269,7 @@ pub async fn execute(
 
     // Add body (for POST/PUT/PATCH)
     if let Some(body) = resolved.form_body {
+        config.body_options.check_request_bytes(body.len() as u64)?;
         request = request
             .header(
                 reqwest::header::CONTENT_TYPE,
@@ -275,6 +277,7 @@ pub async fn execute(
             )
             .body(body);
     } else if let Some(body) = &config.body {
+        config.body_options.check_request_bytes(body.len() as u64)?;
         request = request.body(body.clone());
     }
 
@@ -314,10 +317,24 @@ pub async fn execute(
     let status_code = status.as_u16();
 
     // Collect response headers
-    let response_headers = crate::activities::http_response::collect_headers(&response);
+    let response_headers =
+        crate::activities::http_response::collect_headers(&response, &config.body_options);
 
     // Text or base64 depending on Content-Type — see activities::http_response.
-    let response_body = crate::activities::http_response::read_body(response).await?;
+    let mut response_body =
+        crate::activities::http_response::read_body(response, &config.body_options).await?;
+
+    if !status.is_server_error() {
+        response_body
+            .store_in_sink(
+                &config.body_options,
+                audit_user,
+                config.database.as_deref(),
+                &semaphore,
+                Duration::from_secs(config.timeout_seconds),
+            )
+            .await?;
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_ok = status.is_success();
@@ -333,7 +350,11 @@ pub async fn execute(
 
     ctx.trace_info(format!(
         "HTTP {} completed: status={}, ok={}, encoding={}, duration={}ms",
-        config.method, status_code, is_ok, response_body.encoding, duration_ms
+        config.method,
+        status_code,
+        is_ok,
+        response_body.encoding(),
+        duration_ms
     ));
 
     // Fail on 5xx server errors (transient, should retry)

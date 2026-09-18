@@ -140,9 +140,9 @@ HTTP permission set through `df.grant_usage` and `df.revoke_usage`.
 `df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
 Like other combinators, it uses ordinary `df` schema access and default PUBLIC
 `EXECUTE`. Wrapping a hand-crafted HTTP node does not bypass the activity's
-privilege check. Supported keys are `secret_bindings` and `form_fields`, described
-in [Explicit secret bindings](#37-explicit-secret-bindings). SQL `NULL` and `{}`
-preserve the original node text.
+privilege check. It supports [explicit secret bindings](#37-explicit-secret-bindings)
+and [body limits and response retention](../USER_GUIDE.md#body-limits-and-response-retention).
+SQL `NULL` and `{}` preserve the original node text.
 
 ### 3.3 Managing access
 
@@ -556,12 +556,59 @@ Do not put credentials in paths or parameter names: those can remain visible.
 Request headers and bodies are not directly included in request traces, but an
 endpoint can echo them in its response.
 
-> **Not covered:** stored request inputs, response headers and response bodies.
-> A workflow's final result is logged, and response-body previews appear in 5xx
-> errors. A response containing a credential, including an echoed request URL or
-> a token returned by an endpoint, can still expose it in logs and stored results.
+> **Not covered by URL redaction:** stored request inputs, response headers and
+> inline response bodies. A workflow's final result is logged, and inline
+> response-body previews appear in 5xx errors. A response containing a credential,
+> including an echoed request URL or a token returned by an endpoint, can still
+> expose it in logs and stored results.
 > URL redaction does not make `df.vars` secret storage; see
 > [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
+### 7.2 Response retention and body limits
+
+Use `response: "metadata"` or `response: "discard"` through `df.with_http_options`
+when the workflow does not need the response body. These modes exclude body
+bytes from durable results and 5xx error previews, without saving another copy.
+`metadata` records a SHA-256 digest; use `discard` when a digest is unnecessary
+or would reveal information about a predictable response.
+
+Response headers are controlled separately. `response_headers: []` retains none;
+`"safe"` selects common metadata headers, and an explicit array selects named
+headers. The default remains `"all"`. Allow-listed values are not redacted and
+can still contain sensitive data supplied by the server.
+
+`max_request_bytes` and `max_response_bytes` are optional, caller-controlled
+limits, not administrator-enforced resource quotas. The response cap is checked
+while reading, after automatic decompression. These options do not remove
+request templates, captured variables, or earlier results from history, and
+do not automatically redact secrets from inline responses. See
+[Body Limits and Response Retention](../USER_GUIDE.md#body-limits-and-response-retention).
+
+### 7.3 Table sinks
+
+`response: "sink"` with `into` stores raw response bytes in a caller-provided
+table, keeping them out of durable activity results and 5xx previews. Writes
+authenticate as the submitting role and obey table privileges and RLS. The
+target database comes from the workflow's captured execution context; a forged
+database or submitting-role field in an HTTP node cannot redirect sink writes.
+
+The sink preserves the submitting connection's role/database `search_path`
+defaults for triggers and other table-side code. Its internal queries qualify
+catalog functions, types, and operators explicitly; the sink does not depend
+on a restricted search path for those lookups.
+
+Only permanent, logged storage is accepted. The row's key and body digest are
+verified before commit, so an insert suppressed or altered by a trigger fails
+instead of producing an invalid reference. Database failures expose the operation
+and SQLSTATE, not messages or details that might include response bytes.
+
+This is a data-placement control, not encryption or automatic response-secret
+handling. Table access, backups, replication, database logging, and sink triggers
+remain subject to the deployment's data policy. PostgreSQL logging or trigger
+messages can expose values just as with ordinary table writes. Response headers
+are controlled separately. The caller owns sink retention, including rows left
+by attempts whose completion was never recorded. See
+[Storing Responses in a Table](../USER_GUIDE.md#storing-responses-in-a-table).
 
 ---
 
@@ -578,6 +625,10 @@ endpoint can echo them in its response.
 | Invalid domain-list configuration | `invalid value for parameter "pg_durable.http_allowed_domains"` with the offending entry and reason |
 | Blocked IP (literal or DNS) | `Blocked: the resolved IP address for '{host}' is in a restricted range. df.http() cannot access private or internal network addresses.` |
 | DSL-time (no feature) | `df.http() is disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable outbound HTTP requests.` |
+| Request body too large | `HTTP request body exceeds max_request_bytes ({limit} bytes)` |
+| Response body too large | `HTTP response body exceeds max_response_bytes ({limit} bytes)` |
+| Sink database failure | `HTTP response sink {operation} failed (SQLSTATE {code})` |
+| Sink storage timeout | `HTTP response sink timed out before completion` |
 
 ---
 
@@ -589,7 +640,7 @@ These items are deferred to a future customer-level access control spec:
 |------|-------|
 | Per-role URL/domain allowlists configurable by admins | GUC or table-driven |
 | Rate limiting | DoS mitigation, not SSRF |
-| Response size limits | Resource management |
+| Administrator-enforced body limits | Caller-controlled HTTP options are not resource quotas |
 | Port restrictions | Low value at this layer |
 | Egress filtering to attacker-controlled domains | Separate threat (T9) |
 | **Azure Private Endpoint** | Private Endpoints assign private RFC 1918 addresses to Azure services, which the IP blocklist currently blocks. Supporting Private Endpoints requires a targeted exemption mechanism that does not open all private ranges. Design is deferred to a future spec. |

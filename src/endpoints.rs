@@ -99,6 +99,12 @@ pub fn set_execution_context(
     if config.get("endpoint").is_some()
         || config.get("secret_bindings").is_some()
         || config.get("form_fields").is_some()
+        || config.get("response").is_some_and(|response| {
+            matches!(
+                serde::Deserialize::deserialize(response),
+                Ok(crate::types::HttpResponseMode::Sink)
+            )
+        })
     {
         config["database"] = database.map_or(serde_json::Value::Null, |database| {
             serde_json::Value::String(database.into())
@@ -686,6 +692,25 @@ mod unit_tests {
         assert_eq!(config["endpoint"], "fixed_{server}");
         set_execution_context(&mut config, "caller", None);
         assert!(config["database"].is_null());
+    }
+
+    #[test]
+    fn sink_execution_context_uses_parsed_response_mode() {
+        for response in [serde_json::json!("sink"), serde_json::json!({"sink": null})] {
+            for database in [Some("trusted_database"), None] {
+                let mut config = serde_json::json!({
+                    "response": response, "into": "public.payloads",
+                    "database": "forged", "submitted_by": "forged"
+                });
+                let options: crate::types::HttpBodyOptions =
+                    serde::Deserialize::deserialize(&config).unwrap();
+                assert_eq!(options.response, Some(crate::types::HttpResponseMode::Sink));
+                set_execution_context(&mut config, "caller", database);
+                assert_eq!(config["database"], serde_json::json!(database));
+                assert_eq!(config["submitted_by"], "caller");
+                assert_eq!(config["response"], response);
+            }
+        }
     }
 
     #[test]

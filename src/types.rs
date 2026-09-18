@@ -1365,6 +1365,158 @@ pub(crate) fn string_map_to_json(
     serde_json::to_string(&map.iter().collect::<std::collections::BTreeMap<_, _>>())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpResponseMode {
+    #[default]
+    Inline,
+    Metadata,
+    Discard,
+    Sink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpResponseHeaderPreset {
+    All,
+    Safe,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HttpResponseHeaders {
+    Preset(HttpResponseHeaderPreset),
+    AllowList(Vec<String>),
+}
+
+pub(crate) const HTTP_SINK_TABLE_NAME_SQL: &str =
+    "SELECT CASE WHEN pg_catalog.cardinality(parts) OPERATOR(pg_catalog.=) 2
+            THEN pg_catalog.format('%I.%I', parts[1], parts[2]) END
+     FROM (SELECT pg_catalog.parse_ident($1, true) AS parts) AS parsed";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HttpBodyOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<HttpResponseMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<HttpResponseHeaders>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+}
+
+impl HttpBodyOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.response.unwrap_or_default(), self.into.as_deref()) {
+            (HttpResponseMode::Sink, Some(table))
+                if !table.trim().is_empty() && !table.contains('\0') => {}
+            (HttpResponseMode::Sink, _) => {
+                return Err(
+                    "response 'sink' requires 'into' naming a schema-qualified table".into(),
+                );
+            }
+            (_, Some(_)) => return Err("'into' is only valid with response 'sink'".into()),
+            (_, None) => {}
+        }
+        if let Some(HttpResponseHeaders::AllowList(names)) = &self.response_headers {
+            for name in names {
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    "response_headers must contain valid HTTP header names".to_string()
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_request_bytes(&self, bytes: u64) -> Result<(), String> {
+        if let Some(limit) = self.max_request_bytes {
+            if bytes > limit {
+                return Err(format!(
+                    "HTTP request body exceeds max_request_bytes ({limit} bytes)"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn http_body_has_references(value: &str) -> bool {
+    value.match_indices(['$', '{']).any(|(offset, marker)| {
+        let rest = &value[offset + 1..];
+        let name = parse_identifier(rest);
+        !name.is_empty() && (marker == "$" || rest[name.len()..].starts_with('}'))
+    })
+}
+
+pub(crate) fn check_http_request_size(
+    config: &serde_json::Value,
+    allow_references: bool,
+) -> Result<(), String> {
+    let Some(limit) = config
+        .get("max_request_bytes")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let limit = limit
+        .as_u64()
+        .ok_or("max_request_bytes must be a non-negative integer")?;
+    let options = HttpBodyOptions {
+        max_request_bytes: Some(limit),
+        ..Default::default()
+    };
+    let mut total_bytes = 0u64;
+    let mut add_bytes = |bytes: usize| -> Result<(), String> {
+        total_bytes = total_bytes
+            .checked_add(bytes as u64)
+            .ok_or("HTTP request body length overflow")?;
+        options.check_request_bytes(total_bytes)
+    };
+
+    if let Some(body) = config.get("body").and_then(serde_json::Value::as_str) {
+        if !allow_references || !http_body_has_references(body) {
+            add_bytes(body.len())?;
+        }
+    }
+    if let Some(parts) = config.get("parts").and_then(serde_json::Value::as_array) {
+        for part in parts {
+            if let Some(data) = part.get("data_b64").and_then(serde_json::Value::as_str) {
+                if allow_references && is_whole_value_reference(data) {
+                    continue;
+                }
+                let encoded_len = data
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .count();
+                let padding = data
+                    .bytes()
+                    .rev()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .take_while(|byte| *byte == b'=')
+                    .count()
+                    .min(2);
+                add_bytes(base64::decoded_len_estimate(encoded_len).saturating_sub(padding))?;
+            }
+        }
+    }
+    if let Some(fields) = config
+        .get("form_fields")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        for (name, value) in fields {
+            if let Some(value) = value.as_str() {
+                form.append_pair(name, value);
+            }
+        }
+        add_bytes(form.finish().len())?;
+    }
+    Ok(())
+}
+
 /// Configuration for HTTP requests
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
@@ -1385,6 +1537,8 @@ pub struct HttpConfig {
     pub submitted_by: Option<String>,
     #[serde(flatten)]
     pub secret_options: crate::secrets::SecretOptions,
+    #[serde(flatten)]
+    pub body_options: HttpBodyOptions,
 }
 
 fn default_http_timeout() -> u64 {
@@ -1425,6 +1579,8 @@ pub struct MultipartConfig {
     pub submitted_by: Option<String>,
     #[serde(flatten)]
     pub secret_options: crate::secrets::SecretOptions,
+    #[serde(flatten)]
+    pub body_options: HttpBodyOptions,
 }
 
 // ============================================================================
@@ -1819,6 +1975,133 @@ impl Durofut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn http_sink_options_require_an_explicit_destination() {
+        for invalid in [
+            json!({"response": "sink"}),
+            json!({"response": "sink", "into": ""}),
+            json!({"response": "sink", "into": "  "}),
+            json!({"response": "sink", "into": "public.\u{0}payloads"}),
+            json!({"into": "public.payloads"}),
+            json!({"response": "inline", "into": "public.payloads"}),
+            json!({"response": "metadata", "into": "public.payloads"}),
+            json!({"response": "discard", "into": "public.payloads"}),
+        ] {
+            let options: HttpBodyOptions = serde_json::from_value(invalid.clone()).unwrap();
+            assert!(options.validate().is_err(), "{invalid}");
+        }
+        let valid = json!({"response": "sink", "into": "public.payloads"});
+        let options: HttpBodyOptions = serde_json::from_value(valid.clone()).unwrap();
+        options.validate().unwrap();
+        assert_eq!(serde_json::to_value(options).unwrap(), valid);
+        assert_eq!(
+            serde_json::to_value(HttpBodyOptions::default()).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn http_body_options_preserve_defaults_and_validate_values() {
+        assert_eq!(
+            serde_json::to_value(HttpBodyOptions::default()).unwrap(),
+            json!({})
+        );
+        for value in [
+            json!({"max_request_bytes": -1}),
+            json!({"max_request_bytes": 1.5}),
+            json!({"max_response_bytes": "10"}),
+            json!({"max_response_bytes": true}),
+            json!({"response": "automatic"}),
+            json!({"response_headers": "unknown"}),
+            json!({"response_headers": [1]}),
+        ] {
+            assert!(
+                serde_json::from_value::<HttpBodyOptions>(value.clone()).is_err(),
+                "{value}"
+            );
+        }
+        let invalid: HttpBodyOptions = serde_json::from_value(json!({
+            "response_headers": ["bad header"]
+        }))
+        .unwrap();
+        assert!(invalid.validate().is_err());
+        let valid: HttpBodyOptions = serde_json::from_value(json!({
+            "max_request_bytes": 0,
+            "max_response_bytes": u64::MAX,
+            "response": "discard",
+            "response_headers": []
+        }))
+        .unwrap();
+        valid.validate().unwrap();
+        assert!(valid.check_request_bytes(0).is_ok());
+        assert!(valid.check_request_bytes(1).is_err());
+    }
+
+    #[test]
+    fn http_request_size_counts_bytes_and_defers_template_expansion() {
+        let exact = json!({"max_request_bytes": 2, "body": "\u{e9}"});
+        assert!(check_http_request_size(&exact, true).is_ok());
+        let oversized = json!({"max_request_bytes": 1, "body": "\u{e9}"});
+        assert!(check_http_request_size(&oversized, true).is_err());
+        let template = json!({"max_request_bytes": 1, "body": "prefix:$payload.body:{suffix}"});
+        assert!(check_http_request_size(&template, true).is_ok());
+        assert!(check_http_request_size(&template, false).is_err());
+        let literal_json = json!({"max_request_bytes": 2, "body": "{\"data\":\"large\"}"});
+        assert!(check_http_request_size(&literal_json, true).is_err());
+        assert!(
+            check_http_request_size(&json!({"max_request_bytes": 0, "body": ""}), true).is_ok()
+        );
+    }
+
+    #[test]
+    fn http_request_size_counts_decoded_multipart_and_encoded_form_data() {
+        for data in ["YQ==", "YWI=", "YWJj", " Y W J j Z A = = \n"] {
+            use base64::Engine as _;
+            let normalized: String = data
+                .chars()
+                .filter(|character| !character.is_ascii_whitespace())
+                .collect();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(normalized)
+                .unwrap();
+            let mut config =
+                json!({"max_request_bytes": decoded.len(), "parts": [{"data_b64": data}]});
+            assert!(check_http_request_size(&config, false).is_ok(), "{data}");
+            config["max_request_bytes"] = json!(decoded.len() - 1);
+            assert!(check_http_request_size(&config, false).is_err(), "{data}");
+        }
+        let config = json!({"max_request_bytes": 5, "parts": [
+            {"data_b64": "YWJj"}, {"data_b64": "YWJj"}
+        ]});
+        assert!(check_http_request_size(&config, false).is_err());
+        let template = json!({"max_request_bytes": 1, "parts": [{"data_b64": "$payload.body"}]});
+        assert!(check_http_request_size(&template, true).is_ok());
+        assert!(check_http_request_size(&template, false).is_err());
+
+        let mut form = json!({"max_request_bytes": 10, "form_fields": {"key": "a &"}});
+        assert!(check_http_request_size(&form, false).is_ok());
+        form["max_request_bytes"] = json!(7);
+        assert!(check_http_request_size(&form, false).is_err());
+        let literal_form = json!({
+            "max_request_bytes": 1,
+            "form_fields": {"key": "$payload.body {value}"}
+        });
+        assert!(check_http_request_size(&literal_form, true).is_err());
+    }
+
+    #[test]
+    fn http_request_size_checks_do_not_mutate_replay_inputs() {
+        for raw in [
+            r#"{"url":"https://example.com","body":"$literal {text}","secret_bindings":{"query":{"key":{"server":"server","key":"key"}}}}"#,
+            r#"{"max_request_bytes":100,"form_fields":{"first":"$second","second":"{first}"}}"#,
+            r#"{"max_request_bytes":100,"form_fields":{"second":"{first}","first":"$second"}}"#,
+        ] {
+            let config: serde_json::Value = serde_json::from_str(raw).unwrap();
+            check_http_request_size(&config, false).unwrap();
+            assert_eq!(config.to_string(), raw);
+        }
+    }
 
     #[test]
     fn execution_admission_waits_and_releases() {

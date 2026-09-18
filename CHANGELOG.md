@@ -10,6 +10,15 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
 
 ### Added
 
+- **HTTP body policies (#376):** opt-in request and response byte caps,
+  `inline`/`metadata`/`discard`/`sink` response modes, and response-header selection
+  through `df.with_http_options`, for ordinary and multipart requests.
+  Response limits are enforced while reading, including after decompression.
+  Metadata, discard, and sink modes keep response bodies out of durable results
+  and 5xx error previews. Table sinks store raw bytes under the submitting role's
+  permissions and return a committed row reference with a fresh key per attempt.
+  Existing defaults and HTTP signatures are unchanged.
+
 - **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
 
 - **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB

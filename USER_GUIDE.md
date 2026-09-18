@@ -719,8 +719,8 @@ df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
     |=> 'response'
 ```
 
-Supported keys are `secret_bindings` and `form_fields`, described under
-[Explicit Secret Bindings](#explicit-secret-bindings). SQL `NULL` and `{}` return
+Supported keys configure [body limits and response retention](#body-limits-and-response-retention)
+or [explicit secret bindings](#explicit-secret-bindings). SQL `NULL` and `{}` return
 the input text byte-for-byte. Unknown keys and non-object JSON values, including
 JSON `null`, are rejected. Reapplying a supplied key replaces that entire option;
 omitted keys are retained.
@@ -731,7 +731,7 @@ combining nodes. It does not execute a request or change HTTP permissions.
 
 ### Response Format
 
-HTTP calls return a JSON object with full response details:
+By default, HTTP calls return an `inline` JSON response:
 
 ```json
 {
@@ -752,6 +752,162 @@ HTTP calls return a JSON object with full response details:
 | `headers` | Response headers object |
 | `ok` | `true` for 2xx status codes |
 | `duration_ms` | Request duration in milliseconds |
+
+### Body Limits and Response Retention
+
+Use the same options for ordinary and multipart HTTP requests, including calls
+to endpoints:
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://api.github.com/repos/microsoft/pg_durable', 'GET'),
+        '{"max_request_bytes":0,"max_response_bytes":8388608,
+          "response":"metadata","response_headers":"safe"}'::jsonb
+    )
+);
+```
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `max_request_bytes` | Non-negative integer; maximum request body size | No limit |
+| `max_response_bytes` | Non-negative integer; maximum response body size | No limit |
+| `response` | `inline`, `metadata`, `discard`, or `sink` | `inline` |
+| `response_headers` | `all`, `safe`, or an array of header names | `all` |
+| `into` | Schema-qualified table name; required only for `sink` | None |
+
+These options also accept JSON `null` to restore their defaults. Switching away
+from `sink` requires clearing `into` in the same call. A zero-byte
+cap permits only an empty body. Limits are opt-in: existing calls keep their
+response shape and headers, and a response never changes mode automatically
+because of its size.
+
+The request limit applies to the completed body after substitutions and secret
+resolution. It includes URL-encoding of form fields and multipart boundaries and
+part headers. Preliminary checks reject oversized literal payloads before graph
+submission and expanded payloads before scheduling the HTTP activity. Those
+checks exclude multipart framing and unresolved secret values; the activity
+checks the completed, encoded request before sending. For capped multipart requests,
+the client generates `Content-Length`; a supplied value cannot override it.
+
+The response limit is enforced while reading, even without `Content-Length` or
+with chunked transfer encoding. It counts bytes after any automatic HTTP
+decompression, but before text decoding or base64 encoding. Oversized bodies fail
+the HTTP node rather than returning truncated content. This applies to every
+response mode and to error responses as well.
+
+| Mode | Result Fields |
+|------|---------------|
+| `inline` | `status`, `body`, `encoding`, `headers`, `ok`, `duration_ms` |
+| `metadata` | `status`, `ok`, `bytes`, `sha256`, `headers`, `duration_ms` |
+| `discard` | `status`, `ok`, `bytes`, `headers`, `duration_ms` |
+| `sink` | `status`, `ok`, `bytes`, `sha256`, `headers`, `duration_ms`, `sink`, `sink_key`, `sink_database` |
+
+`bytes` and the lowercase hexadecimal SHA-256 digest describe the response bytes
+before text or base64 encoding. `metadata` and `discard` do not retain the body
+in durable history, node results, or 5xx error previews. They do not store a copy
+elsewhere: `$response.body` and `$response.encoding` are absent. Use `inline` for
+body access through a named result, or `sink` for explicit SQL access to a stored
+body. HTTP 4xx responses still return an envelope;
+5xx responses still fail the node.
+
+Header selection is independent of the response mode. An array is a
+case-insensitive allow-list; `[]` retains no headers. The `safe` preset retains
+`content-type`, `content-length`, `etag`, `last-modified`, `x-ms-request-id`,
+`x-ms-version`, `x-request-id`, `content-md5`, `x-ms-content-crc64`,
+`x-ms-blob-content-md5`, `digest`, `content-digest`, and `repr-digest`.
+`all` retains the existing behavior. Header values are not redacted, so only
+retain headers appropriate for your data policy.
+
+These are body-transfer limits, not total history-size or memory quotas.
+Request templates, captured variables, and earlier SQL results can already be
+in history; base64 and JSON encoding can also make stored values larger than
+the original bytes. Omitting a response body does not remove those other copies.
+
+### Storing Responses in a Table
+
+`response: "sink"` stores the response as raw `bytea` in a table you provide,
+and returns metadata plus a row reference. It supports ordinary and multipart
+requests. The body is buffered, subject to `max_response_bytes`; this is not a
+streaming or resumable transfer. Bytes are stored after automatic HTTP
+decompression, without text decoding or base64 encoding.
+
+Create the destination in the workflow's target database, with these columns:
+
+```sql
+CREATE TABLE public.http_payloads (
+    sink_key UUID PRIMARY KEY,
+    body BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+`sink_key` and `body` are required. Additional columns must have defaults or allow
+NULL. The table and any destination partition must be permanent, logged tables;
+temporary tables, unlogged tables, views, and foreign tables are not sinks.
+The submitting role needs schema `USAGE` and table `INSERT` and `SELECT` privileges.
+RLS must permit both inserting and reading the new row. Triggers and rules must
+not suppress the insert or change its key or body.
+
+Sink writes preserve the submitting role's `search_path` defaults in the target
+database, so unqualified names inside triggers resolve as they would on a new
+connection by that role. Session-local `SET search_path` changes in the session
+calling `df.start` are not captured.
+
+```sql
+SELECT df.start(
+    df.with_http_options(
+        df.http('https://api.github.com/repos/microsoft/pg_durable', 'GET'),
+        '{"response":"sink","into":"public.http_payloads",
+          "max_response_bytes":8388608,"response_headers":["content-type","etag"]}'::jsonb
+    ) |=> 'download'
+    ~> 'SELECT sink_key, octet_length(body) AS bytes
+        FROM public.http_payloads WHERE sink_key = $download.sink_key::uuid'
+);
+```
+
+`into` is a literal, schema-qualified PostgreSQL table name. Quoted identifiers
+are supported; variable substitution is not performed in this option. Name syntax
+and schema qualification are checked when applying options and at submission.
+The destination is resolved when the activity stores its response. It uses the
+database passed to `df.start`, or the configured workflow database when omitted,
+not the endpoint credential catalog's database.
+
+| Reference Field | Meaning |
+|-----------------|---------|
+| `sink` | Canonical, schema-qualified table name |
+| `sink_key` | UUID string identifying this attempt's row |
+| `sink_database` | Database containing the row |
+
+The activity commits the row before returning its reference. Writes use the
+submitting role, share `pg_durable.max_user_connections`, and enable synchronous
+commit for the storage transaction. The storage phase has its own
+`timeout_seconds` budget, including connection admission; `duration_ms` includes
+both the HTTP request and storage. A permission, constraint, verification, or
+storage-timeout failure fails the node. HTTP 4xx bodies are stored; 5xx responses
+still fail without storing a body or including a body preview in the error.
+
+Each attempt inserts a fresh key rather than replacing another attempt's row.
+This prevents overlapping attempts with different responses from invalidating
+a recorded reference. A crash or cancellation after commit but before completion
+is recorded can leave an unreferenced row. Sink rows are not covered by
+pg_durable's history cleanup: manage their retention yourself, retaining rows
+while workflows still need them. Deleting or changing them can invalidate saved
+references.
+
+The returned envelope has no `body` or `encoding` field. Later SQL can use the
+stored bytes directly, for example in `INSERT ... SELECT body`, but there is no
+automatic `$download.body` lookup. Returning the bytes as text or base64 from a
+later SQL node puts that value back into durable history. Header retention still
+follows `response_headers` independently of body storage.
+
+#### Upgrade & Migration
+
+Table sinks use the existing `df.with_http_options` helper, available with the
+0.2.9 extension schema. There are no additional extension objects or signature
+changes. Create and grant access to your destination tables before submitting
+sink workflows. Existing workflows and recorded activity inputs remain unchanged;
+previously stored bodies are not moved out of history automatically.
 
 ### Reading Response Fields
 

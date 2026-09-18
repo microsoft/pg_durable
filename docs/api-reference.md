@@ -443,12 +443,43 @@ a workflow, not an HTTP response. Neither existing HTTP function changes signatu
 | Parameter | Type | Auto-wrap | Description |
 |-----------|------|-----------|-------------|
 | `fut` | TEXT | ❌ Literal | A single `HTTP` or `HTTP_MULTIPART` node, optionally named with `\|=>` |
-| `options` | JSONB | ❌ Literal | Object containing `secret_bindings` and/or `form_fields`; SQL `NULL` and `{}` are no-ops |
+| `options` | JSONB | ❌ Literal | HTTP body policies and/or secret bindings; SQL `NULL` and `{}` are no-ops |
 
 ```sql
 df.with_http_options(df.http('https://api.github.com/', 'GET'), '{}'::jsonb)
   |=> 'response'
 ```
+
+| Option | Accepted Values | Default |
+|--------|-----------------|---------|
+| `max_request_bytes` | Non-negative integer, including multipart framing and encoded form data | Unlimited |
+| `max_response_bytes` | Non-negative integer, enforced during reads after automatic decompression and before text/base64 encoding | Unlimited |
+| `response` | `inline`, `metadata`, `discard`, `sink` | `inline` |
+| `response_headers` | `all`, `safe`, or an array of header names; `[]` keeps none | `all` |
+| `into` | Literal schema-qualified destination table; required for `sink`, invalid with other modes | None |
+| `secret_bindings` | Object containing named `headers`, `query`, and `form` references | None |
+| `form_fields` | Object of literal form strings | None |
+
+The body-policy options accept JSON `null` to restore the default. To switch away
+from `sink`, also set `into` to `null`. A byte
+cap of zero accepts only empty bodies. Oversized bodies are rejected rather than
+truncated; response mode never switches automatically. `metadata` returns
+`{status, ok, bytes, sha256, headers, duration_ms}`; `discard` omits `sha256`.
+Neither includes `body` or `encoding`, stores the body elsewhere, or includes
+body previews in 5xx errors. `inline` preserves the existing response envelope.
+Header selection is independent of the mode and case-insensitive. See
+[Body Limits and Response Retention](../USER_GUIDE.md#body-limits-and-response-retention)
+for byte-counting semantics, the `safe` header list, and persistence limitations.
+
+`sink` stores raw response bytes in an existing, permanent table with
+`sink_key UUID PRIMARY KEY` and `body BYTEA NOT NULL`. It returns the metadata
+envelope plus `sink` (canonical table name), `sink_key` (UUID string), and
+`sink_database`, without `body` or `encoding`. The caller needs schema `USAGE`
+and table `INSERT` and `SELECT`, including RLS access to the inserted row. Storage
+uses the workflow's target database and commits before returning. Each attempt
+gets its own key; retention and cleanup of unreferenced rows are caller-managed.
+The storage phase has an additional `timeout_seconds` budget. See
+[Storing Responses in a Table](../USER_GUIDE.md#storing-responses-in-a-table).
 
 `secret_bindings` contains named `headers`, `query` and `form` reference maps.
 `form_fields` contains literal form strings. A supplied option replaces the entire

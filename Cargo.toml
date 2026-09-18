@@ -59,6 +59,8 @@ chrono = "0.4"
 # reqwest version; Cargo feature unification merges them, so the whole graph
 # stays on native-tls with no rustls/ring/aws-lc in the tree.
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart"] }
+http = "1"
+sha2 = "0.10"
 
 # Canonical URL parsing for SSRF validation. Semver-compatible with reqwest's own
 # url dependency, so Cargo unifies them and `url::Url` is `reqwest::Url` — the

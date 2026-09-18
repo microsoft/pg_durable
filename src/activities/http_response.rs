@@ -34,6 +34,30 @@
 //! rejected by the part decoder.
 
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
+use sqlx::Connection;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+
+use crate::types::{
+    HttpBodyOptions, HttpResponseHeaderPreset, HttpResponseHeaders, HttpResponseMode,
+};
+
+const SAFE_RESPONSE_HEADERS: &[&str] = &[
+    "content-type",
+    "content-length",
+    "etag",
+    "last-modified",
+    "x-ms-request-id",
+    "x-ms-version",
+    "x-request-id",
+    "content-md5",
+    "x-ms-content-crc64",
+    "x-ms-blob-content-md5",
+    "digest",
+    "content-digest",
+    "repr-digest",
+];
 
 /// Maximum number of bytes of a response body to embed in a 5xx error message.
 /// Without a cap, a large binary error response would be base64-encoded into the
@@ -157,41 +181,287 @@ fn text_from_bytes(bytes: &[u8]) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
-/// Read a response body as text or base64, preferring the declared type and
-/// falling back to inspecting the bytes.
-pub async fn read_body(response: reqwest::Response) -> Result<ResponseBody, String> {
+pub struct ResponseContent {
+    inline: Option<ResponseBody>,
+    bytes: u64,
+    sha256: Option<String>,
+    sink_body: Option<Vec<u8>>,
+    sink: Option<StoredResponse>,
+}
+
+struct StoredResponse {
+    table: String,
+    key: uuid::Uuid,
+    database: String,
+}
+
+fn sink_error(operation: &str, error: sqlx::Error) -> String {
+    match error.as_database_error().and_then(|error| error.code()) {
+        Some(code) => format!("HTTP response sink {operation} failed (SQLSTATE {code})"),
+        None => format!("HTTP response sink {operation} failed (connection or protocol error)"),
+    }
+}
+
+async fn store_response(
+    table: &str,
+    body: &[u8],
+    sha256: &str,
+    submitted_by: &str,
+    database: Option<&str>,
+    semaphore: &Semaphore,
+    timeout: Duration,
+) -> Result<StoredResponse, String> {
+    let _permit = crate::types::acquire_execution_permit(
+        semaphore,
+        crate::types::get_execution_acquire_timeout(),
+        crate::types::get_max_user_connections(),
+    )
+    .await?;
+    let mut connection = crate::types::connect_as_user(submitted_by, database).await?;
+    let mut transaction = connection
+        .begin()
+        .await
+        .map_err(|error| sink_error("transaction", error))?;
+    sqlx::query(
+        "SELECT pg_catalog.set_config('synchronous_commit', 'on', true),
+                pg_catalog.set_config('statement_timeout', $1, true)",
+    )
+    .bind(format!("{}ms", timeout.as_millis().min(i32::MAX as u128)))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("transaction setup", error))?;
+    let identity_matches: bool = sqlx::query_scalar(
+        "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
+            AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
+    )
+    .bind(submitted_by)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("identity check", error))?;
+    if !identity_matches {
+        return Err("HTTP response sink connection does not match the submitting role".into());
+    }
+    let qualified: Option<String> = sqlx::query_scalar(crate::types::HTTP_SINK_TABLE_NAME_SQL)
+        .bind(table)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("table name validation", error))?;
+    let qualified =
+        qualified.ok_or("HTTP response sink 'into' must be a schema-qualified table")?;
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {qualified} IN ROW EXCLUSIVE MODE"
+    ))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("table lock", error))?;
+    let destination: Option<(String, String)> = sqlx::query_as(
+        "SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname),
+                pg_catalog.current_database()::pg_catalog.text
+         FROM pg_catalog.pg_class AS relation
+         JOIN pg_catalog.pg_namespace AS namespace
+           ON namespace.oid OPERATOR(pg_catalog.=) relation.relnamespace
+         WHERE relation.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)
+                     AND (relation.relkind OPERATOR(pg_catalog.=) 'r' OR relation.relkind OPERATOR(pg_catalog.=) 'p')
+                     AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'",
+    )
+    .bind(&qualified)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("table validation", error))?;
+    let (table, database) = destination.ok_or("HTTP response sink requires a permanent table")?;
+    let key = uuid::Uuid::new_v4();
+    let inserted = sqlx::query(&format!(
+        "INSERT INTO {table} (sink_key, body) VALUES ($1::pg_catalog.uuid, $2::pg_catalog.bytea)"
+    ))
+    .bind(key)
+    .bind(body)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("insert", error))?;
+    if inserted.rows_affected() != 1 {
+        return Err("HTTP response sink did not insert exactly one row".into());
+    }
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("constraint check", error))?;
+    let matches: bool = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
+            AND COALESCE(pg_catalog.bool_and(
+                pg_catalog.encode(pg_catalog.sha256(stored.body), 'hex')
+                    OPERATOR(pg_catalog.=) $2::pg_catalog.text
+                AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'
+                AND relation.relkind OPERATOR(pg_catalog.=) 'r'), false)
+         FROM {table} AS stored
+         JOIN pg_catalog.pg_class AS relation ON relation.oid OPERATOR(pg_catalog.=) stored.tableoid
+         WHERE stored.sink_key OPERATOR(pg_catalog.=) $1::pg_catalog.uuid"
+    ))
+    .bind(key)
+    .bind(sha256)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| sink_error("stored body verification", error))?;
+    if !matches {
+        return Err(
+            "HTTP response sink row is missing, not durable, or its key or body was changed".into(),
+        );
+    }
+    sqlx::query("SET LOCAL synchronous_commit = on")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| sink_error("commit setup", error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| sink_error("commit", error))?;
+    connection
+        .close()
+        .await
+        .map_err(|error| sink_error("connection close", error))?;
+    Ok(StoredResponse {
+        table,
+        key,
+        database,
+    })
+}
+
+impl ResponseContent {
+    pub fn encoding(&self) -> &'static str {
+        self.inline.as_ref().map_or("omitted", |body| body.encoding)
+    }
+
+    pub fn error_preview(&self) -> String {
+        self.inline.as_ref().map_or_else(
+            || format!("response body omitted ({} bytes)", self.bytes),
+            ResponseBody::error_preview,
+        )
+    }
+
+    pub async fn store_in_sink(
+        &mut self,
+        options: &HttpBodyOptions,
+        submitted_by: &str,
+        database: Option<&str>,
+        semaphore: &Semaphore,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let Some(body) = self.sink_body.as_deref() else {
+            return Ok(());
+        };
+        let table = options
+            .into
+            .as_deref()
+            .ok_or("HTTP response sink is missing 'into'")?;
+        let sha256 = self
+            .sha256
+            .as_deref()
+            .ok_or("HTTP response sink is missing its digest")?;
+        let stored = tokio::time::timeout(
+            timeout,
+            store_response(
+                table,
+                body,
+                sha256,
+                submitted_by,
+                database,
+                semaphore,
+                timeout,
+            ),
+        )
+        .await
+        .map_err(|_| "HTTP response sink timed out before completion")??;
+        self.sink = Some(stored);
+        self.sink_body = None;
+        Ok(())
+    }
+}
+
+pub async fn read_body(
+    mut response: reqwest::Response,
+    options: &HttpBodyOptions,
+) -> Result<ResponseContent, String> {
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // A declared textual type is decoded by reqwest, which honours the `charset`
-    // parameter. Decoding these ourselves would silently narrow them to UTF-8.
-    if is_declared_textual(content_type.as_deref()) {
-        let text = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read response body: {}", e.without_url()))?;
-        return Ok(ResponseBody::text(text));
+        .cloned();
+    let mode = options.response.unwrap_or_default();
+    let limit = options.max_response_bytes.unwrap_or(u64::MAX);
+    let exceeded = || format!("HTTP response body exceeds max_response_bytes ({limit} bytes)");
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        return Err(exceeded());
     }
 
-    let bytes = response
-        .bytes()
+    let mut bytes = Vec::new();
+    let mut total_bytes = 0;
+    let mut sha256 =
+        matches!(mode, HttpResponseMode::Metadata | HttpResponseMode::Sink).then(Sha256::new);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("Failed to read response body: {}", e.without_url()))?;
-    Ok(match text_from_bytes(&bytes) {
-        Some(text) => ResponseBody::text(text),
-        None => ResponseBody::base64(&bytes),
+        .map_err(|error| format!("Failed to read response body: {}", error.without_url()))?
+    {
+        if chunk.len() as u64 > limit - total_bytes {
+            return Err(exceeded());
+        }
+        total_bytes += chunk.len() as u64;
+        if matches!(mode, HttpResponseMode::Inline | HttpResponseMode::Sink) {
+            bytes.extend_from_slice(&chunk);
+        }
+        if let Some(hasher) = &mut sha256 {
+            hasher.update(&chunk);
+        }
+    }
+    let sink_body = (mode == HttpResponseMode::Sink).then(|| std::mem::take(&mut bytes));
+    let inline = if mode != HttpResponseMode::Inline {
+        None
+    } else if is_declared_textual(content_type.as_ref().and_then(|value| value.to_str().ok())) {
+        let mut buffered = http::Response::new(bytes);
+        if let Some(content_type) = content_type {
+            buffered
+                .headers_mut()
+                .insert(reqwest::header::CONTENT_TYPE, content_type);
+        }
+        let text = reqwest::Response::from(buffered)
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read response body: {}", error.without_url()))?;
+        Some(ResponseBody::text(text))
+    } else {
+        Some(match text_from_bytes(&bytes) {
+            Some(text) => ResponseBody::text(text),
+            None => ResponseBody::base64(&bytes),
+        })
+    };
+    Ok(ResponseContent {
+        inline,
+        bytes: total_bytes,
+        sha256: sha256.map(|hasher| format!("{:x}", hasher.finalize())),
+        sink_body,
+        sink: None,
     })
 }
 
 /// Collect response headers into a JSON object, skipping any that are not valid
 /// UTF-8.
-pub fn collect_headers(response: &reqwest::Response) -> serde_json::Map<String, serde_json::Value> {
+pub fn collect_headers(
+    response: &reqwest::Response,
+    options: &HttpBodyOptions,
+) -> serde_json::Map<String, serde_json::Value> {
     response
         .headers()
         .iter()
+        .filter(|(name, _)| match &options.response_headers {
+            None | Some(HttpResponseHeaders::Preset(HttpResponseHeaderPreset::All)) => true,
+            Some(HttpResponseHeaders::Preset(HttpResponseHeaderPreset::Safe)) => {
+                SAFE_RESPONSE_HEADERS.contains(&name.as_str())
+            }
+            Some(HttpResponseHeaders::AllowList(names)) => names
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(name.as_str())),
+        })
         .filter_map(|(k, v)| {
             v.to_str()
                 .ok()
@@ -203,24 +473,298 @@ pub fn collect_headers(response: &reqwest::Response) -> serde_json::Map<String, 
 /// Build the JSON envelope returned by both HTTP activities.
 pub fn build_envelope(
     status_code: u16,
-    body: &ResponseBody,
+    content: &ResponseContent,
     headers: serde_json::Map<String, serde_json::Value>,
     is_ok: bool,
     duration_ms: u64,
 ) -> serde_json::Value {
-    serde_json::json!({
+    if let Some(body) = &content.inline {
+        return serde_json::json!({
+            "status": status_code,
+            "body": body.body,
+            "encoding": body.encoding,
+            "headers": headers,
+            "ok": is_ok,
+            "duration_ms": duration_ms
+        });
+    }
+    let mut envelope = serde_json::json!({
         "status": status_code,
-        "body": body.body,
-        "encoding": body.encoding,
-        "headers": headers,
         "ok": is_ok,
-        "duration_ms": duration_ms
-    })
+        "bytes": content.bytes,
+        "headers": headers,
+        "duration_ms": duration_ms,
+    });
+    if let Some(sha256) = &content.sha256 {
+        envelope["sha256"] = serde_json::Value::String(sha256.clone());
+    }
+    if let Some(sink) = &content.sink {
+        envelope["sink"] = serde_json::Value::String(sink.table.clone());
+        envelope["sink_key"] = serde_json::Value::String(sink.key.to_string());
+        envelope["sink_database"] = serde_json::Value::String(sink.database.clone());
+    }
+    envelope
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sink_buffers_raw_bytes_without_decoding_or_error_previews() {
+        let bytes = b"\0\xffHTTP_SINK_PRIVATE";
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "text/plain; charset=utf-16")
+                .body(bytes.to_vec())
+                .unwrap(),
+        );
+        let options = HttpBodyOptions {
+            response: Some(HttpResponseMode::Sink),
+            into: Some("public.payloads".into()),
+            max_response_bytes: Some(bytes.len() as u64),
+            ..Default::default()
+        };
+        let content = read_body(response, &options).await.unwrap();
+        assert!(content.inline.is_none());
+        assert_eq!(content.sink_body.as_deref(), Some(bytes.as_slice()));
+        assert_eq!(content.bytes, bytes.len() as u64);
+        assert_eq!(content.sha256, Some(format!("{:x}", Sha256::digest(bytes))));
+        assert!(!content.error_preview().contains("HTTP_SINK_PRIVATE"));
+        let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 1);
+        assert!(envelope.get("body").is_none());
+        assert!(envelope.get("encoding").is_none());
+        assert!(envelope.get("sink_key").is_none());
+    }
+
+    async fn raw_response(wire_bytes: &'static [u8]) -> reqwest::Response {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut connection = BufReader::new(connection);
+            loop {
+                let mut line = String::new();
+                if connection.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            connection.get_mut().write_all(wire_bytes).unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/?sig=PRIVATE"))
+            .send()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_accepts_exact_limit_and_empty_bodies() {
+        let response = raw_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n",
+        )
+        .await;
+        let options = HttpBodyOptions {
+            max_response_bytes: Some(4),
+            ..Default::default()
+        };
+        let content = read_body(response, &options).await.unwrap();
+        assert_eq!(content.inline.unwrap().body, "abcd");
+        assert_eq!(content.bytes, 4);
+
+        let response = raw_response(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+        let options = HttpBodyOptions {
+            max_response_bytes: Some(0),
+            ..Default::default()
+        };
+        assert!(read_body(response, &options)
+            .await
+            .unwrap()
+            .inline
+            .unwrap()
+            .body
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_rejects_oversized_bodies_without_finishing_them() {
+        for wire_bytes in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabcde\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcde".as_slice(),
+        ] {
+            for mode in [
+                HttpResponseMode::Inline,
+                HttpResponseMode::Metadata,
+                HttpResponseMode::Discard,
+                HttpResponseMode::Sink,
+            ] {
+                let response = raw_response(wire_bytes).await;
+                let options = HttpBodyOptions {
+                    max_response_bytes: Some(4),
+                    response: Some(mode),
+                    ..Default::default()
+                };
+                let error = read_body(response, &options).await.err().unwrap();
+                assert_eq!(
+                    error,
+                    "HTTP response body exceeds max_response_bytes (4 bytes)"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_and_discard_omit_bodies_from_results_and_errors() {
+        for mode in [HttpResponseMode::Metadata, HttpResponseMode::Discard] {
+            let response =
+                raw_response(b"HTTP/1.1 500 Error\r\nContent-Length: 3\r\n\r\nabc").await;
+            let options = HttpBodyOptions {
+                response: Some(mode),
+                ..Default::default()
+            };
+            let content = read_body(response, &options).await.unwrap();
+            assert!(content.inline.is_none());
+            assert_eq!(content.error_preview(), "response body omitted (3 bytes)");
+            let envelope = build_envelope(500, &content, serde_json::Map::new(), false, 1);
+            assert_eq!(envelope["bytes"], 3);
+            assert!(envelope.get("body").is_none());
+            assert!(envelope.get("encoding").is_none());
+            if mode == HttpResponseMode::Metadata {
+                assert_eq!(
+                    envelope["sha256"],
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                );
+            } else {
+                assert!(envelope.get("sha256").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_limit_counts_decompressed_bytes_in_every_mode() {
+        let wire_bytes = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: 24\r\n\r\n\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x33\x30\x18\x58\x00\x00\xe6\x98\x02\x4d\x80\x00\x00\x00";
+        for mode in [
+            HttpResponseMode::Inline,
+            HttpResponseMode::Metadata,
+            HttpResponseMode::Discard,
+            HttpResponseMode::Sink,
+        ] {
+            let mut options = HttpBodyOptions {
+                max_response_bytes: Some(127),
+                response: Some(mode),
+                ..Default::default()
+            };
+            let error = read_body(raw_response(wire_bytes).await, &options)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.contains("max_response_bytes (127 bytes)"), "{error}");
+            options.max_response_bytes = Some(128);
+            let content = read_body(raw_response(wire_bytes).await, &options)
+                .await
+                .unwrap();
+            assert_eq!(content.bytes, 128);
+            if mode == HttpResponseMode::Inline {
+                assert_eq!(content.inline.unwrap().body, "0".repeat(128));
+            } else {
+                assert!(content.inline.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_limit_counts_binary_bytes_before_base64_encoding() {
+        let response = reqwest::Response::from(http::Response::new(vec![0u8, 1, 255]));
+        let options = HttpBodyOptions {
+            max_response_bytes: Some(3),
+            ..Default::default()
+        };
+        let content = read_body(response, &options).await.unwrap();
+        assert_eq!(content.bytes, 3);
+        let body = content.inline.unwrap();
+        assert_eq!(body.encoding, "base64");
+        assert_eq!(body.body, "AAH/");
+    }
+
+    #[tokio::test]
+    async fn bounded_text_decoding_matches_reqwest() {
+        for (content_type, bytes) in [
+            ("text/plain; charset=iso-8859-1", b"caf\xe9".as_slice()),
+            ("text/plain; charset=utf-16le", b"\xff\xfeh\0i\0".as_slice()),
+            ("application/json", b"\xef\xbb\xbf{}".as_slice()),
+            ("text/plain", b"\xf0\x9f\x98\x80".as_slice()),
+        ] {
+            let response = || {
+                reqwest::Response::from(
+                    http::Response::builder()
+                        .header(reqwest::header::CONTENT_TYPE, content_type)
+                        .body(bytes.to_vec())
+                        .unwrap(),
+                )
+            };
+            let expected = response().text().await.unwrap();
+            let options = HttpBodyOptions {
+                max_response_bytes: Some(bytes.len() as u64),
+                ..Default::default()
+            };
+            let content = read_body(response(), &options).await.unwrap();
+            assert_eq!(content.inline.unwrap().body, expected, "{content_type}");
+            assert_eq!(content.bytes, bytes.len() as u64);
+        }
+    }
+
+    #[test]
+    fn response_header_filtering_is_explicit_and_case_insensitive() {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "text/plain")
+                .header("x-request-id", "request")
+                .header("set-cookie", "private")
+                .header("x-custom", "custom")
+                .body(Vec::<u8>::new())
+                .unwrap(),
+        );
+        for (selection, expected) in [
+            (
+                serde_json::Value::Null,
+                vec!["content-type", "set-cookie", "x-custom", "x-request-id"],
+            ),
+            (
+                serde_json::json!("all"),
+                vec!["content-type", "set-cookie", "x-custom", "x-request-id"],
+            ),
+            (
+                serde_json::json!("safe"),
+                vec!["content-type", "x-request-id"],
+            ),
+            (serde_json::json!(["X-Custom"]), vec!["x-custom"]),
+            (serde_json::json!([]), vec![]),
+        ] {
+            let options: HttpBodyOptions = serde_json::from_value(serde_json::json!({
+                "response_headers": selection
+            }))
+            .unwrap();
+            options.validate().unwrap();
+            let headers = collect_headers(&response, &options);
+            let mut names: Vec<_> = headers.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            assert_eq!(names, expected);
+        }
+    }
 
     #[tokio::test]
     async fn response_read_errors_omit_credentials() {
@@ -259,7 +803,10 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            let error = read_body(response).await.err().unwrap();
+            let error = read_body(response, &HttpBodyOptions::default())
+                .await
+                .err()
+                .unwrap();
             server.join().unwrap();
             assert!(
                 error.starts_with("Failed to read response body:"),
@@ -402,7 +949,14 @@ mod tests {
     #[test]
     fn envelope_carries_encoding_alongside_existing_fields() {
         let body = ResponseBody::base64(b"abc");
-        let envelope = build_envelope(200, &body, serde_json::Map::new(), true, 12);
+        let content = ResponseContent {
+            inline: Some(body),
+            bytes: 3,
+            sha256: None,
+            sink_body: None,
+            sink: None,
+        };
+        let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 12);
         assert_eq!(envelope["status"], 200);
         assert_eq!(envelope["encoding"], "base64");
         assert_eq!(envelope["ok"], true);
