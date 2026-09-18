@@ -592,6 +592,11 @@ authenticate as the submitting role and obey table privileges and RLS. The
 target database comes from the workflow's captured execution context; a forged
 database or submitting-role field in an HTTP node cannot redirect sink writes.
 
+The sink preserves the submitting connection's role/database `search_path`
+defaults for triggers and other table-side code. Its internal queries qualify
+catalog functions, types, and operators explicitly; the sink does not depend
+on a restricted search path for those lookups.
+
 Only permanent, logged storage is accepted. The row's key and body digest are
 verified before commit, so an insert suppressed or altered by a trigger fails
 instead of producing an invalid reference. Database failures expose the operation

@@ -849,6 +849,11 @@ The submitting role needs schema `USAGE` and table `INSERT` and `SELECT` privile
 RLS must permit both inserting and reading the new row. Triggers and rules must
 not suppress the insert or change its key or body.
 
+Sink writes preserve the submitting role's `search_path` defaults in the target
+database, so unqualified names inside triggers resolve as they would on a new
+connection by that role. Session-local `SET search_path` changes in the session
+calling `df.start` are not captured.
+
 ```sql
 SELECT df.start(
     df.with_http_options(

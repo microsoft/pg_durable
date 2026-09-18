@@ -223,8 +223,7 @@ async fn store_response(
         .await
         .map_err(|error| sink_error("transaction", error))?;
     sqlx::query(
-        "SELECT pg_catalog.set_config('search_path', 'pg_catalog', true),
-                pg_catalog.set_config('synchronous_commit', 'on', true),
+        "SELECT pg_catalog.set_config('synchronous_commit', 'on', true),
                 pg_catalog.set_config('statement_timeout', $1, true)",
     )
     .bind(format!("{}ms", timeout.as_millis().min(i32::MAX as u128)))
@@ -262,7 +261,8 @@ async fn store_response(
          JOIN pg_catalog.pg_namespace AS namespace
            ON namespace.oid OPERATOR(pg_catalog.=) relation.relnamespace
          WHERE relation.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)
-           AND relation.relkind IN ('r', 'p') AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'",
+                     AND (relation.relkind OPERATOR(pg_catalog.=) 'r' OR relation.relkind OPERATOR(pg_catalog.=) 'p')
+                     AND relation.relpersistence OPERATOR(pg_catalog.=) 'p'",
     )
     .bind(&qualified)
     .fetch_optional(&mut *transaction)
