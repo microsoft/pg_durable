@@ -1,6 +1,6 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socket
 import threading
-import time
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -34,8 +34,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not chunk:
                     raise ConnectionError("Incomplete request body")
                 remaining -= len(chunk)
-            if self.server.delay_ms:
-                time.sleep(self.server.delay_ms / 1000)
+            if self.server.stopping.wait(self.server.delay_ms / 1000):
+                self.close_connection = True
+                return
             with self.server.lock:
                 self.server.counts["requests"] += 1
                 self.server.counts["request_bytes"] += length
@@ -56,11 +57,14 @@ class Handler(BaseHTTPRequestHandler):
 
 class HttpFixture(ThreadingHTTPServer):
     request_queue_size = 128
+    daemon_threads = False
 
     def __init__(self, response_bytes, delay_ms):
         self.body = b"x" * response_bytes
         self.delay_ms = delay_ms
         self.lock = threading.Lock()
+        self.stopping = threading.Event()
+        self.connections = set()
         self.counts = dict(connections=0, requests=0, request_bytes=0, response_bytes=0, errors=0)
         self.active = 0
         self.peak_active = 0
@@ -72,10 +76,18 @@ class HttpFixture(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_port}/"
 
     def get_request(self):
-        connection = super().get_request()
+        connection, address = super().get_request()
         with self.lock:
             self.counts["connections"] += 1
-        return connection
+            self.connections.add(connection)
+        return connection, address
+
+    def shutdown_request(self, request):
+        try:
+            super().shutdown_request(request)
+        finally:
+            with self.lock:
+                self.connections.discard(request)
 
     def snapshot(self):
         with self.lock:
@@ -90,6 +102,14 @@ class HttpFixture(ThreadingHTTPServer):
         return self
 
     def __exit__(self, *args):
+        self.stopping.set()
         self.shutdown()
+        with self.lock:
+            connections = tuple(self.connections)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         self.server_close()
         self.thread.join()

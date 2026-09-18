@@ -59,7 +59,8 @@ arrival generator.
 concurrency level and is excluded from the measured repetitions. `--jobs`
 controls pgbench threads, capped at the client count; it defaults to one.
 `--timeout` bounds each workflow wait, and `--poll-ms` sets the completion-poll
-interval (default 1 ms). The runner also bounds each pgbench process by
+interval (default 1 ms). Sleeps are capped at the remaining wait time, and
+completion must be observed before the deadline. The runner also bounds each pgbench process by
 `60 + transactions * (timeout + 1)` seconds to stop stalled phases.
 
 HTTP response size and delay are fixed for a run. The target supports HTTP/1.1
@@ -77,10 +78,14 @@ Artifacts include:
 - `results.json`: per-repetition workflow throughput, mean/min/max latency,
   nearest-rank p50/p95/p99, client/thread counts, server versions and settings,
   initial instance count, machine information, source revision and dirty state.
+  The run ID is saved before database setup. Failed reports retain chained
+  errors, including database diagnostics and any cleanup failure.
 - `workload.sql` and `await.sql`: the executed workload and completion helper.
 - `c<clients>-r<repetition>.txt`: full pgbench output, including per-command
   timings. Matching PID-suffixed files retain every raw transaction sample.
   Warmup output and logs use `c<clients>-warmup` prefixes.
+
+Failed workflows include their persisted node errors in the pgbench output.
 
 HTTP results also include request, byte, and newly accepted TCP connection
 counts, plus peak simultaneous target requests. These are per-phase counts:
@@ -136,11 +141,15 @@ them. The runner does not record libpq credentials.
 ## Cleanup and Compatibility
 
 Each run creates a uniquely named `pgd_bench_<run ID>` schema containing its wait
-function. Normal exit, failure, and interruption trigger cancellation of only
-that run's pending/running instances and removal of the helper schema. Failed
+function. Normal exit, failure, Ctrl-C, and SIGTERM trigger cancellation of only
+that run's pending/running instances and removal of the helper schema. The runner
+checks cancellation outcomes and still attempts schema removal if cancellation
+fails. The local HTTP target closes its accepted connections and joins its handlers.
+Failed
 workflows, timeouts, missing samples, and cleanup errors produce a nonzero exit
-and a failed report rather than a successful measurement. A forcibly killed
-runner can leave a schema or workflows behind; use the run ID to identify them.
+and a failed report rather than a successful measurement. An uncatchable kill
+(SIGKILL) or an unavailable database can leave a schema or workflows behind;
+use the saved run ID to identify them.
 
 Completed instances, nodes, and durable history are deliberately retained,
 including warmup instances. Large payload tests can consume substantial disk

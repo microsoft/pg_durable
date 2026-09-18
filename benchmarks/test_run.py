@@ -6,12 +6,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 from http_server import HttpFixture
-from run import benchmark, parser, psql, run_pgbench, summarize
+from run import benchmark, cancel_instances, parser, psql, run_pgbench, summarize
 
 
 class SummaryTests(unittest.TestCase):
@@ -113,21 +116,98 @@ class CleanupTests(unittest.TestCase):
 
     def test_cleanup_failure_marks_results_failed(self):
         summary = {"transactions_per_second": 1, "latency_ms": {"p50": 1, "p95": 1}}
-        with patch("run.psql", side_effect=["{}", "", RuntimeError("cleanup failed")]):
+        with patch("run.psql", side_effect=["{}", "", "[]", "[]", RuntimeError("cleanup failed")]):
             with patch("run.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "version", "")):
                 with patch("run.run_pgbench", return_value=summary), redirect_stdout(io.StringIO()):
                     with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
                         benchmark(self.args)
         self.assertEqual(json.loads((self.output / "results.json").read_text())["status"], "failed")
 
+    def test_cancellation_failure_still_removes_schema(self):
+        with patch("run.psql", side_effect=["{}", "", RuntimeError("cancel failed"), ""]) as database:
+            with patch("run.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "version", "")):
+                with patch("run.run_pgbench", side_effect=RuntimeError("workload failed")), redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(RuntimeError, "cancel failed"):
+                        benchmark(self.args)
+            self.assertIn("df.cancel", database.call_args_list[-2].args[0])
+            self.assertIn("DROP SCHEMA", database.call_args.args[0])
+        report = json.loads((self.output / "results.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("workload failed", report["error"])
+        self.assertIn("cancel failed", report["error"])
+
     def test_interruption_cleans_up_and_records_failure(self):
-        with patch("run.psql", side_effect=["{}", "", ""]) as database:
+        with patch("run.psql", side_effect=["{}", "", "[]", "[]", ""]) as database:
             with patch("run.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "version", "")):
                 with patch("run.run_pgbench", side_effect=KeyboardInterrupt), redirect_stdout(io.StringIO()):
                     with self.assertRaises(KeyboardInterrupt):
                         benchmark(self.args)
             self.assertIn("DROP SCHEMA", database.call_args.args[0])
         self.assertEqual(json.loads((self.output / "results.json").read_text())["status"], "failed")
+
+    def test_report_retains_psql_diagnostics(self):
+        error = subprocess.CalledProcessError(2, ["psql"], stderr="could not connect to server")
+        with patch("run.subprocess.run", side_effect=error), redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "could not connect"):
+                benchmark(self.args)
+        self.assertIn("could not connect to server", json.loads((self.output / "results.json").read_text())["error"])
+
+    def test_cancel_checks_returned_failures_and_remaining_instances(self):
+        for responses, remaining in (
+            ([{"id": "failed", "result": "Failed to cancel: unavailable"}], []),
+            ([{"id": "active", "result": "Instance active cancelled: Benchmark stopped"}], ["active"]),
+        ):
+            with self.subTest(responses=responses), patch("run.psql", side_effect=[json.dumps(responses), json.dumps(remaining)]):
+                with self.assertRaisesRegex(RuntimeError, "cancellation failed"):
+                    cancel_instances({"run_label": "this-run"})
+
+    def test_successful_cancellation_checks_only_this_runs_instances(self):
+        with patch("run.psql", side_effect=['[{"id":"done","result":"Instance done cancelled: Benchmark stopped"}]', "[]"]) as database:
+            cancel_instances({"run_label": "this-run"})
+        for call in database.call_args_list:
+            self.assertIn("WHERE label = :'run_label'", call.args[0])
+            self.assertEqual(call.args[1], {"run_label": "this-run"})
+
+    def test_sigterm_records_run_identity_and_runs_cleanup(self):
+        probe = """
+import json
+import os
+import signal
+import subprocess
+import sys
+from unittest.mock import patch
+import run
+
+def interrupt(args, *unused):
+    report = json.loads((args.output / 'results.json').read_text())
+    assert report['status'] == 'running'
+    print('run_id=' + report['run_id'], flush=True)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+def database(query, variables):
+    if 'df.cancel' in query:
+        print('cancelled', flush=True)
+        return '[]'
+    if 'json_agg(id)' in query:
+        return '[]'
+    if 'DROP SCHEMA' in query:
+        print('dropped', flush=True)
+    return '{}'
+
+with patch('run.psql', side_effect=database), patch('run.run_pgbench', side_effect=interrupt):
+    with patch('run.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'version', '')):
+        sys.exit(run.main())
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", probe, "--clients", "1", "--warmup", "0", "--output", str(self.output)],
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertIn("cancelled\ndropped", result.stdout)
+        report = json.loads((self.output / "results.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("run_id=" + report["run_id"], result.stdout)
 
 
 class HttpFixtureTests(unittest.TestCase):
@@ -160,6 +240,35 @@ class HttpFixtureTests(unittest.TestCase):
             list(executor.map(self.request, [fixture] * 4))
             self.assertGreater(fixture.peak_active, 1)
             self.assertEqual(fixture.snapshot()["requests"], 4)
+
+    def test_shutdown_closes_keepalive_connections_and_joins_handlers(self):
+        with HttpFixture(1, 0) as fixture:
+            connection = HTTPConnection("127.0.0.1", fixture.server_port, timeout=5)
+            self.addCleanup(connection.close)
+            connection.request("POST", "/", b"")
+            self.assertEqual(connection.getresponse().read(), b"x")
+            handlers = tuple(fixture._threads)
+        self.assertEqual(connection.sock.recv(1), b"")
+        self.assertFalse(any(handler.is_alive() for handler in handlers))
+        self.assertEqual(fixture.connections, set())
+
+    def test_shutdown_interrupts_delayed_responses(self):
+        delaying = threading.Event()
+        with HttpFixture(1, 5000) as fixture:
+            wait = fixture.stopping.wait
+
+            def delayed_response(timeout):
+                delaying.set()
+                return wait(timeout)
+
+            connection = HTTPConnection("127.0.0.1", fixture.server_port, timeout=5)
+            self.addCleanup(connection.close)
+            with patch.object(fixture.stopping, "wait", side_effect=delayed_response):
+                connection.request("POST", "/", b"")
+                self.assertTrue(delaying.wait(5))
+            started = time.monotonic()
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(connection.sock.recv(1), b"")
 
     def test_invalid_framing_does_not_count_as_success(self):
         with HttpFixture(0, 0) as fixture:
@@ -218,15 +327,32 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertEqual(report["runs"], [])
         self.assertIn("ended with status failed", (self.output / "c1-r1.txt").read_text())
+        self.assertIn("division by zero", (self.output / "c1-r1.txt").read_text())
         self.assert_cleaned_up(report)
 
     def test_timeout_cancels_only_the_benchmark_workflow(self):
+        sentinel = psql("SELECT df.start(df.sleep(60), 'benchmark-cleanup-sentinel');", {})
+        self.addCleanup(psql, "SELECT df.cancel(:'sentinel');", {"sentinel": sentinel})
         script = self.root / "timeout.sql"
         script.write_text("SELECT df.start(df.sleep(60), ':run_label') AS instance_id\n\\gset\n")
+        started = time.monotonic()
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
-            benchmark(self.arguments("--workload", str(script), "--timeout", "1"))
+            benchmark(self.arguments("--workload", str(script), "--timeout", "1", "--poll-ms", "5000"))
+        self.assertLess(time.monotonic() - started, 4)
         report = json.loads((self.output / "results.json").read_text())
         self.assertEqual(report["status"], "failed")
+        self.assertIn("timed out", (self.output / "c1-r1.txt").read_text())
+        self.assert_cleaned_up(report)
+        self.assertIn(psql("SELECT df.status(:'sentinel');", {"sentinel": sentinel}), {"pending", "running"})
+
+    def test_completion_observed_after_deadline_is_not_success(self):
+        script = self.root / "late.sql"
+        script.write_text("SELECT df.start(df.sleep(2), ':run_label') AS instance_id\n\\gset\n")
+        with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
+            benchmark(self.arguments("--workload", str(script), "--timeout", "1", "--poll-ms", "5000"))
+        report = json.loads((self.output / "results.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["runs"], [])
         self.assertIn("timed out", (self.output / "c1-r1.txt").read_text())
         self.assert_cleaned_up(report)
 
