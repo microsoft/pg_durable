@@ -784,9 +784,10 @@ because of its size.
 
 The request limit applies to the completed body after substitutions and secret
 resolution. It includes URL-encoding of form fields and multipart boundaries and
-part headers. Known oversized payloads are rejected before graph submission;
-expanded payloads are checked before scheduling the HTTP activity, and the
-completed request is checked again before sending. For capped multipart requests,
+part headers. Preliminary checks reject oversized literal payloads before graph
+submission and expanded payloads before scheduling the HTTP activity. Those
+checks exclude multipart framing and unresolved secret values; the activity
+checks the completed, encoded request before sending. For capped multipart requests,
 the client generates `Content-Length`; a supplied value cannot override it.
 
 The response limit is enforced while reading, even without `Content-Length` or
@@ -861,8 +862,9 @@ SELECT df.start(
 ```
 
 `into` is a literal, schema-qualified PostgreSQL table name. Quoted identifiers
-are supported; variable substitution is not performed in this option. The
-destination is resolved when the activity stores its response. It uses the
+are supported; variable substitution is not performed in this option. Name syntax
+and schema qualification are checked when applying options and at submission.
+The destination is resolved when the activity stores its response. It uses the
 database passed to `df.start`, or the configured workflow database when omitted,
 not the endpoint credential catalog's database.
 
