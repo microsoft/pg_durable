@@ -4,6 +4,25 @@ DROP DATABASE IF EXISTS _test_http_sink_target;
 CREATE DATABASE _test_http_sink_target TEMPLATE template0;
 ALTER DATABASE _test_http_sink_target SET synchronous_commit = off;
 \connect _test_http_sink_target
+CREATE SCHEMA _http_sink_context;
+ALTER ROLE df_e2e_user IN DATABASE _test_http_sink_target
+    SET search_path = _http_sink_context, public, pg_catalog;
+CREATE TABLE _http_sink_context.audit_log (
+    sink_key UUID PRIMARY KEY,
+    owner TEXT NOT NULL DEFAULT CURRENT_USER,
+    search_path TEXT NOT NULL DEFAULT current_setting('search_path')
+);
+GRANT USAGE ON SCHEMA _http_sink_context TO df_e2e_user;
+GRANT SELECT, INSERT ON _http_sink_context.audit_log TO df_e2e_user;
+CREATE FUNCTION _http_sink_context.unexpected_char_equality(pg_catalog."char", pg_catalog."char")
+RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Sink resolved an internal equality operator through search_path';
+END $$;
+CREATE OPERATOR _http_sink_context.= (
+    LEFTARG = pg_catalog."char", RIGHTARG = pg_catalog."char",
+    FUNCTION = _http_sink_context.unexpected_char_equality
+);
 CREATE TABLE public._http_sink_target (
     sink_key UUID PRIMARY KEY,
     body BYTEA NOT NULL,
@@ -20,6 +39,16 @@ BEGIN
 END $$;
 CREATE TRIGGER http_sink_sync_commit BEFORE INSERT ON public._http_sink_target
     FOR EACH ROW EXECUTE FUNCTION public._http_sink_sync_commit();
+CREATE FUNCTION public._http_sink_audit() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF pg_catalog.current_setting('search_path') IS DISTINCT FROM '_http_sink_context, public, pg_catalog' THEN
+        RAISE EXCEPTION 'Sink did not preserve the submitting role search_path';
+    END IF;
+    INSERT INTO audit_log (sink_key) VALUES (NEW.sink_key);
+    RETURN NEW;
+END $$;
+CREATE TRIGGER http_sink_audit AFTER INSERT ON public._http_sink_target
+    FOR EACH ROW EXECUTE FUNCTION public._http_sink_audit();
 \connect :sink_control_database
 
 DROP SCHEMA IF EXISTS "Sink.Schema" CASCADE;
