@@ -264,6 +264,83 @@ References at the pinned runtime:
 
 ## Upgrade & Migration
 
+### Separate requirement: guarded schema upgrades with safe refusal
+
+**Contract:** Replacing the binary preserves supported existing work without
+requiring a schema update. `ALTER EXTENSION pg_durable UPDATE` must either
+preserve that work or refuse before making incompatible changes, leaving the
+existing installation operational.
+
+The guard is a final safety gate, not a substitute for binary compatibility.
+Maintenance can deploy the new binary before the customer requests a schema
+update. By then, orchestration replay and the worker's automatic provider
+`ApplyAll` migrations may already have run. They must preserve old schemas,
+histories, queued activities and worker progress independently of this guard.
+Refusing to start, indefinitely blocking, or exiting the worker because supported
+old work exists is an outage, not a successful compatibility check. A genuinely
+incompatible binary requires a separately controlled deployment/migration path.
+
+Each migration must declare the capabilities or representations it removes or
+changes and the execution protocols that remain supported. Persist sufficient
+protocol/capability identity for new executions to make those requirements
+checkable. Do not infer provenance from `pg_extension.extversion`, the current
+binary, or only the currently executing node. Check dependencies of the whole
+remaining execution, including future children and loop continuations. Existing
+pre-1.0 histories without distinguishable provenance need conservative handling,
+not guessed version assignments.
+
+An additive migration that preserves every supported path should pass with live
+work present. A migration that would remove a capability still needed by
+non-terminal work must retain that capability, migrate it safely, or refuse.
+When safety depends on information that cannot be established, refuse with an
+explicit uncertainty diagnostic rather than treating unknown state as safe.
+This is a declared compatibility check, not a claim that arbitrary SQL or Rust
+changes can be automatically proven safe.
+
+The implementation must define a race-free coordination protocol:
+
+1. Establish a bounded migration barrier covering relevant admissions and worker
+   operations. Account for caller-owned transactions, independently committed
+   starts, child creation and continue-as-new; a count followed by DDL is unsafe.
+2. Inspect authoritative durable state, including pending starts, outstanding
+   children and work items, and reconcile uncertainty with the `df` control
+   plane. Neither a stale `df.instances.status` mirror nor the updating user's
+   RLS-filtered view may be used to conclude that no affected work exists.
+3. Reject incompatible or unknown dependencies with actionable diagnostics
+   identifying the target migration, required capability and affected work,
+   without exposing workflow payloads or bypassing diagnostic access controls.
+4. Otherwise apply the transactional migration and keep coordination valid
+   through commit. Specify cleanup on error, cancellation, transaction rollback
+   and rollback to a savepoint, including calls inside explicit transactions.
+
+Do not wait for functions to finish while holding the barrier: they may need
+blocked worker operations or an external signal to progress. Refuse promptly and
+ensure failure cleanup lets existing work continue. A read-only operator
+preflight can explain blockers, but cannot authorize a later update: the update
+must repeat the authoritative check under coordination. The guard must work
+against the supported old catalogs without first requiring the schema objects
+whose installation it is guarding.
+
+**Acceptance coverage (Scenario D: refused upgrade):** Starting from genuine
+old-binary checkpoints, exercise known incompatible and unknown-state cases
+using isolated test-only migration fixtures where necessary. Assert that refusal
+leaves the extension version, schema and protected persisted state unchanged by
+the attempted migration; the worker remains healthy; and the same pre-existing
+instances can resume, including signal waits and subsequent loop generations.
+Permit normal concurrent workflow progress rather than demanding byte-identical
+database contents. Exercise concurrent starts/children/continuations, inspection
+errors, barrier timeouts, cancellation, transaction/savepoint rollback, and a
+successful retry after blockers are safely resolved. Test admission/worker
+liveness as well as absence of corruption. C1/C2 must separately prove that the
+binary swap and provider migrations have not already broken work before the
+guard runs, and that compatible schema updates succeed with live work present.
+
+**SemVer constraint:** Gracefully refusing an incompatible upgrade does not make
+it compatible. Patch/minor releases must not require draining otherwise
+supported functions. Refusal is a safeguard for explicit major migrations,
+unsupported legacy states and unexpected compatibility conditions, not a way to
+weaken the 1.x guarantee.
+
 ### Existing infrastructure: keep it, but do not overclaim it
 
 `scripts/test-upgrade.sh` installs the candidate binary once, then reconstructs
@@ -347,7 +424,8 @@ For every supported PostgreSQL major:
 
 - PR gates: A/B1/B2 for the supported catalog set, C from the oldest promised
   replay baseline and the latest release, and frozen protocol/history fixtures
-  from every distinct released protocol family.
+  from every distinct released protocol family. Include Scenario D safe-refusal
+  and concurrency coverage for guarded migrations and coordination changes.
 - Release gates: direct source-to-candidate C coverage for every promised
   released source (or a documented, justified equivalence grouping), including
   previous binaries that created work on a still-older supported `df` schema.
@@ -368,14 +446,16 @@ previous release does not prove skipped-version upgrades.
 | 2. Capture immutable baselines | Add a supported-source/protocol manifest and old-runtime fixture producers under upgrade-test infrastructure; pin v0.2.8 artifacts and earlier diagnostic sources. | Fixtures are demonstrably produced by the declared released binaries, with checkpoint and expected-output provenance. |
 | 3. Implement real upgrade coverage | Extend `scripts/test-upgrade.sh` or add a separate cross-binary harness implementing C1/C2; strengthen A/B1/B2 and remove major-only source-selection assumptions. | 0.2.2+ catalog support still runs at version 1.0; v0.2.8 -> candidate resumes representative and boundary workflows with and without SQL update. Negative controls fail as expected. |
 | 4. Establish runtime versioning | Update `src/registry.rs`, orchestration organization, input codecs, relevant activities and shared helpers. Bootstrap without changing legacy history. | Old and new handler families coexist; child/CAN routing cannot accidentally upgrade a legacy execution; replay-neutral changes are demonstrated, not assumed. |
-| 5. Add contributor and automated gates | Update `.github/copilot-instructions.md`, `CONTRIBUTING.md`, a PR template and CI. Require compatibility classification for runtime/helper/schema/dependency/API/config changes; compare API/C bindings and released SQL against frozen baselines. | Every relevant PR supplies legacy/new-path evidence. Published SQL/fixtures cannot change silently. Catalog/handler source sets cannot shrink without explicit reviewed policy. |
-| 6. Enforce release decisions | Update `prompts/pg_durable-release.md`, package/release workflows and required checks. Tie compatibility evidence and version classification to the exact release commit/artifacts. | New features cannot ship as patches; incompatible 1.x changes are blocked. Every advertised PG major is blocking, or explicitly unsupported. Missing/empty/skipped compatibility matrices fail the release gate. |
-| 7. Prepare and publish 1.0 | Update Cargo package/lock metadata, target upgrade script, generated metadata/fixtures, changelog, user/API docs and release notes. | All gates pass on the exact candidate; supported old sources have an actionable runbook; version and package metadata agree. Tag/publish only after separate approval. |
+| 5. Guard schema upgrades and prove safe refusal | Define migration capability requirements, persisted execution identity and a bounded admission/worker coordination protocol; add the guard to new upgrade scripts and Scenario D to upgrade tests. | Compatible updates pass with live work; unsafe or unclassifiable updates refuse without changing protected state or stranding work. Concurrent admissions, inspection errors and transaction cleanup are covered. C1/C2 prove binary and provider compatibility independently. |
+| 6. Add contributor and automated gates | Update `.github/copilot-instructions.md`, `CONTRIBUTING.md`, a PR template and CI. Require compatibility classification for runtime/helper/schema/dependency/API/config changes; compare API/C bindings and released SQL against frozen baselines. | Every relevant PR supplies legacy/new-path evidence. Published SQL/fixtures cannot change silently. Catalog/handler source sets cannot shrink without explicit reviewed policy. |
+| 7. Enforce release decisions | Update `prompts/pg_durable-release.md`, package/release workflows and required checks. Tie compatibility evidence and version classification to the exact release commit/artifacts. | New features cannot ship as patches; incompatible 1.x changes are blocked. Every advertised PG major is blocking, or explicitly unsupported. Missing/empty/skipped compatibility matrices fail the release gate. |
+| 8. Prepare and publish 1.0 | Update Cargo package/lock metadata, target upgrade script, generated metadata/fixtures, changelog, user/API docs and release notes. | All gates pass on the exact candidate; supported old sources have an actionable runbook; version and package metadata agree. Tag/publish only after separate approval. |
 
-Steps 1-3 precede claims of continuity; step 4 must itself pass step 3. Steps 5-6
-make the policy durable beyond this work. If a runtime regression is discovered
-during preparation, fix it with compatibility dispatch/versioning instead of
-moving the baseline forward to excuse the regression.
+Steps 1-3 precede claims of continuity; step 4 must itself pass step 3. Step 5
+builds on that independently verified continuity, not the reverse. Steps 6-7 make
+the policy durable beyond this work. If a runtime regression is discovered during
+preparation, fix it with compatibility dispatch/versioning instead of moving the
+baseline forward to excuse the regression.
 
 The current CI makes PG18 test failures non-blocking, even though packages are
 published for PG17 and PG18. Either make PG18 a required compatibility gate
