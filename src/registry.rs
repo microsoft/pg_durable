@@ -18,6 +18,7 @@ pub fn create_activity_registry(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
     http_policy: Arc<HttpPolicy>,
+    identity_client: Arc<crate::managed_identity::TokenClient>,
 ) -> ActivityRegistry {
     let sql_semaphore = semaphore.clone();
     let http_semaphore = semaphore.clone();
@@ -29,6 +30,7 @@ pub fn create_activity_registry(
     let http_pool = pool.clone();
     let multipart_pool = pool.clone();
     let multipart_policy = http_policy.clone();
+    let multipart_identity_client = identity_client.clone();
 
     ActivityRegistry::builder()
         .register(activities::execute_sql::NAME, move |ctx: ActivityContext, input_json: String| {
@@ -60,13 +62,15 @@ pub fn create_activity_registry(
             let pool = http_pool.clone();
             let semaphore = http_semaphore.clone();
             let policy = http_policy.clone();
-            async move { activities::execute_http::execute(ctx, pool, semaphore, policy, config_json).await }
+            let identity_client = identity_client.clone();
+            async move { activities::execute_http::execute(ctx, pool, semaphore, policy, identity_client, config_json).await }
         })
         .register(activities::execute_multipart::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = multipart_pool.clone();
             let semaphore = multipart_semaphore.clone();
             let policy = multipart_policy.clone();
-            async move { activities::execute_multipart::execute(ctx, pool, semaphore, policy, config_json).await }
+            let identity_client = multipart_identity_client.clone();
+            async move { activities::execute_multipart::execute(ctx, pool, semaphore, policy, identity_client, config_json).await }
         })
         .build()
 }

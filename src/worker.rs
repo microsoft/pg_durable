@@ -108,6 +108,19 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
             |err| error!("invalid value for parameter \"pg_durable.http_allowed_domains\": {err}"),
         ),
     });
+    let configured_identity_endpoint = crate::MANAGED_IDENTITY_ENDPOINT
+        .get()
+        .unwrap_or_else(|| error!("pg_durable.managed_identity_endpoint must not be NULL"));
+    let identity_client = Arc::new(
+        crate::managed_identity::TokenClient::new(
+            configured_identity_endpoint
+                .to_str()
+                .unwrap_or_else(|_| error!("pg_durable.managed_identity_endpoint must be UTF-8")),
+        )
+        .unwrap_or_else(|err| {
+            error!("invalid value for parameter \"pg_durable.managed_identity_endpoint\": {err}")
+        }),
+    );
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -121,7 +134,7 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
     };
 
     rt.block_on(async {
-        run_duroxide_runtime(http_policy).await;
+        run_duroxide_runtime(http_policy, identity_client).await;
     });
 
     // All async cleanup (pool closes, runtime shutdown) is performed inside
@@ -135,7 +148,10 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
 }
 
 /// Run the duroxide runtime with proper shutdown handling
-async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
+async fn run_duroxide_runtime(
+    http_policy: Arc<HttpPolicy>,
+    identity_client: Arc<crate::managed_identity::TokenClient>,
+) {
     const WAIT_FOR_EXTENSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const EXTENSION_DROP_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const INIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -300,6 +316,7 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
             &mgmt_pool,
             &duroxide_schema,
             &http_policy,
+            &identity_client,
         )
         .await
         else {
@@ -684,6 +701,7 @@ async fn initialize_duroxide_runtime(
     mgmt_pool: &sqlx::PgPool,
     schema_name: &str,
     http_policy: &Arc<HttpPolicy>,
+    identity_client: &Arc<crate::managed_identity::TokenClient>,
 ) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
 
@@ -776,6 +794,7 @@ async fn initialize_duroxide_runtime(
             Arc::new(mgmt_pool.clone()),
             user_semaphore.clone(),
             http_policy.clone(),
+            identity_client.clone(),
         );
         let orchestrations = create_orchestration_registry();
 

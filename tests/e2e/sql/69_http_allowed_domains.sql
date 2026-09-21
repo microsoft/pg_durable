@@ -159,6 +159,10 @@ BEGIN
 END $$;
 DROP TABLE _test_http_security_reload;
 
+CREATE SERVER mi_custom_domains FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net', auth_scheme 'managed-identity');
+GRANT USAGE ON FOREIGN SERVER mi_custom_domains TO df_e2e_user;
+
 SET SESSION AUTHORIZATION df_e2e_user;
 
 CREATE TEMP TABLE _test_http_allowed_domains (
@@ -186,6 +190,17 @@ FROM (VALUES
     ('httpbingo.org', false)
 ) AS endpoints(hostname, allowed)
 CROSS JOIN (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS node_types(node_type);
+
+INSERT INTO _test_http_allowed_domains
+SELECT df.start(
+    CASE node_type
+        WHEN 'HTTP' THEN df.http(df.endpoint('mi_custom_domains', '/data'), 'GET')
+        ELSE df.http_multipart(df.endpoint('mi_custom_domains', '/upload'),
+            parts => '[{"name":"file","data_b64":"aGVsbG8="}]')
+    END,
+    'managed-identity-custom-domains-' || node_type
+), 'managed-identity', node_type, false
+FROM (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS node_types(node_type);
 
 DO $$
 DECLARE
@@ -236,5 +251,6 @@ END $$;
 
 DROP TABLE _test_http_allowed_domains;
 RESET SESSION AUTHORIZATION;
+DROP SERVER mi_custom_domains;
 
 SELECT 'TEST PASSED' AS result;

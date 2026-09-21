@@ -270,7 +270,7 @@ destination policy.
 HTTP constructors are not decoded as endpoint references. An endpoint value does
 not grant authority. Normal and multipart activities
 first check their existing HTTP function grant, then resolve the foreign server
-and the submitting role's user mapping on a connection authenticated as that role.
+and, when needed, the submitting role's user mapping on a connection authenticated as that role.
 Server `USAGE` is mandatory. Catalogs are in the control database selected by
 `pg_durable.database`, regardless of the workflow's SQL target. Caller-supplied
 database/identity fields in node JSON cannot select another credential catalog or
@@ -336,6 +336,43 @@ query insertion; response credentials remain outside this guarantee.
 
 See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings) for API
 examples and deferred general-composition cases.
+
+---
+
+### 3.8 Managed identity
+
+Managed-identity endpoints delegate a host identity, not a per-role catalog
+credential. Their validator requires a superuser for creation and alteration;
+activities independently require that the current server owner is a superuser.
+Changing ownership or demoting the owner therefore disables identity use. Server
+`USAGE` and HTTP function grants are checked for every attempt before consulting
+the token cache. As with other catalog changes, revocation does not retract a
+request already authorized and in flight.
+
+Only explicitly mapped public Azure hosts over HTTPS on port 443 are accepted.
+The resource is fixed by the destination host; neither server options nor workflow
+data can supply a free-form resource or scope. A user-assigned client UUID can be
+set only in the superuser-controlled server definition. Ordinary headers and
+secret bindings cannot override the endpoint's authorization, including before
+its token has been fetched. See [Managed Identity](../USER_GUIDE.md#managed-identity)
+for the exact host/resource mapping.
+
+After privilege, catalog, destination and binding checks, and after releasing the
+catalog connection, the HTTP activity obtains a token from its configured provider.
+The dedicated client may reach IMDS without weakening the request client's IP or
+domain controls. The provider URL is an administrator-controlled startup setting,
+not workflow data. It uses the public IMDS protocol, disables redirects and proxies,
+and bounds response size and acquisition time. There is no provider fallback.
+This protects against SQL-level redirection, not code already able to access host
+credentials or the PostgreSQL process's memory.
+
+Tokens are validated, marked sensitive and cached only inside the worker, keyed
+by identity and resource. Concurrent misses for the same key share one fetch;
+tokens within two minutes of expiry are not reused, and refresh failures never
+serve an old token. Provider responses, parse details and credential headers are
+not included in activity errors, logs or results. No separate durable token-fetch
+activity is scheduled. Responses from the destination retain the existing
+response policy, including its limitations around echoed secrets.
 
 ---
 
