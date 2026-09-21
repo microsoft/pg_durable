@@ -104,6 +104,51 @@ class ArgumentTests(unittest.TestCase):
             benchmark(parser().parse_args(["--clients", "1", "1"]))
 
 
+class SourceMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.benchmarks = self.root / "benchmarks"
+        (self.benchmarks / "workloads").mkdir(parents=True)
+        for relative in ("await.sql", "workloads/sql.sql"):
+            (self.benchmarks / relative).write_text((Path(__file__).resolve().parent / relative).read_text())
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True, capture_output=True)
+        (self.root / ".git" / "info" / "exclude").write_text("/benchmarks/\n")
+        self.output = self.root / "benchmark-output"
+        self.args = parser().parse_args([
+            "--clients", "1", "--transactions", "1", "--repeat", "1", "--warmup", "0",
+            "--output", str(self.output),
+        ])
+
+    def run_benchmark(self):
+        execute = subprocess.run
+
+        def run_command(command, **options):
+            if command == ["pgbench", "--version"]:
+                return subprocess.CompletedProcess(command, 0, "pgbench test version", "")
+            return execute(command, **options)
+
+        summary = {"transactions_per_second": 1, "latency_ms": {"p50": 1, "p95": 1}}
+        with patch("run.ROOT", self.benchmarks), patch("run.psql", side_effect=["{}", "", "[]", "[]", ""]):
+            with patch("run.run_pgbench", return_value=summary), patch("run.subprocess.run", side_effect=run_command):
+                with redirect_stdout(io.StringIO()):
+                    return benchmark(self.args)
+
+    def test_output_creation_does_not_mark_clean_source_dirty(self):
+        report = self.run_benchmark()
+        self.assertIs(report["source"]["dirty"], False)
+        self.assertTrue((self.output / "results.json").is_file())
+
+    def test_untracked_source_is_dirty_even_when_git_hides_untracked_files(self):
+        subprocess.run(
+            ["git", "-C", str(self.root), "config", "status.showUntrackedFiles", "no"],
+            check=True, capture_output=True,
+        )
+        (self.root / "untracked.sql").write_text("SELECT 1;\n")
+        self.assertIs(self.run_benchmark()["source"]["dirty"], True)
+
+
 class CleanupTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -320,7 +365,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_failed_workflow_is_not_reported_as_completed(self):
         script = self.root / "failed.sql"
-        script.write_text("SELECT df.start('SELECT 1 / 0', :'run_label') AS instance_id\n\\gset\n")
+        script.write_text("SELECT df.start('SELECT 1 / 0', ':run_label') AS instance_id\n\\gset\n")
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
             benchmark(self.arguments("--workload", str(script)))
         report = json.loads((self.output / "results.json").read_text())
@@ -334,7 +379,7 @@ class IntegrationTests(unittest.TestCase):
         sentinel = psql("SELECT df.start(df.sleep(60), 'benchmark-cleanup-sentinel');", {})
         self.addCleanup(psql, "SELECT df.cancel(:'sentinel');", {"sentinel": sentinel})
         script = self.root / "timeout.sql"
-        script.write_text("SELECT df.start(df.sleep(60), :'run_label') AS instance_id\n\\gset\n")
+        script.write_text("SELECT df.start(df.sleep(60), ':run_label') AS instance_id\n\\gset\n")
         started = time.monotonic()
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
             benchmark(self.arguments("--workload", str(script), "--timeout", "1", "--poll-ms", "5000"))
@@ -354,6 +399,10 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertEqual(report["runs"], [])
         self.assertIn("timed out", (self.output / "c1-r1.txt").read_text())
+        self.assertEqual(psql(
+            "SELECT lower(status) FROM df.instances WHERE label = :'label';",
+            {"label": f"pgd-bench-{report['run_id']}"},
+        ), "cancelled")
         self.assert_cleaned_up(report)
 
     @unittest.skipUnless(os.environ.get("PGD_BENCH_HTTP") == "1", "requires a development-only http-allow-all build")

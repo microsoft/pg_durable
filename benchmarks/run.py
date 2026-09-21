@@ -172,6 +172,11 @@ def benchmark(args):
     }
     run_id = uuid.uuid4().hex
     directory = (args.output or ROOT.parent / "target" / "benchmarks" / run_id).resolve()
+    dirty = git_output("status", "--porcelain", "--untracked-files=all")
+    source_metadata = {
+        "revision": git_output("rev-parse", "HEAD"),
+        "dirty": None if dirty is None else bool(dirty),
+    }
     directory.mkdir(parents=True, exist_ok=False)
     variables = {
         "bench_schema": f"pgd_bench_{run_id}",
@@ -181,7 +186,7 @@ def benchmark(args):
         "request_bytes": args.request_bytes,
     }
     script = directory / "workload.sql"
-    script.write_text(source + "\nSELECT :bench_schema.await(:'instance_id', :timeout_seconds, :poll_ms);\n")
+    script.write_text(source + "\nSELECT :bench_schema.await(':instance_id', :timeout_seconds, :poll_ms);\n")
     setup = (ROOT / "await.sql").read_text()
     (directory / "await.sql").write_text(setup)
     report = {
@@ -190,6 +195,7 @@ def benchmark(args):
         "started_at": datetime.now(timezone.utc).isoformat(),
         "label": args.label,
         "workload": str(workload.resolve()),
+        "source": source_metadata,
         "parameters": {key: value for key, value in vars(args).items() if key != "output"},
         "status": "running",
         "runs": [],
@@ -212,11 +218,6 @@ def benchmark(args):
             report["machine"] = {
                 "platform": platform.platform(), "python": platform.python_version(),
                 "logical_cpus": os.cpu_count(),
-            }
-            dirty = git_output("status", "--porcelain")
-            report["source"] = {
-                "revision": git_output("rev-parse", "HEAD"),
-                "dirty": None if dirty is None else bool(dirty),
             }
             fixture = None
             if use_http:
