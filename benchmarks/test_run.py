@@ -334,7 +334,7 @@ class IntegrationTests(unittest.TestCase):
         sentinel = psql("SELECT df.start(df.sleep(60), 'benchmark-cleanup-sentinel');", {})
         self.addCleanup(psql, "SELECT df.cancel(:'sentinel');", {"sentinel": sentinel})
         script = self.root / "timeout.sql"
-        script.write_text("SELECT df.start(df.sleep(60), ':run_label') AS instance_id\n\\gset\n")
+        script.write_text("SELECT df.start(df.sleep(60), :'run_label') AS instance_id\n\\gset\n")
         started = time.monotonic()
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
             benchmark(self.arguments("--workload", str(script), "--timeout", "1", "--poll-ms", "5000"))
