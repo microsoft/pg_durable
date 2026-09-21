@@ -11,7 +11,7 @@
 //! `reqwest::multipart::Form` built from base64-encoded parts) and the
 //! privilege target (`df.http_multipart` instead of `df.http`).
 //!
-//! Startup settings controlling outbound HTTP(S) are the same as for df.http —
+//! The startup `pg_durable.http_security` policy is the same as for df.http —
 //! see docs/http-security.md for the full security model.
 
 use base64::Engine as _;
@@ -108,6 +108,7 @@ pub async fn execute(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
     policy: Arc<HttpPolicy>,
+    identity_client: Arc<crate::managed_identity::TokenClient>,
     config_json: String,
 ) -> Result<String, String> {
     let config: MultipartConfig = serde_json::from_str(&config_json)
@@ -181,6 +182,7 @@ pub async fn execute(
         .resolve(&mut catalog, &mut prepared, config.headers.as_ref())
         .await?;
     catalog.close().await?;
+    prepared.authorize(&identity_client).await?;
     let safe_url = if config
         .secret_options
         .secret_bindings

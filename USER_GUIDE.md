@@ -953,8 +953,9 @@ no round trip through a table — see [Multipart Uploads](#multipart-uploads).
 ### Endpoint Credential Catalog
 
 Endpoint definitions use a handler-less `pg_durable_fdw`. A foreign server holds
-the base URL and authentication scheme; each caller's user mapping holds its
-credentials. There are no foreign tables or scans.
+the base URL and authentication scheme. Static credentials belong in each caller's
+user mapping; managed identity obtains tokens at execution time without a mapping.
+There are no foreign tables or scans.
 
 `auth_scheme` is required. `base_url` may be omitted only with `auth_scheme 'none'`
 for a server used solely for named secrets. A supplied base URL must be a nonempty,
@@ -968,10 +969,11 @@ a server does not authorize network access or bypass HTTP destination restrictio
 | `bearer` | None | `token` (without the `Bearer ` prefix) |
 | `header` | `header_name`, such as `x-api-key` | `header_value` |
 | `query` | None | `query_string`, already URL-encoded, optionally starting with `?` |
+| `managed-identity` | Optional `client_id` for a user-assigned identity | None |
 
-Unknown options and authentication schemes are rejected. `managed-identity` is
-reserved and rejected until its authentication controls are available. The
-catalog does not accept free-form `resource`, `scope` or `client_id` settings.
+Unknown options and authentication schemes are rejected. The catalog does not
+accept free-form `resource` or `scope` settings. `client_id` must be a UUID and is
+accepted only for managed identity.
 Header names cannot override routing, framing or multipart content type.
 Credential values must be nonempty and valid for their transport; validation
 errors do not echo those values. The mapping validator checks individual options;
@@ -1008,8 +1010,9 @@ Server owners can change the destination, so they must be trusted with credentia
 sent through their servers. Catalog masking does not prevent an owner from
 redirecting a subsequent request to a destination they control.
 
-The catalog resolver checks server `USAGE` and reads the authenticated caller's
-mapping on every attempt. Rotation affects the next lookup, not an already-sent
+The catalog resolver checks server `USAGE` on every attempt and reads the
+authenticated caller's mapping when the scheme requires it. Rotation affects the
+next lookup, not an already-sent
 request. Missing or inaccessible credentials fail without privileged fallback.
 Mappings also accept individual `secret.<key>` options for explicit bindings.
 These are separate from `token`, `header_value` and `query_string`; other option
@@ -1022,6 +1025,72 @@ their credential values; less privileged dumps can omit options. Literal values
 in provisioning DDL can appear in PostgreSQL logs. Treat backup/restore and
 credential provisioning accordingly. Dropping the extension with `CASCADE`
 also removes dependent servers and mappings.
+
+### Managed Identity
+
+Managed identity authenticates both normal and multipart endpoint requests with
+an Azure access token acquired inside the HTTP activity. Tokens are not exposed
+through `df.secret`, stored in user mappings, or added to workflow inputs or
+results. A destination can still return sensitive data, including an echoed
+request header; response contents are not automatically redacted.
+
+Only a superuser may create or alter a managed-identity endpoint, even when FDW
+creation has been delegated. Its owner must remain a superuser: execution fails
+after an ownership transfer to an ordinary role or demotion of the owner. Granting
+server `USAGE` delegates use of the selected identity, so restrict both this grant
+and the identity's Azure permissions. Each caller also needs the corresponding
+HTTP function grant.
+
+Provision the endpoint as a superuser, then use an existing application role:
+
+```sql
+CREATE SERVER storage_identity FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (base_url 'https://account.blob.core.windows.net',
+             auth_scheme 'managed-identity');
+GRANT USAGE ON FOREIGN SERVER storage_identity TO app_role;
+SELECT df.grant_usage('app_role', include_http => true);
+
+SET ROLE app_role;
+SELECT df.start(
+    df.http(df.endpoint('storage_identity', '/container/blob'), 'GET',
+            headers => '{"x-ms-version":"2023-11-03"}'),
+    'read-blob'
+);
+RESET ROLE;
+```
+
+Omit `client_id` to use the host's default identity. To select a user-assigned
+identity, add its application/client UUID as the server's `client_id` option.
+Workflow paths, headers, secret bindings and user mappings cannot select the
+identity, change its token resource, or replace its `Authorization` header.
+
+The destination must use HTTPS on port 443. Token resources are fixed by hostname:
+
+| Destination | Token resource |
+|---|---|
+| `*.openai.azure.com`, `*.cognitiveservices.azure.com`, `*.services.ai.azure.com` | `https://cognitiveservices.azure.com` |
+| `*.blob.core.windows.net`, `*.blob.storage.azure.net`, `*.dfs.core.windows.net`, `*.queue.core.windows.net`, `*.table.core.windows.net`, `*.file.core.windows.net` | `https://storage.azure.com/` |
+| `*.vault.azure.net` | `https://vault.azure.net` |
+| `management.azure.com` | `https://management.azure.com/` |
+
+Other hosts, custom application audiences and sovereign-cloud endpoints are not
+supported for managed identity. The HTTP security mode, domain allow-list and DNS/IP
+checks still apply. Some mapped hosts, including `management.azure.com`, require
+an explicit addition to `pg_durable.http_allowed_domains`.
+
+By default, tokens come from the public [Azure IMDS token endpoint](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token).
+No Azure connection is made at startup or for other authentication schemes.
+The same binary works outside Azure; selecting managed identity there requires an
+available token provider. There is no automatic CLI, environment-credential or
+alternate-provider fallback. If a deployment does not expose IMDS, its administrator
+must supply an IMDS-compatible adapter and configure the startup-only
+[`pg_durable.managed_identity_endpoint`](docs/api-reference.md#pg_durablemanaged_identity_endpoint).
+Such adapters are not included in the extension.
+
+The worker caches tokens by identity and resource, refreshes before expiry, and
+never returns a stale token after a refresh failure. Permissions and destination
+configuration are still checked on every request, including cache hits. Provider
+failures fail the activity without persisting the provider's response body.
 
 ### Calling an Endpoint
 

@@ -28,6 +28,9 @@ pub static HTTP_SECURITY: GucSetting<ssrf::HttpSecurity> =
 pub static HTTP_ALLOWED_DOMAINS: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(ssrf::DEFAULT_HTTP_ALLOWED_DOMAINS));
 
+pub static MANAGED_IDENTITY_ENDPOINT: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(managed_identity::DEFAULT_TOKEN_ENDPOINT));
+
 pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
@@ -74,6 +77,7 @@ pub mod client;
 pub mod dsl;
 pub mod endpoints;
 pub mod explain;
+pub mod managed_identity;
 pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
@@ -178,6 +182,17 @@ pub extern "C-unwind" fn _PG_init() {
             GucContext::Postmaster,
             GucFlags::default(),
             Some(ssrf::check_http_allowed_domains),
+            None,
+            None,
+        );
+        GucRegistry::define_string_guc_with_hooks(
+            c"pg_durable.managed_identity_endpoint",
+            c"IMDS-compatible token endpoint for managed identity authentication",
+            c"Used only for managed identity endpoints. HTTP is restricted to loopback or the IMDS address; HTTPS providers are also supported. Requires a server restart to change.",
+            &MANAGED_IDENTITY_ENDPOINT,
+            GucContext::Postmaster,
+            GucFlags::SUPERUSER_ONLY,
+            Some(managed_identity::check_token_endpoint),
             None,
             None,
         );
