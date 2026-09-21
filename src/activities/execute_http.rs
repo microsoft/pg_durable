@@ -153,6 +153,7 @@ pub(crate) async fn execute(
     route: &mut crate::origin::Route,
     semaphore: Arc<Semaphore>,
     policy: Arc<HttpPolicy>,
+    identity_client: Arc<crate::managed_identity::TokenClient>,
     config_json: String,
 ) -> Result<String, String> {
     let config: HttpConfig =
@@ -256,6 +257,7 @@ pub(crate) async fn execute(
         .resolve(&mut catalog, &mut prepared, config.headers.as_ref())
         .await?;
     catalog.close().await?;
+    prepared.authorize(&identity_client).await?;
     let safe_url = if config
         .secret_options
         .secret_bindings
