@@ -433,6 +433,7 @@ struct CatalogServer {
 pub struct EndpointCatalog<'a> {
     submitted_by: &'a str,
     database: Option<&'a str>,
+    origin: Option<&'a crate::origin::Origin>,
     semaphore: &'a Semaphore,
     connection: Option<sqlx::PgConnection>,
     permit: Option<SemaphorePermit<'a>>,
@@ -440,10 +441,16 @@ pub struct EndpointCatalog<'a> {
 }
 
 impl<'a> EndpointCatalog<'a> {
-    pub fn new(submitted_by: &'a str, semaphore: &'a Semaphore) -> Self {
+    pub(crate) fn new(
+        submitted_by: &'a str,
+        semaphore: &'a Semaphore,
+        database: Option<&'a str>,
+        origin: Option<&'a crate::origin::Origin>,
+    ) -> Self {
         Self {
             submitted_by,
-            database: None,
+            database,
+            origin,
             semaphore,
             connection: None,
             permit: None,
@@ -470,6 +477,18 @@ impl<'a> EndpointCatalog<'a> {
                 .execute(&mut connection)
                 .await
                 .map_err(|_| "Endpoint catalog search path setup failed")?;
+            if let Some(origin) = self.origin {
+                crate::origin::configure_metadata_transaction(&mut connection)
+                    .await
+                    .map_err(|_| "Endpoint origin timeout setup failed")?;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    crate::origin::lock_and_validate(&mut connection, origin),
+                )
+                .await
+                .map_err(|_| "Endpoint origin fence timed out")?
+                .map_err(|_| "Endpoint origin fence unavailable")?;
+            }
             let identity_matches: bool = sqlx::query_scalar(
                 "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
                     AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
@@ -875,8 +894,7 @@ mod tests {
         server: &str,
     ) -> Result<ResolvedEndpoint, String> {
         let semaphore = Semaphore::new(1);
-        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore);
-        catalog.database = database;
+        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore, database, None);
         let endpoint = catalog.resolve_endpoint(server).await?;
         catalog.close().await?;
         Ok(endpoint)
@@ -888,8 +906,7 @@ mod tests {
         server: &str,
     ) -> Result<BTreeMap<String, String>, String> {
         let semaphore = Semaphore::new(1);
-        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore);
-        catalog.database = database;
+        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore, database, None);
         let values = catalog.resolve_named_secrets(server).await?;
         catalog.close().await?;
         Ok(values)
@@ -925,8 +942,7 @@ mod tests {
             let occupied = crate::types::acquire_execution_permit(
                 &semaphore, std::time::Duration::from_secs(30), 1,
             ).await.unwrap();
-            let mut catalog = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
-            catalog.database = Some(&database);
+            let mut catalog = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, Some(&database), None);
             {
                 let waiting = catalog.load_server("endpoint_snapshot");
                 tokio::pin!(waiting);
@@ -990,8 +1006,7 @@ mod tests {
             catalog.close().await.unwrap();
             assert_eq!(semaphore.available_permits(), 1);
 
-            let mut next = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
-            next.database = Some(&database);
+            let mut next = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, Some(&database), None);
             let endpoint = next.resolve_endpoint("endpoint_snapshot").await.unwrap();
             assert_eq!(endpoint.base_url.as_str(), "https://new.azurewebsites.net/");
             assert!(matches!(endpoint.auth, EndpointAuth::Bearer(value) if value == "Bearer NEW_TOKEN"));
@@ -1001,7 +1016,7 @@ mod tests {
             assert_eq!(semaphore.available_permits(), 1);
 
             let occupied = semaphore.acquire().await.unwrap();
-            let mut unused = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
+            let mut unused = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, None, None);
             let mut request = prepare_request(&mut unused, None, "https://api.github.com/", None).await.unwrap();
             let options: crate::secrets::SecretOptions = serde_json::from_value(
                 serde_json::json!({"form_fields":{"literal":"$result"}}),
@@ -1013,8 +1028,7 @@ mod tests {
             drop(occupied);
 
             {
-                let mut failed = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
-                failed.database = Some(&database);
+                let mut failed = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, Some(&database), None);
                 assert!(failed.resolve_endpoint("endpoint_snapshot_missing").await.is_err());
             }
             assert_eq!(semaphore.available_permits(), 1);
@@ -1174,9 +1188,9 @@ mod tests {
             "#).execute(&pool).await.unwrap();
             for multipart in [false, true] {
                 for endpoint in [false, true] {
-                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_raw", endpoint, multipart).await.is_ok(), !endpoint);
-                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_typed", endpoint, multipart).await.is_ok(), endpoint);
-                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.is_err());
+                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_raw", endpoint, multipart, None).await.is_ok(), !endpoint);
+                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_typed", endpoint, multipart, None).await.is_ok(), endpoint);
+                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart, None).await.is_err());
                 }
             }
             sqlx::raw_sql(r#"
@@ -1188,7 +1202,7 @@ mod tests {
             "#).execute(&pool).await.unwrap();
             for multipart in [false, true] {
                 for endpoint in [false, true] {
-                    crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.unwrap();
+                    crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart, None).await.unwrap();
                 }
             }
             sqlx::raw_sql(r#"
@@ -1198,7 +1212,7 @@ mod tests {
             "#).execute(&pool).await.unwrap();
             for multipart in [false, true] {
                 for endpoint in [false, true] {
-                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.is_err());
+                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart, None).await.is_err());
                 }
             }
             sqlx::raw_sql(r#"

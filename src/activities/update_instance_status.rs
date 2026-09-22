@@ -21,6 +21,10 @@ pub async fn execute(
 
     let instance_id = input["instance_id"].as_str().ok_or("Missing instance_id")?;
     let status = input["status"].as_str().ok_or("Missing status")?;
+    let origin = crate::origin::Origin::from_engine_id(ctx.instance_id())?;
+    let mut tx = crate::origin::begin_metadata(&pool, origin.as_ref())
+        .await
+        .map_err(|error| format!("Instance status origin validation failed: {error}"))?;
 
     ctx.trace_info(format!(
         "Updating instance {instance_id} status to {status}"
@@ -47,8 +51,11 @@ pub async fn execute(
         .bind(instance_id)
     };
 
-    match query.execute(pool.as_ref()).await {
+    match query.execute(&mut *tx).await {
         Ok(_) => {
+            tx.commit()
+                .await
+                .map_err(|error| format!("Instance status commit failed: {error}"))?;
             ctx.trace_info(format!("Instance {instance_id} status updated to {status}"));
             Ok(format!("Status updated to {status}"))
         }

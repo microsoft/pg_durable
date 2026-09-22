@@ -19,7 +19,6 @@ use duroxide::ActivityContext;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
 use crate::activities::execute_http::{check_http_privilege, http_client};
@@ -54,9 +53,9 @@ fn decode_part_data(data_b64: &str) -> Result<Vec<u8>, base64::DecodeError> {
 }
 
 /// Execute a multipart/form-data HTTP request and return the response as JSON
-pub async fn execute(
+pub(crate) async fn execute(
     ctx: ActivityContext,
-    pool: Arc<PgPool>,
+    route: &mut crate::origin::Route,
     semaphore: Arc<Semaphore>,
     allowed_domains: Arc<DomainAllowlist>,
     config_json: String,
@@ -81,18 +80,30 @@ pub async fn execute(
     //   3. DNS resolver (SsrfSafeResolver): catches DNS rebinding.
 
     // --- Privilege check (Layer 0) ---
-    check_http_privilege(&pool, audit_user, config.endpoint.is_some(), true)
-        .await
-        .inspect_err(|_| {
-            ctx.trace_info(format!(
-                "HTTP_MULTIPART BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
-            ));
-        })?;
+    check_http_privilege(
+        &route.pool,
+        audit_user,
+        config.endpoint.is_some(),
+        true,
+        route.origin.as_ref(),
+    )
+    .await
+    .inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP_MULTIPART BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
+        ));
+    })?;
 
     config
         .secret_options
         .validate(false, &config.method, true, config.headers.as_ref())?;
-    let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
+    ctx.trace_info("HTTP_MULTIPART authorization checked; preparing request");
+    let mut catalog = crate::endpoints::EndpointCatalog::new(
+        audit_user,
+        &semaphore,
+        route.database.as_deref(),
+        route.origin.as_ref(),
+    );
     let mut prepared = crate::endpoints::prepare_request(
         &mut catalog,
         config.endpoint.as_deref(),
@@ -209,6 +220,14 @@ pub async fn execute(
     }
 
     // Execute request
+    check_http_privilege(
+        &route.pool,
+        audit_user,
+        config.endpoint.is_some(),
+        true,
+        route.origin.as_ref(),
+    )
+    .await?;
     let response = request.multipart(form).send().await.map_err(|e| {
         let e = e.without_url();
         let err_string = e.to_string();

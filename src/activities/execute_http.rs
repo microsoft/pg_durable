@@ -35,7 +35,11 @@ pub(crate) async fn check_http_privilege(
     submitted_by: &str,
     endpoint: bool,
     multipart: bool,
+    origin: Option<&crate::origin::Origin>,
 ) -> Result<(), String> {
+    let mut tx = crate::origin::begin_metadata(pool, origin)
+        .await
+        .map_err(|error| format!("HTTP origin validation failed: {error}"))?;
     let signature = match (multipart, endpoint) {
         (false, false) => "df.http(text,text,text,jsonb,integer)",
         (false, true) => "df.http(df.http_endpoint,text,text,jsonb,integer)",
@@ -54,9 +58,12 @@ pub(crate) async fn check_http_privilege(
     )
     .bind(submitted_by)
     .bind(signature)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;
+    tx.rollback()
+        .await
+        .map_err(|error| format!("HTTP privilege check close failed: {error}"))?;
 
     match has_priv {
         Some(true) => Ok(()),
@@ -120,9 +127,9 @@ pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
 }
 
 /// Execute an HTTP request and return the response as JSON
-pub async fn execute(
+pub(crate) async fn execute(
     ctx: ActivityContext,
-    pool: Arc<PgPool>,
+    route: &mut crate::origin::Route,
     semaphore: Arc<Semaphore>,
     allowed_domains: Arc<DomainAllowlist>,
     config_json: String,
@@ -162,13 +169,19 @@ pub async fn execute(
     // differential can separate what we approve from what we request.
 
     // --- Privilege check (Layer 0): submitted_by must have EXECUTE on df.http() ---
-    check_http_privilege(&pool, audit_user, config.endpoint.is_some(), false)
-        .await
-        .inspect_err(|_| {
-            ctx.trace_info(format!(
-                "HTTP BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
-            ));
-        })?;
+    check_http_privilege(
+        &route.pool,
+        audit_user,
+        config.endpoint.is_some(),
+        false,
+        route.origin.as_ref(),
+    )
+    .await
+    .inspect_err(|_| {
+        ctx.trace_info(format!(
+            "HTTP BLOCKED (privilege) url={safe_url} submitted_by={audit_user}"
+        ));
+    })?;
 
     config.secret_options.validate(
         config.body.is_some(),
@@ -176,7 +189,13 @@ pub async fn execute(
         false,
         config.headers.as_ref(),
     )?;
-    let mut catalog = crate::endpoints::EndpointCatalog::new(audit_user, &semaphore);
+    ctx.trace_info("HTTP authorization checked; preparing request");
+    let mut catalog = crate::endpoints::EndpointCatalog::new(
+        audit_user,
+        &semaphore,
+        route.database.as_deref(),
+        route.origin.as_ref(),
+    );
     let mut prepared = crate::endpoints::prepare_request(
         &mut catalog,
         config.endpoint.as_deref(),
@@ -279,6 +298,14 @@ pub async fn execute(
     }
 
     // Execute request
+    check_http_privilege(
+        &route.pool,
+        audit_user,
+        config.endpoint.is_some(),
+        false,
+        route.origin.as_ref(),
+    )
+    .await?;
     let response = request.send().await.map_err(|e| {
         let e = e.without_url();
         let err_string = e.to_string();

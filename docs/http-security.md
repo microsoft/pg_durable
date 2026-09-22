@@ -109,6 +109,10 @@ To close this gap, `execute_http` checks at execution time whether the
 `df.http()`.  If the role's grant has been revoked since the node was created,
 and no other effective grant remains, the next execution attempt fails before
 sending a request. Revocation does not cancel a request already in progress.
+The check is repeated immediately before sending, after credential-catalog waits
+and preparation. Source OID/installation UUID is validated with that final
+privilege read. The check-to-send interval is not atomic with source DROP or
+privilege revocation.
 
 ### 3.2 Mechanism
 
@@ -236,8 +240,8 @@ HTTP constructors are not decoded as endpoint references. An endpoint value does
 not grant authority. Normal and multipart activities
 first check their existing HTTP function grant, then resolve the foreign server
 and the submitting role's user mapping on a connection authenticated as that role.
-Server `USAGE` is mandatory. Catalogs are in the control database selected by
-`pg_durable.database`, regardless of the workflow's SQL target. Caller-supplied
+Server `USAGE` is mandatory. Catalogs are in the trusted origin installation
+(control for legacy control-origin work), regardless of the SQL target. Caller-supplied
 database/identity fields in node JSON cannot select another credential catalog or
 override the trusted submitting identity.
 
@@ -248,6 +252,10 @@ catalog updates from producing mixed destination/credential generations. The
 caller connection acquires the same admission slot as SQL execution and is closed,
 releasing the slot, before network I/O. Requests without catalog references open
 no caller connection.
+Satellite catalog identity is validated on that same connection after admission
+and installation-lock acquisition. The snapshot remains consistent for the
+attempt; the final source/HTTP privilege check does not reread a subset of its
+secrets or change their snapshot semantics.
 
 Server owners must be trusted with credentials sent through their endpoints:
 changing a destination can redirect subsequent authenticated requests, even when
@@ -282,7 +290,7 @@ not a restriction on which destination can receive it.
 
 Activities validate field shapes, reject conflicts with ordinary fields and
 endpoint authentication, and resolve each referenced server under `submitted_by`
-in the request's control-database snapshot after destination policy checks.
+in the request's origin-database snapshot after destination policy checks.
 Server `USAGE` and a caller-owned mapping are
 required even for `auth_scheme 'none'`. With that scheme, a named-secret-only
 server may omit `base_url`; endpoint requests fail without it. A supplied URL

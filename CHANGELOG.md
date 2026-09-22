@@ -8,7 +8,18 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 The changes below landed after the v0.2.8 tag and are not part of that release.
 
+Runtime shutdown and server-side quiescence remain separate known limitations:
+see [deferred guarantees](docs/multi-database-installation.md#release-blockers).
+
 ### Added
+
+- **Multi-database installations:** install the shared control runtime first,
+  then satellites with local `df` metadata, grants, RLS, endpoint catalogs and
+  secret mappings. SQL defaults to its origin unless explicitly targeted.
+  Satellite engine IDs include database OID and installation UUID; legacy
+  control IDs and recorded payloads remain unchanged.
+- **Bounded origin connections:** `pg_durable.max_origin_connections` defaults
+  to `12`. Active routes reserve one metadata slot; idle satellites retain no pool.
 
 - **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
 
@@ -32,7 +43,7 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   named-header and query-string endpoint authentication. FDW creation authority
   is delegated with native grants. User mappings remain plaintext and may be
   included in dumps; `DROP EXTENSION ... CASCADE` removes dependent endpoints
-  and mappings. Catalogs live in the control database independently of SQL targets;
+  and mappings. Catalogs live in the origin database independently of SQL targets;
   each request uses a consistent caller-authenticated snapshot and shares the SQL
   connection budget, releasing its connection before HTTP I/O.
 - **HTTP options helper (#380):** adds `df.with_http_options(fut, options)` for
@@ -43,6 +54,19 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   upgrade.
 
 ### Changed
+
+- **Satellite admission and DDL:** metadata validation/access share short
+  transactions, and SQL retains autocommit for all routes. Source identity is
+  refreshed after resource waits and before SQL/HTTP dispatch; HTTP authorization
+  is refreshed after credential preparation. Extension-managed DROP protection
+  covers short metadata operations, not arbitrary activities; normal PostgreSQL
+  locks still apply. DROP is not a cancellation
+  or quiescence acknowledgment.
+
+- **Independent-start scope:** `transaction_mode => 'new'` launches in the
+  caller's database, with `max_new_transaction_starts` enforced per database.
+- **Shared metrics:** satellite `df.metrics()` exposes all-engine totals.
+  Granting `with_grant => true` includes this access and local delegation.
 
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one
   process-wide client and connection pool, with timeouts applied per request.

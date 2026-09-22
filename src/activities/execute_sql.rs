@@ -189,6 +189,16 @@ pub async fn execute(
     semaphore: Arc<Semaphore>,
     input_json: String,
 ) -> Result<String, String> {
+    execute_in_origin(ctx, semaphore, input_json, None, None).await
+}
+
+pub(crate) async fn execute_in_origin(
+    ctx: ActivityContext,
+    semaphore: Arc<Semaphore>,
+    input_json: String,
+    origin: Option<crate::origin::Origin>,
+    mut source: Option<&mut crate::origin::Route>,
+) -> Result<String, String> {
     let input: ExecuteSqlInput =
         serde_json::from_str(&input_json).map_err(|e| format!("Invalid execute_sql input: {e}"))?;
 
@@ -216,13 +226,34 @@ pub async fn execute(
     )
     .await?;
 
+    if let Some(source) = source.as_mut() {
+        source.validate().await?;
+    }
     let mut conn = connect_as_user(&input.submitted_by, input.database.as_deref()).await?;
+    if let Some(source) = source.as_mut() {
+        source.validate().await?;
+    }
 
+    if let Some(origin) = origin {
+        crate::origin::validate_execution_connection(&mut conn, &origin).await?;
+    }
+    if let Some(source) = source {
+        source.validate().await?;
+    }
+
+    execute_query(&ctx, &mut conn, &input.query).await
+}
+
+async fn execute_query(
+    ctx: &ActivityContext,
+    conn: &mut sqlx::PgConnection,
+    query: &str,
+) -> Result<String, String> {
     // SECURITY: Dynamic SQL is intentional. The query is authored by the submitting
     // user via df.sql() and executes under their own role via connect_as_user().
     // This is equivalent to the user running SQL directly.
     // See docs/spec-security-model.md §4 for the full threat model.
-    match sqlx::query(&input.query).fetch_all(&mut conn).await {
+    match sqlx::query(query).fetch_all(conn).await {
         Ok(rows) => {
             let mut result_rows: Vec<serde_json::Value> = Vec::new();
             for row in &rows {

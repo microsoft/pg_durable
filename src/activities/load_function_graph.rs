@@ -135,6 +135,9 @@ fn sqlstate_of(error: &sqlx::Error) -> Option<String> {
 /// (pool exhaustion, IO/TLS/protocol failures - i.e. connection failures that
 /// never reached the server) are treated as transient.
 fn classify_sqlx_error(error: &sqlx::Error) -> ErrorClass {
+    if matches!(error, sqlx::Error::Protocol(message) if message == crate::origin::REPLACED) {
+        return ErrorClass::Permanent;
+    }
     match sqlstate_of(error) {
         Some(code) => classify_sqlstate(&code),
         None => ErrorClass::Transient,
@@ -167,8 +170,9 @@ const INSTANCE_QUERY: &str = "SELECT root_node, r.rolname AS submitted_by
 /// rollback vs. commit distinction is not observable).
 async fn begin_probe_tx(
     pool: &PgPool,
-) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    origin: Option<&crate::origin::Origin>,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, sqlx::Error> {
+    let mut tx = crate::origin::begin_metadata(pool, origin).await?;
     sqlx::query(&format!(
         "SET LOCAL statement_timeout = '{PROBE_STATEMENT_TIMEOUT_MS}ms'"
     ))
@@ -184,9 +188,10 @@ async fn begin_probe_tx(
 
 async fn find_visible_instance(
     pool: &PgPool,
+    origin: Option<&crate::origin::Origin>,
     instance_id: &str,
 ) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
-    let mut tx = begin_probe_tx(pool).await?;
+    let mut tx = begin_probe_tx(pool, origin).await?;
     let row = sqlx::query(INSTANCE_QUERY)
         .bind(instance_id)
         .fetch_optional(&mut *tx)
@@ -201,9 +206,10 @@ async fn find_visible_instance(
 /// PostgreSQL rather than pinning a management connection.
 async fn probe_origin_transaction_status(
     pool: &PgPool,
+    origin: Option<&crate::origin::Origin>,
     origin_xid: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    let mut tx = begin_probe_tx(pool).await?;
+    let mut tx = begin_probe_tx(pool, origin).await?;
     let status = sqlx::query_scalar("SELECT pg_catalog.pg_xact_status($1::text::xid8)::text")
         .bind(origin_xid)
         .fetch_one(&mut *tx)
@@ -214,8 +220,12 @@ async fn probe_origin_transaction_status(
 
 /// Probe whether the origin transaction is visible in a fresh snapshot, under
 /// server-enforced probe timeouts (see `begin_probe_tx`).
-async fn probe_snapshot_visible(pool: &PgPool, origin_xid: &str) -> Result<bool, sqlx::Error> {
-    let mut tx = begin_probe_tx(pool).await?;
+async fn probe_snapshot_visible(
+    pool: &PgPool,
+    origin: Option<&crate::origin::Origin>,
+    origin_xid: &str,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = begin_probe_tx(pool, origin).await?;
     let visible = sqlx::query_scalar::<_, bool>(
         "SELECT pg_catalog.pg_visible_in_snapshot($1::text::xid8, pg_catalog.pg_current_snapshot())",
     )
@@ -237,6 +247,7 @@ async fn probe_snapshot_visible(pool: &PgPool, origin_xid: &str) -> Result<bool,
 /// avoids depending on the connection's default transaction characteristics).
 async fn fetch_node_rows(
     pool: &PgPool,
+    origin: Option<&crate::origin::Origin>,
     instance_id: &str,
 ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
     const NODES_QUERY: &str = r#"SELECT n.id, n.node_type, n.query, n.result_name,
@@ -247,7 +258,7 @@ async fn fetch_node_rows(
         LEFT JOIN pg_catalog.pg_roles r ON r.oid = n.submitted_by::oid
         WHERE n.instance_id = $1"#;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::origin::begin_metadata(pool, origin).await?;
     sqlx::query(&format!(
         "SET LOCAL statement_timeout = '{GRAPH_LOAD_STATEMENT_TIMEOUT_MS}ms'"
     ))
@@ -273,6 +284,7 @@ async fn fetch_node_rows(
 async fn load_visible_graph(
     ctx: &ActivityContext,
     pool: &PgPool,
+    origin: Option<&crate::origin::Origin>,
     instance_id: String,
     instance_row: sqlx::postgres::PgRow,
 ) -> Result<String, LoadGraphError> {
@@ -305,7 +317,7 @@ async fn load_visible_graph(
         }
     }
 
-    let rows = fetch_node_rows(pool, &instance_id)
+    let rows = fetch_node_rows(pool, origin, &instance_id)
         .await
         .map_err(|e| classified_load_graph_error("Failed to load function nodes", e))?;
 
@@ -357,6 +369,7 @@ pub async fn execute(
     pool: Arc<PgPool>,
     instance_id: String,
 ) -> Result<String, String> {
+    let origin = crate::origin::Origin::from_engine_id(ctx.instance_id())?;
     ctx.trace_info(format!(
         "Loading function graph for instance: {instance_id}"
     ));
@@ -364,7 +377,7 @@ pub async fn execute(
     // Retry loop: wait for instance data to appear
     let start_time = std::time::Instant::now();
     let instance_row = loop {
-        match find_visible_instance(pool.as_ref(), &instance_id).await {
+        match find_visible_instance(pool.as_ref(), origin.as_ref(), &instance_id).await {
             Ok(Some(row)) => break row,
             Ok(None) => {
                 let elapsed = start_time.elapsed();
@@ -392,9 +405,15 @@ pub async fn execute(
         }
     };
 
-    load_visible_graph(&ctx, pool.as_ref(), instance_id, instance_row)
-        .await
-        .map_err(LoadGraphError::into_message)
+    load_visible_graph(
+        &ctx,
+        pool.as_ref(),
+        origin.as_ref(),
+        instance_id,
+        instance_row,
+    )
+    .await
+    .map_err(LoadGraphError::into_message)
 }
 
 fn serialize_probe(probe: &TransactionGraphProbe) -> Result<String, String> {
@@ -467,6 +486,7 @@ pub async fn probe_transaction(
     pool: Arc<PgPool>,
     input_json: String,
 ) -> Result<String, String> {
+    let origin = crate::origin::Origin::from_engine_id(ctx.instance_id())?;
     let input: TransactionAwareLoadInput = serde_json::from_str(&input_json)
         .map_err(|e| format!("Invalid transaction-aware graph probe input: {e}"))?;
     if input.origin_xid.parse::<u64>().is_err() {
@@ -483,7 +503,7 @@ pub async fn probe_transaction(
 
     let visible = match tokio::time::timeout(
         TRANSACTION_PROBE_QUERY_TIMEOUT,
-        find_visible_instance(pool.as_ref(), &input.instance_id),
+        find_visible_instance(pool.as_ref(), origin.as_ref(), &input.instance_id),
     )
     .await
     {
@@ -502,7 +522,13 @@ pub async fn probe_transaction(
         Ok(Some(row)) => {
             let loaded = match tokio::time::timeout(
                 GRAPH_LOAD_QUERY_TIMEOUT,
-                load_visible_graph(&ctx, pool.as_ref(), input.instance_id.clone(), row),
+                load_visible_graph(
+                    &ctx,
+                    pool.as_ref(),
+                    origin.as_ref(),
+                    input.instance_id.clone(),
+                    row,
+                ),
             )
             .await
             {
@@ -532,7 +558,7 @@ pub async fn probe_transaction(
 
     let transaction_status_query = tokio::time::timeout(
         TRANSACTION_PROBE_QUERY_TIMEOUT,
-        probe_origin_transaction_status(pool.as_ref(), &input.origin_xid),
+        probe_origin_transaction_status(pool.as_ref(), origin.as_ref(), &input.origin_xid),
     )
     .await;
     let transaction_status: Option<String> = match transaction_status_query {
@@ -562,7 +588,7 @@ pub async fn probe_transaction(
             // misclassified as CommittedMissing during this narrow window.
             let snapshot_visible_query = tokio::time::timeout(
                 TRANSACTION_PROBE_QUERY_TIMEOUT,
-                probe_snapshot_visible(pool.as_ref(), &input.origin_xid),
+                probe_snapshot_visible(pool.as_ref(), origin.as_ref(), &input.origin_xid),
             )
             .await;
             let snapshot_visible = match snapshot_visible_query {
@@ -602,7 +628,7 @@ pub async fn probe_transaction(
             // genuine CommittedMissing, not a visibility race.
             let visible = match tokio::time::timeout(
                 TRANSACTION_PROBE_QUERY_TIMEOUT,
-                find_visible_instance(pool.as_ref(), &input.instance_id),
+                find_visible_instance(pool.as_ref(), origin.as_ref(), &input.instance_id),
             )
             .await
             {
@@ -620,7 +646,13 @@ pub async fn probe_transaction(
                 Ok(Some(row)) => {
                     let loaded = match tokio::time::timeout(
                         GRAPH_LOAD_QUERY_TIMEOUT,
-                        load_visible_graph(&ctx, pool.as_ref(), input.instance_id.clone(), row),
+                        load_visible_graph(
+                            &ctx,
+                            pool.as_ref(),
+                            origin.as_ref(),
+                            input.instance_id.clone(),
+                            row,
+                        ),
                     )
                     .await
                     {
@@ -678,6 +710,14 @@ pub async fn probe_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaced_origin_is_not_a_transient_graph_probe_failure() {
+        assert_eq!(
+            classify_sqlx_error(&sqlx::Error::Protocol(crate::origin::REPLACED.into())),
+            ErrorClass::Permanent
+        );
+    }
 
     #[test]
     fn transaction_probe_input_round_trips() {
