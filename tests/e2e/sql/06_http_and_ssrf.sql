@@ -4,7 +4,7 @@
 -- Merged from: 18_http, 19_github_api, 36_ssrf_protection
 -- Tests: HTTP GET/POST/headers/sequence/parallel/4xx/delay/vars,
 --        GitHub API with loop and vars, SSRF protection for all blocked/allowed cases
--- Requires: pg_durable built with --features http (standard phase uses http-allow-test-domains)
+-- Requires: restricted HTTP mode with the Azure/GitHub defaults and httpbingo.org allowed.
 SET SESSION AUTHORIZATION df_e2e_user;
 
 -- === Test: 18_http ===
@@ -912,7 +912,7 @@ END $$;
 
 DROP TABLE _test_ssrf2;
 
--- Test 2c: Restricted builds reject plaintext HTTP at DSL time for both APIs
+-- Test 2c: Restricted mode rejects plaintext HTTP at DSL time for both APIs
 DO $$
 DECLARE
     caught_http BOOLEAN := false;
@@ -936,12 +936,12 @@ BEGIN
 
     IF NOT caught_http THEN
         RAISE EXCEPTION
-            'TEST FAILED: df.http() should require HTTPS in restricted builds';
+            'TEST FAILED: df.http() should require HTTPS in restricted mode';
     END IF;
 
     IF NOT caught_multipart THEN
         RAISE EXCEPTION
-            'TEST FAILED: df.http_multipart() should require HTTPS in restricted builds';
+            'TEST FAILED: df.http_multipart() should require HTTPS in restricted mode';
     END IF;
 
     RAISE NOTICE 'TEST PASSED: restricted_http_requires_https_at_dsl_time';

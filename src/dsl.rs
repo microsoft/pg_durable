@@ -649,13 +649,14 @@ fn http_node(
     timeout_seconds: i32,
     endpoint: Option<&str>,
 ) -> String {
-    // Fail early when no http feature is compiled in — df.nodes can be inserted
+    // Fail early when HTTP is disabled — df.nodes can be inserted
     // by hand, so we also enforce this at execution time, but blocking at DSL
     // construction time gives a clearer error to developers.
-    if !crate::ssrf::http_enabled() {
+    let security = crate::HTTP_SECURITY.get();
+    if security == crate::ssrf::HttpSecurity::Disabled {
         pgrx::error!(
-            "df.http() is disabled. Rebuild with the 'http-allow-azure-domains' \
-             Cargo feature to enable outbound HTTP requests."
+            "df.http() is disabled. Configure pg_durable.http_security = 'restricted' \
+             and restart the server to enable outbound HTTP requests."
         );
     }
 
@@ -665,7 +666,7 @@ fn http_node(
     // Skip the check when the URL contains variable placeholders ({...}) —
     // substitution happens at execution time so the scheme is not yet known.
     if endpoint.is_none() && !url.contains('{') {
-        if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
+        if let Err(e) = crate::ssrf::precheck_url_scheme(url, security) {
             pgrx::error!("{}", e);
         }
     }
@@ -769,18 +770,19 @@ fn http_multipart_node(
     timeout_seconds: i32,
     endpoint: Option<&str>,
 ) -> String {
-    // Fail early when no http feature is compiled in — same guard as df.http.
-    if !crate::ssrf::http_enabled() {
+    // Fail early when HTTP is disabled — same guard as df.http.
+    let security = crate::HTTP_SECURITY.get();
+    if security == crate::ssrf::HttpSecurity::Disabled {
         pgrx::error!(
-            "df.http_multipart() is disabled. Rebuild with the 'http-allow-azure-domains' \
-             Cargo feature to enable outbound HTTP requests."
+            "df.http_multipart() is disabled. Configure pg_durable.http_security = 'restricted' \
+             and restart the server to enable outbound HTTP requests."
         );
     }
 
     // Validate URL scheme at DSL time (skip when URL contains variable
     // placeholders — substitution happens at execution time). Mirrors df.http.
     if endpoint.is_none() && !url.contains('{') {
-        if let Err(e) = crate::ssrf::precheck_url_scheme(url) {
+        if let Err(e) = crate::ssrf::precheck_url_scheme(url, security) {
             pgrx::error!("{}", e);
         }
     }

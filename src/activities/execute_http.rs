@@ -3,12 +3,9 @@
 
 //! ExecuteHTTP activity - makes HTTP requests
 //!
-//! Cargo features control the outbound HTTP(S) security tier:
-//! - `http-allow-azure-domains`: configurable domains, defaulting to Azure
-//!   endpoints + api.github.com (+ IP blocklist, no redirects).
-//! - `http-allow-test-domains`: same, also defaulting to allow httpbingo.org.
-//! - `http-allow-all`: no restrictions (development only).
-//! - *(none)*: all HTTP calls fail at execution time.
+//! `pg_durable.http_security` selects disabled (default), restricted, or
+//! unrestricted outbound HTTP(S) access at server startup. The worker passes
+//! an immutable policy snapshot to both HTTP activities.
 //!
 //! See docs/http-security.md for the full security model.
 
@@ -19,7 +16,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
-use crate::ssrf::DomainAllowlist;
+use crate::ssrf::{HttpPolicy, HttpSecurity};
 use crate::types::HttpConfig;
 
 /// Activity name for registration and scheduling
@@ -81,21 +78,23 @@ pub(crate) async fn check_http_privilege(
 /// would follow it without calling our DNS resolver (since the target is an IP
 /// literal).
 ///
-/// Restricted builds also disable environment/system proxies. A proxy resolves
+/// Restricted mode also disables environment/system proxies. A proxy resolves
 /// the destination itself, which would bypass `SsrfSafeResolver`'s check of the
 /// address reqwest ultimately reaches.
-fn build_client() -> Result<reqwest::Client, String> {
+fn build_client(security: HttpSecurity) -> Result<reqwest::Client, String> {
+    if security == HttpSecurity::Disabled {
+        return Err("Blocked: outbound HTTP requests are disabled.".to_string());
+    }
     let builder = reqwest::Client::builder()
         .user_agent(concat!("pg_durable/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none());
 
-    // Inject the SSRF-safe DNS resolver unless http-allow-all removes all guards.
-    #[cfg(not(feature = "http-allow-all"))]
-    let builder = {
+    let builder = if security == HttpSecurity::Restricted {
         use crate::ssrf::{SsrfSafeResolver, SystemResolver};
-        use std::sync::Arc;
         let resolver = SsrfSafeResolver::wrapping(Arc::new(SystemResolver));
         builder.no_proxy().dns_resolver(Arc::new(resolver))
+    } else {
+        builder
     };
 
     builder
@@ -103,18 +102,26 @@ fn build_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to create HTTP client: {e}"))
 }
 
-static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+static RESTRICTED_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+static UNRESTRICTED_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
-/// The process-wide HTTP client, built on first use.
+/// The process-wide HTTP client for this security mode, built on first use.
 ///
 /// The client owns reqwest's connection pool, so building it per request meant
 /// a fresh TCP and TLS handshake every time. Caching it keeps connections alive
 /// across requests and builds the SSRF-safe resolver and TLS connector once.
 /// Construction errors are also cached until the worker process restarts;
 /// request-time failures do not affect the cached client.
-pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
-    HTTP_CLIENT
-        .get_or_init(build_client)
+pub(crate) fn http_client(security: HttpSecurity) -> Result<&'static reqwest::Client, String> {
+    let client = match security {
+        HttpSecurity::Disabled => {
+            return Err("Blocked: outbound HTTP requests are disabled.".to_string());
+        }
+        HttpSecurity::Restricted => &RESTRICTED_HTTP_CLIENT,
+        HttpSecurity::Unrestricted => &UNRESTRICTED_HTTP_CLIENT,
+    };
+    client
+        .get_or_init(|| build_client(security))
         .as_ref()
         .map_err(|e| e.clone())
 }
@@ -124,7 +131,7 @@ pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
-    allowed_domains: Arc<DomainAllowlist>,
+    policy: Arc<HttpPolicy>,
     config_json: String,
 ) -> Result<String, String> {
     let config: HttpConfig =
@@ -197,15 +204,15 @@ pub async fn execute(
         safe_url
     };
 
-    // --- Scheme validation (always enforced, regardless of feature flag) ---
-    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
+    // --- Scheme validation (always enforced) ---
+    crate::ssrf::validate_scheme(request_url, policy.security).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Endpoint allow-list (blocks all bare IPs + unlisted domains) ---
-    crate::ssrf::validate_allowlist(request_url, &allowed_domains).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url, &policy).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
@@ -233,9 +240,9 @@ pub async fn execute(
         config.method
     ));
 
-    // Shared client with SSRF-safe resolver (when feature enabled); the
+    // Shared client with SSRF-safe resolver in restricted mode; the
     // per-node timeout is applied to the request, not the client.
-    let client = http_client()?;
+    let client = http_client(policy.security)?;
 
     // Build request based on method
     let mut request = match config.method.as_str() {
@@ -372,7 +379,7 @@ pub async fn execute(
     Ok(result.to_string())
 }
 
-#[cfg(all(test, not(feature = "http-allow-all")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsString;
@@ -410,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restricted_builds_ignore_environment_proxy() {
+    async fn restricted_mode_ignores_environment_proxy() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let proxy_url = format!("http://{}", listener.local_addr().unwrap());
@@ -444,7 +451,7 @@ mod tests {
             }
         });
 
-        let client = build_client().unwrap();
+        let client = build_client(HttpSecurity::Restricted).unwrap();
         let _ = client
             .get("http://pg-durable-proxy-test.invalid/")
             .timeout(Duration::from_secs(1))
@@ -464,6 +471,16 @@ mod tests {
     /// bound to another test's runtime.
     #[tokio::test]
     async fn shared_client_reuses_connections_without_sharing_request_options() {
+        assert!(build_client(HttpSecurity::Disabled).is_err());
+        assert!(http_client(HttpSecurity::Disabled).is_err());
+        let unrestricted = http_client(HttpSecurity::Unrestricted).unwrap();
+        let restricted = http_client(HttpSecurity::Restricted).unwrap();
+        assert!(!std::ptr::eq(unrestricted, restricted));
+        assert!(std::ptr::eq(
+            restricted,
+            http_client(HttpSecurity::Restricted).unwrap()
+        ));
+
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -515,7 +532,7 @@ mod tests {
         // Reacquire the client and consume each body: retaining one local client
         // or timing out both responses would not prove cross-lookup TCP reuse.
         let responses = tokio::time::timeout(Duration::from_secs(5), async {
-            let first = http_client()
+            let first = http_client(HttpSecurity::Restricted)
                 .unwrap()
                 .get(&url)
                 .header("Authorization", "Bearer first-only")
@@ -525,7 +542,7 @@ mod tests {
                 .await?
                 .text()
                 .await?;
-            let second = http_client()
+            let second = http_client(HttpSecurity::Restricted)
                 .unwrap()
                 .get(&url)
                 .timeout(Duration::from_secs(2))
@@ -583,7 +600,7 @@ mod tests {
 
         let timeouts = tokio::time::timeout(Duration::from_secs(5), async {
             let short_started = std::time::Instant::now();
-            let short_result = http_client()
+            let short_result = http_client(HttpSecurity::Restricted)
                 .unwrap()
                 .get(url.as_str())
                 .timeout(Duration::from_millis(200))
@@ -592,7 +609,7 @@ mod tests {
             let short_elapsed = short_started.elapsed();
 
             let long_started = std::time::Instant::now();
-            let long_result = http_client()
+            let long_result = http_client(HttpSecurity::Restricted)
                 .unwrap()
                 .get(url.as_str())
                 .timeout(Duration::from_millis(900))
@@ -666,12 +683,12 @@ mod tests {
         let body_requests = async {
             let started = std::time::Instant::now();
             let (short_response, long_response) = tokio::join!(
-                http_client()
+                http_client(HttpSecurity::Restricted)
                     .unwrap()
                     .get(format!("{url}/short"))
                     .timeout(Duration::from_millis(200))
                     .send(),
-                http_client()
+                http_client(HttpSecurity::Restricted)
                     .unwrap()
                     .get(format!("{url}/long"))
                     .timeout(Duration::from_secs(2))

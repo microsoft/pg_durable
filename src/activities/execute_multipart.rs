@@ -11,7 +11,7 @@
 //! `reqwest::multipart::Form` built from base64-encoded parts) and the
 //! privilege target (`df.http_multipart` instead of `df.http`).
 //!
-//! Cargo features controlling outbound HTTP(S) are the same as for df.http —
+//! Startup settings controlling outbound HTTP(S) are the same as for df.http —
 //! see docs/http-security.md for the full security model.
 
 use base64::Engine as _;
@@ -23,7 +23,7 @@ use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
 use crate::activities::execute_http::{check_http_privilege, http_client};
-use crate::ssrf::DomainAllowlist;
+use crate::ssrf::HttpPolicy;
 use crate::types::{HttpBodyOptions, MultipartConfig, MultipartPart};
 
 /// Activity name for registration and scheduling
@@ -107,7 +107,7 @@ pub async fn execute(
     ctx: ActivityContext,
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
-    allowed_domains: Arc<DomainAllowlist>,
+    policy: Arc<HttpPolicy>,
     config_json: String,
 ) -> Result<String, String> {
     let config: MultipartConfig = serde_json::from_str(&config_json)
@@ -163,14 +163,14 @@ pub async fn execute(
     };
 
     // --- Scheme validation (always enforced) ---
-    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(request_url, policy.security).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Endpoint allow-list ---
-    crate::ssrf::validate_allowlist(request_url, &allowed_domains).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url, &policy).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
@@ -201,7 +201,7 @@ pub async fn execute(
 
     // Client shared with execute_http (same SSRF-safe resolver and pool); the
     // per-node timeout is applied to the request.
-    let client = http_client()?;
+    let client = http_client(policy.security)?;
 
     // Build request based on method. Multipart only makes sense for
     // body-carrying methods; the DSL guard restricts to POST/PUT/PATCH and we

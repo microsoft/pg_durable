@@ -12,9 +12,9 @@
 #   --clean                   Start with a fresh database cluster
 #   --verbose, -v             Show NOTICE messages and full test output
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
-#   --default-build-phases    Run all phases that share the standard build artifact
-#   --http-disabled           Run only the HTTP-disabled (no http Cargo feature) phase
-#   --http-allow-all          Run only the http-allow-all Cargo feature phase
+#   --default-build-phases    Run standard phases, excluding disabled/unrestricted HTTP
+#   --http-disabled           Run only the default HTTP-disabled startup phase
+#   --http-allow-all          Run only the unrestricted HTTP startup phase
 #   --help, -h                Show this help
 #
 # Examples:
@@ -37,6 +37,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 
+. "$SCRIPT_DIR/pg-common.sh"
+
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
@@ -47,7 +49,6 @@ EXPLICIT_PHASES=false
 SETUP_PLAYGROUND_APPLIED=false
 E2E_ROLE_ENSURED=false
 VERSION_SHOWN=false
-CURRENT_FEATURES=""  # tracks what Cargo features the installed .so was built with
 PHASE_LOG_MARK=0
 
 declare -a REQUESTED_PHASES=()
@@ -169,10 +170,10 @@ phase_label() {
             echo "HTTP empty domain allowlist (deny all)"
             ;;
         http-disabled)
-            echo "HTTP disabled (no http Cargo feature)"
+            echo "HTTP disabled (default startup policy)"
             ;;
         http-allow-all)
-            echo "HTTP allow-all (http-allow-all Cargo feature)"
+            echo "HTTP unrestricted startup policy"
             ;;
         *)
             echo "$1"
@@ -448,22 +449,7 @@ assert_http_domains_startup_rejected() (
 build_extension() {
     echo "Building and installing extension..."
     cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains >/dev/null 2>&1
-    CURRENT_FEATURES="http-allow-test-domains"
-}
-
-build_extension_no_http() {
-    echo "Building extension (no http features)..."
-    cd "$PROJECT_DIR"
     cargo pgrx install --pg-config="$PG_CONFIG" --no-default-features --features "pg${PG_VERSION}" >/dev/null 2>&1
-    CURRENT_FEATURES="none"
-}
-
-build_extension_http_allow_all() {
-    echo "Building extension (http-allow-all feature)..."
-    cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-all >/dev/null 2>&1
-    CURRENT_FEATURES="http-allow-all"
 }
 
 show_version_once() {
@@ -557,6 +543,8 @@ configure_phase() {
     remove_conf_key "log_connections"
     remove_conf_key "pg_durable.host"
     remove_conf_key "pg_durable.http_allowed_domains"
+    set_conf_line "pg_durable.http_security" "'restricted'"
+    set_conf_line "pg_durable.http_allowed_domains" "'$PG_DURABLE_TEST_HTTP_DOMAINS'"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
     set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
@@ -564,6 +552,7 @@ configure_phase() {
     case "$phase" in
         no-preload)
             remove_conf_key "shared_preload_libraries"
+            remove_conf_key "pg_durable.http_security"
             ;;
         standard)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -643,27 +632,19 @@ configure_phase() {
             set_conf_line "pg_durable.http_allowed_domains" "''"
             ;;
     esac
+
+    case "$phase" in
+        http-disabled)
+            remove_conf_key "pg_durable.http_security"
+            ;;
+        http-allow-all)
+            set_conf_line "pg_durable.http_security" "'unrestricted'"
+            ;;
+    esac
 }
 
 prepare_phase() {
     local phase="$1"
-
-    # Phases that need a different Cargo feature build must rebuild before
-    # the server restarts so the new .so is already in place.
-    case "$phase" in
-        http-disabled)
-            build_extension_no_http
-            ;;
-        http-allow-all)
-            build_extension_http_allow_all
-            ;;
-        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|connlimit-timeout|connlimit-startup|reconcile|http-custom-domains|http-empty-domains)
-            # Rebuild if previous phase changed the Cargo features
-            if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
-                build_extension
-            fi
-            ;;
-    esac
 
     configure_phase "$phase"
 

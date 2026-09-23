@@ -287,7 +287,7 @@ df.wait_for_signal('approval', 3600)   -- 1 hour timeout
 
 Makes an HTTP request.
 
-In restricted builds, the destination must be permitted by
+In restricted mode, the destination must be permitted by
 [`pg_durable.http_allowed_domains`](#pg_durablehttp_allowed_domains).
 The same policy applies to `df.http_multipart()`.
 
@@ -862,20 +862,52 @@ These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See e
 
 ---
 
+### pg_durable.http_security
+
+Server-wide outbound HTTP policy for `df.http()` and `df.http_multipart()`.
+Available since v0.2.9; replaces the HTTP Cargo features.
+
+| Property | Value |
+|----------|-------|
+| Type | `enum`: `disabled`, `restricted`, `unrestricted` |
+| Default | `disabled` |
+| Context | `POSTMASTER` (requires a PostgreSQL restart, not just a reload) |
+| Visibility | Superusers and roles with `pg_read_all_settings` |
+
+```ini
+# postgresql.conf
+pg_durable.http_security = 'restricted'
+```
+
+`disabled` rejects all HTTP requests at construction and execution time.
+`restricted` requires HTTPS, enforces the domain allow-list and SSRF IP
+blocklist, and disables proxies. `unrestricted` permits plaintext HTTP and
+private destinations, bypasses the allow-list and IP blocklist, and allows
+system/environment proxies; use it only for local development. Both enabled
+modes enforce HTTP function privileges, TLS verification, and redirect blocking.
+
+Configure it through `postgresql.conf` or an authorized `ALTER SYSTEM SET`.
+Sessions, role/database defaults, and workflow inputs cannot override the
+policy. After restart, pending requests and retries use the new policy;
+recorded activity results replay unchanged.
+
+---
+
 ### pg_durable.http_allowed_domains
 
 The complete destination allow-list for `df.http()` and `df.http_multipart()`
-in restricted builds. Available since v0.2.9.
+in restricted mode. Available since v0.2.9.
 
 | Property | Value |
 |----------|-------|
 | Type | `string` |
-| Default | Azure subdomain patterns and `api.github.com` with `http-allow-azure-domains`; also `httpbingo.org` with `http-allow-test-domains`; empty otherwise |
+| Default | Azure subdomain patterns and `api.github.com`; no test domains |
 | Context | `POSTMASTER` (requires a PostgreSQL restart, not just a reload) |
 | Visibility | All users can read the active value |
 
 ```ini
 # postgresql.conf
+pg_durable.http_security = 'restricted'
 pg_durable.http_allowed_domains = 'api.github.com, *.blob.core.windows.net'
 ```
 
@@ -885,7 +917,7 @@ not the apex itself. Matching is case-insensitive and uses IDNA/Punycode
 normalization. Use UTF-8 internationalized names or ASCII/Punycode.
 
 An explicit value **replaces all defaults**, including test domains. An empty
-or whitespace-only value denies all domains in restricted builds. Malformed
+or whitespace-only value denies all domains in restricted mode. Malformed
 entries reject the whole setting; a malformed startup value prevents server
 startup. URLs, ports, IPs, CIDRs, percent escapes, trailing dots, standalone `*`,
 and empty entries within a nonempty list are not accepted.
@@ -894,8 +926,8 @@ Session, role, and database settings cannot override this policy. An
 authorized `ALTER SYSTEM SET` can change the startup configuration, but
 PostgreSQL must restart before requests use it.
 
-The GUC does not override Cargo feature gates: HTTP remains disabled in builds
-without an HTTP feature, and `http-allow-all` bypasses the list even when it is
+The GUC does not override `pg_durable.http_security`: HTTP remains disabled in
+disabled mode, and unrestricted mode bypasses the list even when it is
 empty. Other HTTP safeguards are unchanged. See
 [HTTP security](http-security.md#5-layer-2-endpoint-allow-list) for the default
 domains and execution-time behavior.

@@ -1074,11 +1074,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all"
-    ))]
     #[pg_test]
     fn endpoint_constructors_preserve_body_and_node_types() {
         let http = crate::dsl::http_endpoint(

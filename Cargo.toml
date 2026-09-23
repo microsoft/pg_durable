@@ -15,9 +15,6 @@ path = "./src/bin/pgrx_embed.rs"
 
 [features]
 default = ["pg17"]
-http-allow-all = []
-http-allow-azure-domains = []
-http-allow-test-domains = ["http-allow-azure-domains"]
 # Compiles the background worker's timing hooks (see `test_pause_before_ready`).
 # Never enable in a shipped build: the hooks let the process environment stall
 # worker initialization.

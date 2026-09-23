@@ -11,13 +11,13 @@ use tokio::sync::Semaphore;
 
 use crate::activities;
 use crate::orchestrations;
-use crate::ssrf::DomainAllowlist;
+use crate::ssrf::HttpPolicy;
 
 /// Create the activity registry with all registered activities
 pub fn create_activity_registry(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
-    http_allowed_domains: Arc<DomainAllowlist>,
+    http_policy: Arc<HttpPolicy>,
 ) -> ActivityRegistry {
     let sql_semaphore = semaphore.clone();
     let http_semaphore = semaphore.clone();
@@ -28,7 +28,7 @@ pub fn create_activity_registry(
     let node_status_pool = pool.clone();
     let http_pool = pool.clone();
     let multipart_pool = pool.clone();
-    let multipart_allowed_domains = http_allowed_domains.clone();
+    let multipart_policy = http_policy.clone();
 
     ActivityRegistry::builder()
         .register(activities::execute_sql::NAME, move |ctx: ActivityContext, input_json: String| {
@@ -59,14 +59,14 @@ pub fn create_activity_registry(
         .register(activities::execute_http::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = http_pool.clone();
             let semaphore = http_semaphore.clone();
-            let allowed_domains = http_allowed_domains.clone();
-            async move { activities::execute_http::execute(ctx, pool, semaphore, allowed_domains, config_json).await }
+            let policy = http_policy.clone();
+            async move { activities::execute_http::execute(ctx, pool, semaphore, policy, config_json).await }
         })
         .register(activities::execute_multipart::NAME, move |ctx: ActivityContext, config_json: String| {
             let pool = multipart_pool.clone();
             let semaphore = multipart_semaphore.clone();
-            let allowed_domains = multipart_allowed_domains.clone();
-            async move { activities::execute_multipart::execute(ctx, pool, semaphore, allowed_domains, config_json).await }
+            let policy = multipart_policy.clone();
+            async move { activities::execute_multipart::execute(ctx, pool, semaphore, policy, config_json).await }
         })
         .build()
 }

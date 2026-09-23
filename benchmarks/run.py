@@ -226,7 +226,7 @@ def benchmark(args):
                 report["http_fixture"] = {
                     "url": fixture.url, "response_bytes": args.response_bytes, "delay_ms": args.delay_ms,
                 }
-                print("Loopback HTTP requires a development-only http-allow-all build.", flush=True)
+                print("Loopback HTTP requires pg_durable.http_security = 'unrestricted' on a development server.", flush=True)
             psql(setup, variables)
             cleanup.callback(psql, 'DROP SCHEMA :"bench_schema" CASCADE;', variables)
             cleanup.callback(cancel_instances, variables)

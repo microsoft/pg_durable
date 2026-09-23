@@ -24,11 +24,12 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 14. [Monitoring](#monitoring)
 15. [User Isolation & Privileges](#user-isolation--privileges)
 16. [Connection Host](#connection-host)
-17. [HTTP Allowed Domains](#http-allowed-domains)
-18. [Connection Limits](#connection-limits)
-19. [Troubleshooting](#troubleshooting)
-20. [Quick Reference Card](#quick-reference-card)
-21. [Appendix: Test Data Setup](#appendix-test-data-setup)
+17. [HTTP Security](#http-security)
+18. [HTTP Allowed Domains](#http-allowed-domains)
+19. [Connection Limits](#connection-limits)
+20. [Troubleshooting](#troubleshooting)
+21. [Quick Reference Card](#quick-reference-card)
+22. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -2615,14 +2616,14 @@ If the user who submitted a function is dropped **before execution**:
 Permission to use each function is checked for the submitting role, but there
 are no per-role domain allowlists.
 
-**Security model:** Outbound HTTP availability and its security tier are
-controlled by compile-time Cargo features; HTTP is off when no HTTP feature is
-enabled. Restricted builds enforce a hardcoded SSRF IP blocklist and the
+**Security model:** Outbound HTTP is disabled by default. Administrators can
+set [pg_durable.http_security](#http-security) to `restricted` and restart
+PostgreSQL to enable it. Restricted mode enforces a hardcoded SSRF IP blocklist and the
 [HTTP domain allow-list](#http-allowed-domains), which defaults to Azure service
 subdomains and `api.github.com`. Administrators can replace the domain list
 with `pg_durable.http_allowed_domains` and restart PostgreSQL. This does not
 relax the other restrictions or exempt superuser requests. Only the
-development-only `http-allow-all` build bypasses domain and IP restrictions.
+development-only `unrestricted` mode bypasses domain and IP restrictions.
 
 These protections apply to the built-in HTTP activities, not arbitrary SQL
 functions, user-defined functions, or third-party Postgres extensions that a
@@ -2816,13 +2817,44 @@ This postmaster setting requires a PostgreSQL restart. When it is empty or unset
 
 ---
 
-## HTTP Allowed Domains
+## HTTP Security
 
-Since v0.2.9, administrators can replace the destination allow-list for
-`df.http()` and `df.http_multipart()` in restricted HTTP builds:
+Since v0.2.9, `pg_durable.http_security` controls both HTTP activities without
+rebuilding the extension. This server-wide, superuser-only Postmaster setting
+requires a PostgreSQL restart; session, role, and database settings cannot
+override it, and a configuration reload does not apply it.
+
+| Mode | Policy |
+|------|--------|
+| `disabled` (default) | Reject all HTTP requests, including crafted workflow nodes |
+| `restricted` | Require HTTPS and approved hostnames; block private IPs, proxies, and redirects |
+| `unrestricted` | Permit any HTTP(S) destination, including private networks; development only |
 
 ```ini
 # postgresql.conf
+pg_durable.http_security = 'restricted'
+```
+
+An authorized `ALTER SYSTEM SET` can also configure the next server startup.
+HTTP function privileges, TLS verification, and redirect blocking remain in
+effect in both enabled modes. Pending requests and retries use the policy
+active when they execute; previously recorded results replay normally.
+
+The former HTTP Cargo features are no longer accepted. Existing HTTP-enabled
+installations must configure this setting before restarting with the new
+binary. See [Upgrade & Migration](docs/http-security.md#upgrade--migration)
+for the replacement settings.
+
+---
+
+## HTTP Allowed Domains
+
+Since v0.2.9, administrators can replace the destination allow-list for
+`df.http()` and `df.http_multipart()` in restricted mode:
+
+```ini
+# postgresql.conf
+pg_durable.http_security = 'restricted'
 pg_durable.http_allowed_domains = 'api.github.com, *.blob.core.windows.net'
 ```
 
@@ -2838,14 +2870,14 @@ internationalized hostnames can use UTF-8 or ASCII/Punycode. Do not include
 URLs, ports, IP addresses, or trailing dots.
 
 **The configured list replaces all defaults.** Without an override,
-`http-allow-azure-domains` permits the existing Azure service subdomains and
-`api.github.com`; `http-allow-test-domains` also permits `httpbingo.org`.
-An empty list (`''`) denies every domain in restricted builds. Malformed lists
+restricted mode permits the Azure service subdomains and `api.github.com`.
+Test domains such as `httpbingo.org` must be explicitly included when needed.
+An empty list (`''`) denies every domain in restricted mode. Malformed lists
 are rejected as a whole; an invalid startup value prevents PostgreSQL from
 starting rather than silently restoring defaults.
 
-This setting does not enable HTTP in a build without HTTP support, and
-`http-allow-all` continues to bypass it even when it is empty. The HTTPS
+This setting does not enable HTTP in disabled mode, and unrestricted mode
+bypasses it even when it is empty. The HTTPS
 requirement, IP blocklist, proxy and redirect restrictions, and HTTP function
 privileges are unchanged. After restart, pending requests and retries use the
 new list. See [HTTP security](docs/http-security.md#5-layer-2-endpoint-allow-list)

@@ -251,7 +251,7 @@ See [rls.md](rls.md) for the full design, policy definitions, grant strategy, an
 
 **Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape.
 
-**Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers, for pg_durable's built-in `df.http()` activity path. It does not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that SQL nodes are permitted to execute.
+**Mitigation (implemented)**: Restricted HTTP mode enforces a hardcoded IP blocklist with DNS rebinding protection and IPv4-mapped IPv6 handling. The startup policy applies to both built-in HTTP activities and cannot be overridden by a workflow, session, or role, including superuser workflows. Administrators can select development-only unrestricted mode at server startup; it bypasses destination restrictions. These controls do not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that SQL nodes are permitted to execute.
 
 See [http-security.md](http-security.md) for the full specification, blocked IP ranges, and implementation details.
 
@@ -530,8 +530,8 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 
 1. **Function-level permission**: managed through `df.grant_usage` and `df.revoke_usage` for the full HTTP function set
 2. **Execution-time privilege re-check**: the worker validates that `submitted_by` still has `EXECUTE` before any network activity
-3. **SSRF protection**: Block internal IPs at the code level
-4. **Compile-time endpoint allowlist**: allowed destinations depend on the HTTP Cargo feature
+3. **SSRF protection**: restricted mode blocks internal IPs at the code level
+4. **Startup destination policy**: `pg_durable.http_security` selects disabled, restricted, or development-only unrestricted HTTP; `pg_durable.http_allowed_domains` controls the restricted-mode allow-list
 5. **Redirect handling**: redirects are disabled
 
 ```

@@ -94,11 +94,10 @@ check fails, the node transitions to `failed` with a message of the form:
 Blocked: role 'alice' does not have EXECUTE privilege on df.http(). ...
 ```
 
-This check is enforced regardless of which HTTP Cargo feature is active.
-When no HTTP feature is enabled, the activity rejects all requests before
-reaching this check, so the privilege check is effectively moot in that
-configuration — but it is still compiled in and would run if the earlier
-gate were ever removed.
+This check runs whenever an HTTP activity executes, regardless of the startup
+security mode. Crafted nodes in disabled mode still face the privilege check
+before the destination policy rejects them. HTTP privileges cannot override
+`pg_durable.http_security` or the restricted-mode destination safeguards.
 
 ### 4. df.grant_usage() — opt-in HTTP via include_http parameter
 

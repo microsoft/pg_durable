@@ -405,7 +405,7 @@ class IntegrationTests(unittest.TestCase):
         ), "cancelled")
         self.assert_cleaned_up(report)
 
-    @unittest.skipUnless(os.environ.get("PGD_BENCH_HTTP") == "1", "requires a development-only http-allow-all build")
+    @unittest.skipUnless(os.environ.get("PGD_BENCH_HTTP") == "1", "requires development-only unrestricted HTTP")
     def test_http_workloads(self):
         for workload in ("http", "http-multipart"):
             with self.subTest(workload=workload), redirect_stdout(io.StringIO()):

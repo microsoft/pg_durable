@@ -576,11 +576,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all"
-    ))]
     #[pg_test]
     fn secret_options_preserve_data_and_noop_bytes() {
         let request = crate::dsl::http("https://api.github.com", "POST", None, None, 30);

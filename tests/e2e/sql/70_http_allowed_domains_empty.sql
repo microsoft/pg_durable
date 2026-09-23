@@ -2,7 +2,7 @@
 -- Licensed under the PostgreSQL License.
 
 -- Issue #375: the "http-empty-domains" phase restarts PostgreSQL with an
--- explicitly empty pg_durable.http_allowed_domains and http-allow-test-domains.
+-- explicitly empty pg_durable.http_allowed_domains and restricted HTTP mode.
 -- The previous phase's custom hostname and the built-in defaults must all be
 -- denied, not restored as a fallback. No request needs a live endpoint.
 

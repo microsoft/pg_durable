@@ -19,7 +19,7 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   permissions and return a committed row reference with a fresh key per attempt.
   Existing defaults and HTTP signatures are unchanged.
 
-- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
+- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Defaults to Azure service subdomains and `api.github.com`; an explicit empty list denies all domains in restricted mode. It cannot enable disabled HTTP or relax the other safeguards.
 
 - **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB
   descriptor for named header/query/form fields through `df.with_http_options`.
@@ -53,6 +53,13 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
 
 ### Changed
 
+- **HTTP startup policy (#374):** replaces the three HTTP Cargo features with
+  the superuser-only, restart-required `pg_durable.http_security` setting:
+  `disabled` (default), `restricted`, or development-only `unrestricted`.
+  Existing HTTP-enabled installations must configure the replacement policy
+  before restarting with the new binary. Test domains are explicitly configured
+  through `pg_durable.http_allowed_domains`; restricted-mode SSRF defenses and
+  HTTP privileges remain unchanged. No extension SQL migration is required.
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one
   process-wide client and connection pool, with timeouts applied per request.
   Client-construction errors are cached until the background worker restarts;

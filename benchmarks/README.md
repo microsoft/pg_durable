@@ -16,21 +16,29 @@ a schema, read its instances, and start, monitor, and cancel the chosen workflow
 
 For HTTP benchmarks, PostgreSQL must run on the same host/network namespace as
 the runner. The target binds only to `127.0.0.1`, on an automatically chosen port.
-It requires a **development-only `http-allow-all` build**: restricted builds
-intentionally reject both plaintext HTTP and loopback destinations. Never use
-this feature in production. The SQL baseline does not require it.
+It requires **`pg_durable.http_security = 'unrestricted'` on a development server**: restricted mode
+intentionally rejects both plaintext HTTP and loopback destinations. Never use
+this mode in production. The SQL baseline does not require it.
 
 For a release-mode local PG17 HTTP build:
 
 ```sh
 ./scripts/pg-stop.sh
-cargo pgrx install --release --features http-allow-all
+cargo pgrx install --release
+./scripts/pg-start.sh
+psql -h localhost -p 28817 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c "ALTER SYSTEM SET pg_durable.http_security = 'unrestricted'"
+./scripts/pg-stop.sh
 ./scripts/pg-start.sh
 ```
 
 Stop PostgreSQL before replacing its extension library. Use the appropriate
 pgrx installation and PostgreSQL feature when testing another major version.
 The harness never changes HTTP policy to make a workload succeed.
+
+After HTTP benchmarking, remove the override with
+`ALTER SYSTEM RESET pg_durable.http_security` and restart PostgreSQL. The local
+development launcher will then use restricted mode again.
 
 ## Run a Workload
 
@@ -176,7 +184,7 @@ python3 -m unittest discover -s benchmarks -p 'test_*.py'
 ```
 
 To include real workflow completion, failure, cancellation, and HTTP tests on a
-disposable local `http-allow-all` server:
+disposable local server configured with unrestricted HTTP:
 
 ```sh
 env PGHOST=localhost PGPORT=28817 PGUSER=postgres PGDATABASE=postgres \
@@ -185,4 +193,4 @@ env PGHOST=localhost PGPORT=28817 PGUSER=postgres PGDATABASE=postgres \
 ```
 
 Omit `PGD_BENCH_HTTP=1` to test only the database-independent and SQL paths on a
-restricted build.
+restricted-mode server.

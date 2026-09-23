@@ -17,7 +17,7 @@ use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
 use crate::registry::{create_activity_registry, create_orchestration_registry};
-use crate::ssrf::DomainAllowlist;
+use crate::ssrf::{DomainAllowlist, HttpPolicy};
 use crate::types::{
     get_max_duroxide_connections, get_max_management_connections, get_max_user_connections,
     get_reconcile_interval, get_retention_days, postgres_connection_string,
@@ -102,11 +102,12 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
     let configured_domains = crate::HTTP_ALLOWED_DOMAINS
         .get()
         .unwrap_or_else(|| error!("pg_durable.http_allowed_domains must not be NULL"));
-    let http_allowed_domains = Arc::new(
-        DomainAllowlist::try_from(configured_domains.as_c_str()).unwrap_or_else(|err| {
-            error!("invalid value for parameter \"pg_durable.http_allowed_domains\": {err}")
-        }),
-    );
+    let http_policy = Arc::new(HttpPolicy {
+        security: crate::HTTP_SECURITY.get(),
+        allowed_domains: DomainAllowlist::try_from(configured_domains.as_c_str()).unwrap_or_else(
+            |err| error!("invalid value for parameter \"pg_durable.http_allowed_domains\": {err}"),
+        ),
+    });
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -120,7 +121,7 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
     };
 
     rt.block_on(async {
-        run_duroxide_runtime(http_allowed_domains).await;
+        run_duroxide_runtime(http_policy).await;
     });
 
     // All async cleanup (pool closes, runtime shutdown) is performed inside
@@ -134,7 +135,7 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
 }
 
 /// Run the duroxide runtime with proper shutdown handling
-async fn run_duroxide_runtime(http_allowed_domains: Arc<DomainAllowlist>) {
+async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
     const WAIT_FOR_EXTENSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const EXTENSION_DROP_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const INIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -298,7 +299,7 @@ async fn run_duroxide_runtime(http_allowed_domains: Arc<DomainAllowlist>) {
             INIT_RETRY_INTERVAL,
             &mgmt_pool,
             &duroxide_schema,
-            &http_allowed_domains,
+            &http_policy,
         )
         .await
         else {
@@ -682,7 +683,7 @@ async fn initialize_duroxide_runtime(
     retry_interval: Duration,
     mgmt_pool: &sqlx::PgPool,
     schema_name: &str,
-    http_allowed_domains: &Arc<DomainAllowlist>,
+    http_policy: &Arc<HttpPolicy>,
 ) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
 
@@ -774,7 +775,7 @@ async fn initialize_duroxide_runtime(
         let activities = create_activity_registry(
             Arc::new(mgmt_pool.clone()),
             user_semaphore.clone(),
-            http_allowed_domains.clone(),
+            http_policy.clone(),
         );
         let orchestrations = create_orchestration_registry();
 

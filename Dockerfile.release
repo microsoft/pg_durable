@@ -11,8 +11,8 @@
 #
 # NOTE: This image is intended for evaluating and learning pg_durable only —
 # NOT for production. It enables superuser instances for an out-of-the-box demo
-# experience. The extension HTTP egress policy is whatever the released package
-# was built with (http-allow-azure-domains).
+# experience. Restricted HTTP is configured at startup with the default
+# Azure/GitHub domain allow-list.
 
 ARG PG_MAJOR=17
 FROM postgres:${PG_MAJOR}-bookworm
@@ -55,7 +55,8 @@ RUN mkdir -p /docker-entrypoint-initdb.d && \
 RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
-    echo "pg_durable.enable_superuser_instances = on" >> /usr/share/postgresql/postgresql.conf.sample
+    echo "pg_durable.enable_superuser_instances = on" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.http_security = 'restricted'" >> /usr/share/postgresql/postgresql.conf.sample
 
 # Report container health based on PostgreSQL accepting connections on the
 # pg_durable database.

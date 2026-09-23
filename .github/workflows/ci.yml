@@ -253,32 +253,28 @@ jobs:
             echo "PostgreSQL ${{ matrix.pg_version }} already initialized, skipping download"
           fi
 
-      # Include an http feature for the broadest clippy coverage. No time for multiple feature combos.
       - name: Run clippy
-        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }},http-allow-test-domains -- -D warnings
+        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
 
       # pgspot SQL security gate (pg17 only; the install SQL is the shipped DDL).
-      # http-allow-test-domains is a test-only feature that emits no extra DDL, so
-      # the scanned surface matches the shipped build while reusing this job's build.
       - name: Generate extension install SQL
         if: matrix.pg_version == 17
         run: |
           cargo pgrx schema pg${{ matrix.pg_version }} \
             --no-default-features \
-            --features pg${{ matrix.pg_version }},http-allow-test-domains \
+            --features pg${{ matrix.pg_version }} \
             -o /tmp/pg_durable-install.sql
 
       - name: Run pgspot SQL security gate
         if: matrix.pg_version == 17
         run: scripts/pgspot-gate.sh /tmp/pg_durable-install.sql
 
-      # Include an http feature to allow http unit tests to run. No time for multiple feature combos.
       - name: Run unit tests
-        run: cargo pgrx test pg${{ matrix.pg_version }} --features http-allow-test-domains
+        run: cargo pgrx test pg${{ matrix.pg_version }}
 
-      - name: Run E2E tests (default-build phases)
-        id: e2e_default_build_phases
-        run: ./scripts/test-e2e-local.sh --clean --default-build-phases --pg-version ${{ matrix.pg_version }}
+      - name: Run E2E tests (all startup policies)
+        id: e2e_tests
+        run: ./scripts/test-e2e-local.sh --clean --pg-version ${{ matrix.pg_version }}
 
       - name: Run upgrade tests
         id: upgrade_tests
