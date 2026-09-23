@@ -339,14 +339,13 @@ pub(crate) async fn execute(
     }
 
     // Return response for all other cases (including 4xx)
-    Ok(crate::activities::http_response::build_envelope(
+    crate::activities::http_response::serialize_envelope(
         status_code,
-        response_body,
-        response_headers,
+        &response_body,
+        &response_headers,
         is_ok,
         duration_ms,
     )
-    .to_string())
 }
 
 #[cfg(test)]

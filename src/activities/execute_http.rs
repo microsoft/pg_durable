@@ -316,9 +316,9 @@ pub(crate) async fn execute(
                 "application/x-www-form-urlencoded",
             )
             .body(body);
-    } else if let Some(body) = &config.body {
+    } else if let Some(body) = config.body {
         config.body_options.check_request_bytes(body.len() as u64)?;
-        request = request.body(body.clone());
+        request = request.body(body);
     }
 
     // Execute request
@@ -409,14 +409,13 @@ pub(crate) async fn execute(
 
     // Return response for all other cases (including 4xx)
     // 4xx are client errors - user should handle in workflow logic
-    Ok(crate::activities::http_response::build_envelope(
+    crate::activities::http_response::serialize_envelope(
         status_code,
-        response_body,
-        response_headers,
+        &response_body,
+        &response_headers,
         is_ok,
         duration_ms,
     )
-    .to_string())
 }
 
 #[cfg(test)]
