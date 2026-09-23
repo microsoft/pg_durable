@@ -422,10 +422,9 @@ mod backend_schema_tests {
     }
 
     #[test]
-    fn schema_resolution_does_not_pin_a_previous_installation() {
+    fn accepts_supported_schema_identifiers() {
         assert_eq!(backend_schema_name("duroxide"), Ok("duroxide"));
         assert_eq!(backend_schema_name("_duroxide"), Ok("_duroxide"));
-        assert_eq!(backend_schema_name("duroxide"), Ok("duroxide"));
     }
 
     #[test]
