@@ -471,39 +471,42 @@ pub fn collect_headers(
 }
 
 /// Build the JSON envelope returned by both HTTP activities.
+///
+/// Construct owned values directly: `json!` would copy the body and headers.
 pub fn build_envelope(
     status_code: u16,
-    content: &ResponseContent,
+    content: ResponseContent,
     headers: serde_json::Map<String, serde_json::Value>,
     is_ok: bool,
     duration_ms: u64,
 ) -> serde_json::Value {
-    if let Some(body) = &content.inline {
-        return serde_json::json!({
-            "status": status_code,
-            "body": body.body,
-            "encoding": body.encoding,
-            "headers": headers,
-            "ok": is_ok,
-            "duration_ms": duration_ms
-        });
+    if let Some(body) = content.inline {
+        return serde_json::Map::from_iter([
+            ("status".into(), status_code.into()),
+            ("body".into(), body.body.into()),
+            ("encoding".into(), body.encoding.into()),
+            ("headers".into(), headers.into()),
+            ("ok".into(), is_ok.into()),
+            ("duration_ms".into(), duration_ms.into()),
+        ])
+        .into();
     }
-    let mut envelope = serde_json::json!({
-        "status": status_code,
-        "ok": is_ok,
-        "bytes": content.bytes,
-        "headers": headers,
-        "duration_ms": duration_ms,
-    });
-    if let Some(sha256) = &content.sha256 {
-        envelope["sha256"] = serde_json::Value::String(sha256.clone());
+    let mut envelope = serde_json::Map::from_iter([
+        ("status".into(), status_code.into()),
+        ("ok".into(), is_ok.into()),
+        ("bytes".into(), content.bytes.into()),
+        ("headers".into(), headers.into()),
+        ("duration_ms".into(), duration_ms.into()),
+    ]);
+    if let Some(sha256) = content.sha256 {
+        envelope.insert("sha256".into(), sha256.into());
     }
-    if let Some(sink) = &content.sink {
-        envelope["sink"] = serde_json::Value::String(sink.table.clone());
-        envelope["sink_key"] = serde_json::Value::String(sink.key.to_string());
-        envelope["sink_database"] = serde_json::Value::String(sink.database.clone());
+    if let Some(sink) = content.sink {
+        envelope.insert("sink".into(), sink.table.into());
+        envelope.insert("sink_key".into(), sink.key.to_string().into());
+        envelope.insert("sink_database".into(), sink.database.into());
     }
-    envelope
+    envelope.into()
 }
 
 #[cfg(test)]
@@ -531,7 +534,7 @@ mod tests {
         assert_eq!(content.bytes, bytes.len() as u64);
         assert_eq!(content.sha256, Some(format!("{:x}", Sha256::digest(bytes))));
         assert!(!content.error_preview().contains("HTTP_SINK_PRIVATE"));
-        let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 1);
+        let envelope = build_envelope(200, content, serde_json::Map::new(), true, 1);
         assert!(envelope.get("body").is_none());
         assert!(envelope.get("encoding").is_none());
         assert!(envelope.get("sink_key").is_none());
@@ -639,7 +642,7 @@ mod tests {
             let content = read_body(response, &options).await.unwrap();
             assert!(content.inline.is_none());
             assert_eq!(content.error_preview(), "response body omitted (3 bytes)");
-            let envelope = build_envelope(500, &content, serde_json::Map::new(), false, 1);
+            let envelope = build_envelope(500, content, serde_json::Map::new(), false, 1);
             assert_eq!(envelope["bytes"], 3);
             assert!(envelope.get("body").is_none());
             assert!(envelope.get("encoding").is_none());
@@ -947,20 +950,85 @@ mod tests {
     }
 
     #[test]
-    fn envelope_carries_encoding_alongside_existing_fields() {
-        let body = ResponseBody::base64(b"abc");
-        let content = ResponseContent {
-            inline: Some(body),
-            bytes: 3,
-            sha256: None,
-            sink_body: None,
-            sink: None,
-        };
-        let envelope = build_envelope(200, &content, serde_json::Map::new(), true, 12);
-        assert_eq!(envelope["status"], 200);
-        assert_eq!(envelope["encoding"], "base64");
-        assert_eq!(envelope["ok"], true);
-        assert_eq!(envelope["duration_ms"], 12);
-        assert!(envelope["body"].is_string());
+    fn envelope_moves_inline_body_and_headers_without_changing_serialization() {
+        for body in [
+            ResponseBody::text("caf\u{e9}\n\"\\\t".repeat(1024)),
+            ResponseBody::base64(&[0, 255, 128, 1]),
+            ResponseBody::text(String::new()),
+        ] {
+            let headers = serde_json::Map::from_iter([(
+                "x-request-id".into(),
+                serde_json::Value::String("request".into()),
+            )]);
+            let expected = serde_json::json!({
+                "status": 400,
+                "body": body.body,
+                "encoding": body.encoding,
+                "headers": headers,
+                "ok": false,
+                "duration_ms": 12,
+            })
+            .to_string();
+            let body_ptr = body.body.as_ptr();
+            let header_ptr = headers["x-request-id"].as_str().unwrap().as_ptr();
+            let content = ResponseContent {
+                inline: Some(body),
+                bytes: 0,
+                sha256: None,
+                sink_body: None,
+                sink: None,
+            };
+            let envelope = build_envelope(400, content, headers, false, 12);
+            assert_eq!(envelope.to_string(), expected);
+            assert_eq!(envelope["body"].as_str().unwrap().as_ptr(), body_ptr);
+            assert_eq!(
+                envelope["headers"]["x-request-id"]
+                    .as_str()
+                    .unwrap()
+                    .as_ptr(),
+                header_ptr
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_preserves_metadata_discard_and_sink_serialization() {
+        let digest = format!("{:x}", Sha256::digest(b"abc"));
+        for mode in [
+            HttpResponseMode::Metadata,
+            HttpResponseMode::Discard,
+            HttpResponseMode::Sink,
+        ] {
+            let mut expected = serde_json::json!({
+                "status": 200,
+                "ok": true,
+                "bytes": 3,
+                "headers": {},
+                "duration_ms": 12,
+            });
+            let sha256 = (mode != HttpResponseMode::Discard).then(|| digest.clone());
+            if let Some(sha256) = &sha256 {
+                expected["sha256"] = sha256.clone().into();
+            }
+            let sink = (mode == HttpResponseMode::Sink).then(|| StoredResponse {
+                table: "\"Sink.Schema\".\"Body.Table\"".into(),
+                key: uuid::Uuid::nil(),
+                database: "postgres".into(),
+            });
+            if let Some(sink) = &sink {
+                expected["sink"] = sink.table.clone().into();
+                expected["sink_key"] = sink.key.to_string().into();
+                expected["sink_database"] = sink.database.clone().into();
+            }
+            let content = ResponseContent {
+                inline: None,
+                bytes: 3,
+                sha256,
+                sink_body: None,
+                sink,
+            };
+            let envelope = build_envelope(200, content, serde_json::Map::new(), true, 12);
+            assert_eq!(envelope.to_string(), expected.to_string());
+        }
     }
 }
