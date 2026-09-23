@@ -1,10 +1,10 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
--- Issue #375: the "http-custom-domains" phase restarts PostgreSQL with
+-- Issues #374 and #375: the "http-custom-domains" phase restarts PostgreSQL with
 -- pg_durable.http_allowed_domains = 'example.com' and restricted HTTP mode.
--- The local runner first checks rejection of a malformed postgresql.conf value,
--- restores the configuration, and starts PostgreSQL with this valid allowlist.
+-- The local runner first checks rejection of invalid startup values for both
+-- settings, restores the configuration, and starts with this valid allowlist.
 -- Allowed requests must reach HTTP transport; example.com need not provide a
 -- working POST endpoint. All other requests must fail before DNS or networking.
 

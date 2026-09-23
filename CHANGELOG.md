@@ -59,7 +59,8 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
   Installations previously built without HTTP support must explicitly select
   `disabled` before restarting to keep HTTP blocked. Test domains are explicitly configured
   through `pg_durable.http_allowed_domains`; restricted-mode SSRF defenses and
-  HTTP privileges remain unchanged. No extension SQL migration is required.
+  HTTP privileges remain unchanged. Invalid security-mode values prevent server
+  startup instead of falling back to the default. No extension SQL migration is required.
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one
   process-wide client and connection pool, with timeouts applied per request.
   Client-construction errors are cached until the background worker restarts;

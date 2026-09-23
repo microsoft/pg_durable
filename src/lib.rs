@@ -8,7 +8,7 @@
 
 use pgrx::guc::*;
 use pgrx::prelude::*;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 // ============================================================================
 // GUC Definitions
@@ -134,14 +134,39 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
 
+    let http_security_name = c"pg_durable.http_security";
+    let configured_http_security = unsafe {
+        let value = pg_sys::GetConfigOption(http_security_name.as_ptr(), true, false);
+        if value.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(value).to_owned())
+        }
+    };
+
     GucRegistry::define_enum_guc(
-        c"pg_durable.http_security",
+        http_security_name,
         c"Security policy for outbound HTTP requests",
         c"disabled blocks all requests; restricted enforces HTTPS, the domain allow-list, and SSRF protections; unrestricted permits private networks and plaintext HTTP. Requires a server restart to change.",
         &HTTP_SECURITY,
         GucContext::Postmaster,
         GucFlags::SUPERUSER_ONLY,
     );
+
+    if let Some(value) = configured_http_security {
+        unsafe {
+            pg_sys::set_config_option(
+                http_security_name.as_ptr(),
+                value.as_ptr(),
+                pg_sys::GucContext::PGC_POSTMASTER,
+                pg_sys::GucSource::PGC_S_FILE,
+                pg_sys::GucAction::GUC_ACTION_SET,
+                false,
+                pgrx::PgLogLevel::ERROR as i32,
+                false,
+            );
+        }
+    }
 
     // The callback is pg_guard-protected and only validates the proposed value.
     unsafe {

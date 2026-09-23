@@ -32,6 +32,9 @@ it in `postgresql.conf` or through an authorized `ALTER SYSTEM SET`, then
 restart PostgreSQL. Reloads, `SET`, `SET LOCAL`, role/database defaults, and
 workflow inputs cannot change the running policy.
 
+An invalid startup value prevents PostgreSQL from starting rather than
+silently falling back to the default policy.
+
 | Mode | What is allowed | Use case |
 |---------|-----------------|----------|
 | `disabled` | Nothing; both HTTP constructors and execution paths reject requests | Deployments that don't need HTTP |

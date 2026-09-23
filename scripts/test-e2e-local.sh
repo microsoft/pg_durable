@@ -384,9 +384,11 @@ restart_server() {
     wait_for_server
 }
 
-assert_http_domains_startup_rejected() (
+assert_http_startup_rejected() (
+    parameter="$1"
+    invalid_value="$2"
     # Scope the restoration trap to this probe, leaving the runner's EXIT trap intact.
-    config_backup=$(mktemp "$DATA_DIR/http-domains-startup.XXXXXX") || exit 1
+    config_backup=$(mktemp "$DATA_DIR/http-startup.XXXXXX") || exit 1
     if ! cp "$CONF_FILE" "$config_backup"; then
         rm -f -- "$config_backup"
         exit 1
@@ -418,22 +420,21 @@ assert_http_domains_startup_rejected() (
         exit 1
     fi
 
-    # The last assignment wins. This must reach the preload check hook rather
+    # The last assignment wins. This must reach preload validation rather
     # than ALTER SYSTEM validation or a postgresql.conf syntax error.
-    printf "\npg_durable.http_allowed_domains = 'example.com,https://api.github.com'\n" \
-        >> "$CONF_FILE" || exit 1
+    printf "\n%s = '%s'\n" "$parameter" "$invalid_value" >> "$CONF_FILE" || exit 1
 
     failed=false
     if startup_output=$("$PG_CTL" -D "$DATA_DIR" -l "$startup_log" -w -t 15 start 2>&1); then
-        echo "TEST FAILED: PostgreSQL accepted a malformed startup domain allowlist"
+        echo "TEST FAILED: PostgreSQL accepted an invalid startup value for $parameter"
         failed=true
     fi
     if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
         echo "TEST FAILED: PostgreSQL is still running after the invalid-config startup"
         failed=true
     fi
-    if ! grep -Eq '(ERROR|FATAL):[[:space:]]+invalid value for parameter "pg_durable[.]http_allowed_domains"' "$startup_log"; then
-        echo "TEST FAILED: startup did not report the expected domain GUC error"
+    if ! grep -Eq "(ERROR|FATAL):[[:space:]]+invalid value for parameter \"${parameter//./[.]}\"" "$startup_log"; then
+        echo "TEST FAILED: startup did not report the expected $parameter error"
         failed=true
     fi
 
@@ -661,8 +662,9 @@ prepare_phase() {
         >/dev/null 2>&1 || true
 
     if [ "$phase" = "http-custom-domains" ]; then
-        echo "Checking malformed HTTP allowlist startup rejection..."
-        assert_http_domains_startup_rejected || exit 1
+        echo "Checking invalid HTTP startup setting rejection..."
+        assert_http_startup_rejected "pg_durable.http_allowed_domains" "example.com,https://api.github.com" || exit 1
+        assert_http_startup_rejected "pg_durable.http_security" "disable" || exit 1
     fi
 
     if [ -f "$LOG_FILE" ]; then
