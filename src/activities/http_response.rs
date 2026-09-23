@@ -166,7 +166,8 @@ impl ResponseBody {
     }
 }
 
-/// Decode `bytes` as text, or return `None` if they cannot be carried as text.
+/// Decode `bytes` as text without copying, or return the original buffer if
+/// they cannot be carried as text.
 ///
 /// Valid UTF-8 is necessary but not sufficient: PostgreSQL's `text` type cannot
 /// hold a NUL byte, so a NUL-containing body has to travel as base64 even though
@@ -174,11 +175,11 @@ impl ResponseBody {
 /// silence in an uncompressed audio file, padding in a disk image — would be
 /// classified as text and then fail on the way into the result row, far from the
 /// decision that caused it.
-fn text_from_bytes(bytes: &[u8]) -> Option<String> {
+fn text_from_bytes(bytes: Vec<u8>) -> Result<String, Vec<u8>> {
     if bytes.contains(&0) {
-        return None;
+        return Err(bytes);
     }
-    std::str::from_utf8(bytes).ok().map(str::to_string)
+    String::from_utf8(bytes).map_err(std::string::FromUtf8Error::into_bytes)
 }
 
 pub struct ResponseContent {
@@ -430,9 +431,9 @@ pub async fn read_body(
             .map_err(|error| format!("Failed to read response body: {}", error.without_url()))?;
         Some(ResponseBody::text(text))
     } else {
-        Some(match text_from_bytes(&bytes) {
-            Some(text) => ResponseBody::text(text),
-            None => ResponseBody::base64(&bytes),
+        Some(match text_from_bytes(bytes) {
+            Ok(text) => ResponseBody::text(text),
+            Err(bytes) => ResponseBody::base64(&bytes),
         })
     };
     Ok(ResponseContent {
@@ -470,43 +471,67 @@ pub fn collect_headers(
         .collect()
 }
 
-/// Build the JSON envelope returned by both HTTP activities.
-///
-/// Construct owned values directly: `json!` would copy the body and headers.
-pub fn build_envelope(
+/// Serialize the HTTP response without allocating an intermediate JSON object.
+pub fn serialize_envelope(
     status_code: u16,
-    content: ResponseContent,
-    headers: serde_json::Map<String, serde_json::Value>,
+    content: &ResponseContent,
+    headers: &serde_json::Map<String, serde_json::Value>,
     is_ok: bool,
     duration_ms: u64,
-) -> serde_json::Value {
-    if let Some(body) = content.inline {
-        return serde_json::Map::from_iter([
-            ("status".into(), status_code.into()),
-            ("body".into(), body.body.into()),
-            ("encoding".into(), body.encoding.into()),
-            ("headers".into(), headers.into()),
-            ("ok".into(), is_ok.into()),
-            ("duration_ms".into(), duration_ms.into()),
-        ])
-        .into();
+) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    #[serde(untagged)]
+    enum Envelope<'a> {
+        Inline {
+            status: u16,
+            body: &'a str,
+            encoding: &'a str,
+            headers: &'a serde_json::Map<String, serde_json::Value>,
+            ok: bool,
+            duration_ms: u64,
+        },
+        Omitted {
+            status: u16,
+            ok: bool,
+            bytes: u64,
+            headers: &'a serde_json::Map<String, serde_json::Value>,
+            duration_ms: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sha256: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sink: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sink_key: Option<uuid::Uuid>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sink_database: Option<&'a str>,
+        },
     }
-    let mut envelope = serde_json::Map::from_iter([
-        ("status".into(), status_code.into()),
-        ("ok".into(), is_ok.into()),
-        ("bytes".into(), content.bytes.into()),
-        ("headers".into(), headers.into()),
-        ("duration_ms".into(), duration_ms.into()),
-    ]);
-    if let Some(sha256) = content.sha256 {
-        envelope.insert("sha256".into(), sha256.into());
-    }
-    if let Some(sink) = content.sink {
-        envelope.insert("sink".into(), sink.table.into());
-        envelope.insert("sink_key".into(), sink.key.to_string().into());
-        envelope.insert("sink_database".into(), sink.database.into());
-    }
-    envelope.into()
+
+    let envelope = if let Some(body) = &content.inline {
+        Envelope::Inline {
+            status: status_code,
+            body: &body.body,
+            encoding: body.encoding,
+            headers,
+            ok: is_ok,
+            duration_ms,
+        }
+    } else {
+        let sink = content.sink.as_ref();
+        Envelope::Omitted {
+            status: status_code,
+            ok: is_ok,
+            bytes: content.bytes,
+            headers,
+            duration_ms,
+            sha256: content.sha256.as_deref(),
+            sink: sink.map(|sink| sink.table.as_str()),
+            sink_key: sink.map(|sink| sink.key),
+            sink_database: sink.map(|sink| sink.database.as_str()),
+        }
+    };
+    serde_json::to_string(&envelope)
+        .map_err(|error| format!("Failed to serialize HTTP response: {error}"))
 }
 
 #[cfg(test)]
@@ -534,7 +559,10 @@ mod tests {
         assert_eq!(content.bytes, bytes.len() as u64);
         assert_eq!(content.sha256, Some(format!("{:x}", Sha256::digest(bytes))));
         assert!(!content.error_preview().contains("HTTP_SINK_PRIVATE"));
-        let envelope = build_envelope(200, content, serde_json::Map::new(), true, 1);
+        let envelope: serde_json::Value = serde_json::from_str(
+            &serialize_envelope(200, &content, &serde_json::Map::new(), true, 1).unwrap(),
+        )
+        .unwrap();
         assert!(envelope.get("body").is_none());
         assert!(envelope.get("encoding").is_none());
         assert!(envelope.get("sink_key").is_none());
@@ -642,7 +670,10 @@ mod tests {
             let content = read_body(response, &options).await.unwrap();
             assert!(content.inline.is_none());
             assert_eq!(content.error_preview(), "response body omitted (3 bytes)");
-            let envelope = build_envelope(500, content, serde_json::Map::new(), false, 1);
+            let envelope: serde_json::Value = serde_json::from_str(
+                &serialize_envelope(500, &content, &serde_json::Map::new(), false, 1).unwrap(),
+            )
+            .unwrap();
             assert_eq!(envelope["bytes"], 3);
             assert!(envelope.get("body").is_none());
             assert!(envelope.get("encoding").is_none());
@@ -886,28 +917,31 @@ mod tests {
     }
 
     #[test]
-    fn sniffing_accepts_utf8_without_nul() {
-        // An unlisted textual type reaches this path; base64-encoding it would
-        // be a needless regression for callers already parsing `body`.
-        assert_eq!(
-            text_from_bytes(b"{\"ok\":true}").as_deref(),
-            Some("{\"ok\":true}")
-        );
-        assert_eq!(
-            text_from_bytes("caf\u{e9} \u{1f600}".as_bytes()).as_deref(),
-            Some("caf\u{e9} \u{1f600}")
-        );
-        assert_eq!(text_from_bytes(b"").as_deref(), Some(""));
+    fn sniffing_reuses_utf8_without_nul() {
+        for text in ["", "{\"ok\":true}", "caf\u{e9} \u{1f600}", "\u{feff}text"] {
+            let bytes = text.as_bytes().to_vec();
+            let ptr = bytes.as_ptr();
+            let result = text_from_bytes(bytes).unwrap();
+            assert_eq!(result, text);
+            assert_eq!(result.as_ptr(), ptr);
+        }
     }
 
     #[test]
-    fn sniffing_rejects_non_utf8_and_nul_bytes() {
-        // Real binary signatures: PNG, and a lone continuation byte.
-        assert_eq!(text_from_bytes(&[0x89, b'P', b'N', b'G']), None);
-        assert_eq!(text_from_bytes(&[0xff, 0xd8, 0xff]), None);
-        // Valid UTF-8, but PostgreSQL cannot store a NUL in `text`.
-        assert_eq!(text_from_bytes(b"RIFF\0\0\0\0WAVE"), None);
-        assert_eq!(text_from_bytes(&[0u8; 16]), None);
+    fn sniffing_preserves_non_utf8_and_nul_bytes_for_base64() {
+        for bytes in [
+            &[0x89, b'P', b'N', b'G'][..],
+            &[0xff, 0xd8, 0xff],
+            b"RIFF\0\0\0\0WAVE",
+            &[0u8; 16],
+            b"caf\xc3",
+        ] {
+            let owned = bytes.to_vec();
+            let ptr = owned.as_ptr();
+            let result = text_from_bytes(owned).unwrap_err();
+            assert_eq!(result, bytes);
+            assert_eq!(result.as_ptr(), ptr);
+        }
     }
 
     #[test]
@@ -950,16 +984,22 @@ mod tests {
     }
 
     #[test]
-    fn envelope_moves_inline_body_and_headers_without_changing_serialization() {
+    fn envelope_serializes_inline_responses_without_changing_json() {
         for body in [
             ResponseBody::text("caf\u{e9}\n\"\\\t".repeat(1024)),
             ResponseBody::base64(&[0, 255, 128, 1]),
             ResponseBody::text(String::new()),
         ] {
-            let headers = serde_json::Map::from_iter([(
-                "x-request-id".into(),
-                serde_json::Value::String("request".into()),
-            )]);
+            let headers = serde_json::Map::from_iter([
+                (
+                    "x-request-id".into(),
+                    serde_json::Value::String("request".into()),
+                ),
+                (
+                    "content-type".into(),
+                    serde_json::Value::String("text/plain".into()),
+                ),
+            ]);
             let expected = serde_json::json!({
                 "status": 400,
                 "body": body.body,
@@ -969,8 +1009,6 @@ mod tests {
                 "duration_ms": 12,
             })
             .to_string();
-            let body_ptr = body.body.as_ptr();
-            let header_ptr = headers["x-request-id"].as_str().unwrap().as_ptr();
             let content = ResponseContent {
                 inline: Some(body),
                 bytes: 0,
@@ -978,16 +1016,8 @@ mod tests {
                 sink_body: None,
                 sink: None,
             };
-            let envelope = build_envelope(400, content, headers, false, 12);
-            assert_eq!(envelope.to_string(), expected);
-            assert_eq!(envelope["body"].as_str().unwrap().as_ptr(), body_ptr);
-            assert_eq!(
-                envelope["headers"]["x-request-id"]
-                    .as_str()
-                    .unwrap()
-                    .as_ptr(),
-                header_ptr
-            );
+            let envelope = serialize_envelope(400, &content, &headers, false, 12).unwrap();
+            assert_eq!(envelope, expected);
         }
     }
 
@@ -1012,7 +1042,7 @@ mod tests {
             }
             let sink = (mode == HttpResponseMode::Sink).then(|| StoredResponse {
                 table: "\"Sink.Schema\".\"Body.Table\"".into(),
-                key: uuid::Uuid::nil(),
+                key: uuid::Uuid::from_u128(0x01234567_89ab_cdef_0123_456789abcdef),
                 database: "postgres".into(),
             });
             if let Some(sink) = &sink {
@@ -1027,8 +1057,9 @@ mod tests {
                 sink_body: None,
                 sink,
             };
-            let envelope = build_envelope(200, content, serde_json::Map::new(), true, 12);
-            assert_eq!(envelope.to_string(), expected.to_string());
+            let envelope =
+                serialize_envelope(200, &content, &serde_json::Map::new(), true, 12).unwrap();
+            assert_eq!(envelope, expected.to_string());
         }
     }
 }
