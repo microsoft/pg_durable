@@ -263,7 +263,7 @@ trap cleanup EXIT
 # Build and install the current version
 echo -e "${YELLOW}Building and installing extension (v${CURRENT_VERSION})...${NC}"
 cd "$PROJECT_DIR"
-cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains >/dev/null 2>&1
+cargo pgrx install --pg-config="$PG_CONFIG" >/dev/null 2>&1
 
 # Copy checked-in install SQL fixtures to the extension directory so older
 # schemas from previous majors can be reconstructed during upgrade tests.
@@ -302,8 +302,9 @@ if [ -f "$DATA_DIR/postgresql.conf" ]; then
     # causes the BGW to refuse to start (breaking the B1 wait-for-readiness check),
     # and the reconcile phase's aggressive reconcile_interval/retention_days would
     # remove terminal instances mid-test and make df.result() flaky. HTTP phases
-    # can leave a custom or empty domain list instead of the build's defaults.
-    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d; /^[#[:space:]]*pg_durable\.http_allowed_domains[[:space:]]*=/d' "$DATA_DIR/postgresql.conf"
+    # can leave a custom domain list or a non-default HTTP security mode.
+    sed -i.bak '/^[#[:space:]]*pg_durable\.max_/d; /^[#[:space:]]*pg_durable\.execution_/d; /^[#[:space:]]*pg_durable\.reconcile_/d; /^[#[:space:]]*pg_durable\.retention_/d; /^[#[:space:]]*pg_durable\.http_allowed_domains[[:space:]]*=/d; /^[#[:space:]]*pg_durable\.http_security[[:space:]]*=/d' "$DATA_DIR/postgresql.conf"
+    echo "pg_durable.http_security = 'restricted'" >> "$DATA_DIR/postgresql.conf"
 fi
 
 # If the server is already running, restart it so both the freshly installed

@@ -4,7 +4,7 @@
 -- Merged from: 03_variables, 20_vars, 39_named_results_dot, 41_row_set_expansion, 42_result_name_validation
 -- Tests: variable substitution (|=> / df.as()), workflow variables (df.setvar/getvar),
 --        named result dot-notation, null-safe accessor, row-set expansion, result name validation
--- Note: Test section from 20_vars includes an HTTP sub-test (requires --features http)
+-- Note: Test section from 20_vars includes an HTTP sub-test (requires restricted mode and test domains).
 SET SESSION AUTHORIZATION df_e2e_user;
 
 -- === Test: 03_variables ===
@@ -146,7 +146,7 @@ END $$;
 
 DROP TABLE _test_sys_vars;
 
--- Test 3: Vars in HTTP requests (requires --features http)
+-- Test 3: Vars in HTTP requests (requires restricted mode and test domains)
 SELECT df.clearvars();
 SELECT df.setvar('api_base', 'https://httpbingo.org');
 

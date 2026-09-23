@@ -1,13 +1,13 @@
 # Azure HTTP Domain Tests for pg_durable
 
 Systematically test `df.http()` against every Azure domain suffix in the
-`http-allow-azure-domains` allowlist.  Each test provisions a real Azure
+default restricted-mode allowlist.  Each test provisions a real Azure
 resource, sends a request through pg_durable's background worker, and
 verifies a successful HTTP response.
 
 ## Domain Coverage
 
-The `http-allow-azure-domains` feature allows 20 domain suffixes.  This
+The default restricted-mode allowlist permits 20 domain suffixes. This
 test suite covers them as follows:
 
 | Status | Service | Domain Suffix | Test |
@@ -36,13 +36,13 @@ test suite covers them as follows:
 ## Prerequisites
 
 1. **Azure CLI** (`az`) installed and logged in: `az login`
-2. **pg_durable** built with `http-allow-azure-domains` or `http-allow-test-domains`
+2. **pg_durable** configured with `pg_durable.http_security = 'restricted'`
 3. **PostgreSQL server** running with pg_durable loaded
 4. **psql** available (system or pgrx path)
 
-The extension must be built with HTTP support.  Both `http-allow-azure-domains`
-and `http-allow-test-domains` (which implies it) work.  The standard
-`./scripts/test-e2e-local.sh` flow uses `http-allow-test-domains`.
+Set the security mode in `postgresql.conf` and restart PostgreSQL. The default
+domain allow-list covers these Azure services; a custom list must retain the
+domains needed by the selected tests. No special HTTP build is required.
 
 ## Usage
 
@@ -155,7 +155,7 @@ With prompt cleanup, total cost is negligible:
 ## Relationship to E2E Tests
 
 The existing E2E tests in `tests/e2e/sql/06_http_and_ssrf.sql` test
-`df.http()` against `httpbingo.org` (allowed via `http-allow-test-domains`).
+`df.http()` against `httpbingo.org` (explicitly allowed by the test launcher).
 Those tests validate HTTP functionality (GET, POST, headers, sequences, etc.).
 
 This example suite is complementary — it validates that each **Azure domain

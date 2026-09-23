@@ -11,7 +11,7 @@
 //! `reqwest::multipart::Form` built from base64-encoded parts) and the
 //! privilege target (`df.http_multipart` instead of `df.http`).
 //!
-//! Cargo features controlling outbound HTTP(S) are the same as for df.http —
+//! Startup settings controlling outbound HTTP(S) are the same as for df.http —
 //! see docs/http-security.md for the full security model.
 
 use base64::Engine as _;
@@ -22,8 +22,8 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use crate::activities::execute_http::{check_http_privilege, http_client};
-use crate::ssrf::DomainAllowlist;
-use crate::types::MultipartConfig;
+use crate::ssrf::HttpPolicy;
+use crate::types::{HttpBodyOptions, MultipartConfig, MultipartPart};
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-multipart";
@@ -52,12 +52,61 @@ fn decode_part_data(data_b64: &str) -> Result<Vec<u8>, base64::DecodeError> {
     }
 }
 
+fn build_multipart_request(
+    request: reqwest::RequestBuilder,
+    parts: &[MultipartPart],
+    options: &HttpBodyOptions,
+) -> Result<reqwest::Request, String> {
+    let (client, request) = request.build_split();
+    let mut request = request
+        .map_err(|error| format!("Failed to build multipart request: {}", error.without_url()))?;
+    if options.max_request_bytes.is_some() {
+        request
+            .headers_mut()
+            .remove(reqwest::header::CONTENT_LENGTH);
+    }
+    let mut form = reqwest::multipart::Form::new();
+    let mut total_bytes = 0u64;
+    for part in parts {
+        let bytes = decode_part_data(&part.data_b64)
+            .map_err(|error| format!("Invalid base64 in part '{}': {error}", part.name))?;
+        total_bytes = total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or("HTTP request body length overflow")?;
+        options.check_request_bytes(total_bytes)?;
+        let mut req_part = reqwest::multipart::Part::bytes(bytes);
+        if let Some(content_type) = &part.content_type {
+            req_part = req_part.mime_str(content_type).map_err(|error| {
+                format!("Invalid content_type for part '{}': {error}", part.name)
+            })?;
+        }
+        if let Some(filename) = &part.filename {
+            req_part = req_part.file_name(filename.clone());
+        }
+        form = form.part(part.name.clone(), req_part);
+    }
+    let request = reqwest::RequestBuilder::from_parts(client, request)
+        .multipart(form)
+        .build()
+        .map_err(|error| format!("Failed to build multipart request: {}", error.without_url()))?;
+    if options.max_request_bytes.is_some() {
+        let length = request
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or("Cannot enforce max_request_bytes: multipart body length is unknown")?;
+        options.check_request_bytes(length)?;
+    }
+    Ok(request)
+}
+
 /// Execute a multipart/form-data HTTP request and return the response as JSON
 pub(crate) async fn execute(
     ctx: ActivityContext,
     route: &mut crate::origin::Route,
     semaphore: Arc<Semaphore>,
-    allowed_domains: Arc<DomainAllowlist>,
+    policy: Arc<HttpPolicy>,
     config_json: String,
 ) -> Result<String, String> {
     let config: MultipartConfig = serde_json::from_str(&config_json)
@@ -97,6 +146,7 @@ pub(crate) async fn execute(
     config
         .secret_options
         .validate(false, &config.method, true, config.headers.as_ref())?;
+    config.body_options.validate()?;
     ctx.trace_info("HTTP_MULTIPART authorization checked; preparing request");
     let mut catalog = crate::endpoints::EndpointCatalog::new(
         audit_user,
@@ -124,14 +174,14 @@ pub(crate) async fn execute(
     };
 
     // --- Scheme validation (always enforced) ---
-    crate::ssrf::validate_scheme(request_url).inspect_err(|_| {
+    crate::ssrf::validate_scheme(request_url, policy.security).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (scheme) url={safe_url} submitted_by={audit_user}"
         ));
     })?;
 
     // --- Endpoint allow-list ---
-    crate::ssrf::validate_allowlist(request_url, &allowed_domains).inspect_err(|_| {
+    crate::ssrf::validate_allowlist(request_url, &policy).inspect_err(|_| {
         ctx.trace_info(format!(
             "HTTP_MULTIPART BLOCKED (allowlist) url={safe_url} submitted_by={audit_user}"
         ));
@@ -162,7 +212,7 @@ pub(crate) async fn execute(
 
     // Client shared with execute_http (same SSRF-safe resolver and pool); the
     // per-node timeout is applied to the request.
-    let client = http_client()?;
+    let client = http_client(policy.security)?;
 
     // Build request based on method. Multipart only makes sense for
     // body-carrying methods; the DSL guard restricts to POST/PUT/PATCH and we
@@ -202,22 +252,7 @@ pub(crate) async fn execute(
     }
     request = request.headers(resolved.headers);
 
-    // Build the multipart form from base64-encoded parts.
-    let mut form = reqwest::multipart::Form::new();
-    for part in &config.parts {
-        let bytes = decode_part_data(&part.data_b64)
-            .map_err(|e| format!("Invalid base64 in part '{}': {e}", part.name))?;
-        let mut req_part = reqwest::multipart::Part::bytes(bytes);
-        if let Some(ct) = &part.content_type {
-            req_part = req_part
-                .mime_str(ct)
-                .map_err(|e| format!("Invalid content_type for part '{}': {e}", part.name))?;
-        }
-        if let Some(filename) = &part.filename {
-            req_part = req_part.file_name(filename.clone());
-        }
-        form = form.part(part.name.clone(), req_part);
-    }
+    let request = build_multipart_request(request, &config.parts, &config.body_options)?;
 
     // Execute request
     check_http_privilege(
@@ -228,7 +263,7 @@ pub(crate) async fn execute(
         route.origin.as_ref(),
     )
     .await?;
-    let response = request.multipart(form).send().await.map_err(|e| {
+    let response = client.execute(request).await.map_err(|e| {
         let e = e.without_url();
         let err_string = e.to_string();
 
@@ -261,10 +296,25 @@ pub(crate) async fn execute(
     let status_code = status.as_u16();
 
     // Collect response headers
-    let response_headers = crate::activities::http_response::collect_headers(&response);
+    let response_headers =
+        crate::activities::http_response::collect_headers(&response, &config.body_options);
 
     // Text or base64 depending on Content-Type — see activities::http_response.
-    let response_body = crate::activities::http_response::read_body(response).await?;
+    let mut response_body =
+        crate::activities::http_response::read_body(response, &config.body_options).await?;
+
+    if !status.is_server_error() {
+        response_body
+            .store_in_sink(
+                &config.body_options,
+                audit_user,
+                config.database.as_deref(),
+                &semaphore,
+                Duration::from_secs(config.timeout_seconds),
+                route,
+            )
+            .await?;
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_ok = status.is_success();
@@ -280,7 +330,11 @@ pub(crate) async fn execute(
 
     ctx.trace_info(format!(
         "HTTP_MULTIPART {} completed: status={}, ok={}, encoding={}, duration={}ms",
-        config.method, status_code, is_ok, response_body.encoding, duration_ms
+        config.method,
+        status_code,
+        is_ok,
+        response_body.encoding(),
+        duration_ms
     ));
 
     // Fail on 5xx server errors (transient, should retry)
@@ -300,6 +354,52 @@ pub(crate) async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_request_cap_includes_multipart_framing_and_ignores_spoofed_length() {
+        let client = reqwest::Client::new();
+        let parts = [MultipartPart {
+            name: "field".to_string(),
+            filename: Some("file.txt".to_string()),
+            content_type: Some("text/plain".to_string()),
+            data_b64: "YWJj".to_string(),
+        }];
+        let build = |limit| {
+            build_multipart_request(
+                client
+                    .post("https://example.com/")
+                    .header("Content-Length", "1"),
+                &parts,
+                &HttpBodyOptions {
+                    max_request_bytes: Some(limit),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(build(3).unwrap_err().contains("max_request_bytes"));
+        let mut request = build(4096).unwrap();
+        let length: u64 = request.headers()[reqwest::header::CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(length > 3);
+        assert_eq!(
+            request
+                .headers()
+                .get_all(reqwest::header::CONTENT_LENGTH)
+                .iter()
+                .count(),
+            1
+        );
+        let body = reqwest::Response::from(http::Response::new(request.body_mut().take().unwrap()))
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(body.len() as u64, length);
+        assert!(build(length).is_ok());
+        assert!(build(length - 1).unwrap_err().contains("max_request_bytes"));
+    }
 
     /// Mirror of PostgreSQL's `encode(bytea, 'base64')`: RFC 2045 §6.8 line
     /// breaking at 76 characters.

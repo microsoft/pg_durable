@@ -12,9 +12,9 @@
 #   --clean                   Start with a fresh database cluster
 #   --verbose, -v             Show NOTICE messages and full test output
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
-#   --default-build-phases    Run all phases that share the standard build artifact
-#   --http-disabled           Run only the HTTP-disabled (no http Cargo feature) phase
-#   --http-allow-all          Run only the http-allow-all Cargo feature phase
+#   --default-build-phases    Run standard phases, excluding disabled/unrestricted HTTP
+#   --http-disabled           Run only the explicitly HTTP-disabled startup phase
+#   --http-allow-all          Run only the unrestricted HTTP startup phase
 #   --help, -h                Show this help
 #
 # Examples:
@@ -37,6 +37,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 
+. "$SCRIPT_DIR/pg-common.sh"
+
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
@@ -47,7 +49,6 @@ EXPLICIT_PHASES=false
 SETUP_PLAYGROUND_APPLIED=false
 E2E_ROLE_ENSURED=false
 VERSION_SHOWN=false
-CURRENT_FEATURES=""  # tracks what Cargo features the installed .so was built with
 PHASE_LOG_MARK=0
 
 declare -a REQUESTED_PHASES=()
@@ -174,10 +175,10 @@ phase_label() {
             echo "HTTP empty domain allowlist (deny all)"
             ;;
         http-disabled)
-            echo "HTTP disabled (no http Cargo feature)"
+            echo "HTTP disabled (explicit startup policy)"
             ;;
         http-allow-all)
-            echo "HTTP allow-all (http-allow-all Cargo feature)"
+            echo "HTTP unrestricted startup policy"
             ;;
         *)
             echo "$1"
@@ -391,9 +392,11 @@ restart_server() {
     wait_for_server
 }
 
-assert_http_domains_startup_rejected() (
+assert_http_startup_rejected() (
+    parameter="$1"
+    invalid_value="$2"
     # Scope the restoration trap to this probe, leaving the runner's EXIT trap intact.
-    config_backup=$(mktemp "$DATA_DIR/http-domains-startup.XXXXXX") || exit 1
+    config_backup=$(mktemp "$DATA_DIR/http-startup.XXXXXX") || exit 1
     if ! cp "$CONF_FILE" "$config_backup"; then
         rm -f -- "$config_backup"
         exit 1
@@ -425,22 +428,21 @@ assert_http_domains_startup_rejected() (
         exit 1
     fi
 
-    # The last assignment wins. This must reach the preload check hook rather
+    # The last assignment wins. This must reach preload validation rather
     # than ALTER SYSTEM validation or a postgresql.conf syntax error.
-    printf "\npg_durable.http_allowed_domains = 'example.com,https://api.github.com'\n" \
-        >> "$CONF_FILE" || exit 1
+    printf "\n%s = '%s'\n" "$parameter" "$invalid_value" >> "$CONF_FILE" || exit 1
 
     failed=false
     if startup_output=$("$PG_CTL" -D "$DATA_DIR" -l "$startup_log" -w -t 15 start 2>&1); then
-        echo "TEST FAILED: PostgreSQL accepted a malformed startup domain allowlist"
+        echo "TEST FAILED: PostgreSQL accepted an invalid startup value for $parameter"
         failed=true
     fi
     if "$PG_CTL" status -D "$DATA_DIR" >/dev/null 2>&1; then
         echo "TEST FAILED: PostgreSQL is still running after the invalid-config startup"
         failed=true
     fi
-    if ! grep -Eq '(ERROR|FATAL):[[:space:]]+invalid value for parameter "pg_durable[.]http_allowed_domains"' "$startup_log"; then
-        echo "TEST FAILED: startup did not report the expected domain GUC error"
+    if ! grep -Eq "(ERROR|FATAL):[[:space:]]+invalid value for parameter \"${parameter//./[.]}\"" "$startup_log"; then
+        echo "TEST FAILED: startup did not report the expected $parameter error"
         failed=true
     fi
 
@@ -456,22 +458,7 @@ assert_http_domains_startup_rejected() (
 build_extension() {
     echo "Building and installing extension..."
     cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-test-domains >/dev/null 2>&1
-    CURRENT_FEATURES="http-allow-test-domains"
-}
-
-build_extension_no_http() {
-    echo "Building extension (no http features)..."
-    cd "$PROJECT_DIR"
     cargo pgrx install --pg-config="$PG_CONFIG" --no-default-features --features "pg${PG_VERSION}" >/dev/null 2>&1
-    CURRENT_FEATURES="none"
-}
-
-build_extension_http_allow_all() {
-    echo "Building extension (http-allow-all feature)..."
-    cd "$PROJECT_DIR"
-    cargo pgrx install --pg-config="$PG_CONFIG" --features http-allow-all >/dev/null 2>&1
-    CURRENT_FEATURES="http-allow-all"
 }
 
 show_version_once() {
@@ -565,6 +552,8 @@ configure_phase() {
     remove_conf_key "log_connections"
     remove_conf_key "pg_durable.host"
     remove_conf_key "pg_durable.http_allowed_domains"
+    remove_conf_key "pg_durable.http_security"
+    set_conf_line "pg_durable.http_allowed_domains" "'$PG_DURABLE_TEST_HTTP_DOMAINS'"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
     set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
@@ -659,27 +648,19 @@ configure_phase() {
             fi
             ;;
     esac
+
+    case "$phase" in
+        http-disabled)
+            set_conf_line "pg_durable.http_security" "'disabled'"
+            ;;
+        http-allow-all)
+            set_conf_line "pg_durable.http_security" "'unrestricted'"
+            ;;
+    esac
 }
 
 prepare_phase() {
     local phase="$1"
-
-    # Phases that need a different Cargo feature build must rebuild before
-    # the server restarts so the new .so is already in place.
-    case "$phase" in
-        http-disabled)
-            build_extension_no_http
-            ;;
-        http-allow-all)
-            build_extension_http_allow_all
-            ;;
-        no-preload|standard|host-guc|superuser-guc-off|connlimit-backpressure|force-drop|connlimit-timeout|connlimit-startup|reconcile|http-custom-domains|http-empty-domains)
-            # Rebuild if previous phase changed the Cargo features
-            if [ "$CURRENT_FEATURES" != "http-allow-test-domains" ]; then
-                build_extension
-            fi
-            ;;
-    esac
 
     configure_phase "$phase"
 
@@ -697,8 +678,9 @@ prepare_phase() {
         >/dev/null 2>&1 || true
 
     if [ "$phase" = "http-custom-domains" ]; then
-        echo "Checking malformed HTTP allowlist startup rejection..."
-        assert_http_domains_startup_rejected || exit 1
+        echo "Checking invalid HTTP startup setting rejection..."
+        assert_http_startup_rejected "pg_durable.http_allowed_domains" "example.com,https://api.github.com" || exit 1
+        assert_http_startup_rejected "pg_durable.http_security" "disable" || exit 1
     fi
 
     if [ -f "$LOG_FILE" ]; then

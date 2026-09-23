@@ -138,8 +138,8 @@ for test_case in 17:.so 18:.so 17:.dylib 18:.dylib; do
             CARGO="$FAKE_CARGO" \
             PGRX_PACKAGE_DIR="$package_dir" \
             PG_DLSUFFIX="$dlsuffix" \
-            EXTRA_FEATURES=http-allow-azure-domains
-        grep -F -- "--features pg17\\ http-allow-azure-domains" "$CARGO_LOG" > /dev/null
+            EXTRA_FEATURES=unsafe
+        grep -F -- "--features pg17\\ unsafe" "$CARGO_LOG" > /dev/null
     else
         make --no-print-directory \
             PG_VERSION="pg$major" \

@@ -1,16 +1,18 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
--- Issue #375: the "http-custom-domains" phase restarts PostgreSQL with
--- pg_durable.http_allowed_domains = 'example.com' and http-allow-test-domains.
--- The local runner first checks rejection of a malformed postgresql.conf value,
--- restores the configuration, and starts PostgreSQL with this valid allowlist.
+-- Issues #374 and #375: the "http-custom-domains" phase restarts PostgreSQL with
+-- pg_durable.http_allowed_domains = 'example.com' and restricted HTTP mode.
+-- The local runner first checks rejection of invalid startup values for both
+-- settings, restores the configuration, and starts with this valid allowlist.
 -- Allowed requests must reach HTTP transport; example.com need not provide a
 -- working POST endpoint. All other requests must fail before DNS or networking.
 
 SET SESSION AUTHORIZATION df_e2e_user;
 
 DO $$
+DECLARE
+    statement TEXT;
 BEGIN
     IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM 'example.com' THEN
         RAISE EXCEPTION 'TEST FAILED: custom allowlist is not visible to an ordinary user';
@@ -27,6 +29,26 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'TEST FAILED: expected a readable string GUC applied at server startup';
     END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_settings WHERE name = 'pg_durable.http_security') THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP security GUC must be superuser-only';
+    END IF;
+
+    FOREACH statement IN ARRAY ARRAY[
+        'SET pg_durable.http_security = ''unrestricted''',
+        'SET LOCAL pg_durable.http_security = ''unrestricted''',
+        'SELECT set_config(''pg_durable.http_security'', ''unrestricted'', false)',
+        'ALTER ROLE df_e2e_user SET pg_durable.http_security = ''unrestricted''',
+        format('ALTER ROLE df_e2e_user IN DATABASE %I SET pg_durable.http_security = ''unrestricted''',
+               current_database())
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'TEST FAILED: ordinary user changed the HTTP policy: %', statement;
+        EXCEPTION WHEN insufficient_privilege OR cant_change_runtime_param THEN
+            NULL;
+        END;
+    END LOOP;
 END $$;
 
 RESET SESSION AUTHORIZATION;
@@ -42,7 +64,13 @@ BEGIN
         format('ALTER DATABASE %I SET pg_durable.http_allowed_domains = ''api.github.com''',
                current_database()),
         format('ALTER ROLE df_e2e_user IN DATABASE %I SET pg_durable.http_allowed_domains = ''api.github.com''',
-               current_database())
+             current_database()),
+         'SET pg_durable.http_security = ''unrestricted''',
+         'SET LOCAL pg_durable.http_security = ''unrestricted''',
+         'ALTER ROLE df_e2e_user SET pg_durable.http_security = ''unrestricted''',
+         format('ALTER DATABASE %I SET pg_durable.http_security = ''unrestricted''', current_database()),
+         format('ALTER ROLE df_e2e_user IN DATABASE %I SET pg_durable.http_security = ''unrestricted''',
+             current_database())
     ] LOOP
         BEGIN
             EXECUTE statement;
@@ -54,6 +82,9 @@ BEGIN
 
     IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM 'example.com' THEN
         RAISE EXCEPTION 'TEST FAILED: runtime overrides changed the allowlist';
+    END IF;
+    IF current_setting('pg_durable.http_security') IS DISTINCT FROM 'restricted' THEN
+        RAISE EXCEPTION 'TEST FAILED: runtime overrides changed the HTTP security policy';
     END IF;
 END $$;
 
@@ -95,6 +126,38 @@ BEGIN
 END $$;
 
 DROP TABLE _test_invalid_domains;
+
+ALTER SYSTEM SET pg_durable.http_security = 'unrestricted';
+SELECT pg_reload_conf();
+
+CREATE TEMP TABLE _test_http_security_reload (unchanged BOOLEAN);
+DO $$
+DECLARE
+    attempts INT := 0;
+BEGIN
+    LOOP
+        EXIT WHEN EXISTS (
+            SELECT 1 FROM pg_settings
+            WHERE name = 'pg_durable.http_security' AND pending_restart
+        ) OR attempts >= 100;
+        PERFORM pg_sleep(0.05);
+        attempts := attempts + 1;
+    END LOOP;
+    INSERT INTO _test_http_security_reload
+    SELECT setting = 'restricted' AND pending_restart
+    FROM pg_settings WHERE name = 'pg_durable.http_security';
+END $$;
+
+ALTER SYSTEM RESET pg_durable.http_security;
+SELECT pg_reload_conf();
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM _test_http_security_reload WHERE unchanged) THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP security must require a restart, not a reload';
+    END IF;
+END $$;
+DROP TABLE _test_http_security_reload;
 
 SET SESSION AUTHORIZATION df_e2e_user;
 

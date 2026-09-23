@@ -251,11 +251,11 @@ See [rls.md](rls.md) for the full design, policy definitions, grant strategy, an
 
 **Threat**: Attacker uses `df.http()` to access internal network services, cloud metadata endpoints, or localhost services from within the PostgreSQL VM. In a PG-as-a-service deployment, this is a dataplane escape.
 
-**Mitigation (implemented)**: Compile-time IP blocklist that blocks all private/reserved IP ranges, with DNS rebinding protection and IPv4-mapped IPv6 handling. The blocklist is hardcoded and cannot be bypassed by any database user, including superusers, for pg_durable's built-in `df.http()` activity path. It does not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that SQL nodes are permitted to execute.
+**Mitigation (implemented)**: Restricted HTTP mode enforces a hardcoded IP blocklist with DNS rebinding protection and IPv4-mapped IPv6 handling. The startup policy applies to both built-in HTTP activities and cannot be overridden by a workflow, session, or role, including superuser workflows. Administrators can select development-only unrestricted mode at server startup; it bypasses destination restrictions. These controls do not restrict arbitrary SQL functions, user-defined functions, or third-party Postgres extensions that SQL nodes are permitted to execute.
 
 See [http-security.md](http-security.md) for the full specification, blocked IP ranges, and implementation details.
 
-**Residual Risk**: Low for `df.http()` — hardcoded blocklist cannot be bypassed in that path.
+**Residual Risk**: Low for the built-in HTTP activities while restricted mode is active. Development-only unrestricted mode bypasses destination restrictions and must not be used on untrusted deployments.
 
 ---
 
@@ -272,7 +272,7 @@ See [http-security.md](http-security.md) for the full specification, blocked IP 
 - Audit logging records HTTP attempts
 
 **Future enhancements**:
-- Per-customer or per-role destination controls beyond the current feature-gated allowlist
+- Per-customer or per-role destination controls beyond the server-wide startup allow-list
 - Rate limiting
 
 **Residual Risk**: Medium until customer-level controls are implemented. T8 (SSRF/dataplane) protection is independent and addressed first.
@@ -531,8 +531,8 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 
 1. **Function-level permission**: managed through `df.grant_usage` and `df.revoke_usage` for the full HTTP function set
 2. **Execution-time privilege re-check**: the worker validates that `submitted_by` still has `EXECUTE` before any network activity
-3. **SSRF protection**: Block internal IPs at the code level
-4. **Compile-time endpoint allowlist**: allowed destinations depend on the HTTP Cargo feature
+3. **SSRF protection**: restricted mode blocks internal IPs at the code level
+4. **Startup destination policy**: `pg_durable.http_security` selects disabled, restricted (default), or development-only unrestricted HTTP; `pg_durable.http_allowed_domains` controls the restricted-mode allow-list
 5. **Redirect handling**: redirects are disabled
 
 ```
@@ -551,11 +551,11 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 │  │ Blocks raw df.start() JSON injection bypasses             │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
-│  Layer 3: SSRF Protection + Feature Allowlist                  │
+│  Layer 3: Destination Policy (Restricted Mode)                 │
 │  ┌───────────────────────────────────────────────────────────┐ │
-│  │ Block: private/link-local/loopback ranges                │ │
-│  │ Allow only feature-approved hostnames                    │ │
-│  │ No redirects                                              │ │
+│  │ HTTPS only; block private/link-local/loopback IPs           │ │
+│  │ Allow only GUC-approved hostnames                          │ │
+│  │ No proxies or redirects                                   │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -566,7 +566,7 @@ HTTP requests are guarded by PostgreSQL function privileges plus runtime SSRF de
 **Function-level access control** (PostgreSQL native):
 
 ```sql
--- Fresh installs: HTTP disabled by default
+-- Fresh installs: PUBLIC has no HTTP EXECUTE privilege
 
 -- DBA enables HTTP for specific roles
 SELECT df.grant_usage('etl_service', include_http => true);
@@ -580,22 +580,50 @@ SELECT df.start(df.http('https://example.com', 'GET'), 'test');
 
 ### 6.3 GUC Configuration
 
-The current implementation does not expose HTTP allowlists or rate limits via
-GUCs. Allowed destinations are compiled in through Cargo features and the
-execution-time permission model is documented in [http-security.md](http-security.md).
+HTTP destination policy is configured at server startup, not through Cargo
+features. Both settings apply to `df.http()` and `df.http_multipart()`:
+
+| Setting | Default | Behavior |
+|---------|---------|----------|
+| `pg_durable.http_security` | `restricted` | `disabled` rejects all HTTP requests; `restricted` enforces HTTPS, the domain allow-list, and SSRF protections; development-only `unrestricted` bypasses domain and IP restrictions and permits plaintext HTTP and proxies |
+| `pg_durable.http_allowed_domains` | Azure service subdomain patterns and `api.github.com` | Complete restricted-mode allow-list of exact hostnames and `*.domain` patterns; an explicit value replaces all defaults, and an empty list denies all domains |
+
+Both are **Postmaster-context** settings: configure them in `postgresql.conf`
+or through an authorized `ALTER SYSTEM SET`, then restart PostgreSQL. A reload
+alone does not apply changes, and session, role, database, and workflow settings
+cannot override the policy. The security-mode GUC is superuser-only; all users
+can inspect the domain list. Invalid startup values prevent server startup
+rather than falling back to defaults.
+
+HTTP function privileges, TLS certificate verification, and redirect blocking
+remain enforced in both enabled modes. There are no HTTP rate-limit or global
+HTTP-timeout GUCs; timeouts are specified per request. See
+[http-security.md](http-security.md) for the complete policy and migration guidance.
 
 ### 6.4 SSRF Protection
 
-SSRF protection is implemented as a compile-time IP blocklist that blocks all private/reserved IP ranges (RFC 1918, link-local, loopback, IPv6 ULA, etc.), with DNS rebinding protection and IPv4-mapped IPv6 handling.
+In restricted mode, a hardcoded IP blocklist rejects private and reserved ranges
+(RFC 1918, link-local, loopback, IPv6 ULA, etc.), with DNS rebinding protection
+and IPv4-mapped IPv6 handling. Bare IP URLs are rejected before DNS resolution,
+and proxies are disabled so they cannot bypass the resolver. Configuring an
+allowed hostname does not exempt its resolved addresses from these checks.
+Unrestricted mode bypasses the destination restrictions; disabled mode rejects
+all HTTP requests.
 
 See [http-security.md](http-security.md) for the full specification including blocked ranges, implementation architecture, and testing.
 
 ### 6.5 Implementation
 
 See [http-security.md](http-security.md) for the implemented privilege check,
-SSRF protections, and feature-gated hostname allowlist.
+SSRF protections, and startup-configured hostname allow-list. The worker
+captures an immutable policy at startup; pending requests and retries use that
+policy, while previously recorded activity results replay unchanged.
 
 ### 6.6 User Experience
+
+These examples assume the server started in restricted mode with
+`api.company.com` included in `pg_durable.http_allowed_domains`. Function grants
+alone do not permit an unlisted destination.
 
 ```sql
 -- DBA setup (one-time)
@@ -620,10 +648,10 @@ SELECT df.start(
 -- SSRF attempt (even with permission)
 SET ROLE etl_service;
 SELECT df.start(
-    df.http('http://169.254.169.254/latest/meta-data/', 'GET'),
+    df.http('https://169.254.169.254/latest/meta-data/', 'GET'),
     'ssrf-attempt'
 );
--- ✗ ERROR: HTTP request blocked: resolves to internal IP
+-- Fails at execution: requests to bare IP addresses are not permitted.
 ```
 
 ### 6.7 Duroxide Background Worker Authentication/Authorization
@@ -716,7 +744,7 @@ Credential values remain plaintext in catalogs, WAL and backups. Superuser dumps
 -- df.sql() - available to anyone who can use df.start()
 -- (actual SQL permission checked via per-user sqlx connection)
 
--- df.http() - disabled by default, DBA enables per-role
+-- HTTP functions - no PUBLIC EXECUTE privilege; DBA grants per-role
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.http(df.http_endpoint, text, text, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM PUBLIC;
@@ -735,12 +763,15 @@ REVOKE EXECUTE ON FUNCTION df.http_multipart(df.http_endpoint, text, jsonb, json
 
 ### 8.3 Earlier GUC Proposal (Not Implemented)
 
-The following GUC definitions were part of an earlier proposal. The current
-implementation uses Cargo features plus the execution-time privilege check
-described in `docs/http-security.md`, not runtime HTTP GUCs.
+The following `df.*` GUC definitions are historical, unimplemented proposal
+code, not supported configuration. The implemented Postmaster settings
+`pg_durable.http_security` and `pg_durable.http_allowed_domains` replace the
+proposed destination controls. They do not provide a separately tunable IP
+blocklist, a global HTTP timeout, or rate limiting. See
+[Section 6.3](#63-guc-configuration) for the current configuration contract.
 
 ```rust
-// src/lib.rs
+// Historical proposal, not the implemented registration API.
 
 // HTTP activity controls
 GucRegistry::define_string_guc(
@@ -959,8 +990,9 @@ SELECT df.grant_usage('app_backend');
 -- 2. Opt a role into HTTP access only when needed
 SELECT df.grant_usage('app_backend_http', include_http => true);
 
--- 3. Allowed HTTP destinations depend on the build feature set.
--- See docs/http-security.md for the current allowlist.
+-- 3. Configure pg_durable.http_security and pg_durable.http_allowed_domains
+-- in postgresql.conf or via authorized ALTER SYSTEM SET, then restart PostgreSQL.
+-- See docs/http-security.md for the policy and default allow-list.
 
 -- 4. View all instances (superuser bypasses RLS)
 SELECT submitted_by, count(*) 
@@ -1450,8 +1482,8 @@ SELECT 'TEST PASSED: E2E-SEC-05 Function Permission Requirement' AS result;
 **File**: `tests/e2e/sql/security_07_http_ssrf.sql`
 
 ```sql
--- Test: HTTP requests to internal IPs are blocked (always-on protection)
--- Expected: SSRF attempts fail regardless of permissions
+-- Test: HTTP requests to internal IPs are blocked in restricted mode
+-- Expected: SSRF attempts fail even with HTTP function privileges
 
 -- Setup
 DROP USER IF EXISTS sec_test_ssrf_user;
@@ -1462,14 +1494,14 @@ GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO sec_test_
 GRANT EXECUTE ON FUNCTION df.status TO sec_test_ssrf_user;
 GRANT sec_test_ssrf_user TO duroxide;
 
--- Build with a feature set that allows the chosen public test destination.
--- SSRF protection still applies regardless of that feature set.
+-- Start the server with pg_durable.http_security = 'restricted' (the default).
+-- A configured domain allow-list cannot bypass the restricted-mode IP checks.
 
 -- Test 1: AWS metadata endpoint (169.254.169.254) should be blocked
 SET ROLE sec_test_ssrf_user;
 CREATE TEMP TABLE _test_ssrf_1 (instance_id TEXT);
 INSERT INTO _test_ssrf_1 SELECT df.start(
-    df.http('http://169.254.169.254/latest/meta-data/', 'GET'),
+    df.http('https://169.254.169.254/latest/meta-data/', 'GET'),
     'ssrf-test-aws-metadata'
 );
 RESET ROLE;
@@ -1504,7 +1536,7 @@ END $$;
 SET ROLE sec_test_ssrf_user;
 CREATE TEMP TABLE _test_ssrf_2 (instance_id TEXT);
 INSERT INTO _test_ssrf_2 SELECT df.start(
-    df.http('http://127.0.0.1:8080/', 'GET'),
+    df.http('https://127.0.0.1:8080/', 'GET'),
     'ssrf-test-localhost'
 );
 RESET ROLE;
@@ -1564,7 +1596,8 @@ GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO sec_test_
 GRANT sec_test_http_denied TO duroxide;
 GRANT sec_test_http_allowed TO duroxide;
 
--- Build with a feature set that allows httpbingo.org.
+-- Start in restricted mode with httpbingo.org in pg_durable.http_allowed_domains.
+-- Configure the complete list before startup; HTTP function grants are separate.
 
 -- Test 1: User WITHOUT df.http permission should fail
 SET ROLE sec_test_http_denied;
@@ -1629,8 +1662,8 @@ SELECT 'TEST PASSED: E2E-SEC-08 HTTP Function Permission' AS result;
 **File**: `tests/e2e/sql/security_09_http_allowlist.sql`
 
 ```sql
--- Test: HTTP requests only allowed to the destinations permitted by the
--- build-time feature allowlist
+-- Test: HTTP requests in restricted mode only reach destinations permitted by
+-- pg_durable.http_allowed_domains
 -- Expected: Requests to non-allowlisted hosts are denied
 
 -- Setup
@@ -1643,7 +1676,8 @@ GRANT EXECUTE ON FUNCTION df.status TO sec_test_allowlist_user;
 GRANT SELECT ON df.instances TO sec_test_allowlist_user;
 GRANT sec_test_allowlist_user TO duroxide;
 
--- Build with a feature set that allows httpbingo.org but not evil.com.
+-- Start with pg_durable.http_security = 'restricted' and
+-- pg_durable.http_allowed_domains = 'httpbingo.org' (replaces all defaults).
 
 -- Test 1: Allowlisted host should succeed
 SET ROLE sec_test_allowlist_user;

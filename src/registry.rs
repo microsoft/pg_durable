@@ -11,18 +11,18 @@ use tokio::sync::Semaphore;
 
 use crate::activities;
 use crate::orchestrations;
-use crate::ssrf::DomainAllowlist;
+use crate::ssrf::HttpPolicy;
 
 /// Create the activity registry with all registered activities
 pub fn create_activity_registry(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
-    http_allowed_domains: Arc<DomainAllowlist>,
+    http_policy: Arc<HttpPolicy>,
 ) -> ActivityRegistry {
     let sql_semaphore = semaphore.clone();
     let http_semaphore = semaphore.clone();
     let multipart_semaphore = semaphore;
-    let multipart_allowed_domains = http_allowed_domains.clone();
+    let multipart_policy = http_policy.clone();
     let router = Arc::new(crate::origin::Router::new(pool));
     let sql_pool = router.clone();
     let graph_pool = router.clone();
@@ -141,14 +141,14 @@ pub fn create_activity_registry(
             move |ctx: ActivityContext, config_json: String| {
                 let pool = http_pool.clone();
                 let semaphore = http_semaphore.clone();
-                let allowed_domains = http_allowed_domains.clone();
+                let policy = http_policy.clone();
                 async move {
                     let mut route = pool.route(ctx.instance_id()).await?;
                     let result = activities::execute_http::execute(
                         ctx,
                         &mut route,
                         semaphore,
-                        allowed_domains,
+                        policy,
                         config_json,
                     )
                     .await;
@@ -162,14 +162,14 @@ pub fn create_activity_registry(
             move |ctx: ActivityContext, config_json: String| {
                 let pool = multipart_pool.clone();
                 let semaphore = multipart_semaphore.clone();
-                let allowed_domains = multipart_allowed_domains.clone();
+                let policy = multipart_policy.clone();
                 async move {
                     let mut route = pool.route(ctx.instance_id()).await?;
                     let result = activities::execute_multipart::execute(
                         ctx,
                         &mut route,
                         semaphore,
-                        allowed_domains,
+                        policy,
                         config_json,
                     )
                     .await;

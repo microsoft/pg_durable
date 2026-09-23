@@ -1,21 +1,30 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
--- E2E Test: df.http() raises an error at DSL call time when no http Cargo feature
--- is compiled in.
+-- E2E Test: Explicitly disabled HTTP is blocked at DSL and execution time.
 --
--- This test runs in the "http-disabled" phase, which builds pg_durable without any
--- http-allow-* features.  df.http() must raise immediately at SQL call time (before
--- df.start() is ever called), not just at execution time.
+-- This test runs in the "http-disabled" phase with http_security = 'disabled'.
+-- df.http() must raise immediately, before df.start() is called.
 -- The requested hostname is explicitly allowed by the GUC: a configured list
--- must not enable HTTP in a build without an HTTP feature.
+-- must not enable HTTP when the security mode is disabled.
 
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_settings
+        WHERE name = 'pg_durable.http_security'
+          AND setting = 'disabled' AND boot_val = 'restricted'
+          AND context = 'postmaster' AND vartype = 'enum'
+          AND source = 'configuration file' AND NOT pending_restart
+    ) THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP must be explicitly disabled at startup';
+    END IF;
     IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM 'example.com' THEN
         RAISE EXCEPTION 'TEST FAILED: http-disabled phase requires the example.com allowlist';
     END IF;
 END $$;
+
+SET SESSION AUTHORIZATION df_e2e_user;
 
 -- ============================================================================
 -- Test 1: df.http() raises at DSL construction time when HTTP is disabled
@@ -39,6 +48,18 @@ BEGIN
     IF NOT caught THEN
         RAISE EXCEPTION 'TEST FAILED: df.http() should raise at DSL time when HTTP is disabled';
     END IF;
+
+    caught := false;
+    BEGIN
+        PERFORM df.http_multipart('https://example.com/path', parts => '[{"name":"file","data_b64":"aA=="}]');
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM ILIKE '%df.http_multipart() is disabled%' THEN
+            caught := true;
+        ELSE
+            RAISE;
+        END IF;
+    END;
+    IF NOT caught THEN RAISE EXCEPTION 'TEST FAILED: multipart should be disabled'; END IF;
 
     caught := false;
     BEGIN
@@ -72,48 +93,51 @@ END $$;
 --
 -- df.start() accepts a serialized Durofut JSON string directly, so a caller
 -- can construct an HTTP node without ever touching df.http().  The execution-
--- time defence in execute_http (validate_url_allowlist) must catch this.
+-- time defence in both HTTP activities must catch this.
 -- ============================================================================
 
-CREATE TEMP TABLE _test_http_bypass (instance_id TEXT);
+CREATE TEMP TABLE _test_http_bypass (instance_id TEXT, node_type TEXT);
 
 -- Pass a hand-crafted HTTP node JSON straight to df.start().
 -- df.start() accepts raw Durofut JSON, so this bypasses the df.http() guard.
 INSERT INTO _test_http_bypass
 SELECT df.start(
-    '{"node_type":"HTTP","query":"{\"url\":\"https://example.com/path\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
-    'test-http-bypass-attempt'
-);
+    jsonb_build_object(
+        'node_type', node_type,
+        'query', jsonb_build_object(
+            'url', 'https://example.com/path', 'method', 'POST',
+            'parts', '[{"name":"field","data_b64":"dmFsdWU="}]'::jsonb,
+            'timeout_seconds', 5
+        )::text
+    )::text,
+    'test-http-bypass-' || node_type
+), node_type
+FROM (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS node_types(node_type);
 
 DO $$
 DECLARE
-    inst_id     TEXT;
+    test_case   RECORD;
     status      TEXT;
     node_result TEXT;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_http_bypass;
+    FOR test_case IN SELECT * FROM _test_http_bypass ORDER BY node_type LOOP
+        SELECT df.await_instance(test_case.instance_id, 30) INTO status;
+        SELECT result::text INTO node_result
+        FROM df.nodes
+        WHERE instance_id = test_case.instance_id AND node_type = test_case.node_type;
 
-    -- Wait up to 30 s; the request must fail (not complete or time out).
-    SELECT df.await_instance(inst_id, 30) INTO status;
+        IF status IS DISTINCT FROM 'failed'
+           OR node_result IS NULL
+           OR node_result NOT ILIKE '%outbound HTTP requests are disabled%' THEN
+            RAISE EXCEPTION 'TEST FAILED: disabled % request: status = %, result = %',
+                test_case.node_type, status, node_result;
+        END IF;
+    END LOOP;
 
-    IF status != 'failed' THEN
-        RAISE EXCEPTION 'TEST FAILED: expected status = failed, got %', status;
-    END IF;
-
-    -- The node result should contain the execution-time block message.
-    SELECT result::text INTO node_result
-    FROM df.nodes
-    WHERE instance_id = inst_id AND node_type = 'HTTP';
-
-    IF node_result IS NULL OR node_result NOT ILIKE '%outbound HTTP requests are disabled%' THEN
-        RAISE EXCEPTION
-            'TEST FAILED: expected "outbound HTTP requests are disabled" in node result, got: %',
-            node_result;
-    END IF;
-
-    RAISE NOTICE 'TEST PASSED: http_execution_blocked_without_feature';
+    RAISE NOTICE 'TEST PASSED: http_execution_blocked_by_startup_policy';
 END $$;
 
 DROP TABLE _test_http_bypass;
+RESET SESSION AUTHORIZATION;
 
 SELECT 'TEST PASSED' AS result;

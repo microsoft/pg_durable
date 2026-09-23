@@ -304,12 +304,30 @@ for the separate runtime shutdown and server-side cancellation limitations.
 - **Scenario A considerations:** The added function matches pgrx-generated fresh-install SQL, including argument names, null handling and the `with_http_options_wrapper` C symbol.
 - **Scenario B1 considerations:** The new helper remains absent until `ALTER EXTENSION UPDATE`. The new `.so` exports `with_http_options_wrapper`; existing HTTP function signatures, C symbols, OIDs and ACLs are unchanged.
 
-#### Configurable HTTP domains (#375)
-- **Runtime change (no DDL):** `pg_durable.http_allowed_domains` is a Postmaster-context string GUC that replaces the domain allow-list for both HTTP activities in restricted builds. The defaults preserve the existing Azure/GitHub policy, including `httpbingo.org` in test builds. Disabled and `http-allow-all` build behavior is unchanged.
-- **Configuration migration:** None is required to retain existing behavior. Administrators can configure exact hostnames and `*.domain` patterns, then restart PostgreSQL. An explicit value replaces all defaults; an empty list denies all domains in restricted builds. Malformed values are rejected, including at server startup.
+#### HTTP body policies and table sinks (#376)
+
+- **Upgrade & Migration:** No additional extension DDL or schema detection is
+  needed. Body policies use `df.with_http_options`; destination tables are
+  caller-provisioned in the workflow's target database. Existing HTTP defaults,
+  signatures, grants, and previously persisted response bodies are unchanged.
+- **Binary compatibility:** The new `.so` continues to work with supported older
+  extension schemas. Sink writes use native PostgreSQL functionality through a
+  caller-authenticated connection, without relying on new extension tables.
+- **Replay compatibility:** Only new `response: "sink"` nodes gain trusted
+  target-database metadata. Older request configurations preserve their activity
+  input bytes. Table writes and attempt-key generation happen inside HTTP
+  activities; replay uses the recorded reference without fetching the body.
+- **Retention:** A sink write and its durable activity completion are not one
+  transaction. Each attempt uses a fresh UUID, so a losing attempt cannot
+  overwrite a completed attempt's body. A committed but unrecorded attempt can
+  leave a row for the application's retention policy to remove.
+
+#### Startup HTTP security and domains (#374, #375)
+- **Runtime change (no DDL):** `pg_durable.http_security` is a superuser-only Postmaster enum: `disabled`, `restricted` (default), or development-only `unrestricted`. It replaces the HTTP Cargo features. `pg_durable.http_allowed_domains` is a Postmaster string GUC that replaces the complete domain allow-list in restricted mode, defaulting to Azure service subdomains and `api.github.com`.
+- **Configuration migration:** The default preserves the former Azure/GitHub policy. Installations previously built without HTTP support must explicitly select `disabled` before restarting with the new binary to keep HTTP blocked. Test domains such as `httpbingo.org` require explicit allow-list configuration. An explicit list replaces all defaults; an empty list denies all domains in restricted mode. Malformed domain lists are rejected, including at server startup. See [Upgrade & Migration](http-security.md#upgrade--migration).
 - **Scenario A/B2 considerations:** No upgrade-script DDL, schema changes, or data migration. Existing graphs, activity names, and serialized activity inputs are unchanged.
 - **Scenario B1 considerations:** The new `.so` works against all previous supported schemas without `ALTER EXTENSION UPDATE` or runtime schema detection. The policy is read from the GUC, not extension tables.
-- **Replay compatibility:** The policy is evaluated only when an HTTP activity executes, not by orchestration code. Pending requests and retries use the new list after restart; already-recorded activity results replay normally.
+- **Replay compatibility:** The policy is evaluated only when an HTTP activity executes, not by orchestration code. Pending requests and retries use the new mode and list after restart; already-recorded activity results replay normally.
 
 #### Shared HTTP client (#379)
 

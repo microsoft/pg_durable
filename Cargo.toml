@@ -15,9 +15,6 @@ path = "./src/bin/pgrx_embed.rs"
 
 [features]
 default = ["pg17"]
-http-allow-all = []
-http-allow-azure-domains = []
-http-allow-test-domains = ["http-allow-azure-domains"]
 # Compiles the background worker's timing hooks (see `test_pause_before_ready`).
 # Never enable in a shipped build: the hooks let the process environment stall
 # worker initialization.
@@ -58,7 +55,9 @@ chrono = "0.4"
 # tokio-native-tls). duroxide-pg also selects native-tls on the same resolved
 # reqwest version; Cargo feature unification merges them, so the whole graph
 # stays on native-tls with no rustls/ring/aws-lc in the tree.
-reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart", "gzip", "deflate"] }
+http = "1"
+sha2 = "0.10"
 
 # Canonical URL parsing for SSRF validation. Semver-compatible with reqwest's own
 # url dependency, so Cargo unifies them and `url::Url` is `reqwest::Url` — the

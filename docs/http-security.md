@@ -12,7 +12,7 @@ privilege check. For endpoint credentials, see
 
 ## Table of Contents
 
-1. [Feature Flags](#1-feature-flags)
+1. [Startup Policy](#1-startup-policy)
 2. [Three-Layer Security Model](#2-three-layer-security-model)
 3. [Layer 0: PostgreSQL Privilege Check](#3-layer-0-postgresql-privilege-check)
 4. [Layer 1: IP Blocklist (SSRF protection)](#4-layer-1-ip-blocklist-ssrf-protection)
@@ -24,37 +24,70 @@ privilege check. For endpoint credentials, see
 
 ---
 
-## 1. Feature Flags
+## 1. Startup Policy
 
-Cargo features select the outbound HTTP security tier at build time.
-In restricted builds, administrators can replace the domain allow-list with
-`pg_durable.http_allowed_domains` and restart PostgreSQL. That setting cannot
-enable HTTP in a disabled build or change the other protections.
+Since v0.2.9, `pg_durable.http_security` selects the outbound HTTP policy at
+server startup. It is a superuser-only, **Postmaster-context** enum. Configure
+it in `postgresql.conf` or through an authorized `ALTER SYSTEM SET`, then
+restart PostgreSQL. Reloads, `SET`, `SET LOCAL`, role/database defaults, and
+workflow inputs cannot change the running policy.
 
-| Feature | What is allowed | Use case |
+An invalid startup value prevents PostgreSQL from starting rather than
+silently falling back to the default policy.
+
+| Mode | What is allowed | Use case |
 |---------|-----------------|----------|
-| *(none)* | Nothing — `df.http()` errors immediately at DSL time **and** at execution time | Deployments that don't need HTTP |
-| `http-allow-azure-domains` | HTTPS to configured domains, defaulting to Azure subdomains plus `api.github.com`; bare IPs blocked; redirects blocked | Production |
-| `http-allow-test-domains` | Same restrictions; the default list also includes `httpbingo.org` | E2E testing; implies `http-allow-azure-domains` |
-| `http-allow-all` | HTTP and HTTPS to all URLs; SSRF IP blocklist and allow-list are both disabled | Local development only |
+| `disabled` | Nothing; both HTTP constructors and execution paths reject requests | Deployments that don't need HTTP |
+| `restricted` (default) | HTTPS to configured domains, defaulting to Azure subdomains plus `api.github.com`; bare IPs and private DNS results blocked; no proxies | Production HTTP access |
+| `unrestricted` | HTTP and HTTPS to any destination, including private networks; domain and IP restrictions bypassed | Local development only |
 
-The scripts and CI use `http-allow-test-domains` so that the HTTP E2E tests
-pass — this includes the source-built `Dockerfile` used for local dev and CI.
-The released Debian packages are built with `http-allow-azure-domains`, so the
-published Docker image (`Dockerfile.release`, which installs that package)
-inherits the `http-allow-azure-domains` tier and defaults.
-
-### When no feature is set
-
-`df.http()` **fails at the point `df.http()` is called in SQL** with:
-
-```
-df.http() is disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable outbound HTTP requests.
+```ini
+# postgresql.conf
+pg_durable.http_security = 'restricted'
 ```
 
-Because `df.nodes` rows can be inserted by hand (bypassing the DSL), the same
-block is enforced again at execution time inside `execute_http.rs` via
-`validate_allowlist`.
+The domain allow-list can be replaced with `pg_durable.http_allowed_domains`.
+It cannot enable HTTP in disabled mode or relax restricted mode's other
+protections. Both enabled modes retain function privilege checks, TLS
+certificate verification, and redirect blocking. Unrestricted mode permits
+system/environment proxies and must not be used on untrusted deployments.
+
+Local development and E2E launchers use restricted mode and add
+`httpbingo.org` to their test allow-list. The source-built `Dockerfile` does the
+same. Released packages default to restricted HTTP; the published demo image
+(`Dockerfile.release`) explicitly selects restricted mode with the default
+Azure/GitHub allow-list.
+
+### Disabled HTTP
+
+When `pg_durable.http_security = 'disabled'`, `df.http()` **fails at the point
+`df.http()` is called in SQL** with:
+
+```
+df.http() is disabled. Configure pg_durable.http_security = 'restricted' and restart the server to enable outbound HTTP requests.
+```
+
+Crafted workflow JSON can bypass the constructors, so both HTTP activities
+enforce the same block again at execution time.
+
+### Upgrade & Migration
+
+The HTTP Cargo features have been removed. Restricted mode is the default and
+matches the former Azure/GitHub policy. For installations previously built
+without HTTP support, explicitly select `disabled` **before restarting with
+the new binary** to keep HTTP blocked. HTTP function privileges are unchanged.
+
+| Previous build | Replacement configuration |
+|----------------|---------------------------|
+| No HTTP feature | Set `pg_durable.http_security = 'disabled'` |
+| `http-allow-azure-domains` | Use the default `restricted` mode |
+| `http-allow-test-domains` | Select `restricted` and explicitly include `httpbingo.org` in the complete domain allow-list |
+| `http-allow-all` | Select `unrestricted`, on development servers only |
+
+No extension SQL migration is required for these settings. The new binary
+uses them with older extension schemas as well. After a restart, pending
+requests and retries use the new policy; recorded activity results still
+replay normally. HTTP privileges are unchanged.
 
 ---
 
@@ -76,15 +109,15 @@ block is enforced again at execution time inside `execute_http.rs` via
 │  • IPv4-mapped IPv6 (::ffff:A.B.C.D) unwrapped + checked │
 │  • IP literals in URLs blocked before DNS                │
 │  • DNS rebinding prevented via inline resolver check     │
-│  • Disabled only under http-allow-all                    │
+│  • Bypassed only in unrestricted mode                    │
 │                                                          │
 ├──────────────────────────────────────────────────────────┤
 │  Layer 2: Endpoint Allow-List                            │
 │                                                          │
 │  • Bare IPv4/IPv6 addresses always rejected              │
 │  • Hostname must match an approved suffix or exact name  │
-│  • Disabled (allow everything) under http-allow-all      │
-│  • Empty (block everything) when no http feature set     │
+│  • Bypassed only in unrestricted mode                    │
+│  • All requests blocked in disabled mode                 │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -144,9 +177,9 @@ HTTP permission set through `df.grant_usage` and `df.revoke_usage`.
 `df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
 Like other combinators, it uses ordinary `df` schema access and default PUBLIC
 `EXECUTE`. Wrapping a hand-crafted HTTP node does not bypass the activity's
-privilege check. Supported keys are `secret_bindings` and `form_fields`, described
-in [Explicit secret bindings](#37-explicit-secret-bindings). SQL `NULL` and `{}`
-preserve the original node text.
+privilege check. It supports [explicit secret bindings](#37-explicit-secret-bindings)
+and [body limits and response retention](../USER_GUIDE.md#body-limits-and-response-retention).
+SQL `NULL` and `{}` preserve the original node text.
 
 ### 3.3 Managing access
 
@@ -224,12 +257,14 @@ It does not use a blanket function grant followed by revocations. When granting
 HTTP access, the caller must be able to grant the complete HTTP function set; otherwise the
 call fails rather than silently skipping the HTTP grant.
 
-### 3.5 Feature-flag interaction
+### 3.5 Security-mode interaction
 
-The privilege check runs regardless of which HTTP Cargo feature is enabled.
-When no HTTP feature is compiled in, the request is still blocked later by the
-DSL-time guard and by execution-time URL validation, but the privilege check
-remains compiled in and still runs before any network activity.
+The HTTP activities enforce the privilege check in every
+`pg_durable.http_security` mode, including `unrestricted`. In `disabled` mode,
+DSL constructors reject requests immediately. Crafted nodes that bypass the
+constructors still undergo the activity's privilege check before the destination
+policy rejects them. HTTP function privileges never override the startup
+destination policy.
 
 ---
 
@@ -345,7 +380,7 @@ The SSRF-safe DNS resolver (`SsrfSafeResolver`) wraps the system resolver and
 filters blocked IPs **inline** — the same IP that passes the check is the one
 used for the TCP connection.  There is no window for a rebinding attack.
 
-Restricted builds disable reqwest's system and environment proxy discovery.
+Restricted mode disables reqwest's system and environment proxy discovery.
 An HTTP proxy resolves the destination itself, outside `SsrfSafeResolver`, so
 inheriting `HTTP_PROXY`, `HTTPS_PROXY`, or platform proxy settings would bypass
 the destination-IP check.
@@ -359,8 +394,8 @@ would create false positives without any security benefit.
 
 Bare IP literals in URLs (e.g. `http://169.254.169.254/...`) bypass DNS
 entirely — `reqwest` connects directly without calling the resolver.
-`validate_allowlist` blocks all bare IPs in restricted builds, so these never
-reach the resolver. Only the development-only `http-allow-all` feature bypasses
+`validate_allowlist` blocks all bare IPs in restricted mode, so these never
+reach the resolver. Only development-only unrestricted mode bypasses
 this rule.
 
 ---
@@ -370,9 +405,10 @@ this rule.
 ### 5.1 Configuring allowed domains
 
 Since v0.2.9, `pg_durable.http_allowed_domains` is the complete allow-list for
-both HTTP activities in restricted builds. For example, in `postgresql.conf`:
+both HTTP activities in restricted mode. For example, in `postgresql.conf`:
 
 ```ini
+pg_durable.http_security = 'restricted'
 pg_durable.http_allowed_domains = 'api.github.com, *.blob.core.windows.net'
 ```
 
@@ -392,7 +428,7 @@ default.
 
 **An explicit value replaces all defaults.** It does not implicitly retain
 Azure, GitHub, or test domains. An empty or whitespace-only value denies all
-domains in restricted builds:
+domains in restricted mode:
 
 ```ini
 pg_durable.http_allowed_domains = ''
@@ -410,10 +446,10 @@ normally. There is no per-workflow snapshot of the old policy.
 
 The setting does not relax HTTPS, IP blocking, proxy restrictions, redirects,
 or function privileges. A hostname that resolves to a blocked IP is still
-blocked. Builds without an HTTP feature remain disabled regardless of the
-list; `http-allow-all` bypasses it, even when it is empty.
+blocked. Disabled mode remains disabled regardless of the list;
+unrestricted mode bypasses it, even when it is empty.
 
-### 5.2 Default Azure domains (`http-allow-azure-domains`)
+### 5.2 Default Azure domains
 
 With no override, the following subdomain patterns are allowed. Apex domains
 (e.g. `blob.core.windows.net`) require a separate exact entry.
@@ -441,7 +477,7 @@ With no override, the following subdomain patterns are allowed. Apex domains
 | `*.trafficmanager.net` | Azure Traffic Manager |
 | `*.cloudapp.azure.com` | Azure Cloud App |
 
-### 5.3 Default exact-match domains (`http-allow-azure-domains`)
+### 5.3 Default exact-match domains
 
 Matched exactly — subdomains and lookalikes are rejected.
 
@@ -449,7 +485,10 @@ Matched exactly — subdomains and lookalikes are rejected.
 |--------|---------|
 | `api.github.com` | GitHub API |
 
-### 5.4 Additional default test domains (`http-allow-test-domains`)
+### 5.4 Test domains
+
+Test domains are not production defaults. The development and E2E launchers
+explicitly include this host in their configured allow-list:
 
 | Domain | Purpose |
 |--------|---------|
@@ -458,7 +497,7 @@ Matched exactly — subdomains and lookalikes are rejected.
 ### 5.5 Bare IP rejection
 
 All bare IPv4 and IPv6 addresses are rejected by `validate_allowlist` in
-restricted builds, regardless of the configured domain list.
+restricted mode, regardless of the configured domain list.
 Because the allowlist blocks all bare IPs, there is no separate IP-literal
 check; the allowlist is the definitive gate for IP-literal URLs.
 
@@ -485,9 +524,9 @@ internationalised names are compared in their Punycode form.
 
 ### 6.1 Scheme restriction
 
-Restricted builds accept only `https://`. This prevents credentials and request
+Restricted mode accepts only `https://`. This prevents credentials and request
 bodies from being transmitted over plaintext connections. Plaintext `http://`
-is available only with the development-only `http-allow-all` feature.
+is available only in development-only unrestricted mode.
 
 All other schemes (`file://`, `ftp://`, `gopher://`, etc.) are rejected before
 any DNS resolution or connection attempt. Scheme validation runs both when the
@@ -502,7 +541,7 @@ target is an IP literal, the DNS resolver would never be called.
 
 ### 6.3 Shared connection pool
 
-The background worker builds one `reqwest::Client` for the whole process, so
+The background worker reuses a `reqwest::Client` for its startup security mode, so
 its connection pool is reused across every HTTP node — and therefore across
 database users. This is deliberate: a pooled connection carries no caller
 identity. Credentials travel as per-request headers (`Authorization`, SAS
@@ -564,12 +603,59 @@ Do not put credentials in paths or parameter names: those can remain visible.
 Request headers and bodies are not directly included in request traces, but an
 endpoint can echo them in its response.
 
-> **Not covered:** stored request inputs, response headers and response bodies.
-> A workflow's final result is logged, and response-body previews appear in 5xx
-> errors. A response containing a credential, including an echoed request URL or
-> a token returned by an endpoint, can still expose it in logs and stored results.
+> **Not covered by URL redaction:** stored request inputs, response headers and
+> inline response bodies. A workflow's final result is logged, and inline
+> response-body previews appear in 5xx errors. A response containing a credential,
+> including an echoed request URL or a token returned by an endpoint, can still
+> expose it in logs and stored results.
 > URL redaction does not make `df.vars` secret storage; see
 > [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
+
+### 7.2 Response retention and body limits
+
+Use `response: "metadata"` or `response: "discard"` through `df.with_http_options`
+when the workflow does not need the response body. These modes exclude body
+bytes from durable results and 5xx error previews, without saving another copy.
+`metadata` records a SHA-256 digest; use `discard` when a digest is unnecessary
+or would reveal information about a predictable response.
+
+Response headers are controlled separately. `response_headers: []` retains none;
+`"safe"` selects common metadata headers, and an explicit array selects named
+headers. The default remains `"all"`. Allow-listed values are not redacted and
+can still contain sensitive data supplied by the server.
+
+`max_request_bytes` and `max_response_bytes` are optional, caller-controlled
+limits, not administrator-enforced resource quotas. The response cap is checked
+while reading, after automatic decompression. These options do not remove
+request templates, captured variables, or earlier results from history, and
+do not automatically redact secrets from inline responses. See
+[Body Limits and Response Retention](../USER_GUIDE.md#body-limits-and-response-retention).
+
+### 7.3 Table sinks
+
+`response: "sink"` with `into` stores raw response bytes in a caller-provided
+table, keeping them out of durable activity results and 5xx previews. Writes
+authenticate as the submitting role and obey table privileges and RLS. The
+target database comes from the workflow's captured execution context; a forged
+database or submitting-role field in an HTTP node cannot redirect sink writes.
+
+The sink preserves the submitting connection's role/database `search_path`
+defaults for triggers and other table-side code. Its internal queries qualify
+catalog functions, types, and operators explicitly; the sink does not depend
+on a restricted search path for those lookups.
+
+Only permanent, logged storage is accepted. The row's key and body digest are
+verified before commit, so an insert suppressed or altered by a trigger fails
+instead of producing an invalid reference. Database failures expose the operation
+and SQLSTATE, not messages or details that might include response bytes.
+
+This is a data-placement control, not encryption or automatic response-secret
+handling. Table access, backups, replication, database logging, and sink triggers
+remain subject to the deployment's data policy. PostgreSQL logging or trigger
+messages can expose values just as with ordinary table writes. Response headers
+are controlled separately. The caller owns sink retention, including rows left
+by attempts whose completion was never recorded. See
+[Storing Responses in a Table](../USER_GUIDE.md#storing-responses-in-a-table).
 
 ---
 
@@ -578,14 +664,18 @@ endpoint can echo them in its response.
 | Scenario | Message |
 |----------|---------|
 | No HTTP EXECUTE privilege | `Blocked: role '{role}' does not have EXECUTE privilege on {function}() for this request.` The error identifies the required signature and recommends `df.grant_usage` with `include_http => true`. |
-| HTTP disabled (no feature) | `Blocked: outbound HTTP requests are disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable them.` |
-| Plaintext HTTP in a restricted build | `Blocked: plaintext HTTP is not permitted in restricted builds. HTTPS is required.` |
-| Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted builds or `http and https` with `http-allow-all` |
+| HTTP disabled | `Blocked: outbound HTTP requests are disabled. Configure pg_durable.http_security = 'restricted' and restart the server to enable them.` |
+| Plaintext HTTP in restricted mode | `Blocked: plaintext HTTP is not permitted in restricted mode. HTTPS is required.` |
+| Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted mode or `http and https` in unrestricted mode |
 | Bare IP address | `Blocked: requests to bare IP addresses are not permitted. Use an approved service hostname instead.` |
 | Non-allowed domain | `Blocked: '{host}' is not in the allowed endpoint list. Configure pg_durable.http_allowed_domains to allow this hostname.` |
 | Invalid domain-list configuration | `invalid value for parameter "pg_durable.http_allowed_domains"` with the offending entry and reason |
 | Blocked IP (literal or DNS) | `Blocked: the resolved IP address for '{host}' is in a restricted range. df.http() cannot access private or internal network addresses.` |
-| DSL-time (no feature) | `df.http() is disabled. Rebuild with the 'http-allow-azure-domains' Cargo feature to enable outbound HTTP requests.` |
+| DSL-time (disabled mode) | `df.http() is disabled. Configure pg_durable.http_security = 'restricted' and restart the server to enable outbound HTTP requests.` |
+| Request body too large | `HTTP request body exceeds max_request_bytes ({limit} bytes)` |
+| Response body too large | `HTTP response body exceeds max_response_bytes ({limit} bytes)` |
+| Sink database failure | `HTTP response sink {operation} failed (SQLSTATE {code})` |
+| Sink storage timeout | `HTTP response sink timed out before completion` |
 
 ---
 
@@ -597,7 +687,7 @@ These items are deferred to a future customer-level access control spec:
 |------|-------|
 | Per-role URL/domain allowlists configurable by admins | GUC or table-driven |
 | Rate limiting | DoS mitigation, not SSRF |
-| Response size limits | Resource management |
+| Administrator-enforced body limits | Caller-controlled HTTP options are not resource quotas |
 | Port restrictions | Low value at this layer |
 | Egress filtering to attacker-controlled domains | Separate threat (T9) |
 | **Azure Private Endpoint** | Private Endpoints assign private RFC 1918 addresses to Azure services, which the IP blocklist currently blocks. Supporting Private Endpoints requires a targeted exemption mechanism that does not open all private ranges. Design is deferred to a future spec. |

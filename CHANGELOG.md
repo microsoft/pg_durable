@@ -21,7 +21,16 @@ see [deferred guarantees](docs/multi-database-installation.md#release-blockers).
 - **Bounded origin connections:** `pg_durable.max_origin_connections` defaults
   to `12`. Active routes reserve one metadata slot; idle satellites retain no pool.
 
-- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Existing build-dependent defaults are preserved; an explicit empty list denies all domains in restricted builds. Other HTTP feature gates and safeguards are unchanged.
+- **HTTP body policies (#376):** opt-in request and response byte caps,
+  `inline`/`metadata`/`discard`/`sink` response modes, and response-header selection
+  through `df.with_http_options`, for ordinary and multipart requests.
+  Response limits are enforced while reading, including after decompression.
+  Metadata, discard, and sink modes keep response bodies out of durable results
+  and 5xx error previews. Table sinks store raw bytes under the submitting role's
+  permissions and return a committed row reference with a fresh key per attempt.
+  Existing defaults and HTTP signatures are unchanged.
+
+- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Defaults to Azure service subdomains and `api.github.com`; an explicit empty list denies all domains in restricted mode. It cannot enable disabled HTTP or relax the other safeguards.
 
 - **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB
   descriptor for named header/query/form fields through `df.with_http_options`.
@@ -68,6 +77,14 @@ see [deferred guarantees](docs/multi-database-installation.md#release-blockers).
 - **Shared metrics:** satellite `df.metrics()` exposes all-engine totals.
   Granting `with_grant => true` includes this access and local delegation.
 
+- **HTTP startup policy (#374):** replaces the three HTTP Cargo features with
+  the superuser-only, restart-required `pg_durable.http_security` setting:
+  `disabled`, `restricted` (default), or development-only `unrestricted`.
+  Installations previously built without HTTP support must explicitly select
+  `disabled` before restarting to keep HTTP blocked. Test domains are explicitly configured
+  through `pg_durable.http_allowed_domains`; restricted-mode SSRF defenses and
+  HTTP privileges remain unchanged. Invalid security-mode values prevent server
+  startup instead of falling back to the default. No extension SQL migration is required.
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one
   process-wide client and connection pool, with timeouts applied per request.
   Client-construction errors are cached until the background worker restarts;

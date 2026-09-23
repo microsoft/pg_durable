@@ -54,7 +54,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `03_loops.sql` | `df.loop()` / `@>` with `df.cancel()`, `df.break()` / `^?>` with while-condition |
 | `04_variables_and_results.sql` | `\|=>` / `df.as()`, `df.setvar()` / `df.getvar()` / `{var}` templates, dot-notation (`$name.col`), `$name.*` expansion, result-name validation |
 | `05_monitoring_and_explain.sql` | `df.list_instances()`, `df.instance_info()`, `df.status()`, `df.result()`, `df.explain()` dry-run and live modes |
-| `06_http_and_ssrf.sql` | HTTP allow-list enforcement, SSRF protection (metadata endpoints, localhost, file://, bare IPs); requires `--features http` |
+| `06_http_and_ssrf.sql` | HTTP allow-list enforcement and SSRF protection in restricted mode with the configured test domains |
 | `07_signals.sql` | `df.signal()` — send signals to a running workflow from within the polling loop |
 | `08_scenarios.sql` | End-to-end workflow scenarios using `playground.*` tables (ETL, parallel counts, conditional load, order processing, three-step) |
 | `09_graph_and_validation.sql` | `df.explain()` graph reuse, invalid `node_type` rejection |
@@ -74,7 +74,10 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `52_node_id_collision_across_instances.sql` | Cross-instance node-ID collision — two instances own the same 8-hex node id; asserts composite-PK coexistence, that `(instance_id, id)` addresses exactly one row, `df.result()` is instance-scoped, and a scoped `update_node_status`-style UPDATE affects exactly one row (issue #129) |
 | `68_long_caller_transaction.sql` | Caller-transaction handoff beyond five seconds, transient graph-probe failure, whole rollback, and savepoint rollback |
 
-### Build-Phase Specific
+### Startup-Phase Specific
+
+All phases use the same binary. HTTP policy changes require only a PostgreSQL
+restart with the phase's configuration, not a rebuild.
 
 | File | Phase | Description |
 |------|-------|-------------|
@@ -82,8 +85,10 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `45_connection_limit_timeout.sql` | `connlimit-timeout` | Timeout error after `execution_acquire_timeout` expires |
 | `46_connection_limit_startup_validation.sql` | `connlimit-startup` | BGW refuses to start with invalid GUC value |
 | `66_new_transaction_launch_limit.sql` | `new-start-limit` | `transaction_mode => 'new'` launch admission cap, timeout, and cleanup |
-| `47_http_dsl_disabled.sql` | `http-disabled` | `df.http()` unavailable when built without `--features http` |
-| `48_http_allow_all.sql` | `http-allow-all` | All HTTP destinations allowed when built with `--features http-allow-all` |
+| `47_http_dsl_disabled.sql` | `http-disabled` | Both HTTP constructors and crafted workflow nodes are blocked by explicitly configured disabled mode |
+| `48_http_allow_all.sql` | `http-allow-all` | Unrestricted mode admits plaintext HTTP, unlisted domains, and private destinations for both HTTP activities |
+| `69_http_allowed_domains.sql` | `http-custom-domains` | Custom allow-list enforcement, malformed startup rejection, protected mode settings, and restart-only policy changes |
+| `70_http_allowed_domains_empty.sql` | `http-empty-domains` | Empty restricted-mode allow-list denies all domains |
 
 ## Test Structure
 

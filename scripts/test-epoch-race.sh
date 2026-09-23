@@ -221,7 +221,7 @@ trap cleanup EXIT
 info "Building pg_durable extension..."
 cd "$PROJECT_DIR"
 if ! cargo pgrx install --pg-config="$PG_CONFIG" \
-        --features http-allow-test-domains,test-hooks \
+        --features test-hooks \
         > /tmp/pg_durable-epoch-race-build.log 2>&1; then
     echo -e "${RED}Build failed:${NC}"
     cat /tmp/pg_durable-epoch-race-build.log

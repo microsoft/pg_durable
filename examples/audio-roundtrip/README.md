@@ -42,7 +42,7 @@ steps, which is where composition actually gets tested:
 
 ## Prerequisites
 
-- pg_durable built with the `http-allow-azure-domains` feature
+- pg_durable configured with `pg_durable.http_security = 'restricted'` at server startup
 - The `df` role permissions to use HTTP:
   ```sql
   SELECT df.grant_usage('your_role', include_http => true);

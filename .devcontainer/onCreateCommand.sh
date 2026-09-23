@@ -65,7 +65,7 @@ echo "Building pg_durable..."
 if [ "$SMOKE_MODE" = "1" ]; then
     echo "Smoke mode: skipping cargo build"
 else
-    cargo build --features pg17,http-allow-test-domains
+    cargo build --features pg17
     echo "✅ pg_durable built successfully"
 
     echo "Installing pg_durable into PostgreSQL ${PG_MAJOR}..."

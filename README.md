@@ -107,7 +107,7 @@ Tagged releases publish Debian packages for PostgreSQL 17 and 18 on amd64 from t
 
 Tagged releases also publish a ready-to-run Docker image (`linux/amd64`) for PostgreSQL 17 and 18 to GitHub Container Registry: `ghcr.io/microsoft/pg_durable`. The image installs the released Debian package on top of the official `postgres` image. Each release publishes immutable `X.Y.Z-pg<major>` and `vX.Y.Z-pg<major>` tags (for example `0.2.2-pg17`, `0.2.2-pg18`); the highest stable release additionally updates the floating `pg<major>` tags, and the default major (`pg17`) also updates `latest`. The PG major version is part of every tag so multiple PostgreSQL versions can be published alongside each other. Browse all published images and tags at <https://github.com/microsoft/pg_durable/pkgs/container/pg_durable>.
 
-> **Warning:** The published Docker image is intended for **evaluating and learning pg_durable only — do not use it in production.** It enables superuser durable instances for a frictionless out-of-the-box demo. Its HTTP egress policy uses the released Debian package's `http-allow-azure-domains` tier, defaulting to Azure service subdomains and `api.github.com`. See [HTTP allowed domains](USER_GUIDE.md#http-allowed-domains) for configuration in v0.2.9+. Multi-arch (`linux/arm64`) images are not published yet; they will follow once arm64 Debian packages are available.
+> **Warning:** The published Docker image is intended for **evaluating and learning pg_durable only — do not use it in production.** It enables superuser durable instances for a frictionless out-of-the-box demo. It explicitly configures restricted HTTP at startup, permitting the default Azure service subdomains and `api.github.com`. See [HTTP security](USER_GUIDE.md#http-security) for configuration in v0.2.9+. Multi-arch (`linux/arm64`) images are not published yet; they will follow once arm64 Debian packages are available.
 
 Run the published image — PostgreSQL 17 and 18 can run side by side on different host ports:
 
@@ -152,9 +152,11 @@ sudo make install PG_CONFIG="$PG_CONFIG"
 ```
 
 Source installation is supported on Linux and macOS for PostgreSQL 17 and 18.
-Windows source installation is not currently supported. Set `EXTRA_FEATURES`
-on the build command to enable an HTTP policy feature. `DESTDIR` may be set on
-`make install` when staging files for a package.
+Windows source installation is not currently supported. Configure HTTP policy
+with `pg_durable.http_security` in `postgresql.conf` or through an authorized
+`ALTER SYSTEM SET`, then restart PostgreSQL. The default is `restricted`; no
+HTTP Cargo feature is needed. See [HTTP security](USER_GUIDE.md#http-security).
+`DESTDIR` may be set on `make install` when staging files for a package.
 
 `sudo make uninstall PG_CONFIG="$PG_CONFIG"` removes the installed files again.
 It needs no build, so it also works from an unbuilt source tree.
@@ -340,6 +342,14 @@ Complex local integration tests with pgrx PostgreSQL:
 ```
 
 See [tests/e2e/](tests/e2e/) for details.
+
+### Benchmarks
+
+The reusable pgbench harness measures completed SQL, HTTP, and multipart HTTP
+workflows with configurable concurrency, warmups, and repetitions. See
+[benchmarks/README.md](benchmarks/README.md) for setup, result interpretation,
+and adding workloads. Benchmark correctness tests run in CI; performance
+measurements are opt-in.
 
 ## Documentation
 

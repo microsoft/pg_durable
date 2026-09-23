@@ -8,8 +8,8 @@ name: Docker Publish
 # When arm64 packages are published, add the arch to this workflow.
 #
 # The image is intended for evaluating and learning pg_durable only — NOT for
-# production. Its HTTP egress policy is whatever the released package was built
-# with (http-allow-azure-domains).
+# production. It configures restricted HTTP at startup with the default
+# Azure/GitHub domain allow-list.
 
 on:
   release:

@@ -88,6 +88,74 @@ BEGIN
 END $$;
 SELECT pg_temp.e80_check(connection) FROM _e80_sources;
 
+-- Main's new response sink follows the SQL target, defaulting to the origin.
+-- Credentials remain origin-local even when the sink target has no extension.
+SELECT dblink_connect('e80target', format(
+    'host=localhost port=%s dbname=_e80_target user=postgres', current_setting('port')));
+SELECT dblink_exec('e80target', $sql$
+    CREATE TABLE public.e80_sink(sink_key uuid PRIMARY KEY, body bytea NOT NULL);
+    GRANT INSERT, SELECT ON public.e80_sink TO df_e2e_user;
+$sql$);
+DO $$
+DECLARE source record;
+BEGIN
+    FOR source IN SELECT * FROM _e80_sources LOOP
+        PERFORM dblink_exec(source.connection, $sql$
+            RESET SESSION AUTHORIZATION;
+            CREATE TABLE public.e80_sink(sink_key uuid PRIMARY KEY, body bytea NOT NULL);
+            GRANT INSERT, SELECT ON public.e80_sink TO df_e2e_user;
+            CREATE TABLE public.e80_sink_cases(id text, expected_database text);
+            GRANT SELECT, INSERT ON public.e80_sink_cases TO df_e2e_user;
+            SET SESSION AUTHORIZATION df_e2e_user;
+            DO $start$
+            DECLARE target text; node text; multipart bool;
+            BEGIN
+                FOREACH target IN ARRAY ARRAY[NULL::text, current_database()::text, '_e80_target'] LOOP
+                    FOREACH multipart IN ARRAY ARRAY[false, true] LOOP
+                        node := CASE WHEN multipart THEN df.http_multipart(
+                            df.endpoint('e80_endpoint', '/'), parts => '[{"name":"file","data_b64":"aA=="}]')
+                            ELSE df.http(df.endpoint('e80_endpoint', '/'), 'GET') END;
+                        INSERT INTO public.e80_sink_cases VALUES (
+                            df.start(df.with_http_options(node,
+                                '{"response":"sink","into":"public.e80_sink","max_response_bytes":1}'),
+                                'e80-sink', database => target),
+                            COALESCE(target, current_database()));
+                    END LOOP;
+                END LOOP;
+            END $start$;
+        $sql$);
+        PERFORM dblink_exec(source.connection, $sql$
+            DO $check$
+            DECLARE item record; response jsonb;
+            BEGIN
+                FOR item IN SELECT * FROM public.e80_sink_cases LOOP
+                    IF df.await_instance(item.id, 30) <> 'completed' THEN
+                        RAISE EXCEPTION 'TEST FAILED: origin HTTP sink failed';
+                    END IF;
+                    response := df.result(item.id)::jsonb;
+                    IF response->>'sink_database' IS DISTINCT FROM item.expected_database
+                        OR (response->>'status')::int IS DISTINCT FROM 204
+                        OR response->>'body' IS NOT NULL THEN
+                        RAISE EXCEPTION 'TEST FAILED: wrong sink target or retained body: %', response;
+                    END IF;
+                END LOOP;
+                IF (SELECT count(*) FROM public.e80_sink WHERE octet_length(body) = 0) <> 4 THEN
+                    RAISE EXCEPTION 'TEST FAILED: missing default/explicit-self origin sink rows';
+                END IF;
+            END $check$;
+        $sql$);
+    END LOOP;
+END $$;
+SELECT dblink_exec('e80target', $sql$
+    DO $check$ BEGIN
+        IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_durable')
+            OR (SELECT count(*) FROM public.e80_sink WHERE octet_length(body) = 0) <> 6 THEN
+            RAISE EXCEPTION 'TEST FAILED: expected six remote sink rows in extension-free target';
+        END IF;
+    END $check$;
+$sql$);
+SELECT dblink_disconnect('e80target');
+
 -- New attempts see rotation, while other origins keep their own values.
 SELECT dblink_exec('e80a', format($remote$
     RESET SESSION AUTHORIZATION;
@@ -127,10 +195,11 @@ END $$;
 SELECT dblink_disconnect(connection) FROM _e80_sources;
 DROP SERVER e80_endpoint, e80_secrets CASCADE;
 BEGIN;
-DELETE FROM df.nodes WHERE instance_id IN (SELECT id FROM public.e80_cases);
-DELETE FROM df.instances WHERE id IN (SELECT id FROM public.e80_cases);
+DELETE FROM df.nodes WHERE instance_id IN (SELECT id FROM public.e80_cases UNION ALL SELECT id FROM public.e80_sink_cases);
+DELETE FROM df.instances WHERE id IN (SELECT id FROM public.e80_cases UNION ALL SELECT id FROM public.e80_sink_cases);
 COMMIT;
 DROP TABLE public.e80_cases;
+DROP TABLE public.e80_sink_cases, public.e80_sink;
 DROP DATABASE _e80_a WITH (FORCE);
 DROP DATABASE _e80_c WITH (FORCE);
 DROP DATABASE _e80_target WITH (FORCE);

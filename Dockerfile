@@ -45,7 +45,7 @@ COPY pg_durable.control ./
 COPY sql ./sql
 
 # Build the extension
-RUN cargo pgrx package --features http-allow-test-domains --pg-config /usr/lib/postgresql/17/bin/pg_config
+RUN cargo pgrx package --pg-config /usr/lib/postgresql/17/bin/pg_config
 
 # Stage 2: Runtime image with PostgreSQL
 FROM postgres:17-bookworm
@@ -76,6 +76,8 @@ RUN echo "shared_preload_libraries = 'pg_durable'" >> /usr/share/postgresql/post
     echo "pg_durable.database = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.worker_role = 'postgres'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "pg_durable.enable_superuser_instances = on" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.http_security = 'restricted'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "pg_durable.http_allowed_domains = '*.blob.core.windows.net,*.blob.storage.azure.net,*.queue.core.windows.net,*.table.core.windows.net,*.file.core.windows.net,*.azurewebsites.net,*.azure-api.net,*.documents.azure.com,*.servicebus.windows.net,*.openai.azure.com,*.cognitiveservices.azure.com,*.vault.azure.net,*.redis.cache.windows.net,*.database.windows.net,*.kusto.windows.net,*.azurefd.net,*.azureedge.net,*.azure-devices.net,*.trafficmanager.net,*.cloudapp.azure.com,api.github.com,httpbingo.org'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "logging_collector = on" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "log_directory = 'log'" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "log_filename = 'postgresql.log'" >> /usr/share/postgresql/postgresql.conf.sample && \

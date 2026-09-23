@@ -470,7 +470,7 @@ human-in-the-loop approval and always-on processing loops.
 | Example | Use Case | Folder |
 |---------|----------|--------|
 | **Azure Functions** | Call an HTTP-triggered Azure Function from `df.http()` for token-aware text chunking, then store the chunks in PostgreSQL | [`azure-functions/`](../examples/azure-functions/) |
-| **Azure HTTP Domains** | Validate `df.http()` against every Azure domain suffix in the `http-allow-azure-domains` allowlist | [`azure-http-domains/`](../examples/azure-http-domains/) |
+| **Azure HTTP Domains** | Validate `df.http()` against every Azure domain suffix in the default restricted-mode allowlist | [`azure-http-domains/`](../examples/azure-http-domains/) |
 | **Invoice Approval** | Always-on pipeline that classifies invoices via an Azure Function, auto-approves small ones, and pauses for human approval on high-value invoices | [`invoice-approval/`](../examples/invoice-approval/) |
 
 ### Azure Functions
@@ -485,7 +485,7 @@ for token-aware chunking, then inserts the returned chunks and marks documents p
 > *"Confirm `df.http()` works across every allowed Azure domain suffix."*
 
 Systematically exercises `df.http()` against each Azure domain suffix in the
-`http-allow-azure-domains` allowlist, sending real requests through pg_durable's background
+default restricted-mode allowlist, sending real requests through pg_durable's background
 worker and verifying successful responses. → [`azure-http-domains/`](../examples/azure-http-domains/)
 
 ### Invoice Approval

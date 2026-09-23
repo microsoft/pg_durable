@@ -1,114 +1,73 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
--- E2E Test: http-allow-all feature disables all domain restrictions.
---
--- This test runs in the "http-allow-all" phase, which builds pg_durable with the
--- http-allow-all Cargo feature.  Domains that are normally blocked by the Azure
--- allow-list (e.g. example.com) must be reachable (or at least not rejected by
--- the allow-list — network/DNS failure is fine).
--- An explicitly empty GUC must not restrict this build.
+-- Unrestricted mode permits plaintext, unlisted domains, and private networks.
+-- An explicitly empty domain allowlist must not restrict this mode.
 
 DO $$
 BEGIN
+    IF current_setting('pg_durable.http_security') IS DISTINCT FROM 'unrestricted' THEN
+        RAISE EXCEPTION 'TEST FAILED: expected unrestricted startup policy';
+    END IF;
     IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM '' THEN
         RAISE EXCEPTION 'TEST FAILED: http-allow-all phase requires an empty allowlist';
     END IF;
 END $$;
 
--- ============================================================================
--- Test 1: Non-Azure domain passes allow-list when http-allow-all is set
--- ============================================================================
+SET SESSION AUTHORIZATION df_e2e_user;
 
-CREATE TEMP TABLE _test_allowall1 (instance_id TEXT);
+CREATE TEMP TABLE _test_http_unrestricted (instance_id TEXT, node_type TEXT, url TEXT);
 
-INSERT INTO _test_allowall1 SELECT df.start(
-    df.http('http://example.com/', 'GET', NULL, NULL, 5),
-    'test-http-allow-all-non-azure'
-);
-
-DO $$
-DECLARE
-    inst_id TEXT;
-    status TEXT;
-    node_result TEXT;
-BEGIN
-    SELECT instance_id INTO inst_id FROM _test_allowall1;
-    RAISE NOTICE 'Testing non-Azure domain allowed under http-allow-all: %', inst_id;
-
-    SELECT df.await_instance(inst_id, 30) INTO status;
-
-    -- Must NOT fail due to allow-list; network/DNS failure is acceptable
-    SELECT result::text INTO node_result
-    FROM df.nodes
-    WHERE instance_id = inst_id AND node_type = 'HTTP';
-
-    IF status IS NULL OR status NOT IN ('completed', 'failed') OR node_result IS NULL THEN
-        RAISE EXCEPTION 'TEST FAILED: allow-all request did not finish: status = %, result = %',
-            status, node_result;
-    END IF;
-
-    IF node_result ILIKE '%not in the allowed%' THEN
-        RAISE EXCEPTION 'TEST FAILED: allow-list should be bypassed under http-allow-all, got: %', node_result;
-    END IF;
-
-    IF node_result ILIKE '%HTTPS is required%' THEN
-        RAISE EXCEPTION 'TEST FAILED: plaintext HTTP should be allowed under http-allow-all, got: %', node_result;
-    END IF;
-
-    IF node_result ILIKE '%bare IP%' THEN
-        RAISE EXCEPTION 'TEST FAILED: IP check should be bypassed under http-allow-all, got: %', node_result;
-    END IF;
-
-    RAISE NOTICE 'TEST PASSED: http_allow_all_non_azure';
-END $$;
-
-DROP TABLE _test_allowall1;
-
--- ============================================================================
--- Test 2: Bare public IP passes allow-list when http-allow-all is set
--- (network connection may fail, but not the allow-list check)
--- ============================================================================
-
-CREATE TEMP TABLE _test_allowall2 (instance_id TEXT);
-
-INSERT INTO _test_allowall2 SELECT df.start(
-    df.http('https://8.8.8.8/', 'GET', NULL, NULL, 5),
-    'test-http-allow-all-bare-ip'
-);
+INSERT INTO _test_http_unrestricted
+SELECT df.start(
+    CASE node_type
+        WHEN 'HTTP' THEN df.http(url, 'GET', NULL, NULL, 5)
+        ELSE df.http_multipart(url, 'POST', '[{"name":"field","data_b64":"dmFsdWU="}]'::jsonb, NULL, 5)
+    END,
+    'test-http-unrestricted-' || node_type
+), node_type, url
+FROM (VALUES
+    ('http://example.com/'),
+    ('https://8.8.8.8/'),
+    ('http://127.0.0.1:1/'),
+    ('http://localhost:1/')
+) AS destinations(url)
+CROSS JOIN (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS node_types(node_type);
 
 DO $$
 DECLARE
-    inst_id TEXT;
+    test_case RECORD;
     status TEXT;
     node_result TEXT;
+    http_status INT;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_allowall2;
-    RAISE NOTICE 'Testing bare public IP allowed under http-allow-all: %', inst_id;
+    FOR test_case IN SELECT * FROM _test_http_unrestricted ORDER BY node_type, url LOOP
+        SELECT df.await_instance(test_case.instance_id, 30) INTO status;
+        SELECT result::text INTO node_result
+        FROM df.nodes
+        WHERE instance_id = test_case.instance_id AND node_type = test_case.node_type;
 
-    SELECT df.await_instance(inst_id, 30) INTO status;
+        IF status IS NULL OR status NOT IN ('completed', 'failed') OR node_result IS NULL THEN
+            RAISE EXCEPTION 'TEST FAILED: unrestricted % request to %: status = %, result = %',
+                test_case.node_type, test_case.url, status, node_result;
+        END IF;
 
-    SELECT result::text INTO node_result
-    FROM df.nodes
-    WHERE instance_id = inst_id AND node_type = 'HTTP';
-
-    IF status IS NULL OR status NOT IN ('completed', 'failed') OR node_result IS NULL THEN
-        RAISE EXCEPTION 'TEST FAILED: allow-all IP request did not finish: status = %, result = %',
-            status, node_result;
-    END IF;
-
-    -- Under http-allow-all the allow-list is entirely bypassed — no "bare IP" rejection
-    IF node_result ILIKE '%bare IP%' THEN
-        RAISE EXCEPTION 'TEST FAILED: bare IP check should be bypassed under http-allow-all, got: %', node_result;
-    END IF;
-
-    IF node_result ILIKE '%not in the allowed%' THEN
-        RAISE EXCEPTION 'TEST FAILED: allow-list should be bypassed under http-allow-all, got: %', node_result;
-    END IF;
-
-    RAISE NOTICE 'TEST PASSED: http_allow_all_bare_ip';
+        IF status = 'completed' THEN
+            http_status := (node_result::jsonb->>'status')::int;
+            IF http_status IS NULL OR http_status NOT BETWEEN 100 AND 599 THEN
+                RAISE EXCEPTION 'TEST FAILED: expected an HTTP response: %', node_result;
+            END IF;
+        ELSIF NOT (node_result LIKE ANY (ARRAY[
+            '%HTTP connection failed%', '%HTTP request failed%',
+            '%HTTP timeout after%', '% returned 5__:%'
+        ])) THEN
+            RAISE EXCEPTION 'TEST FAILED: unrestricted % request to % did not reach HTTP transport: %',
+                test_case.node_type, test_case.url, node_result;
+        END IF;
+    END LOOP;
 END $$;
 
-DROP TABLE _test_allowall2;
+DROP TABLE _test_http_unrestricted;
+RESET SESSION AUTHORIZATION;
 
 SELECT 'TEST PASSED' AS result;

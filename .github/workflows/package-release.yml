@@ -33,7 +33,6 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_PGRX_VERSION: 0.16.1
-  PACKAGE_HTTP_FEATURE: http-allow-azure-domains
 
 concurrency:
   group: package-release-${{ inputs.tag || github.ref }}
@@ -118,6 +117,7 @@ jobs:
                 gnupg \
                 lsb-release \
                 pkg-config \
+                python3 \
                 libssl-dev \
                 libclang-dev \
                 clang \
@@ -146,9 +146,11 @@ jobs:
               cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
               cargo pgrx init --pg${{ matrix.pg_version }} "$PG_CONFIG"
 
+              http_feature=$(cargo metadata --no-deps --format-version 1 | python3 -c \
+                "import json, sys; feature = \"http-allow-azure-domains\"; print(feature if feature in json.load(sys.stdin)[\"packages\"][0][\"features\"] else \"\")")
               make -f _release_tooling/Makefile package \
                 PG_CONFIG="$PG_CONFIG" \
-                EXTRA_FEATURES="${{ env.PACKAGE_HTTP_FEATURE }}"
+                EXTRA_FEATURES="$http_feature"
 
               STAGE_DIR="$PWD/target/source-install-stage-pg${{ matrix.pg_version }}"
               make -f _release_tooling/Makefile install \

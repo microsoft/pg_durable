@@ -8,7 +8,7 @@
 
 use pgrx::guc::*;
 use pgrx::prelude::*;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 // ============================================================================
 // GUC Definitions
@@ -21,6 +21,9 @@ pub static DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
 
 pub static HOST: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+
+pub static HTTP_SECURITY: GucSetting<ssrf::HttpSecurity> =
+    GucSetting::<ssrf::HttpSecurity>::new(ssrf::HttpSecurity::Restricted);
 
 pub static HTTP_ALLOWED_DOMAINS: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(ssrf::DEFAULT_HTTP_ALLOWED_DOMAINS));
@@ -133,12 +136,46 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
 
+    let http_security_name = c"pg_durable.http_security";
+    let configured_http_security = unsafe {
+        let value = pg_sys::GetConfigOption(http_security_name.as_ptr(), true, false);
+        if value.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(value).to_owned())
+        }
+    };
+
+    GucRegistry::define_enum_guc(
+        http_security_name,
+        c"Security policy for outbound HTTP requests",
+        c"disabled blocks all requests; restricted enforces HTTPS, the domain allow-list, and SSRF protections; unrestricted permits private networks and plaintext HTTP. Requires a server restart to change.",
+        &HTTP_SECURITY,
+        GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY,
+    );
+
+    if let Some(value) = configured_http_security {
+        unsafe {
+            pg_sys::set_config_option(
+                http_security_name.as_ptr(),
+                value.as_ptr(),
+                pg_sys::GucContext::PGC_POSTMASTER,
+                pg_sys::GucSource::PGC_S_FILE,
+                pg_sys::GucAction::GUC_ACTION_SET,
+                false,
+                pgrx::PgLogLevel::ERROR as i32,
+                false,
+            );
+        }
+    }
+
     // The callback is pg_guard-protected and only validates the proposed value.
     unsafe {
         GucRegistry::define_string_guc_with_hooks(
             c"pg_durable.http_allowed_domains",
-            c"Hostnames allowed for outbound HTTP requests in restricted builds",
-            c"Comma-separated exact hostnames or *.domain subdomain patterns. Replaces the build's default list; an empty list denies all domains. Does not override HTTP feature gates or IP restrictions. Requires a server restart to change.",
+            c"Hostnames allowed for outbound HTTP requests in restricted mode",
+            c"Comma-separated exact hostnames or *.domain subdomain patterns. Replaces the default list; an empty list denies all domains. Does not override pg_durable.http_security or IP restrictions. Requires a server restart to change.",
             &HTTP_ALLOWED_DOMAINS,
             GucContext::Postmaster,
             GucFlags::default(),
@@ -1392,14 +1429,29 @@ mod tests {
     }
 
     // ========================================================================
-    // Unit Tests - HTTP Node Creation (require an http feature to be enabled)
+    // Unit Tests - HTTP Node Creation
     // ========================================================================
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
+    #[pg_test]
+    fn test_http_security_guc() {
+        assert_eq!(
+            crate::HTTP_SECURITY.get(),
+            crate::ssrf::HttpSecurity::Restricted
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT context = 'postmaster' AND vartype = 'enum'
+                     AND setting = 'restricted' AND boot_val = 'restricted'
+                     AND source = 'default'
+                     AND enumvals = ARRAY['disabled', 'restricted', 'unrestricted']
+                     AND NOT pending_restart
+                 FROM pg_catalog.pg_settings WHERE name = 'pg_durable.http_security'"
+            )
+            .unwrap(),
+            Some(true)
+        );
+    }
+
     #[pg_test]
     fn test_http_creates_valid_node() {
         let json = crate::dsl::http("https://example.com/api", "GET", None, None, 30);
@@ -1408,11 +1460,6 @@ mod tests {
         assert!(fut.query.is_some());
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_post_with_body() {
         let json = crate::dsl::http(
@@ -1431,11 +1478,6 @@ mod tests {
         assert_eq!(config["body"], r#"{"key": "value"}"#);
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_with_headers() {
         let headers = pgrx::JsonB(serde_json::json!({
@@ -1457,11 +1499,6 @@ mod tests {
         assert_eq!(config["timeout_seconds"], 60);
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_config_parsing() {
         use crate::types::HttpConfig;
@@ -1482,11 +1519,6 @@ mod tests {
         assert_eq!(config.timeout_seconds, 45);
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_via_sql() {
         let result = Spi::get_one::<String>("SELECT df.http('https://example.com', 'GET')")
@@ -1496,11 +1528,6 @@ mod tests {
         assert_eq!(fut.node_type, "HTTP");
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_in_sequence() {
         let http_node = crate::dsl::http("https://api.example.com/data", "GET", None, None, 30);
@@ -1512,11 +1539,6 @@ mod tests {
         assert!(fut.right_node.is_some());
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_with_name() {
         let http_node = crate::dsl::http("https://api.example.com", "GET", None, None, 30);
@@ -1525,11 +1547,6 @@ mod tests {
         assert_eq!(fut.result_name, Some("api_response".to_string()));
     }
 
-    #[cfg(any(
-        feature = "http-allow-azure-domains",
-        feature = "http-allow-test-domains",
-        feature = "http-allow-all",
-    ))]
     #[pg_test]
     fn test_http_methods() {
         // Test all supported methods
