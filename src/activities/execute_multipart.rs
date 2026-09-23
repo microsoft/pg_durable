@@ -319,15 +319,6 @@ pub(crate) async fn execute(
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_ok = status.is_success();
 
-    // Build response object — same envelope as execute_http.
-    let result = crate::activities::http_response::build_envelope(
-        status_code,
-        &response_body,
-        response_headers,
-        is_ok,
-        duration_ms,
-    );
-
     ctx.trace_info(format!(
         "HTTP_MULTIPART {} completed: status={}, ok={}, encoding={}, duration={}ms",
         config.method,
@@ -348,7 +339,14 @@ pub(crate) async fn execute(
     }
 
     // Return response for all other cases (including 4xx)
-    Ok(result.to_string())
+    Ok(crate::activities::http_response::build_envelope(
+        status_code,
+        response_body,
+        response_headers,
+        is_ok,
+        duration_ms,
+    )
+    .to_string())
 }
 
 #[cfg(test)]
