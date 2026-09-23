@@ -2616,9 +2616,8 @@ If the user who submitted a function is dropped **before execution**:
 Permission to use each function is checked for the submitting role, but there
 are no per-role domain allowlists.
 
-**Security model:** Outbound HTTP is disabled by default. Administrators can
-set [pg_durable.http_security](#http-security) to `restricted` and restart
-PostgreSQL to enable it. Restricted mode enforces a hardcoded SSRF IP blocklist and the
+**Security model:** [pg_durable.http_security](#http-security) defaults to
+`restricted` mode, which enforces a hardcoded SSRF IP blocklist and the
 [HTTP domain allow-list](#http-allowed-domains), which defaults to Azure service
 subdomains and `api.github.com`. Administrators can replace the domain list
 with `pg_durable.http_allowed_domains` and restart PostgreSQL. This does not
@@ -2826,8 +2825,8 @@ override it, and a configuration reload does not apply it.
 
 | Mode | Policy |
 |------|--------|
-| `disabled` (default) | Reject all HTTP requests, including crafted workflow nodes |
-| `restricted` | Require HTTPS and approved hostnames; block private IPs, proxies, and redirects |
+| `disabled` | Reject all HTTP requests, including crafted workflow nodes |
+| `restricted` (default) | Require HTTPS and approved hostnames; block private IPs, proxies, and redirects |
 | `unrestricted` | Permit any HTTP(S) destination, including private networks; development only |
 
 ```ini
@@ -2840,10 +2839,12 @@ HTTP function privileges, TLS verification, and redirect blocking remain in
 effect in both enabled modes. Pending requests and retries use the policy
 active when they execute; previously recorded results replay normally.
 
-The former HTTP Cargo features are no longer accepted. Existing HTTP-enabled
-installations must configure this setting before restarting with the new
-binary. See [Upgrade & Migration](docs/http-security.md#upgrade--migration)
-for the replacement settings.
+The former HTTP Cargo features are no longer accepted. The default preserves
+the former Azure/GitHub policy. Installations previously built without HTTP
+support must explicitly select `disabled` before restarting with the new
+binary to keep HTTP blocked. See
+[Upgrade & Migration](docs/http-security.md#upgrade--migration) for the
+replacement settings.
 
 ---
 

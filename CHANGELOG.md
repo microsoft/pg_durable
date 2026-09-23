@@ -55,9 +55,9 @@ The changes below landed after the v0.2.8 tag and are not part of that release.
 
 - **HTTP startup policy (#374):** replaces the three HTTP Cargo features with
   the superuser-only, restart-required `pg_durable.http_security` setting:
-  `disabled` (default), `restricted`, or development-only `unrestricted`.
-  Existing HTTP-enabled installations must configure the replacement policy
-  before restarting with the new binary. Test domains are explicitly configured
+  `disabled`, `restricted` (default), or development-only `unrestricted`.
+  Installations previously built without HTTP support must explicitly select
+  `disabled` before restarting to keep HTTP blocked. Test domains are explicitly configured
   through `pg_durable.http_allowed_domains`; restricted-mode SSRF defenses and
   HTTP privileges remain unchanged. No extension SQL migration is required.
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one

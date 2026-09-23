@@ -13,7 +13,7 @@
 #   --verbose, -v             Show NOTICE messages and full test output
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
 #   --default-build-phases    Run standard phases, excluding disabled/unrestricted HTTP
-#   --http-disabled           Run only the default HTTP-disabled startup phase
+#   --http-disabled           Run only the explicitly HTTP-disabled startup phase
 #   --http-allow-all          Run only the unrestricted HTTP startup phase
 #   --help, -h                Show this help
 #
@@ -170,7 +170,7 @@ phase_label() {
             echo "HTTP empty domain allowlist (deny all)"
             ;;
         http-disabled)
-            echo "HTTP disabled (default startup policy)"
+            echo "HTTP disabled (explicit startup policy)"
             ;;
         http-allow-all)
             echo "HTTP unrestricted startup policy"
@@ -543,7 +543,7 @@ configure_phase() {
     remove_conf_key "log_connections"
     remove_conf_key "pg_durable.host"
     remove_conf_key "pg_durable.http_allowed_domains"
-    set_conf_line "pg_durable.http_security" "'restricted'"
+    remove_conf_key "pg_durable.http_security"
     set_conf_line "pg_durable.http_allowed_domains" "'$PG_DURABLE_TEST_HTTP_DOMAINS'"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
@@ -552,7 +552,6 @@ configure_phase() {
     case "$phase" in
         no-preload)
             remove_conf_key "shared_preload_libraries"
-            remove_conf_key "pg_durable.http_security"
             ;;
         standard)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -635,7 +634,7 @@ configure_phase() {
 
     case "$phase" in
         http-disabled)
-            remove_conf_key "pg_durable.http_security"
+            set_conf_line "pg_durable.http_security" "'disabled'"
             ;;
         http-allow-all)
             set_conf_line "pg_durable.http_security" "'unrestricted'"

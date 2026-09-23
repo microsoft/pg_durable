@@ -1,9 +1,9 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the PostgreSQL License.
 
--- E2E Test: HTTP is disabled by default at DSL and execution time.
+-- E2E Test: Explicitly disabled HTTP is blocked at DSL and execution time.
 --
--- This test runs in the "http-disabled" phase without setting http_security.
+-- This test runs in the "http-disabled" phase with http_security = 'disabled'.
 -- df.http() must raise immediately, before df.start() is called.
 -- The requested hostname is explicitly allowed by the GUC: a configured list
 -- must not enable HTTP when the security mode is disabled.
@@ -13,11 +13,11 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_settings
         WHERE name = 'pg_durable.http_security'
-          AND setting = 'disabled' AND boot_val = 'disabled'
+          AND setting = 'disabled' AND boot_val = 'restricted'
           AND context = 'postmaster' AND vartype = 'enum'
-          AND source = 'default' AND NOT pending_restart
+          AND source = 'configuration file' AND NOT pending_restart
     ) THEN
-        RAISE EXCEPTION 'TEST FAILED: HTTP must be disabled by default';
+        RAISE EXCEPTION 'TEST FAILED: HTTP must be explicitly disabled at startup';
     END IF;
     IF current_setting('pg_durable.http_allowed_domains') IS DISTINCT FROM 'example.com' THEN
         RAISE EXCEPTION 'TEST FAILED: http-disabled phase requires the example.com allowlist';

@@ -34,8 +34,8 @@ workflow inputs cannot change the running policy.
 
 | Mode | What is allowed | Use case |
 |---------|-----------------|----------|
-| `disabled` (default) | Nothing; both HTTP constructors and execution paths reject requests | Deployments that don't need HTTP |
-| `restricted` | HTTPS to configured domains, defaulting to Azure subdomains plus `api.github.com`; bare IPs and private DNS results blocked; no proxies | Production HTTP access |
+| `disabled` | Nothing; both HTTP constructors and execution paths reject requests | Deployments that don't need HTTP |
+| `restricted` (default) | HTTPS to configured domains, defaulting to Azure subdomains plus `api.github.com`; bare IPs and private DNS results blocked; no proxies | Production HTTP access |
 | `unrestricted` | HTTP and HTTPS to any destination, including private networks; domain and IP restrictions bypassed | Local development only |
 
 ```ini
@@ -49,15 +49,16 @@ protections. Both enabled modes retain function privilege checks, TLS
 certificate verification, and redirect blocking. Unrestricted mode permits
 system/environment proxies and must not be used on untrusted deployments.
 
-Local development and E2E launchers explicitly select restricted mode and add
+Local development and E2E launchers use restricted mode and add
 `httpbingo.org` to their test allow-list. The source-built `Dockerfile` does the
-same. Released packages default to disabled HTTP; the published demo image
+same. Released packages default to restricted HTTP; the published demo image
 (`Dockerfile.release`) explicitly selects restricted mode with the default
 Azure/GitHub allow-list.
 
 ### Disabled HTTP
 
-`df.http()` **fails at the point `df.http()` is called in SQL** with:
+When `pg_durable.http_security = 'disabled'`, `df.http()` **fails at the point
+`df.http()` is called in SQL** with:
 
 ```
 df.http() is disabled. Configure pg_durable.http_security = 'restricted' and restart the server to enable outbound HTTP requests.
@@ -68,14 +69,15 @@ enforce the same block again at execution time.
 
 ### Upgrade & Migration
 
-The HTTP Cargo features have been removed. When upgrading an installation that
-enabled HTTP, configure the replacement policy **before restarting with the
-new binary**; otherwise HTTP is disabled by default.
+The HTTP Cargo features have been removed. Restricted mode is the default and
+matches the former Azure/GitHub policy. For installations previously built
+without HTTP support, explicitly select `disabled` **before restarting with
+the new binary** to keep HTTP blocked. HTTP function privileges are unchanged.
 
 | Previous build | Replacement configuration |
 |----------------|---------------------------|
-| No HTTP feature | Leave `pg_durable.http_security = 'disabled'` |
-| `http-allow-azure-domains` | Set `pg_durable.http_security = 'restricted'` |
+| No HTTP feature | Set `pg_durable.http_security = 'disabled'` |
+| `http-allow-azure-domains` | Use the default `restricted` mode |
 | `http-allow-test-domains` | Select `restricted` and explicitly include `httpbingo.org` in the complete domain allow-list |
 | `http-allow-all` | Select `unrestricted`, on development servers only |
 

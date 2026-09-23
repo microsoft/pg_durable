@@ -85,7 +85,7 @@ restart with the phase's configuration, not a rebuild.
 | `45_connection_limit_timeout.sql` | `connlimit-timeout` | Timeout error after `execution_acquire_timeout` expires |
 | `46_connection_limit_startup_validation.sql` | `connlimit-startup` | BGW refuses to start with invalid GUC value |
 | `66_new_transaction_launch_limit.sql` | `new-start-limit` | `transaction_mode => 'new'` launch admission cap, timeout, and cleanup |
-| `47_http_dsl_disabled.sql` | `http-disabled` | Both HTTP constructors and crafted workflow nodes are blocked by the default disabled mode |
+| `47_http_dsl_disabled.sql` | `http-disabled` | Both HTTP constructors and crafted workflow nodes are blocked by explicitly configured disabled mode |
 | `48_http_allow_all.sql` | `http-allow-all` | Unrestricted mode admits plaintext HTTP, unlisted domains, and private destinations for both HTTP activities |
 | `69_http_allowed_domains.sql` | `http-custom-domains` | Custom allow-list enforcement, malformed startup rejection, protected mode settings, and restart-only policy changes |
 | `70_http_allowed_domains_empty.sql` | `http-empty-domains` | Empty restricted-mode allow-list denies all domains |

@@ -870,7 +870,7 @@ Available since v0.2.9; replaces the HTTP Cargo features.
 | Property | Value |
 |----------|-------|
 | Type | `enum`: `disabled`, `restricted`, `unrestricted` |
-| Default | `disabled` |
+| Default | `restricted` |
 | Context | `POSTMASTER` (requires a PostgreSQL restart, not just a reload) |
 | Visibility | Superusers and roles with `pg_read_all_settings` |
 

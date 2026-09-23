@@ -3,7 +3,7 @@
 
 //! ExecuteHTTP activity - makes HTTP requests
 //!
-//! `pg_durable.http_security` selects disabled (default), restricted, or
+//! `pg_durable.http_security` selects disabled, restricted (default), or
 //! unrestricted outbound HTTP(S) access at server startup. The worker passes
 //! an immutable policy snapshot to both HTTP activities.
 //!

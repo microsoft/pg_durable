@@ -7,8 +7,8 @@
 //!
 //! | Mode | Behaviour |
 //! |---------|-----------|
-//! | `disabled` (default) | All outbound HTTP is blocked at DSL and execution time. |
-//! | `restricted` | HTTPS only, domain allow-list, IP blocklist, no proxies or redirects. |
+//! | `disabled` | All outbound HTTP is blocked at DSL and execution time. |
+//! | `restricted` (default) | HTTPS only, domain allow-list, IP blocklist, no proxies or redirects. |
 //! | `unrestricted` | Any HTTP(S) destination, including private networks (development only). No redirects. |
 //!
 //! `pg_durable.http_allowed_domains` replaces the restricted mode's default

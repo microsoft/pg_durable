@@ -23,7 +23,7 @@ pub static DATABASE: GucSetting<Option<CString>> =
 pub static HOST: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
 
 pub static HTTP_SECURITY: GucSetting<ssrf::HttpSecurity> =
-    GucSetting::<ssrf::HttpSecurity>::new(ssrf::HttpSecurity::Disabled);
+    GucSetting::<ssrf::HttpSecurity>::new(ssrf::HttpSecurity::Restricted);
 
 pub static HTTP_ALLOWED_DOMAINS: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(ssrf::DEFAULT_HTTP_ALLOWED_DOMAINS));
@@ -1402,7 +1402,8 @@ mod tests {
         assert_eq!(
             Spi::get_one::<bool>(
                 "SELECT context = 'postmaster' AND vartype = 'enum'
-                     AND setting = 'restricted' AND boot_val = 'disabled'
+                     AND setting = 'restricted' AND boot_val = 'restricted'
+                     AND source = 'default'
                      AND enumvals = ARRAY['disabled', 'restricted', 'unrestricted']
                      AND NOT pending_restart
                  FROM pg_catalog.pg_settings WHERE name = 'pg_durable.http_security'"
@@ -3572,7 +3573,6 @@ pub mod pg_test {
             "pg_durable.worker_role = 'postgres'",
             "pg_durable.database = 'postgres'",
             "pg_durable.enable_superuser_instances = on",
-            "pg_durable.http_security = 'restricted'",
         ]
     }
 }
