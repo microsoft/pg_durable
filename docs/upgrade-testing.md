@@ -19,6 +19,11 @@ We never downgrade. Downgrade scripts are not needed.
 
 Scenarios A and B2 are **chain tests**: PostgreSQL applies upgrade scripts sequentially (v0.2.2→v0.2.3→v0.3.0 within the current provider line), so each step is validated transitively by its own version's CI. Testing the current upgrade script against the immediately previous compatible version is sufficient.
 
+That argument applies to the SQL upgrade scripts, not to replay of running
+workflows. Candidate-only catalog tests cannot establish that histories produced
+by released binaries survive replacement. The released-binary B1/B2 chain below
+tests that separately, without replacing the all-previous-schema B1 checks.
+
 Scenario B1 is a **direct-contact test**: the `.so` faces whatever raw schema the customer has, with no intermediate transformation. There is no chain — a customer on v0.2.2 who receives the v0.5.0 binary without ever upgrading has a v0.2.2 schema with a v0.5.0 `.so`. That's why B1 must test against all previous compatible versions in the same provider line.
 
 ### Compatibility boundaries
@@ -104,6 +109,128 @@ This is a **chain test** (like Scenario A) — upgrade scripts are applied seque
 | New operations | `df.start()` works with new schema |
 
 **Priority:** High — validates the upgrade doesn't corrupt or lose existing data.
+
+### Released-binary B1/B2 discovery chain
+
+The opt-in chain in [scripts/upgrade_replay.py](../scripts/upgrade_replay.py)
+uses actual released binaries to produce histories before upgrading. It extends
+B1/B2 execution coverage; it is not a replacement for Scenario A, the default
+all-previous-schema B1 sweep, or B2's variables, grants, dependent objects and
+HTTP catalog assertions.
+
+PostgreSQL stays fixed throughout one run. The initial supported environment is
+Linux with PostgreSQL 17, Python 3.11+, cargo-pgrx 0.16.1 and a Rust toolchain
+that can build all selected releases. The runner builds exact tags with their
+lockfiles and the working-tree 0.2.9 candidate, using debug builds with only the
+`pg17` feature. It refuses builds that change the lockfile. No HTTP feature is
+enabled. The release tags must be present locally.
+
+| Step | Phase | Binary | Extension catalog | Scenario |
+|---|---|---|---|---|
+| 0 | 1 | 0.2.2 | 0.2.2 | Baseline |
+| 1 | 2 | 0.2.5 | 0.2.2 | B1 |
+| 2 | 1 | 0.2.5 | 0.2.5 | B2 |
+| 3 | 2 | 0.2.7 | 0.2.5 | B1 |
+| 4 | 1 | 0.2.7 | 0.2.7 | B2 |
+| 5 | 2 | 0.2.9 candidate | 0.2.7 | B1 |
+| 6 | 1 | 0.2.9 candidate | 0.2.9 | B2 |
+
+Here phase 1 means matching binary/catalog versions, and phase 2 means a newer
+binary against the previous catalog. These observation labels are not the
+numbered deployment steps above. The runner stops PostgreSQL, replaces the
+library and packaged SQL in a private installation, then restarts for each B1.
+For B2 it applies `ALTER EXTENSION UPDATE` with surviving loops still running.
+Provider migrations belong to the binary's worker, not to `ALTER EXTENSION`.
+All selected releases currently pin duroxide-pg 0.1.34; this chain exercises
+retained provider state but does not establish coverage of a provider upgrade.
+
+Each step starts exactly two instances from
+[tests/upgrade/replay.sql](../tests/upgrade/replay.sql): one finite SQL insertion
+and one root loop that inserts a progress mark and waits on a one-second durable
+timer. Loops advance independently; their iteration counts need not match
+phases. A bounded observation window checks positive progress for every surviving
+loop, rather than accepting a `running` status alone. Finite instances must
+complete with the expected result and exactly one insertion, and their results
+are rechecked at later steps. This is not an exactly-once guarantee for arbitrary
+activities interrupted by maintenance.
+
+Every step inspects engine and `df` status, results, instance listings, nodes,
+execution summaries and `df.explain()`. The first failure is attributed to its
+observed transition. Failed instances remain inspectable and are reported as
+`previously_failed` at later steps, not as passing continuity checks. A new
+inspection failure on an already-failed instance still fails the run.
+
+#### Running and retaining evidence
+
+The default command continues to run the original A/B1/B2 suite. The chain is a
+separate mode and always stops its private cluster; `--keep` is not supported:
+
+```bash
+./scripts/test-upgrade.sh --pg-version 17
+./scripts/test-upgrade.sh --pg-version 17 \
+  --replay-chain "$PWD/target/replay-evidence" --allow-known-replay-breaks
+```
+
+Use a dedicated output directory, outside tracked source paths. It holds build
+logs, source exports, lockfiles, package/source hashes, commit IDs, toolchain and
+PostgreSQL versions, the latest `report.json`, and per-run database/log/history
+evidence. Cached packages are reused only when their recorded source, toolchain
+and file hashes match; changed sources or incomplete builds require a new output
+directory. Do not run two chains concurrently with the same output directory.
+The data directory is retained for diagnosis but is not a portable replay fixture
+or a supported downgrade mechanism. Evidence may contain workflow payloads; use
+only sanitized test data, especially for future downstream fixtures.
+
+Exit codes are `0` for accepted results, `1` for compatibility-check failures,
+and `2` for setup errors or incomplete phase coverage. Strict mode (omit
+`--allow-known-replay-breaks`) fails on any observed break. The opt-in exception
+accepts only the baseline loop's `update-node-status` nondeterministic schedule
+mismatch at the 0.2.2 to 0.2.5 B1 step; it does not accept timeouts, unrelated
+engine errors or diagnostic failures. A green exception-enabled run therefore
+does not mean every workflow survived.
+
+For longer observation or different timeouts, invoke the Python runner directly:
+
+```bash
+python3 scripts/upgrade_replay.py --pg-config /path/to/pg17/bin/pg_config \
+  --output-dir "$PWD/target/replay-evidence" \
+  --observe-seconds 10 --timeout 60 --allow-known-breaks
+```
+
+CI runs the harness unit tests and original upgrade suite automatically. Full
+historical execution is opt-in through the CI workflow's `replay_chain` boolean;
+select PG17 or `17, 18` when enabling it. It uses the explicit known-break
+exception and uploads reports, provenance and diagnostics. Run this discovery
+mode before releases and when adding fixtures; it is not yet a SemVer gate.
+
+#### Initial measured results
+
+The September 23, 2026 local run used PostgreSQL 17.10, debug `pg17` builds,
+the released tags above and candidate source commit
+`e175a2a9f6b72904ea6b04acce1c968496063775`.
+
+| Workflow/state | Observation on the tested chain |
+|---|---|
+| Finite SQL insertion, created at each step | All seven completed with the expected result and a single insertion; retained results remained readable at every later step. |
+| Root loop created on 0.2.2 | Progressed before upgrade, then failed engine replay at 0.2.5 B1 on changed `update-node-status` input; `df.status()` still reported `running`. |
+| Root loops created at the six later steps | Each made progress in its creation step and every subsequent observed step through candidate B2. |
+| Diagnostics for all fourteen instances | Listings, info, nodes, execution summaries and graph explanations remained available, including for the failed instance. |
+
+These results cover two graph shapes, not whole features or arbitrary histories.
+The failed 0.2.2 loop cannot establish live compatibility with later binaries.
+The chain does not test direct source-to-candidate jumps, all deferred-schema
+combinations, fresh `_duroxide` lineage, PG18, release-profile/HTTP builds,
+abrupt crashes, or the exact intermediate release that introduced a mismatch.
+Source-derived risks in the [SemVer proposal](semver-compatibility-plan.md) are
+not automatically promoted to measured results by this run.
+
+Expand the fixture set incrementally: sequences, captures/substitution,
+conditionals, JOIN/RACE, nested loops, signals and external activity behavior.
+Add focused transition tests where an earlier failure masks a later boundary.
+Collect sanitized downstream pipeline examples with source versions, required
+tables/configuration, typical waiting states, expected outputs/side effects and
+local substitutes for external services. Report untested paths separately from
+passed, failed and blocked-by-earlier-failure observations.
 
 ## Backward Compatibility Patterns
 

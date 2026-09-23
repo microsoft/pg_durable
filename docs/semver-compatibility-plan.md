@@ -1,17 +1,26 @@
 # Semantic versioning and compatibility plan
 
-**Status: proposal, not an implemented compatibility guarantee.**
-Prepared on 2026-09-15 against the v0.2.8 release and the current 0.2.9 development
-tree. This document defines the proposed contract and release gates; it does not
-bump the version, change execution behavior, or certify cross-binary replay.
+**Status: compatibility discovery in progress; guarantees remain proposals.**
+Prepared on 2026-09-15 and updated on 2026-09-23. The initial released-binary
+B1/B2 discovery harness has been exercised against the 0.2.9 development tree.
+Its two workflow shapes do not certify general replay compatibility. This work
+does not bump the version, repair runtime incompatibilities, choose a 1.0
+baseline, or implement the future release gates described below.
 
 ## Recommendation
 
-Make the next stable release **1.0.0**, after the compatibility gates below pass.
-Make it a compatibility-preserving release from v0.2.8, not another drain boundary.
-Do not publish 1.0 merely by changing the version number.
+First establish a reproducible inventory of which workflows survive which
+upgrade paths, and document the failures. Finish the discovery harness and
+initial findings in this PR; expand small diagnostic workflows and sanitized
+downstream pipeline examples incrementally. Keep the full historical chain
+opt-in while retaining automatic catalog and harness-unit checks.
 
-Use separate baselines for separate contracts:
+Decide the release number, supported replay baseline and mandatory compatibility
+gates after reviewing that evidence. A future 1.0 remains an option, not a
+decision made by this PR. Do not publish 1.0 merely by changing the version number.
+
+Evaluate separate baselines for separate contracts. These are candidate policy
+choices, not guarantees established by the initial experiment:
 
 | Contract | Proposed source set |
 |---|---|
@@ -45,8 +54,9 @@ the current execution's earlier decisions, not just its currently parked node.
 A changed operation already present in retained history can therefore matter
 after that node appears to have finished.
 
-These are source/documentation findings, not results of an old-binary upgrade
-test. Published release notes and tagged code take precedence over an unshipped
+The table below contains source/documentation findings, not measured outcomes
+for every transition. The separate initial experiment is summarized below it.
+Published release notes and tagged code take precedence over an unshipped
 changelog section. A replay failure can leave `df.instances` reporting
 `pending`/`running` if the engine fails before pg_durable's status-finalization
 activity; checking only `df.status()` is insufficient.
@@ -66,8 +76,29 @@ There is no single useful "last breaking version": **0.2.2 is the provider
 boundary, 0.2.4 the broad replay boundary, 0.2.5 the broad loop/parallel boundary,
 and 0.2.8 the latest explicitly documented narrow replay exception.** The
 substitution fix in 0.2.6 is another reason not to use 0.2.5 as an unqualified
-continuity baseline. v0.2.8 is therefore the conservative initial replay baseline
-for 1.0, not a reason to drop old-schema support.
+continuity baseline. v0.2.8 is therefore a candidate replay baseline to evaluate
+for 1.0, not an approved guarantee or a reason to drop old-schema support.
+
+### Initial measured evidence
+
+The [released-binary B1/B2 chain](upgrade-testing.md#released-binary-b1b2-discovery-chain)
+ran 0.2.2 -> 0.2.5 -> 0.2.7 -> candidate 0.2.9 on PostgreSQL 17.10, with a
+binary-only observation followed by a SQL-update observation at each upgrade.
+At each of seven steps it created a finite SQL insertion and a timer-paced root
+loop. Iteration counts were independent of the upgrade phases.
+
+All seven finite instances completed and retained their results. The 0.2.2 loop
+failed at the 0.2.5 binary replacement with an `update-node-status` schedule
+mismatch, while the `df` status mirror still said `running`. Loops created in
+the six subsequent steps progressed through all their later observations. All
+fourteen instances remained inspectable. Exact candidate identity, build scope
+and limitations are recorded in the upgrade-testing document and run evidence.
+
+This is evidence for those graph shapes on that path only. It does not locate
+the first breaking intermediate release, prove direct jumps, certify v0.2.8 as
+a replay source, or show live survival of the already-failed 0.2.2 loop. Keep
+observed success, confirmed failure, source-inferred risk, untested behavior and
+paths blocked by earlier failures distinct in future compatibility tables.
 
 ### Source-derived risks and historical precision
 
@@ -130,8 +161,9 @@ reset in either release.
   identity and timer semantics in our contract, but do not overstate what the
   current [engine matcher](https://github.com/microsoft/duroxide/blob/v0.1.30/src/runtime/replay_engine.rs#L1857-L1879)
   actually checks.
-- Existing B1/B2 prose mentions pre-swap work, but the harness builds only the
-  current binary. Do not present those tests as historical replay coverage.
+- The default B1/B2 suite builds only the current binary. Only the opt-in
+   released-binary mode produces historical replay evidence; do not conflate
+   the two kinds of coverage.
 - Keep published upgrade SQL immutable. Correct prose openly and put any
   required DDL repair in the next upgrade script, not a shipped script.
 
@@ -185,6 +217,13 @@ even then, do not silently abandon persisted running work created through it.
 | Patch | Backward-compatible fixes and maintenance. Internal orchestration versions may change if old executions and public behavior remain supported. A fix for newly executed work must still replay old recorded decisions safely. |
 | Minor | Compatible API/features and deprecations, with the patch guarantees intact. New required schema objects gate only new capabilities. |
 | Major | Intentional incompatible public behavior or withdrawal of a previously promised upgrade/runtime path. Requires a specific migration and continuity plan, not just a major number. |
+
+Supporting older minor branches would add new maintenance-patch releases, not
+modify published tags or SQL. Preserve fixtures from the original releases and
+add the patched sources and supported upgrade paths to the matrix. A patch that
+only changes newly created workflows does not repair already-recorded history;
+the destination may need legacy replay support. Any required intermediate patch
+must be an explicit operator constraint, not an assumed upgrade step.
 
 The pg_durable package version, extension catalog version, orchestration handler
 version, history/replay-engine version and provider migration version are
@@ -264,6 +303,12 @@ References at the pinned runtime:
 
 ## Upgrade & Migration
 
+The current discovery implementation changes no extension DDL, runtime queries
+or worker migration behavior. It therefore needs no upgrade script or runtime
+schema detection. B1 coverage remains in the default suite, and the optional
+chain observes the existing binary/schema boundaries. The guards and protocol
+changes below are future proposals with separate compatibility obligations.
+
 ### Separate requirement: guarded schema upgrades with safe refusal
 
 **Contract:** Replacing the binary preserves supported existing work without
@@ -331,7 +376,7 @@ Permit normal concurrent workflow progress rather than demanding byte-identical
 database contents. Exercise concurrent starts/children/continuations, inspection
 errors, barrier timeouts, cancellation, transaction/savepoint rollback, and a
 successful retry after blockers are safely resolved. Test admission/worker
-liveness as well as absence of corruption. C1/C2 must separately prove that the
+liveness as well as absence of corruption. Released-binary B1/B2 must separately prove that the
 binary swap and provider migrations have not already broken work before the
 guard runs, and that compatible schema updates succeed with live work present.
 
@@ -343,7 +388,7 @@ weaken the 1.x guarantee.
 
 ### Existing infrastructure: keep it, but do not overclaim it
 
-`scripts/test-upgrade.sh` installs the candidate binary once, then reconstructs
+The default `scripts/test-upgrade.sh` mode installs the candidate binary once, then reconstructs
 older catalogs from install fixtures and upgrade chains. B1 exercises new work
 on those old catalogs. B2 creates its "pre-upgrade" instances using that same
 candidate binary and then applies SQL. Neither creates history with the previous
@@ -360,7 +405,16 @@ bump alone can therefore fail setup or skip all 0.x B1 sources. Introduce an
 explicit supported-source manifest rather than advancing
 `PROVIDER_COMPAT_START_VERSION` or deleting old fixtures to make CI green.
 
-### Add Scenario C: actual old-binary state and replay
+### Extend B1/B2 with actual old-binary state and replay
+
+The initial opt-in implementation is the staged discovery chain documented in
+[upgrade testing](upgrade-testing.md#released-binary-b1b2-discovery-chain).
+It retains one database across alternating B1/B2 steps, starts live and finite
+work at each step, observes independent timer-paced progress and records the
+first failure. It does not implement the full coverage below. Historical replay
+is an extension of B1/B2, not a separate Scenario C.
+
+Future direct-path certification should satisfy these additional requirements:
 
 Use immutable released packages where suitable, otherwise build exact pinned
 tags with their own lockfiles in separate source directories and install roots.
@@ -378,21 +432,21 @@ running database or external production services.
    outstanding work. Snapshot it while stopped, with normal PostgreSQL backup/
    restore constraints. Replace the binary and packaged extension files;
    restart PostgreSQL so both preloaded code and worker processes are new.
-4. **C1: binary-only path.** Leave `pg_extension.extversion` unchanged. Verify
+4. **B1: binary-only path.** Leave `pg_extension.extversion` unchanged. Verify
    provider migrations/readiness, resume old work, check old results/vars,
    run new work on the old schema, and drive loops through multiple generations.
-5. **C2: binary plus SQL path.** Restore an independent copy of the same old
+5. **B2: binary plus SQL path.** Restore an independent copy of the same old
    checkpoint, load the candidate, apply `ALTER EXTENSION UPDATE` while selected
    work is still parked, and then resume it. Also cover a delayed SQL update
-   after some work has progressed under C1 conditions.
+   after some work has progressed under B1 conditions.
 6. Assert engine and `df` states agree, no replay errors or lost signals/children
    occur, intended results/control flow match, and already-recorded successful
    activities are not repeated merely because of replay. Include interrupted
    activity retry cases without claiming external exactly-once execution.
 
-Both C1 and C2 are necessary: C1 covers deferred schema upgrades; C2 covers SQL
+Both B1 and B2 are necessary: B1 covers deferred schema upgrades; B2 covers SQL
 migration/dependency/privilege interactions with real historical state. Do not
-complete all workflows in C1 and then call C2 an in-flight migration test.
+complete all workflows in B1 and then call B2 an in-flight migration test.
 Exercise an ordinary maintenance stop first, then targeted abrupt-stop recovery
 in isolated clusters.
 
@@ -407,7 +461,22 @@ putting the old library back is not a supported rollback procedure.
 
 ### Coverage and release matrix
 
-The fixture suite must cover sequences before/after recorded SQL, IF/IF_ROWS and
+**Current scope:** two graph shapes, opt-in historical execution, automatic
+harness unit tests, and unchanged default A/B1/B2 coverage. The full chain is
+useful for characterization and pre-release investigation, but rerunning its
+immutable historical prefix on every PR is not yet a requirement. Reusing a
+versioned pre-candidate checkpoint may later reduce cost, subject to PostgreSQL
+backup/restore and provenance constraints; no checkpoint-distribution system is
+part of this PR.
+
+Grow the corpus incrementally, including sanitized real pipelines from downstream
+consumers. Request their source versions and upgrade paths, required setup,
+typical in-flight states, expected outputs and side effects (including duplicate
+tolerance), and local external-service substitutes. Retain provenance without
+credentials or customer data. Add intermediate releases or targeted transition
+tests when an early failure masks the boundary being investigated.
+
+**Future target, before advertising broad guarantees:** cover sequences before/after recorded SQL, IF/IF_ROWS and
 both branch outcomes, named results and placeholder-like values, JOIN/RACE
 (including completed children retained in parent history), root/nested/parallel
 loops, conditions and break propagation, continue-as-new state, timers and cron,
@@ -420,13 +489,14 @@ legacy-handler tests: loop iteration limits, transaction-admission compaction,
 typed errors and serialization. A hand-authored history or a current-binary
 fixture must not be mislabeled as a released-binary fixture.
 
-For every supported PostgreSQL major:
+Once the support policy is approved, proposed gates for every supported
+PostgreSQL major are:
 
-- PR gates: A/B1/B2 for the supported catalog set, C from the oldest promised
+- PR gates: A/B1/B2 for the supported catalog set, released-binary B1/B2 from the oldest promised
   replay baseline and the latest release, and frozen protocol/history fixtures
   from every distinct released protocol family. Include Scenario D safe-refusal
   and concurrency coverage for guarded migrations and coordination changes.
-- Release gates: direct source-to-candidate C coverage for every promised
+- Release gates: direct source-to-candidate B1/B2 coverage for every promised
   released source (or a documented, justified equivalence grouping), including
   previous binaries that created work on a still-older supported `df` schema.
   Every source must appear as covered, not silently skipped.
@@ -440,13 +510,18 @@ previous release does not prove skipped-version upgrades.
 
 ## Implementation sequence and acceptance criteria
 
+The current milestone is the discovery harness, initial measured results,
+opt-in execution and regression validation of the original suite. The sequence
+below is a future enforcement proposal, conditional on the evidence and policy
+decisions; it is not the acceptance checklist for merging this foundation.
+
 | Step | Work and primary files | Done when |
 |---|---|---|
 | 1. Approve contract and scope | Turn this proposal into a concise public compatibility policy; inventory the SQL/API/config/platform/experimental surface. Resolve historical documentation discrepancies. | The 1.0 adoption baseline, 1.x support promise and exclusions are explicit; no version number has been used to hide an unsupported path. |
 | 2. Capture immutable baselines | Add a supported-source/protocol manifest and old-runtime fixture producers under upgrade-test infrastructure; pin v0.2.8 artifacts and earlier diagnostic sources. | Fixtures are demonstrably produced by the declared released binaries, with checkpoint and expected-output provenance. |
-| 3. Implement real upgrade coverage | Extend `scripts/test-upgrade.sh` or add a separate cross-binary harness implementing C1/C2; strengthen A/B1/B2 and remove major-only source-selection assumptions. | 0.2.2+ catalog support still runs at version 1.0; v0.2.8 -> candidate resumes representative and boundary workflows with and without SQL update. Negative controls fail as expected. |
+| 3. Implement certification coverage | Expand released-binary B1/B2 to the approved direct-upgrade source set; strengthen catalog coverage and remove major-only source-selection assumptions. | Old-catalog support still runs across the adoption major boundary; every promised source resumes representative and boundary workflows with and without SQL update. Negative controls fail as expected. |
 | 4. Establish runtime versioning | Update `src/registry.rs`, orchestration organization, input codecs, relevant activities and shared helpers. Bootstrap without changing legacy history. | Old and new handler families coexist; child/CAN routing cannot accidentally upgrade a legacy execution; replay-neutral changes are demonstrated, not assumed. |
-| 5. Guard schema upgrades and prove safe refusal | Define migration capability requirements, persisted execution identity and a bounded admission/worker coordination protocol; add the guard to new upgrade scripts and Scenario D to upgrade tests. | Compatible updates pass with live work; unsafe or unclassifiable updates refuse without changing protected state or stranding work. Concurrent admissions, inspection errors and transaction cleanup are covered. C1/C2 prove binary and provider compatibility independently. |
+| 5. Guard schema upgrades and prove safe refusal | Define migration capability requirements, persisted execution identity and a bounded admission/worker coordination protocol; add the guard to new upgrade scripts and Scenario D to upgrade tests. | Compatible updates pass with live work; unsafe or unclassifiable updates refuse without changing protected state or stranding work. Concurrent admissions, inspection errors and transaction cleanup are covered. Released-binary B1/B2 prove binary and provider compatibility independently. |
 | 6. Add contributor and automated gates | Update `.github/copilot-instructions.md`, `CONTRIBUTING.md`, a PR template and CI. Require compatibility classification for runtime/helper/schema/dependency/API/config changes; compare API/C bindings and released SQL against frozen baselines. | Every relevant PR supplies legacy/new-path evidence. Published SQL/fixtures cannot change silently. Catalog/handler source sets cannot shrink without explicit reviewed policy. |
 | 7. Enforce release decisions | Update `prompts/pg_durable-release.md`, package/release workflows and required checks. Tie compatibility evidence and version classification to the exact release commit/artifacts. | New features cannot ship as patches; incompatible 1.x changes are blocked. Every advertised PG major is blocking, or explicitly unsupported. Missing/empty/skipped compatibility matrices fail the release gate. |
 | 8. Prepare and publish 1.0 | Update Cargo package/lock metadata, target upgrade script, generated metadata/fixtures, changelog, user/API docs and release notes. | All gates pass on the exact candidate; supported old sources have an actionable runbook; version and package metadata agree. Tag/publish only after separate approval. |

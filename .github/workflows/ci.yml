@@ -16,6 +16,11 @@ on:
           - '17'
           - '18'
           - '17, 18'
+      replay_chain:
+        description: 'Run historical B1/B2 replay chain (requires PG17 in the selection)'
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,6 +62,9 @@ jobs:
 
       - name: Test benchmark harness
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
+
+      - name: Test upgrade replay harness
+        run: python3 -m unittest discover -s scripts -p test_upgrade_replay.py
 
   make_install_smoke:
     name: Source Install Checks
@@ -150,6 +158,10 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [[ "${{ inputs.replay_chain }}" == "true" && "${{ inputs.pg_version }}" == "18" ]]; then
+              echo "::error::The replay chain requires PG17; select 17 or 17, 18."
+              exit 1
+            fi
             echo 'pg_versions=[${{ github.event.inputs.pg_version }}]' >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             if [ "${{ contains(github.event.pull_request.labels.*.name, 'test-pg18') }}" = "true" ]; then
@@ -175,6 +187,8 @@ jobs:
     continue-on-error: ${{ matrix.pg_version == 18 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && inputs.replay_chain && '0' || '1' }}
 
       - name: Free disk space and show usage
         run: |
@@ -319,3 +333,25 @@ jobs:
       - name: Stop PostgreSQL after pg_regress
         if: steps.pg_regress.outcome != 'skipped'
         run: ./scripts/pg-stop.sh --pg-version ${{ matrix.pg_version }}
+
+      - name: Run released-binary B1/B2 chain
+        id: replay_chain
+        if: github.event_name == 'workflow_dispatch' && inputs.replay_chain && matrix.pg_version == 17
+        timeout-minutes: 60
+        run: |
+          ./scripts/test-upgrade.sh --pg-version 17 \
+            --replay-chain "$RUNNER_TEMP/upgrade-replay" --allow-known-replay-breaks
+
+      - name: Upload replay chain evidence
+        if: always() && (steps.replay_chain.outcome == 'success' || steps.replay_chain.outcome == 'failure' || steps.replay_chain.outcome == 'cancelled')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-replay-pg17
+          path: |
+            ${{ runner.temp }}/upgrade-replay/report.json
+            ${{ runner.temp }}/upgrade-replay/artifacts/*/provenance.json
+            ${{ runner.temp }}/upgrade-replay/artifacts/*/Cargo.lock
+            ${{ runner.temp }}/upgrade-replay/artifacts/*/build.log
+            ${{ runner.temp }}/upgrade-replay/runs/*/postgres.log
+            ${{ runner.temp }}/upgrade-replay/runs/*/*/*.json
+          if-no-files-found: error
