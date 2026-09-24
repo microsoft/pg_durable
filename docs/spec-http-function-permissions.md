@@ -29,9 +29,9 @@ the only gate.
 1. HTTP access must be **opt-in**, separate from general `df` access.
 2. The privilege check must be **enforced at execution time**, not only at DSL
    construction time, so that raw `df.start()` JSON injection is also blocked.
-3. The privilege check must be enforced **regardless of which HTTP Cargo
-   feature is enabled**. (This is moot when HTTP is entirely disabled at build
-   time, since the activity rejects all requests unconditionally.)
+3. The privilege check must be enforced **regardless of the startup HTTP
+   security mode**. HTTP function privileges cannot override
+   `pg_durable.http_security` or restricted-mode destination safeguards.
 4. Admins must be able to **revoke HTTP access** from a role without removing
    all `df` access.
 5. The design must work for **fresh installs** (v0.2.0+) and for

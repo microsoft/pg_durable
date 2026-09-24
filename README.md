@@ -152,9 +152,11 @@ sudo make install PG_CONFIG="$PG_CONFIG"
 ```
 
 Source installation is supported on Linux and macOS for PostgreSQL 17 and 18.
-Windows source installation is not currently supported. Set `EXTRA_FEATURES`
-on the build command to enable an HTTP policy feature. `DESTDIR` may be set on
-`make install` when staging files for a package.
+Windows source installation is not currently supported. Configure HTTP policy
+with `pg_durable.http_security` in `postgresql.conf` or through an authorized
+`ALTER SYSTEM SET`, then restart PostgreSQL. The default is `restricted`; no
+HTTP Cargo feature is needed. See [HTTP security](USER_GUIDE.md#http-security).
+`DESTDIR` may be set on `make install` when staging files for a package.
 
 `sudo make uninstall PG_CONFIG="$PG_CONFIG"` removes the installed files again.
 It needs no build, so it also works from an unbuilt source tree.
