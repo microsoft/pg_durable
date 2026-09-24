@@ -253,12 +253,14 @@ It does not use a blanket function grant followed by revocations. When granting
 HTTP access, the caller must be able to grant the complete HTTP function set; otherwise the
 call fails rather than silently skipping the HTTP grant.
 
-### 3.5 Feature-flag interaction
+### 3.5 Security-mode interaction
 
-The privilege check runs regardless of the startup HTTP security mode. In disabled
-mode, crafted nodes still run the privilege check before the execution-time
-destination policy rejects them; DSL constructors fail earlier.
-remains compiled in and still runs before any network activity.
+The HTTP activities enforce the privilege check in every
+`pg_durable.http_security` mode, including `unrestricted`. In `disabled` mode,
+DSL constructors reject requests immediately. Crafted nodes that bypass the
+constructors still undergo the activity's privilege check before the destination
+policy rejects them. HTTP function privileges never override the startup
+destination policy.
 
 ---
 
