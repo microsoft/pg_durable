@@ -255,9 +255,9 @@ call fails rather than silently skipping the HTTP grant.
 
 ### 3.5 Feature-flag interaction
 
-The privilege check runs regardless of the startup HTTP security mode.
-When no HTTP feature is compiled in, the request is still blocked later by the
-DSL-time guard and by execution-time URL validation, but the privilege check
+The privilege check runs regardless of the startup HTTP security mode. In disabled
+mode, crafted nodes still run the privilege check before the execution-time
+destination policy rejects them; DSL constructors fail earlier.
 remains compiled in and still runs before any network activity.
 
 ---

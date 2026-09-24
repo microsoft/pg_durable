@@ -146,8 +146,8 @@ jobs:
               cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
               cargo pgrx init --pg${{ matrix.pg_version }} "$PG_CONFIG"
 
-              http_feature=$(cargo read-manifest | python3 -c \
-                "import json, sys; feature = \"http-allow-azure-domains\"; print(feature if feature in json.load(sys.stdin)[\"features\"] else \"\")")
+              http_feature=$(cargo metadata --no-deps --format-version 1 | python3 -c \
+                "import json, sys; feature = \"http-allow-azure-domains\"; print(feature if feature in json.load(sys.stdin)[\"packages\"][0][\"features\"] else \"\")")
               make -f _release_tooling/Makefile package \
                 PG_CONFIG="$PG_CONFIG" \
                 EXTRA_FEATURES="$http_feature"
