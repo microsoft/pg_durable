@@ -19,9 +19,6 @@ DECLARE connection text;
 BEGIN
     FOREACH connection IN ARRAY ARRAY['e81origin', 'e81target', 'e81control'] LOOP
         PERFORM dblink_exec(connection, $sql$
-            DROP TABLE IF EXISTS public.e81_data;
-            CREATE TABLE public.e81_data(value integer);
-            ALTER TABLE public.e81_data OWNER TO df_e2e_user;
             GRANT USAGE, CREATE ON SCHEMA public TO df_e2e_user;
             SET SESSION AUTHORIZATION df_e2e_user;
         $sql$);
@@ -35,26 +32,33 @@ INSERT INTO _e81_routes VALUES
     ('e81control', '_e81_target', 'control-remote'),
     ('e81origin', '_e81_target', 'satellite-remote');
 CREATE TEMP TABLE _e81_cases(connection text, target_connection text, route text,
-    kind text, index_name text, id text, status text);
+    kind text, table_name text, index_name text, id text, status text);
 DO $$
 DECLARE
     route record;
     kind text;
     statement text;
     instance text;
+    target_connection text;
+    table_name text;
     n int := 0;
 BEGIN
     FOR route IN SELECT * FROM _e81_routes LOOP
         FOREACH kind IN ARRAY ARRAY['vacuum', 'concurrent-index'] LOOP
             n := n + 1;
-            statement := CASE WHEN kind = 'vacuum' THEN 'VACUUM public.e81_data'
-                ELSE format('CREATE INDEX CONCURRENTLY e81_index_%s ON public.e81_data(value)', n) END;
+            target_connection := CASE WHEN route.target = '_e81_target' THEN 'e81target' ELSE route.connection END;
+            table_name := format('e81_data_%s', n);
+            -- Concurrent index builds on the same table can deadlock independently
+            -- of autocommit. Isolate cases, retaining parallel workflow execution.
+            PERFORM dblink_exec(target_connection,
+                format('CREATE TABLE public.%I(value integer)', table_name));
+            statement := CASE WHEN kind = 'vacuum' THEN format('VACUUM public.%I', table_name)
+                ELSE format('CREATE INDEX CONCURRENTLY e81_index_%s ON public.%I(value)', n, table_name) END;
             SELECT id INTO instance FROM dblink(route.connection, format(
                 'SELECT df.start(%L, %L, database => %L)',
                 statement, 'e81-' || route.route || '-' || kind, route.target)) AS remote(id text);
-            INSERT INTO _e81_cases VALUES (route.connection,
-                CASE WHEN route.target = '_e81_target' THEN 'e81target' ELSE route.connection END,
-                route.route, kind, format('e81_index_%s', n), instance, NULL);
+            INSERT INTO _e81_cases VALUES (route.connection, target_connection,
+                route.route, kind, table_name, format('e81_index_%s', n), instance, NULL);
         END LOOP;
     END LOOP;
 END $$;
@@ -95,10 +99,12 @@ BEGIN
     END LOOP;
 END $$;
 DO $$
-DECLARE connection text;
+DECLARE connection text; item record;
 BEGIN
+    FOR item IN SELECT * FROM _e81_cases LOOP
+        PERFORM dblink_exec(item.target_connection, format('DROP TABLE public.%I', item.table_name));
+    END LOOP;
     FOREACH connection IN ARRAY ARRAY['e81origin', 'e81target', 'e81control'] LOOP
-        PERFORM dblink_exec(connection, 'RESET SESSION AUTHORIZATION; DROP TABLE public.e81_data');
         PERFORM dblink_disconnect(connection);
     END LOOP;
 END $$;
