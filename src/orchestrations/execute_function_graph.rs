@@ -570,8 +570,10 @@ pub async fn execute(ctx: OrchestrationContext, input_json: String) -> Result<St
 
     match &function_result {
         Ok(result) => {
-            // Logs the final return value (may contain sensitive data; see USER_GUIDE.md#what-reaches-the-server-log).
-            ctx.trace_info(format!("Function completed with result: {result}"));
+            ctx.trace_info(format!(
+                "Function completed (result size: {} bytes)",
+                result.len()
+            ));
             finalize_instance_status(&ctx, &input.instance_id, "completed").await;
         }
         Err(err) => {
