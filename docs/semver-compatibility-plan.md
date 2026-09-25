@@ -1,9 +1,10 @@
 # Semantic versioning and compatibility plan
 
 **Status: compatibility discovery in progress; guarantees remain proposals.**
-Prepared on 2026-09-15 and updated on 2026-09-23. The initial released-binary
+Prepared on 2026-09-15 and updated on 2026-09-24. The released-binary
 B1/B2 discovery harness has been exercised against the 0.2.9 development tree.
-Its two workflow shapes do not certify general replay compatibility. This work
+Its finite SQL, timer-loop, SQL-sequence and permission cases do not certify
+general replay or provider-migration compatibility. This work
 does not bump the version, repair runtime incompatibilities, choose a 1.0
 baseline, or implement the future release gates described below.
 
@@ -93,6 +94,20 @@ mismatch, while the `df` status mirror still said `running`. Loops created in
 the six subsequent steps progressed through all their later observations. All
 fourteen instances remained inspectable. Exact candidate identity, build scope
 and limitations are recorded in the upgrade-testing document and run evidence.
+
+The September 24 expansion added 28 SQL-only sequences with 13 leaves, 25 total
+nodes and depth 12, under two delegated non-superuser users. Completed sequences
+survived; both sequences held on 0.2.2 failed at the 0.2.5 binary swap with the
+same node-status mismatch. Later held sequences crossed their next upgrade and
+completed. Permission probes found missing grants for new multipart (0.2.5)
+and endpoint-overload (candidate 0.2.9) functions, plus broken HTTP-inclusive
+delegation by unrefreshed admins. Refreshing only the admin restored delegation,
+not the original user's new-function grants; tested SQL access remained usable.
+See the [expanded report](upgrade-testing.md#expanded-measured-results).
+
+The recorded provider dependency stayed at `duroxide-pg` 0.1.34 with the same
+21 migration records. The harness observes startup migrations and post-restart
+behavior, but these runs did not exercise a provider-version transition.
 
 This is evidence for those graph shapes on that path only. It does not locate
 the first breaking intermediate release, prove direct jumps, certify v0.2.8 as
@@ -461,8 +476,11 @@ putting the old library back is not a supported rollback procedure.
 
 ### Coverage and release matrix
 
-**Current scope:** two graph shapes, opt-in historical execution, automatic
-harness unit tests, and unchanged default A/B1/B2 coverage. The full chain is
+**Current scope:** finite SQL, timer loops, completed/partially executed 13-leaf
+SQL sequences, and retained/refreshed permission cohorts; opt-in historical
+execution, automatic harness unit tests, and unchanged default A/B1/B2 coverage.
+Provider versions and applied migrations are recorded, but a provider-version
+transition has not yet been exercised. The full chain is
 useful for characterization and pre-release investigation, but rerunning its
 immutable historical prefix on every PR is not yet a requirement. Reusing a
 versioned pre-candidate checkpoint may later reduce cost, subject to PostgreSQL

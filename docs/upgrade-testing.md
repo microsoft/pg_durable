@@ -139,12 +139,13 @@ Here phase 1 means matching binary/catalog versions, and phase 2 means a newer
 binary against the previous catalog. These observation labels are not the
 numbered deployment steps above. The runner stops PostgreSQL, replaces the
 library and packaged SQL in a private installation, then restarts for each B1.
-For B2 it applies `ALTER EXTENSION UPDATE` with surviving loops still running.
+For B2 it applies each intermediate `ALTER EXTENSION UPDATE`, recording grants
+after each catalog version, with surviving loops and held SQL sequences present.
 Provider migrations belong to the binary's worker, not to `ALTER EXTENSION`.
 All selected releases currently pin duroxide-pg 0.1.34; this chain exercises
 retained provider state but does not establish coverage of a provider upgrade.
 
-Each step starts exactly two instances from
+Each step starts two original instances from
 [tests/upgrade/replay.sql](../tests/upgrade/replay.sql): one finite SQL insertion
 and one root loop that inserts a progress mark and waits on a one-second durable
 timer. Loops advance independently; their iteration counts need not match
@@ -153,6 +154,38 @@ loop, rather than accepting a `running` status alone. Finite instances must
 complete with the expected result and exactly one insertion, and their results
 are rechecked at later steps. This is not an exactly-once guarantee for arbitrary
 activities interrupted by maintenance.
+
+Each step also starts four SQL-only sequences: a completed and a held sequence
+under each of two non-superuser users. Each graph has 13 SQL leaves and 12
+left-associated THEN nodes (25 nodes, depth 12), submitted with two-argument
+`df.start()`. This matches a representative downstream pipeline topology, not
+its implementation. The network-free leaves in
+[tests/upgrade/sequence.sql](../tests/upgrade/sequence.sql) build an ordered
+running total in regular tables. Every step verifies the invoker role; duplicate
+committed steps violate a primary key. The held variant commits steps 1-6 and
+blocks inside the seventh SQL leaf until the next upgrade has finished. There
+are no durable SLEEP, SIGNAL or LOOP nodes in these graphs. The last step
+releases all sequences because no further upgrade follows.
+
+Graph links, query payloads, ownership, node count/depth, ordered side effects,
+engine and `df` status, owner-readable nodes and the final result (91) are checked
+and retained. Ordinary work and timer progress are measured before parking new
+SQL leaves, which otherwise occupy worker/user-connection capacity. A held SQL
+activity can be retried after maintenance; this fixture detects unexpected
+duplicate commits but does not promise exactly-once external side effects.
+
+Permission cohorts start on 0.2.2: a superuser grants each administrator
+`include_http => true, with_grant => true`; each administrator grants its user
+`include_http => true` with the default `with_grant => false`. One pair is never
+refreshed. The managed-service pair refreshes only its administrator after SQL
+updates from 0.2.7 onward. Its original user's grants are never refreshed. A
+separate repair-control user is explicitly re-granted by that administrator.
+Snapshots compare function, schema and table-column privileges/grant options
+against freshly granted reference roles at the same catalog version. Actual
+non-superuser connections test construction, submission, SQL invoker identity,
+variables, monitoring and delegation with both default and HTTP-inclusive grants.
+HTTP privilege checks do not execute outbound requests or provision endpoint
+servers/user mappings.
 
 Every step inspects engine and `df` status, results, instance listings, nodes,
 execution summaries and `df.explain()`. The first failure is attributed to its
@@ -173,7 +206,7 @@ separate mode and always stops its private cluster; `--keep` is not supported:
 
 Use a dedicated output directory, outside tracked source paths. It holds build
 logs, source exports, lockfiles, package/source hashes, commit IDs, toolchain and
-PostgreSQL versions, the latest `report.json`, and per-run database/log/history
+PostgreSQL versions, the latest `report.json`, and per-run reports/database/log/history
 evidence. Cached packages are reused only when their recorded source, toolchain
 and file hashes match; changed sources or incomplete builds require a new output
 directory. Do not run two chains concurrently with the same output directory.
@@ -184,10 +217,13 @@ only sanitized test data, especially for future downstream fixtures.
 Exit codes are `0` for accepted results, `1` for compatibility-check failures,
 and `2` for setup errors or incomplete phase coverage. Strict mode (omit
 `--allow-known-replay-breaks`) fails on any observed break. The opt-in exception
-accepts only the baseline loop's `update-node-status` nondeterministic schedule
-mismatch at the 0.2.2 to 0.2.5 B1 step; it does not accept timeouts, unrelated
-engine errors or diagnostic failures. A green exception-enabled run therefore
-does not mean every workflow survived.
+accepts only the documented baseline loop/held-sequence `update-node-status`
+schedule mismatches at 0.2.2 to 0.2.5 B1 and the exact missing HTTP grants and
+delegation errors in the permission matrix below. Despite the legacy flag name,
+this also covers those permission findings. It does not accept timeouts,
+unrelated engine errors, damaged graphs, incorrect committed step values, lost
+existing privileges or diagnostic failures. A green exception-enabled run does
+not mean every workflow survived or every role has current-version capabilities.
 
 For longer observation or different timeouts, invoke the Python runner directly:
 
@@ -224,13 +260,90 @@ abrupt crashes, or the exact intermediate release that introduced a mismatch.
 Source-derived risks in the [SemVer proposal](semver-compatibility-plan.md) are
 not automatically promoted to measured results by this run.
 
-Expand the fixture set incrementally: sequences, captures/substitution,
+Expand the fixture set incrementally: additional sequences, captures/substitution,
 conditionals, JOIN/RACE, nested loops, signals and external activity behavior.
 Add focused transition tests where an earlier failure masks a later boundary.
 Collect sanitized downstream pipeline examples with source versions, required
 tables/configuration, typical waiting states, expected outputs/side effects and
 local substitutes for external services. Report untested paths separately from
 passed, failed and blocked-by-earlier-failure observations.
+
+#### Expanded measured results
+
+The September 24, 2026 run used PostgreSQL 17.10 and candidate source commit
+`cd2ead8baafee0c9a46718ef86a0612cc9a0d1d0`, with uncommitted harness/fixture
+changes identified by SHA-256 in the report. Runtime sources were unchanged.
+Local evidence is in `target/replay-expanded-evidence/report.json`; immutable
+per-run reports live under its `runs/` directory. These generated files are not
+checked in. Manual CI uploads the JSON report, build provenance and diagnostics.
+
+| Scenario | Measured result |
+|---|---|
+| Original finite SQL and timer loops | Reproduced the initial findings above: seven finite cases passed; only the baseline 0.2.2 loop failed replay. |
+| 14 ordinary 13-leaf sequences (two per state) | All completed; their results, 25-node graphs, owner access and ordered side effects survived every later observation. |
+| Two held sequences created on 0.2.2 | Both failed engine replay at 0.2.5 B1 on changed `update-node-status` input. The `df` mirror remained `running`. Grants and graph inspection still worked: this was not a permission failure. |
+| Held sequences created in the five intermediate states | All ten completed after their next B1/B2 transition and retained their results through candidate B2. |
+| Final-state sequence controls | Both completed without a further transition. Overall, 26 of 28 sequences completed; the two failed baseline sequences remained inspectable. |
+| SQL-only role operations | All five roles could construct/start SQL, execute as their own role, use variables and read monitoring data at all seven states. Both administrators could delegate default SQL-only usage; ordinary users could not delegate. |
+
+The replay error was `nondeterministic: schedule mismatch` for
+`pg_durable::activity::update-node-status`: new activity input included
+`instance_id` and `execution_id`, while the recorded input contained only
+`node_id` and `status`. This chain brackets the break between 0.2.2 and 0.2.5;
+it does not experimentally identify its first intermediate binary release.
+Depending on shutdown/recovery timing, the failed sequences retained six or
+seven committed steps, never a successful final result.
+
+**Permission results by extension catalog** (intermediate SQL versions were
+actually applied and inspected, using the destination chain binary):
+
+| Catalog transition | Without re-grant | Admin refresh from 0.2.7 | Original delegated user, never refreshed |
+|---|---|---|---|
+| 0.2.2 -> 0.2.3 -> 0.2.4 | No missing privileges relative to a fresh grant at the same catalog. | Not yet performed. | Existing SQL access remained usable. |
+| 0.2.4 -> 0.2.5 | New `df.http_multipart(text,text,jsonb,jsonb,integer)` lacks EXECUTE (and admin grant option). HTTP-inclusive `df.grant_usage` delegation errors with `permission denied for function http_multipart`; default SQL-only delegation still succeeds. | Not yet performed, so both admin cohorts have the gap. | Cannot use the new multipart constructor; pre-existing SQL and plain-URL HTTP EXECUTE remain granted. |
+| 0.2.5 -> 0.2.6 -> 0.2.7 | Multipart gap persists. | Superuser re-grant at 0.2.7 restores admin EXECUTE/grant option and successful HTTP-inclusive delegation. | Admin refresh does not propagate multipart EXECUTE to an already-granted user. |
+| 0.2.7 -> 0.2.8 | No additional missing privileges in this fixture. | Admin remains fully granted relative to the current helper. | Multipart gap persists. |
+| 0.2.8 -> candidate 0.2.9 | Both new endpoint overloads (`df.http(df.http_endpoint,...)`, `df.http_multipart(df.http_endpoint,...)`) are also ungranted. Unrefreshed admin delegation now errors on `http`. | Re-grant restores both new overloads, their grant options and HTTP-inclusive delegation. | Both endpoint overloads and the older multipart overload remain ungranted. |
+
+The explicitly re-granted repair-control user matched fresh user grants after
+each refresh from 0.2.7. **Refreshing only the administrator is not enough to
+grant new restricted capabilities to existing users.** No tested existing SQL
+privilege was lost; these are newly introduced restricted API gaps plus a
+regression in the old HTTP-inclusive delegation operation. Removed/renamed
+functions are not classified as ACL loss, and this is not an exhaustive API
+compatibility or privilege-escalation audit. A default `include_http => false`
+grant intentionally excludes these HTTP capabilities.
+
+This is a sanitized topology/authorization test, not a run of the downstream
+extension itself. Its staging DDL, model calls, terminal-status triggers, failed
+node snapshots, 47-node maximum example and pre-first-activity pending starts
+remain untested. Do not translate success here into certification of that whole
+consumer or all SQL sequences.
+
+#### Provider migration coverage
+
+B1 starts the new binary over retained provider state **before** any extension
+SQL update. Its background worker applies embedded provider migrations. Startup
+failure, stalled/replay-failed old work, lost results and broken monitoring can
+therefore fail this harness even if `ALTER EXTENSION UPDATE` has not run.
+The report captures locked `duroxide`/`duroxide-pg` versions and the provider's
+`_duroxide_migrations` ledger at every state, alongside histories and worker logs.
+Failure attribution still needs those diagnostics: a B1 failure alone does not
+prove the provider migration caused it.
+
+**No provider-version upgrade occurred in these measured runs.** Every selected
+artifact pins `duroxide-pg` 0.1.34 and had the same 21 applied migration records.
+`provider_version_transition` is explicitly `false`; duroxide itself changed
+from 0.1.29 to 0.1.30 at the first binary boundary. This cannot establish that a
+future provider migration preserves data or behavior. Test a real old/new
+provider pair, through their compatible pg_durable binaries, with old-produced
+state and scenarios that exercise the changed provider features. Signals,
+JOIN/RACE, retries and other absent scenarios still need their own fixtures.
+
+A `0.y.z` version permits unstable public APIs under SemVer; that label alone
+does not prove a violation or make migration safety irrelevant. Persistent
+state, running workflows and operator upgrade obligations need measured,
+explicit compatibility contracts independent of the major version number.
 
 ## Backward Compatibility Patterns
 

@@ -18,7 +18,7 @@
 #   --verbose         Show SQL output and detailed diff
 #   -v                Same as --verbose
 #   --replay-chain DIR Run released-binary B1/B2 chain instead; retain evidence in DIR
-#   --allow-known-replay-breaks Accept only documented replay breaks in chain mode
+#   --allow-known-replay-breaks Accept only documented replay/permission breaks in chain mode
 #
 # Prerequisites:
 #   - cargo pgrx init (PostgreSQL installed)

@@ -7,6 +7,99 @@ import unittest
 from unittest.mock import Mock, patch
 
 from upgrade_replay import check_finite, check_live_progress, exercise_chain, exit_status, install_package, known_break, main, phases, record_failure, require_version, sql_literal
+from upgrade_replay import Cluster, permission_changes, sequence_expression, sequence_shape, known_sequence_break, permission_outcome, operation_outcome, check_sequences, PERMISSION_ROLES, MULTIPART, ENDPOINT_FUNCTIONS
+
+
+class SequenceTests(unittest.TestCase):
+    def test_exception_rejects_other_boundaries_and_corrupt_side_effects(self):
+        case = {"name": "00-0.2.2-phase1-replay_never_user-held", "owner_role": "replay_never_user",
+                "engine_status": "failed", "df_status": "running",
+                "engine_output": 'nondeterministic: schedule mismatch: name: "pg_durable::activity::update-node-status"'}
+        case["marks"] = [{"label": case["name"], "step": step, "executed_by": case["owner_role"], "value": step * (step + 1) // 2} for step in range(1, 7)]
+        problems = ["incorrect ordered side effects: expected 13, got 6", "expected completed, engine=failed, df=running", "incorrect sequence result"]
+        self.assertTrue(known_sequence_break(case, "01-0.2.5-phase2", problems))
+        self.assertFalse(known_sequence_break(case, "02-0.2.5-phase1", problems))
+        self.assertFalse(known_sequence_break(case, "01-0.2.5-phase2", problems + ["persisted graph changed"]))
+        self.assertFalse(known_sequence_break(dict(case, engine_output="connection lost"), "01-0.2.5-phase2", problems))
+        case["marks"][0]["value"] = 100
+        self.assertFalse(known_sequence_break(case, "01-0.2.5-phase2", problems))
+
+    def test_prior_failure_does_not_hide_new_graph_damage(self):
+        case = {"name": "broken", "instance_id": "id", "owner_role": "owner", "allowed_step": 13,
+                "engine_status": "failed", "df_status": "running", "result": None}
+        cluster = Mock()
+        cluster.rows.side_effect = [[case], []]
+        cluster.probe.return_value = {"ok": True, "output": "25"}
+        with tempfile.TemporaryDirectory() as directory, patch("upgrade_replay.sequence_graph", return_value={"root_node": "missing", "nodes": []}):
+            outcomes = check_sequences(cluster, "duroxide", "later", 1, {}, {"broken": {"phase": "first"}}, Path(directory))
+        self.assertEqual(outcomes[0]["outcome"], "failure")
+        self.assertIn("missing or repeated graph node", outcomes[0]["problems"])
+
+    def graph(self):
+        nodes = [{"id": "sql1", "node_type": "SQL", "left_node": None, "right_node": None}]
+        root = "sql1"
+        for step in range(2, 14):
+            nodes.append({"id": f"sql{step}", "node_type": "SQL", "left_node": None, "right_node": None})
+            nodes.append({"id": f"then{step}", "node_type": "THEN", "left_node": root, "right_node": f"sql{step}"})
+            root = f"then{step}"
+        return {"root_node": root, "nodes": nodes}
+
+    def test_left_deep_shape_and_expression(self):
+        self.assertEqual(sequence_shape(self.graph()), {"nodes": 25, "depth": 12, "sql_leaves": 13})
+        self.assertEqual(sequence_expression().count(" ~> "), 12)
+        self.assertEqual(sequence_expression().count("replay_sequence_step"), 13)
+
+    def test_invalid_topologies_are_rejected(self):
+        for mutation in ("missing", "cycle", "extra", "wrong_type"):
+            with self.subTest(mutation=mutation):
+                graph = self.graph()
+                if mutation == "missing":
+                    graph["nodes"].pop(0)
+                elif mutation == "cycle":
+                    graph["nodes"][-1]["left_node"] = graph["root_node"]
+                elif mutation == "extra":
+                    graph["nodes"].append(dict(graph["nodes"][0], id="orphan"))
+                else:
+                    graph["nodes"][0]["node_type"] = "SLEEP"
+                with self.assertRaises(ValueError):
+                    sequence_shape(graph)
+
+
+class PermissionTests(unittest.TestCase):
+    def test_distinguishes_lost_access_from_new_ungranted_functions(self):
+        before = [{"signature": "existing()", "execute": True}, {"signature": "private()", "execute": False}]
+        after = [{"signature": "existing()", "execute": False}, {"signature": "private()", "execute": False},
+                 {"signature": "new()", "execute": False}, {"signature": "public()", "execute": True}]
+        self.assertEqual(permission_changes(before, after), [
+            {"signature": "existing()", "execute": False, "change": "lost"},
+            {"signature": "new()", "execute": False, "change": "new_ungranted"},
+        ])
+
+    def test_sql_connects_as_the_role_without_superuser_session(self):
+        cluster = Cluster(Path("/private"), Path("/data"))
+        with patch("upgrade_replay.subprocess.run", return_value=Mock(stdout="ok")) as execute:
+            self.assertEqual(cluster.sql("SELECT current_user", role='test"role'), "ok")
+        self.assertEqual(execute.call_args.kwargs["input"], "SELECT current_user")
+        self.assertIn('test"role', execute.call_args.args[0])
+        self.assertNotIn("postgres", execute.call_args.args[0][execute.call_args.args[0].index("-U") + 1:execute.call_args.args[0].index("-d")])
+
+    def test_admin_refresh_does_not_imply_user_refresh(self):
+        snapshot = {"name": "04-0.2.7-phase1", "extension_version": "0.2.7"}
+        value = {"missing": [MULTIPART], "missing_grantable": [], "changes": []}
+        self.assertEqual(permission_outcome(snapshot, "replay_managed_user", value), "known_break")
+        self.assertEqual(permission_outcome(snapshot, "replay_regranted_user", value), "failure")
+        self.assertEqual(permission_outcome(snapshot, "replay_managed_admin", dict(value, missing_grantable=[MULTIPART])), "failure")
+        self.assertEqual(permission_outcome(snapshot, "replay_never_user", dict(value, changes=[{"change": "lost"}])), "failure")
+
+    def test_endpoint_refresh_is_exact_and_delegation_errors_are_not_blanket_ignored(self):
+        snapshot = {"name": "catalog-0.2.9-before-refresh", "extension_version": "0.2.9"}
+        value = {"missing": list(ENDPOINT_FUNCTIONS), "missing_grantable": list(ENDPOINT_FUNCTIONS), "changes": []}
+        self.assertEqual(permission_outcome(snapshot, "replay_managed_admin", value), "known_break")
+        snapshot["name"] = "06-0.2.9-phase1"
+        result = {"ok": False, "error": "ERROR:  permission denied for function http\n", "missing": ["df.http(text,text,text,jsonb,integer)", MULTIPART, *ENDPOINT_FUNCTIONS]}
+        self.assertEqual(operation_outcome(snapshot, "replay_never_admin", "delegate", result), "known_break")
+        self.assertEqual(operation_outcome(snapshot, "replay_managed_admin", "delegate", result), "failure")
+        self.assertEqual(operation_outcome(snapshot, "replay_never_admin", "delegate", dict(result, error="connection lost")), "failure")
 
 
 class PackageTests(unittest.TestCase):
@@ -110,6 +203,23 @@ class LiveProgressTests(unittest.TestCase):
 
 
 class OutcomeTests(unittest.TestCase):
+    def test_expanded_results_and_missing_coverage_affect_exit_status(self):
+        report = {"errors": [], "permissions": [], "outcomes": []}
+        for index, phase in enumerate(phases()):
+            report["outcomes"].append({"cases": [{"outcome": "passed"}],
+                                       "sequences": [{"outcome": "passed"} for count in range(4 * (index + 1))],
+                                       "resumed_sequences": [{"outcome": "passed"} for count in range(4 * index + 2)]})
+            report["permissions"].append({"roles": {role: {"outcome": "passed"} for role in PERMISSION_ROLES},
+                                          "operations": {role: {"start": {"outcome": "passed"}} for role in PERMISSION_ROLES}})
+        self.assertEqual(exit_status(report), 0)
+        report["outcomes"][1]["resumed_sequences"][0]["outcome"] = "known_break"
+        self.assertEqual(exit_status(report), 1)
+        self.assertEqual(exit_status(report, True), 0)
+        report["permissions"][0]["operations"][PERMISSION_ROLES[0]]["start"]["outcome"] = "failure"
+        self.assertEqual(exit_status(report, True), 1)
+        report["outcomes"][0]["sequences"].pop()
+        self.assertEqual(exit_status(report, True), 2)
+
     def test_only_documented_transition_and_error_are_known(self):
         case = {"name": "00-0.2.2-phase1-live", "engine_status": "failed", "df_status": "running",
                 "engine_output": 'nondeterministic: schedule mismatch: name: "pg_durable::activity::update-node-status"'}
@@ -154,8 +264,8 @@ class FailureHandlingTests(unittest.TestCase):
             (root / "postmaster.pid").touch()
             cluster = Mock(data=root)
             cluster.ready.return_value = "duroxide"
-            cluster.sql.side_effect = ["", "0.2.2", RuntimeError("fixture failed")]
-            with patch("upgrade_replay.Cluster", return_value=cluster), patch("upgrade_replay.install_package"):
+            cluster.sql.side_effect = ["", "", "0.2.2", RuntimeError("fixture failed")]
+            with patch("upgrade_replay.Cluster", return_value=cluster), patch("upgrade_replay.install_package"), patch("upgrade_replay.setup_permission_roles"), patch("upgrade_replay.permission_snapshot", return_value={}), patch("upgrade_replay.check_role_operations"):
                 with self.assertRaisesRegex(RuntimeError, "fixture failed"):
                     exercise_chain(root, root, root, 45, 3, {"errors": []}, root / "report.json")
             cluster.diagnostics.assert_called_once_with("duroxide", root / "00-0.2.2-phase1")
