@@ -883,8 +883,12 @@ SELECT df.start(
 are supported; variable substitution is not performed in this option. Name syntax
 and schema qualification are checked when applying options and at submission.
 The destination is resolved when the activity stores its response. It uses the
-database passed to `df.start`, or the configured workflow database when omitted,
-not the endpoint credential catalog's database.
+database passed to `df.start`, or the workflow's origin database when omitted.
+An explicit sink target remains separate from the origin-local credential catalog
+and does not require pg_durable. Source identity is refreshed after storage
+admission/connection waits; an own-origin sink validates its exact connection
+inside the storage transaction. As with SQL admission, remote storage is not
+atomic with source removal.
 
 | Reference Field | Meaning |
 |-----------------|---------|

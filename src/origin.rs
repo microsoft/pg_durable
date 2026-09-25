@@ -365,6 +365,22 @@ mod identity_tests {
     use super::*;
 
     #[test]
+    fn batch_identity_mapping_preserves_legacy_and_satellite_ids() {
+        let origin = Origin {
+            database_oid: 42,
+            installation_id: Uuid::from_u128(7),
+        };
+        for n in 0..1000 {
+            let local_id = format!("{n:08x}");
+            assert_eq!(engine_id_for_origin(None, &local_id), local_id);
+            assert_eq!(
+                engine_id_for_origin(Some(&origin), &local_id),
+                format!("pgdf-42-00000000000000000000000000000007-{local_id}")
+            );
+        }
+    }
+
+    #[test]
     fn multi_database_identity_preserves_child_routing() {
         let origin = Origin {
             database_oid: 42,

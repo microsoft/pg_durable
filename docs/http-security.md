@@ -638,6 +638,12 @@ table, keeping them out of durable activity results and 5xx previews. Writes
 authenticate as the submitting role and obey table privileges and RLS. The
 target database comes from the workflow's captured execution context; a forged
 database or submitting-role field in an HTTP node cannot redirect sink writes.
+When no explicit execution database is selected, a satellite stores in its origin
+database. Source identity is checked again after sink-slot/connection waits and
+before remote storage. Own-origin writes validate the exact database/installation
+identity within the sink transaction; credential lookup still uses the origin,
+not an explicit remote sink target. Remote storage admission is not atomic with
+source removal and cannot undo an already-committed row.
 
 The sink preserves the submitting connection's role/database `search_path`
 defaults for triggers and other table-side code. Its internal queries qualify
