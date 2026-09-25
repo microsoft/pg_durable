@@ -355,8 +355,9 @@ foreign tables. `df.endpoint_option_validator(options text[], catalog oid)` is
 the FDW validator invoked by PostgreSQL on creation and alteration; it returns
 `void` or raises an error without echoing credential values.
 
-The server options are `base_url`, `auth_scheme`, and `header_name` (only for
-header authentication). `auth_scheme` is required; `base_url` may be omitted only
+The server options are `base_url`, `auth_scheme`, `header_name` (only for
+header authentication), and `client_id` (an optional UUID only for managed
+identity). `auth_scheme` is required; `base_url` may be omitted only
 with `auth_scheme 'none'` for named-secret storage. A supplied URL retains all
 validation requirements, and endpoint requests fail explicitly if it is absent.
 Mapping options are `token`, `header_value`,
@@ -364,6 +365,14 @@ Mapping options are `token`, `header_value`,
 native per-option `ADD`, `SET` and `DROP`. See
 [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
 for option combinations, grants, rotation and backup implications.
+
+`auth_scheme 'managed-identity'` requires superuser creation and alteration and
+a superuser owner at execution. It requires no user mapping for authentication.
+The destination must be a supported public Azure hostname over HTTPS on port 443;
+the token resource is derived from that host, never supplied by the workflow.
+Server `USAGE`, HTTP function permissions and destination policy remain mandatory.
+See [Managed Identity](../USER_GUIDE.md#managed-identity) for supported hosts and
+deployment requirements.
 
 ### df.http_multipart(url [, method, parts, headers, timeout])
 
@@ -931,6 +940,40 @@ disabled mode, and unrestricted mode bypasses the list even when it is
 empty. Other HTTP safeguards are unchanged. See
 [HTTP security](http-security.md#5-layer-2-endpoint-allow-list) for the default
 domains and execution-time behavior.
+
+---
+
+### pg_durable.managed_identity_endpoint
+
+The token-provider URL for endpoint managed-identity authentication. Available
+since v0.2.9; it is unused by other authentication schemes.
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | `http://169.254.169.254/metadata/identity/oauth2/token` |
+| Context | `POSTMASTER` (requires a PostgreSQL restart) |
+| Visibility | Superusers and roles with configuration-reading privileges |
+
+The provider must implement the public IMDS GET token protocol: `Metadata: true`,
+`api-version=2018-02-01`, a host-derived `resource`, and optional `client_id`.
+Success must include `access_token`, `token_type` (`Bearer`), the requested
+`resource`, and an `expires_on` Unix timestamp or `expires_in` seconds. Expiry
+values may be JSON numbers or strings. Tokens must have more than two minutes
+remaining and must already be valid.
+
+Only administrators configure this URL. It must be HTTPS, or HTTP with a literal
+loopback or IMDS IP address, without userinfo, query or fragment. Session, role and
+database overrides are rejected. An invalid startup setting prevents startup.
+An adapter for a different identity service must be provided separately; there is
+no provider auto-discovery or fallback on failure.
+
+Token requests use a separate client with no redirects or environment proxies,
+a two-second connection timeout, a ten-second total acquisition deadline
+(including cache waits), and a 64 KiB response limit. Failures expose only local
+diagnostics or HTTP status, not the provider's body. The worker holds at most 128
+identity/resource cache entries and coalesces concurrent fetches for each entry.
+The cache is in memory only and is cleared by worker restart.
 
 ---
 

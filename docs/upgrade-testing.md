@@ -261,6 +261,24 @@ the extension schema.
   additional upgrade DDL and leaves existing server definitions valid. The B2
   probe covers URL-less creation and removal of a URL when switching to `none`.
 
+#### Managed identity endpoints
+
+- **Runtime change (no DDL):** The endpoint validator accepts
+  `auth_scheme 'managed-identity'` and optional UUID `client_id`. Only superusers
+  can configure this authentication; activities re-check superuser ownership,
+  caller permissions and destination policy before acquiring a token.
+- **Scenario A/B2 considerations:** No additional SQL objects, signatures, grants
+  or upgrade-script DDL. Tokens remain in worker memory, never catalog mappings
+  or durable activity results. The startup-only token-provider GUC is independent
+  of the extension schema.
+- **Scenario B1 considerations:** Existing workflows still run on previous
+  supported schemas. Token-client construction performs no network access;
+  workflows without managed-identity endpoints never contact a token provider.
+  Endpoint references retain the existing missing-schema check.
+- **Replay compatibility:** Activity names, operation order and serialized inputs
+  are unchanged. Endpoint configuration and authentication are resolved only when
+  an HTTP activity executes; recorded results replay without acquiring a token.
+
 #### Add `df.with_http_options()`
 - **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. SQL `NULL` and `{}` preserve input bytes; `secret_bindings` and `form_fields` configure references and literal form data. Other values and unsupported keys raise an error.
 - **Upgrade script:** [sql/pg_durable--0.2.8--0.2.9.sql](../sql/pg_durable--0.2.8--0.2.9.sql) adds this helper without replacing the existing HTTP functions. The new helper uses the same schema-access and default PUBLIC `EXECUTE` model as other combinators; it does not grant HTTP access.

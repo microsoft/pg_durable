@@ -213,7 +213,7 @@ impl SecretOptions {
                 );
             }
         }
-        if let Some((name, _)) = &request.credential_header {
+        if let Some(name) = request.credential_header_name() {
             if bindings
                 .headers
                 .keys()
@@ -397,6 +397,7 @@ mod unit_tests {
         let mut request = crate::endpoints::EndpointRequest {
             url: url::Url::parse("https://api.github.com/?sig=existing%2Bvalue").unwrap(),
             credential_header: None,
+            managed_identity: None,
         };
         options.validate(false, "POST", false, None).unwrap();
         options.validate_destinations(&request, None).unwrap();
@@ -435,6 +436,7 @@ mod unit_tests {
         let mut request = crate::endpoints::EndpointRequest {
             url: url::Url::parse("https://api.github.com/?%6bey=ordinary").unwrap(),
             credential_header: None,
+            managed_identity: None,
         };
         assert!(options.validate_destinations(&request, None).is_err());
         request.url.set_query(None);
@@ -449,6 +451,21 @@ mod unit_tests {
             reqwest::header::HeaderValue::from_static("endpoint"),
         ));
         assert!(options.validate_destinations(&request, None).is_err());
+        request.credential_header = None;
+        request.managed_identity = Some(
+            crate::managed_identity::Identity::for_endpoint(
+                &url::Url::parse("https://account.blob.core.windows.net").unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let identity_options: SecretOptions = serde_json::from_value(
+            json!({"secret_bindings":{"headers":{"aUtHoRiZaTiOn":{"server":"foo","key":"bar"}}}}),
+        )
+        .unwrap();
+        assert!(identity_options
+            .validate_destinations(&request, None)
+            .is_err());
         let form: SecretOptions = serde_json::from_value(json!({"form_fields":{}})).unwrap();
         assert!(form.validate(true, "POST", false, None).is_err());
         assert!(form.validate(false, "POST", true, None).is_err());
@@ -480,6 +497,7 @@ mod unit_tests {
         let mut request = crate::endpoints::EndpointRequest {
             url: url::Url::parse("https://api.github.com/").unwrap(),
             credential_header: None,
+            managed_identity: None,
         };
         let catalog = BTreeMap::from([(
             "foo".into(),

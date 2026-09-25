@@ -36,10 +36,20 @@ BEGIN
     BEGIN
         ALTER SERVER ec_server OPTIONS (SET auth_scheme 'managed-identity', DROP header_name);
     EXCEPTION WHEN OTHERS THEN
-        IF SQLERRM NOT LIKE '%not supported in this version%' THEN RAISE; END IF;
+        IF SQLERRM NOT LIKE '%not supported for this destination hostname%' THEN RAISE; END IF;
         rejected := true;
     END;
-    IF NOT rejected THEN RAISE EXCEPTION 'TEST FAILED: managed identity enabled without controls'; END IF;
+    IF NOT rejected THEN RAISE EXCEPTION 'TEST FAILED: managed identity accepted an unmapped destination'; END IF;
+
+    rejected := false;
+    BEGIN
+        ALTER SERVER ec_server OPTIONS (SET base_url 'https://account.blob.core.windows.net',
+            SET auth_scheme 'managed-identity', DROP header_name);
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM NOT LIKE '%Only superusers%' THEN RAISE; END IF;
+        rejected := true;
+    END;
+    IF NOT rejected THEN RAISE EXCEPTION 'TEST FAILED: delegated endpoint owner enabled managed identity'; END IF;
 
     rejected := false;
     BEGIN
