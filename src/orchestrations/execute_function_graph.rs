@@ -608,14 +608,14 @@ pub async fn execute_subtree(
     // branch roots).
     let fail = |ctx: &OrchestrationContext, e: String| {
         let stamp = format!("{}::{}", ctx.instance_id(), ctx.execution_id());
-        let status_input = serde_json::json!({
-            "node_id": input.node_id,
-            "instance_id": input.instance_id,
-            "status": "failed",
-            "result": e,
-            "execution_id": stamp,
-        });
-        (status_input.to_string(), e)
+        let status_input = serialize_node_status_input(
+            &input.node_id,
+            &input.instance_id,
+            "failed",
+            Some(&e),
+            &stamp,
+        );
+        (status_input, e)
     };
 
     ctx.trace_info(format!(
@@ -760,6 +760,35 @@ fn subtree_instance_id(ctx: &OrchestrationContext, child_root_node_id: &str) -> 
     )
 }
 
+fn serialize_node_status_input(
+    node_id: &str,
+    instance_id: &str,
+    status: &str,
+    result: Option<&str>,
+    execution_id: &str,
+) -> String {
+    // Preserve the recorded field order for byte-for-byte replay compatibility.
+    // Parent-loop stamps use a different order and must not use this serializer.
+    #[derive(serde::Serialize)]
+    struct NodeStatusInput<'a> {
+        node_id: &'a str,
+        instance_id: &'a str,
+        status: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<&'a str>,
+        execution_id: &'a str,
+    }
+
+    serde_json::to_string(&NodeStatusInput {
+        node_id,
+        instance_id,
+        status,
+        result,
+        execution_id,
+    })
+    .expect("NodeStatusInput serialization cannot fail")
+}
+
 /// Recursively execute function nodes with vars support
 async fn execute_function_node_with_vars(
     ctx: &OrchestrationContext,
@@ -804,17 +833,15 @@ async fn execute_function_node_with_vars(
     let execution_stamp = format!("{}::{}", ctx.instance_id(), ctx.execution_id());
 
     // Mark node as running
-    let running_input = serde_json::json!({
-        "node_id": node_id,
-        "instance_id": graph.instance_id,
-        "status": "running",
-        "execution_id": execution_stamp,
-    });
+    let running_input = serialize_node_status_input(
+        node_id,
+        &graph.instance_id,
+        "running",
+        None,
+        &execution_stamp,
+    );
     let _ = ctx
-        .schedule_activity(
-            activities::update_node_status::NAME,
-            running_input.to_string(),
-        )
+        .schedule_activity(activities::update_node_status::NAME, running_input)
         .await;
 
     let execute_result = execute_node_inner(ctx, graph, node_id, node, results, exec_ctx).await;
@@ -829,18 +856,15 @@ async fn execute_function_node_with_vars(
         Err(NodeError::Break(value)) => ("completed", value.as_str()),
         Err(NodeError::Application(err)) | Err(NodeError::Failure(err)) => ("failed", err.as_str()),
     };
-    let status_input = serde_json::json!({
-        "node_id": node_id,
-        "instance_id": graph.instance_id,
-        "status": status,
-        "result": status_result,
-        "execution_id": execution_stamp,
-    });
+    let status_input = serialize_node_status_input(
+        node_id,
+        &graph.instance_id,
+        status,
+        Some(status_result),
+        &execution_stamp,
+    );
     let _ = ctx
-        .schedule_activity(
-            activities::update_node_status::NAME,
-            status_input.to_string(),
-        )
+        .schedule_activity(activities::update_node_status::NAME, status_input)
         .await;
 
     execute_result
@@ -2225,6 +2249,55 @@ mod tests {
         match result {
             Ok(v) => v,
             other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn node_status_input_preserves_recorded_layout() {
+        assert_eq!(
+            serialize_node_status_input("node", "root", "running", None, "root::1"),
+            r#"{"node_id":"node","instance_id":"root","status":"running","execution_id":"root::1"}"#
+        );
+        assert_eq!(
+            serialize_node_status_input("node", "root", "completed", Some("null"), "root::1"),
+            r#"{"node_id":"node","instance_id":"root","status":"completed","result":"null","execution_id":"root::1"}"#
+        );
+    }
+
+    #[test]
+    fn node_status_input_matches_legacy_serialization() {
+        let node_id = "node\"\\\u{00e9}";
+        let instance_id = "root\u{1f4a5}";
+        let execution_id = "root::1::child::2";
+        let large_result = "x".repeat(1024 * 1024);
+        for result in [
+            "",
+            "plain text failure",
+            "\"\\/\n\r\t\u{0008}\u{000c}\u{0000}\u{001f}\u{007f}\u{2028}\u{2029}",
+            "\u{00e9}\u{1f4a5} $result.column {sys_instance_id}",
+            r#"{"body":"$result {sys_label}","values":[null,true,1.25]}"#,
+            large_result.as_str(),
+        ] {
+            for status in ["completed", "failed"] {
+                let legacy = serde_json::json!({
+                    "node_id": node_id,
+                    "instance_id": instance_id,
+                    "status": status,
+                    "result": result,
+                    "execution_id": execution_id,
+                })
+                .to_string();
+                assert_eq!(
+                    serialize_node_status_input(
+                        node_id,
+                        instance_id,
+                        status,
+                        Some(result),
+                        execution_id,
+                    ),
+                    legacy,
+                );
+            }
         }
     }
 
