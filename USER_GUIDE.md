@@ -1528,7 +1528,7 @@ SELECT df.start(df.http('https://api.example.com/users', 'GET', NULL,
 | `df.vars.value` | **Yes, plaintext** | RLS isolates it from other users. It is *not* encrypted, and it is not hidden from a superuser or the table owner. |
 | Durable execution history | **Yes, plaintext** | `df.start()` snapshots every variable you own into the orchestration input, and the substituted header is recorded as the HTTP step's input. Parallel branches and each loop iteration re-record it. |
 | WAL, backups, replicas | **Yes** | Follows every write above, typically with a longer retention than `pg_durable.retention_days`. |
-| Server log | May contain it | Request diagnostics redact URLs, but SQL, errors and results can still expose values. See [What reaches the server log](#what-reaches-the-server-log). |
+| Server log | May contain it | Request diagnostics redact URLs, but SQL and errors can still expose values. See [What reaches the server log](#what-reaches-the-server-log). |
 | Query monitoring and PostgreSQL logs | Depends on the statement and server settings | Bind parameters avoid inlining the value in the `df.setvar()` statement. Client-side `psql` variable expansion, including values read with `\getenv`, does not provide that protection. Values later substituted into workflow SQL become literal query text. |
 
 Inlining a credential in `df.http(...)` also stores it in `df.nodes.query`; it does not
@@ -2653,7 +2653,7 @@ different security boundary from the database: RLS does not apply to it, it is n
 | HTTP request errors | Request URLs are removed from HTTP client errors; explicitly reported URLs are redacted as above. Response bodies included in 5xx errors are not redacted. |
 | HTTP and multipart request headers and bodies | Not directly included in request traces. An endpoint can echo them in its response. |
 | SQL nodes | The submitting role and any explicit target database, plus the fully-substituted SQL text when `pg_durable.log_workflow_sql` is on. |
-| Workflow result | The final return value is logged on completion. For a workflow ending in an HTTP step this includes response headers and body, without redaction. |
+| Workflow result | Successful completion logs the serialized result's size in bytes, not its contents. Retrieve the unchanged result with `df.result(id)`. |
 
 `pg_durable.log_workflow_sql` (default `on`) controls SQL text in the worker's execution
 trace. SQL cannot be reliably redacted after substitution, so this is an on/off switch.
@@ -2665,7 +2665,7 @@ pg_durable.log_workflow_sql = off
 ```
 
 Turning it off keeps the submitting role and any explicit target database in the trace, but removes
-statement text. It does not suppress workflow results, error messages, or PostgreSQL's
+statement text. It does not suppress completion summaries, error messages, or PostgreSQL's
 own statement logging. Keep credentials out of SQL even when this setting is off.
 
 ### Security Best Practices
