@@ -17,6 +17,8 @@
 #   --keep            Leave PostgreSQL running after tests for investigation
 #   --verbose         Show SQL output and detailed diff
 #   -v                Same as --verbose
+#   --replay-chain DIR Run released-binary B1/B2 chain instead; retain evidence in DIR
+#   --allow-known-replay-breaks Accept only documented replay/permission breaks in chain mode
 #
 # Prerequisites:
 #   - cargo pgrx init (PostgreSQL installed)
@@ -31,6 +33,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PG_VERSION="17"
 KEEP_RUNNING=false
 VERBOSE=false
+REPLAY_OUTPUT=""
+ALLOW_KNOWN_REPLAY_BREAKS=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -51,12 +55,34 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --replay-chain)
+            if [[ -z "${2:-}" || "$2" == --* ]]; then
+                echo "Error: --replay-chain requires an output directory"
+                exit 1
+            fi
+            REPLAY_OUTPUT="$2"
+            shift 2
+            ;;
+        --allow-known-replay-breaks)
+            ALLOW_KNOWN_REPLAY_BREAKS=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
             ;;
     esac
 done
+
+if [[ "$ALLOW_KNOWN_REPLAY_BREAKS" == true && -z "$REPLAY_OUTPUT" ]]; then
+    echo "Error: --allow-known-replay-breaks requires --replay-chain"
+    exit 1
+fi
+
+if [[ -n "$REPLAY_OUTPUT" && ( "$KEEP_RUNNING" == true || "$PG_VERSION" != 17 ) ]]; then
+    echo "Error: the replay chain requires PG17 and always stops its private cluster"
+    exit 1
+fi
 
 # pgrx settings
 PGRX_HOME="$HOME/.pgrx"
@@ -74,6 +100,14 @@ PSQL="$PGRX_BIN/psql"
 PG_CTL="$PGRX_BIN/pg_ctl"
 PG_ISREADY="$PGRX_BIN/pg_isready"
 PG_CONFIG="$PGRX_BIN/pg_config"
+if [[ -n "$REPLAY_OUTPUT" ]]; then
+    replay_args=(--pg-config "$PG_CONFIG" --output-dir "$REPLAY_OUTPUT")
+    if [[ "$ALLOW_KNOWN_REPLAY_BREAKS" == true ]]; then
+        replay_args+=(--allow-known-breaks)
+    fi
+    exec python3 "$SCRIPT_DIR/upgrade_replay.py" "${replay_args[@]}"
+fi
+
 DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
 EXTENSION_DIR=$("$PG_CONFIG" --sharedir)/extension
