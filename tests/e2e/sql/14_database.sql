@@ -2,10 +2,10 @@
 -- Licensed under the PostgreSQL License.
 
 -- Merged from: 29_database_validation, 34_multi_database
--- Tests: CREATE EXTENSION rejected in wrong database, workflows execute in correct database,
+-- Tests: control and satellite installation, local APIs and transaction boundaries,
 --        df.start() with explicit database parameter, invalid database rejection,
 --        multi-node sequence in another database, dropped database failure handling
--- Runs as postgres throughout (creates/drops databases)
+-- Database administration runs as postgres; normal workflows use df_e2e_user.
 
 -- === Test: 29_database_validation ===
 
@@ -29,6 +29,35 @@ END $$;
 
 -- Test 1: CREATE EXTENSION should succeed in the correct database
 SELECT public._e2e_drop_extension_safe();
+
+DROP DATABASE IF EXISTS _test_satellite_db WITH (FORCE);
+CREATE DATABASE _test_satellite_db;
+
+DO $$
+DECLARE
+    connstr TEXT := format('host=localhost dbname=_test_satellite_db port=%s user=postgres', current_setting('port'));
+    installed BOOLEAN := false;
+    schema_count INT;
+BEGIN
+    BEGIN
+        PERFORM dblink_exec(connstr, 'CREATE EXTENSION pg_durable');
+        installed := true;
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM NOT ILIKE '%control%' THEN
+            RAISE EXCEPTION 'TEST FAILED [control absent]: unexpected install error: %', SQLERRM;
+        END IF;
+    END;
+    IF installed THEN
+        RAISE EXCEPTION 'TEST FAILED: satellite installed without a control installation';
+    END IF;
+    SELECT total INTO schema_count FROM dblink(connstr,
+        'SELECT count(*) FROM pg_namespace WHERE nspname IN (''df'', ''_duroxide'', ''duroxide'')'
+    ) AS remote(total INT);
+    IF schema_count IS DISTINCT FROM 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: rejected installation left schemas behind';
+    END IF;
+END $$;
+
 CREATE EXTENSION pg_durable;
 
 SELECT df.grant_usage('df_e2e_user');
@@ -44,6 +73,7 @@ BEGIN
 END $$;
 
 -- Test 2: Verify workflows can execute (BGW is connected to this database)
+SET SESSION AUTHORIZATION df_e2e_user;
 CREATE TEMP TABLE _test_state (instance_id TEXT);
 INSERT INTO _test_state
 SELECT df.start('SELECT 42 as answer', 'test-correct-db');
@@ -65,40 +95,295 @@ BEGIN
 END $$;
 
 DROP TABLE _test_state;
+RESET SESSION AUTHORIZATION;
 
--- Test 3: CREATE EXTENSION must fail in a wrong database
-DROP DATABASE IF EXISTS _test_wrong_db;
-CREATE DATABASE _test_wrong_db;
+-- Test 3: A satellite owns local metadata and uses the control runtime.
+CREATE TEMP TABLE _control_epoch AS SELECT epoch_id FROM df._worker_epoch;
+DROP TABLE IF EXISTS public.test_satellite_log;
+CREATE TABLE public.test_satellite_log (
+    marker TEXT PRIMARY KEY,
+    value INT DEFAULT 0,
+    db_name TEXT DEFAULT current_database(),
+    role_name TEXT DEFAULT current_user
+);
+GRANT SELECT, INSERT, UPDATE ON public.test_satellite_log TO df_e2e_user;
+SELECT df.grant_usage('df_e2e_user', include_http => true);
+
+SELECT dblink_connect('satellite', format(
+    'host=localhost dbname=_test_satellite_db port=%s user=postgres', current_setting('port')
+));
+SELECT dblink_exec('satellite', 'CREATE EXTENSION pg_durable');
+SELECT dblink_exec('satellite', $remote$
+    DO $check$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname IN ('_duroxide', 'duroxide')) THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite created a provider schema';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_class AS relation
+            JOIN pg_extension AS extension ON extension.extname = 'pg_durable'
+            JOIN pg_depend AS dependency ON dependency.objid = relation.oid
+                AND dependency.classid = 'pg_class'::regclass
+                AND dependency.refclassid = 'pg_extension'::regclass
+                AND dependency.refobjid = extension.oid AND dependency.deptype = 'e'
+            WHERE relation.oid = 'df._installation'::regclass
+                AND relation.relowner = extension.extowner
+        ) THEN
+            RAISE EXCEPTION 'TEST FAILED: installation identity is not extension-owned';
+        END IF;
+        PERFORM df.grant_usage('df_e2e_user');
+    END $check$;
+    CREATE TABLE public.test_satellite_log (
+        marker TEXT PRIMARY KEY,
+        value INT DEFAULT 0,
+        db_name TEXT DEFAULT current_database(),
+        role_name TEXT DEFAULT current_user
+    );
+    GRANT SELECT, INSERT, UPDATE ON public.test_satellite_log TO df_e2e_user;
+    SET SESSION AUTHORIZATION df_e2e_user;
+    CREATE TEMP TABLE _satellite_state (name TEXT PRIMARY KEY, instance_id TEXT);
+$remote$);
 
 DO $$
 DECLARE
-    connstr TEXT;
-    err_msg TEXT;
+    satellite_id UUID;
+    control_id UUID;
 BEGIN
-    connstr := format(
-        'host=localhost dbname=_test_wrong_db port=%s user=postgres',
-        current_setting('port')
-    );
-
-    BEGIN
-        PERFORM dblink_exec(connstr, 'CREATE EXTENSION pg_durable;');
-        RAISE EXCEPTION 'TEST FAILED: CREATE EXTENSION should have been rejected in wrong database';
-    EXCEPTION WHEN OTHERS THEN
-        err_msg := SQLERRM;
-    END;
-
-    IF err_msg NOT ILIKE '%must be created in database%' THEN
-        RAISE EXCEPTION 'TEST FAILED: Expected "must be created in database" in error, got: %', err_msg;
+    SELECT id INTO STRICT control_id FROM df._installation WHERE singleton;
+    SELECT id INTO STRICT satellite_id FROM dblink('satellite',
+        'SELECT id FROM df._installation WHERE singleton') AS remote(id UUID);
+    IF satellite_id IS NULL OR satellite_id = control_id THEN
+        RAISE EXCEPTION 'TEST FAILED: installations must have distinct non-null identities';
     END IF;
-    IF err_msg NOT ILIKE '%_test_wrong_db%' THEN
-        RAISE EXCEPTION 'TEST FAILED: Expected wrong db name in error, got: %', err_msg;
-    END IF;
-
-    RAISE NOTICE 'PASSED: CREATE EXTENSION correctly rejected in wrong database';
-    RAISE NOTICE 'Error was: %', err_msg;
 END $$;
 
-DROP DATABASE IF EXISTS _test_wrong_db;
+SELECT dblink_exec('satellite', $remote$
+    DO $check$ BEGIN PERFORM df.setvar('satellite_value', '42'); END $check$;
+$remote$);
+
+SELECT dblink_exec('satellite', $remote$
+    DO $check$
+    BEGIN
+        IF (SELECT count(*) FROM df._installation) <> 1 OR
+            has_table_privilege(current_user, 'df._installation', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+            RAISE EXCEPTION 'TEST FAILED: installation identity must be a read-only singleton';
+        END IF;
+        IF has_function_privilege(current_user, 'df.http(text,text,text,jsonb,integer)', 'EXECUTE') THEN
+            RAISE EXCEPTION 'TEST FAILED: control HTTP grant leaked into satellite';
+        END IF;
+    END $check$;
+    INSERT INTO _satellite_state SELECT 'native', df.start(
+        'INSERT INTO public.test_satellite_log (marker, value) VALUES (''native'', {satellite_value})'
+        ~> 'SELECT current_database()', 'test-satellite-native'
+    );
+$remote$);
+
+SELECT dblink_exec('satellite', $remote$
+    DO $check$
+    DECLARE
+        inst_id TEXT := (SELECT instance_id FROM _satellite_state WHERE name = 'native');
+        status TEXT;
+    BEGIN
+        status := df.await_instance(inst_id, 30);
+        IF status IS DISTINCT FROM 'completed' OR df.status(inst_id) IS DISTINCT FROM 'completed' THEN
+            RAISE EXCEPTION 'TEST FAILED [satellite native]: status = %', status;
+        END IF;
+        IF inst_id !~ '^[0-9a-f]{8}$' OR
+            COALESCE(position('_test_satellite_db' IN df.result(inst_id)), 0) = 0 OR
+            COALESCE(length(df.explain(inst_id)), 0) = 0 THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite public ID/result/explain';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM df.instance_info(inst_id) AS info
+            WHERE info.instance_id = inst_id AND lower(info.status) = 'completed') OR
+            NOT EXISTS (SELECT 1 FROM df.list_instances() AS info
+            WHERE info.instance_id = inst_id AND lower(info.status) = 'completed') THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite info/list did not resolve local instance';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM public.test_satellite_log
+            WHERE marker = 'native' AND value = 42 AND db_name = '_test_satellite_db'
+                AND role_name = 'df_e2e_user') THEN
+            RAISE EXCEPTION 'TEST FAILED: default target, captured vars, or execution role misrouted';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM df.nodes WHERE instance_id = inst_id AND node_type = 'SQL') OR
+            EXISTS (SELECT 1 FROM df.nodes AS node WHERE node.instance_id = inst_id
+                AND node.node_type = 'SQL' AND node.status IS DISTINCT FROM 'completed') THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite node statuses not updated';
+        END IF;
+    END $check$;
+$remote$);
+
+-- Keep the returned ID outside the transaction being rolled back.
+SELECT dblink_exec('satellite', 'BEGIN');
+CREATE TEMP TABLE _satellite_rolled_back AS
+SELECT instance_id FROM dblink('satellite', $remote$
+    SELECT df.start(
+        'INSERT INTO public.test_satellite_log (marker) VALUES (''rolled-back'')',
+        'test-satellite-rolled-back'
+    )
+$remote$) AS remote(instance_id TEXT);
+SELECT dblink_exec('satellite', 'ROLLBACK');
+
+SELECT dblink_exec('satellite', $remote$
+    BEGIN;
+    INSERT INTO public.test_satellite_log (marker) VALUES ('caller-new');
+$remote$);
+SELECT * FROM dblink('satellite', $remote$
+    SELECT df.start(
+        'INSERT INTO public.test_satellite_log (marker) VALUES (''independent'')',
+        'test-satellite-independent', transaction_mode => 'new'
+    )
+$remote$) AS remote(instance_id TEXT);
+SELECT dblink_exec('satellite', 'ROLLBACK');
+
+SELECT dblink_exec('satellite', $remote$
+    DO $check$
+    DECLARE
+        inst_id TEXT := (SELECT id FROM df.instances WHERE label = 'test-satellite-independent');
+    BEGIN
+        PERFORM df.await_instance(inst_id, 30);
+        IF inst_id IS NULL OR df.status(inst_id) IS DISTINCT FROM 'completed' THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite independent start did not survive rollback';
+        END IF;
+        IF EXISTS (SELECT 1 FROM public.test_satellite_log WHERE marker IN ('caller-new', 'rolled-back')) OR
+            NOT EXISTS (SELECT 1 FROM public.test_satellite_log WHERE marker = 'independent') OR
+            EXISTS (SELECT 1 FROM df.instances WHERE label = 'test-satellite-rolled-back') THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite transaction boundary';
+        END IF;
+    END $check$;
+$remote$);
+
+SELECT dblink_exec('satellite', $remote$
+    INSERT INTO _satellite_state SELECT 'children', df.start(
+        'INSERT INTO public.test_satellite_log (marker) VALUES (''loop'')'
+        ~> ('INSERT INTO public.test_satellite_log (marker) VALUES (''left'')'
+            & 'INSERT INTO public.test_satellite_log (marker) VALUES (''right'')')
+        ~> df.loop(
+            'UPDATE public.test_satellite_log SET value = value + 1 WHERE marker = ''loop''',
+            'SELECT value < 2 FROM public.test_satellite_log WHERE marker = ''loop''',
+            continue_on_failure => true
+        ), 'test-satellite-children'
+    );
+    INSERT INTO _satellite_state SELECT 'signal', df.start(
+        (df.wait_for_signal('go', 30) |=> 'payload')
+        ~> 'INSERT INTO public.test_satellite_log (marker, value) VALUES (''signal'', ($payload::jsonb->''data''->>''value'')::int)',
+        'test-satellite-signal'
+    );
+    INSERT INTO _satellite_state SELECT 'cancel', df.start(
+        df.wait_for_signal('never', 60)
+        ~> 'INSERT INTO public.test_satellite_log (marker) VALUES (''cancelled'')',
+        'test-satellite-cancel'
+    );
+    INSERT INTO _satellite_state SELECT 'http', df.start(
+        '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+        'test-satellite-http-denied'
+    );
+$remote$);
+
+SELECT dblink_exec('satellite', $remote$
+    DO $check$
+    DECLARE
+        inst_id TEXT := (SELECT instance_id FROM _satellite_state WHERE name = 'signal');
+        status TEXT;
+    BEGIN
+        FOR attempt IN 1..200 LOOP
+            status := df.status(inst_id);
+            EXIT WHEN status IN ('completed', 'failed', 'cancelled');
+            PERFORM df.signal(inst_id, 'go', '{"value":73}');
+            PERFORM pg_sleep(0.1);
+        END LOOP;
+        PERFORM df.await_instance(inst_id, 10);
+        IF df.status(inst_id) IS DISTINCT FROM 'completed' OR
+            NOT EXISTS (SELECT 1 FROM public.test_satellite_log WHERE marker = 'signal' AND value = 73) THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite signal not delivered';
+        END IF;
+    END $check$;
+$remote$);
+SELECT * FROM dblink('satellite', $remote$
+    SELECT df.cancel(instance_id, 'satellite test cancellation')
+    FROM _satellite_state WHERE name = 'cancel'
+$remote$) AS remote(result TEXT);
+
+SELECT dblink_exec('satellite', $remote$
+    DO $check$
+    DECLARE
+        inst_id TEXT;
+        node_result TEXT;
+    BEGIN
+        SELECT instance_id INTO inst_id FROM _satellite_state WHERE name = 'cancel';
+        IF df.await_instance(inst_id, 30) IS DISTINCT FROM 'cancelled' THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite cancellation';
+        END IF;
+        SELECT instance_id INTO inst_id FROM _satellite_state WHERE name = 'children';
+        PERFORM df.await_instance(inst_id, 30);
+        IF df.status(inst_id) IS DISTINCT FROM 'completed' OR
+            (SELECT count(*) FROM public.test_satellite_log WHERE marker IN ('left', 'right')) <> 2 OR
+            (SELECT value FROM public.test_satellite_log WHERE marker = 'loop') IS DISTINCT FROM 2 THEN
+            RAISE EXCEPTION 'TEST FAILED: satellite parallel or loop children misrouted';
+        END IF;
+        SELECT instance_id INTO inst_id FROM _satellite_state WHERE name = 'http';
+        IF df.await_instance(inst_id, 30) IS DISTINCT FROM 'failed' THEN
+            RAISE EXCEPTION 'TEST FAILED: control HTTP permission authorized satellite request';
+        END IF;
+        SELECT result::text INTO node_result FROM df.nodes
+            WHERE instance_id = inst_id AND node_type = 'HTTP';
+        IF node_result IS NULL OR node_result NOT ILIKE '%does not have EXECUTE privilege%' THEN
+            RAISE EXCEPTION 'TEST FAILED: expected origin HTTP privilege denial, got %', node_result;
+        END IF;
+        IF EXISTS (SELECT 1 FROM public.test_satellite_log
+            WHERE marker IN ('rolled-back', 'cancelled') OR db_name <> '_test_satellite_db'
+                OR role_name <> 'df_e2e_user') THEN
+            RAISE EXCEPTION 'TEST FAILED: unexpected satellite side effect or execution identity';
+        END IF;
+    END $check$;
+$remote$);
+
+DO $$
+DECLARE
+    rollback_id TEXT := (SELECT instance_id FROM _satellite_rolled_back);
+    row_count INT;
+BEGIN
+    SELECT total INTO row_count FROM dblink('satellite', format(
+        'SELECT (SELECT count(*) FROM df.instances WHERE id = %L) + (SELECT count(*) FROM df.nodes WHERE instance_id = %L)',
+        rollback_id, rollback_id
+    )) AS remote(total INT);
+    IF row_count IS DISTINCT FROM 0 OR
+        EXISTS (SELECT 1 FROM df.instances WHERE label LIKE 'test-satellite-%') OR
+        EXISTS (SELECT 1 FROM df.vars WHERE name = 'satellite_value') OR
+        EXISTS (SELECT 1 FROM public.test_satellite_log) THEN
+        RAISE EXCEPTION 'TEST FAILED: satellite metadata or writes leaked into control';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = df.duroxide_schema()) THEN
+        RAISE EXCEPTION 'TEST FAILED: control provider schema missing';
+    END IF;
+END $$;
+
+SELECT dblink_exec('satellite', 'RESET SESSION AUTHORIZATION; DROP EXTENSION pg_durable CASCADE');
+SELECT dblink_disconnect('satellite');
+DROP DATABASE _test_satellite_db WITH (FORCE);
+
+SET SESSION AUTHORIZATION df_e2e_user;
+CREATE TEMP TABLE _control_after_satellite AS
+SELECT df.start('SELECT 84', 'test-control-after-satellite-drop') AS instance_id;
+DO $$
+BEGIN
+    IF df.await_instance((SELECT instance_id FROM _control_after_satellite), 30) IS DISTINCT FROM 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: dropping satellite stopped control execution';
+    END IF;
+END $$;
+DROP TABLE _control_after_satellite;
+RESET SESSION AUTHORIZATION;
+
+DO $$
+BEGIN
+    IF (SELECT epoch_id FROM df._worker_epoch) IS DISTINCT FROM (SELECT epoch_id FROM _control_epoch) THEN
+        RAISE EXCEPTION 'TEST FAILED: dropping satellite restarted control runtime';
+    END IF;
+END $$;
+
+REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM df_e2e_user;
+REVOKE EXECUTE ON FUNCTION df.http_multipart(text, text, jsonb, jsonb, integer) FROM df_e2e_user;
+DROP TABLE public.test_satellite_log;
+DROP TABLE _control_epoch, _satellite_rolled_back;
 
 -- === Test: 34_multi_database ===
 

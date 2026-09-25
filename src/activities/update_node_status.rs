@@ -5,35 +5,20 @@
 
 use duroxide::ActivityContext;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::update-node-status";
 
-/// Process-global cache for whether df.nodes.status_details exists.
-///
-/// 0 = unknown, 1 = present, 2 = absent. The column is added by the
-/// 0.2.3 → 0.2.4 upgrade; a binary newer than the schema (Scenario B1) must run
-/// against an older schema that lacks it. We cache "present" permanently once
-/// seen, but re-probe on "unknown"/"absent" so an in-place ALTER EXTENSION
-/// UPDATE that adds the column is picked up without a worker restart.
-static STATUS_DETAILS_COL: AtomicU8 = AtomicU8::new(0);
-
-async fn status_details_present(pool: &PgPool) -> bool {
-    if STATUS_DETAILS_COL.load(Ordering::Relaxed) == 1 {
-        return true;
-    }
-    let present = sqlx::query_scalar::<_, bool>(
+async fn status_details_present(connection: &mut sqlx::PgConnection) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
          WHERE table_schema = 'df' AND table_name = 'nodes' \
          AND column_name = 'status_details')",
     )
-    .fetch_one(pool)
+    .fetch_one(connection)
     .await
-    .unwrap_or(false);
-    STATUS_DETAILS_COL.store(if present { 1 } else { 2 }, Ordering::Relaxed);
-    present
+    .map_err(|error| format!("Node status schema lookup failed: {error}"))
 }
 
 fn execution_id_from_details(status_details: Option<&serde_json::Value>) -> Option<&str> {
@@ -183,7 +168,11 @@ pub async fn execute(
     // Only write status_details when the binary supplies a stamp AND the running
     // schema actually has the column (Scenario B1: a newer .so may run against a
     // pre-0.2.4 schema lacking it -- degrade to the plain status/result write).
-    let write_details = execution_id.is_some() && status_details_present(pool.as_ref()).await;
+    let origin = crate::origin::Origin::from_engine_id(ctx.instance_id())?;
+    let mut tx = crate::origin::begin_metadata(&pool, origin.as_ref())
+        .await
+        .map_err(|error| format!("Node status origin validation failed: {error}"))?;
+    let write_details = execution_id.is_some() && status_details_present(&mut tx).await?;
 
     let mut update = QueryBuilder::<Postgres>::new("");
     push_status_update(&mut update, status, result, execution_id, write_details);
@@ -194,11 +183,6 @@ pub async fn execute(
     // or whose parent scope was spawned by an older ancestor generation. Equal-or-newer
     // generations (including running -> terminal within the same generation) are accepted.
     if write_details {
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin node status update transaction: {e}"))?;
-
         let existing_details = sqlx::query_scalar::<_, Option<serde_json::Value>>(
             "SELECT status_details FROM df.nodes WHERE id = $1 AND instance_id = $2 FOR UPDATE",
         )
@@ -255,10 +239,13 @@ pub async fn execute(
         .push(" AND instance_id = ")
         .push_bind(instance_id);
 
-    match update.build().execute(pool.as_ref()).await {
+    match update.build().execute(&mut *tx).await {
         Ok(done) => {
             let rows = done.rows_affected();
             if rows == 1 {
+                tx.commit()
+                    .await
+                    .map_err(|error| format!("Node status commit failed: {error}"))?;
                 Ok("Node status updated".to_string())
             } else {
                 // No fence in play: exactly one row must match (instance_id, id).

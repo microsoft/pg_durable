@@ -29,6 +29,7 @@ pub static HTTP_ALLOWED_DOMAINS: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(ssrf::DEFAULT_HTTP_ALLOWED_DOMAINS));
 
 pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
+pub static MAX_ORIGIN_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(12);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_NEW_TRANSACTION_STARTS: GucSetting<i32> = GucSetting::<i32>::new(2);
@@ -77,6 +78,7 @@ pub mod explain;
 pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
+pub(crate) mod origin;
 pub mod redact;
 pub mod registry;
 pub mod secrets;
@@ -91,7 +93,7 @@ pub use types::Durofut;
 /// by the background worker after successful initialization. Increment whenever
 /// a new binary introduces new duroxide-pg migration scripts or any other
 /// BGW-applied duroxide schema change.
-pub const WORKER_SCHEMA_VERSION: i32 = 1;
+pub const WORKER_SCHEMA_VERSION: i32 = 2;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -195,6 +197,17 @@ pub extern "C-unwind" fn _PG_init() {
     );
 
     GucRegistry::define_int_guc(
+        c"pg_durable.max_origin_connections",
+        c"Maximum total satellite metadata connections across activities and maintenance",
+        c"Each active satellite route reserves one metadata connection. Requires a server restart.",
+        &MAX_ORIGIN_CONNECTIONS,
+        2,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_durable.max_duroxide_connections",
         c"Maximum number of connections in the duroxide provider pool (orchestration state + listener)",
         c"",
@@ -218,7 +231,7 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.max_new_transaction_starts",
-        c"Maximum number of concurrent transaction_mode => 'new' df.start() loopback launch sessions",
+        c"Maximum concurrent transaction_mode => 'new' df.start() loopback launch sessions per database",
         c"",
         &MAX_NEW_TRANSACTION_STARTS,
         1,
@@ -313,14 +326,24 @@ pub extern "C-unwind" fn _PG_init() {
 // Schema Declaration
 // ============================================================================
 
-// Create both extension-owned schemas as the very first statements of the
+// Create the local schema and the control-only provider schema at the start of the
 // install script. `bootstrap` guarantees this runs before every other extension
 // object, including the redundant `CREATE SCHEMA IF NOT EXISTS df` that pgrx
 // emits for the `#[pg_schema] mod df` entity below.
 extension_sql!(
     r#"
 CREATE SCHEMA df;
-CREATE SCHEMA _duroxide;
+DO $$
+DECLARE
+    target_db pg_catalog.text := pg_catalog.current_setting('pg_durable.database', true);
+BEGIN
+    IF target_db IS NULL OR target_db OPERATOR(pg_catalog.=) '' THEN
+        target_db := 'postgres';
+    END IF;
+    IF pg_catalog.current_database() OPERATOR(pg_catalog.=) target_db THEN
+        CREATE SCHEMA _duroxide;
+    END IF;
+END $$;
 
 -- Returns the name of the duroxide provider schema selected for this install.
 -- Fresh installs return '_duroxide'. The body is version-specific: the upgrade
@@ -448,6 +471,14 @@ CREATE TABLE df._worker_epoch (
     last_seen_at TIMESTAMPTZ DEFAULT pg_catalog.now()
 );
 
+CREATE TABLE df._installation (
+    singleton pg_catalog.bool PRIMARY KEY DEFAULT true CHECK (singleton),
+    id pg_catalog.uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid()
+);
+INSERT INTO df._installation (singleton) VALUES (true);
+REVOKE ALL ON TABLE df._installation FROM PUBLIC;
+GRANT SELECT ON TABLE df._installation TO PUBLIC;
+
 ALTER TABLE df.instances
     ADD CONSTRAINT instances_id_format_chk
         -- Operators (OPERATOR(pg_catalog.<op>)) and functions (e.g. pg_catalog.now)
@@ -564,7 +595,7 @@ CREATE POLICY vars_user_isolation ON df.vars
     USING (owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole)
     WITH CHECK (owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole);
 
--- No automatic PUBLIC grants — admins call df.grant_usage('role') after
+-- No automatic PUBLIC schema access — admins call df.grant_usage('role') after
 -- CREATE EXTENSION (or see USER_GUIDE.md "Privilege Grants" for manual GRANTs).
 
 -- Helper: grant all required df privileges to a role in one call. Additive
@@ -748,40 +779,23 @@ REVOKE EXECUTE ON FUNCTION df.revoke_usage(text) FROM PUBLIC;
 );
 
 // ============================================================================
-// Extension Validation (must run before duroxide schema creation)
+// Extension Validation
 // ============================================================================
 
-// In production builds, validate that the extension is created in the database
-// the background worker will connect to.  In pgrx test builds the test database
-// name is chosen by pgrx and won't match the worker's target database, so we
-// skip the check (unit tests don't need the background worker).
+// Satellite installs require a ready, compatible control installation. Control
+// installs return immediately because their DDL is not visible to the worker yet.
+// pgrx unit tests do not require a running control installation.
 
 #[cfg(not(any(test, feature = "pg_test")))]
 extension_sql!(
     r#"
--- Validate that CREATE EXTENSION is run in the correct database
--- The background worker connects to one specific database (determined by
--- the pg_durable.database GUC, defaults to "postgres").
--- The extension must be created in that database for workflows to execute.
 DO $$
-DECLARE
-    current_db TEXT;
-    target_db TEXT;
 BEGIN
-    -- Get the current database
-    SELECT pg_catalog.current_database() INTO current_db;
-    
-    -- Get the target database that the background worker will connect to
-    SELECT df.target_database() INTO target_db;
-    
-    IF current_db OPERATOR(pg_catalog.<>) target_db THEN
-        RAISE EXCEPTION 'pg_durable extension must be created in database "%" (currently in "%"). The background worker only processes functions in the database specified by the pg_durable.database GUC (defaults to "postgres").', target_db, current_db
-            USING HINT = 'Connect to the correct database and run: CREATE EXTENSION pg_durable;';
-    END IF;
+    PERFORM df.validate_installation();
 END $$;
 "#,
     name = "validate_database",
-    requires = [df, target_database]
+    requires = [df, origin::validate_installation, "create_tables"]
 );
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -1717,13 +1731,20 @@ mod tests {
 
     #[pg_test]
     fn test_connection_info_builders() {
-        use crate::types::{backend_duroxide_schema, postgres_connection_string};
+        use crate::types::{backend_provider_config, postgres_connection_string};
         let conn = postgres_connection_string();
         assert!(!conn.is_empty());
         assert!(conn.contains("postgres://"));
         // Fresh installs use the "_duroxide" provider schema; upgraded installs
         // use the legacy "duroxide". Both contain "duroxide" as a substring.
-        assert!(backend_duroxide_schema().contains("duroxide"));
+        for schema in ["_duroxide", "duroxide"] {
+            assert_eq!(
+                backend_provider_config(&conn, schema)
+                    .schema_name
+                    .as_deref(),
+                Some(schema)
+            );
+        }
     }
 
     #[pg_test]

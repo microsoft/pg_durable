@@ -202,12 +202,17 @@ fn sink_error(operation: &str, error: sqlx::Error) -> String {
     }
 }
 
+struct SinkDestination<'a> {
+    database: Option<&'a str>,
+    source: &'a crate::origin::Route,
+}
+
 async fn store_response(
     table: &str,
     body: &[u8],
     sha256: &str,
     submitted_by: &str,
-    database: Option<&str>,
+    destination: SinkDestination<'_>,
     semaphore: &Semaphore,
     timeout: Duration,
 ) -> Result<StoredResponse, String> {
@@ -217,11 +222,27 @@ async fn store_response(
         crate::types::get_max_user_connections(),
     )
     .await?;
+    destination.source.validate().await?;
+    let database = destination
+        .database
+        .or(destination.source.database.as_deref());
     let mut connection = crate::types::connect_as_user(submitted_by, database).await?;
+    destination.source.validate().await?;
     let mut transaction = connection
         .begin()
         .await
         .map_err(|error| sink_error("transaction", error))?;
+    let execution_origin = destination
+        .source
+        .origin
+        .as_ref()
+        .filter(|_| database == destination.source.database.as_deref());
+    if execution_origin.is_some() {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| sink_error("origin isolation", error))?;
+    }
     sqlx::query(
         "SELECT pg_catalog.set_config('synchronous_commit', 'on', true),
                 pg_catalog.set_config('statement_timeout', $1, true)",
@@ -230,6 +251,11 @@ async fn store_response(
     .execute(&mut *transaction)
     .await
     .map_err(|error| sink_error("transaction setup", error))?;
+    if let Some(origin) = execution_origin {
+        crate::origin::lock_and_validate(&mut transaction, origin)
+            .await
+            .map_err(|error| sink_error("origin validation", error))?;
+    }
     let identity_matches: bool = sqlx::query_scalar(
         "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
             AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
@@ -254,7 +280,7 @@ async fn store_response(
     .execute(&mut *transaction)
     .await
     .map_err(|error| sink_error("table lock", error))?;
-    let destination: Option<(String, String)> = sqlx::query_as(
+    let table_location: Option<(String, String)> = sqlx::query_as(
         "SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname),
                 pg_catalog.current_database()::pg_catalog.text
          FROM pg_catalog.pg_class AS relation
@@ -268,7 +294,11 @@ async fn store_response(
     .fetch_optional(&mut *transaction)
     .await
     .map_err(|error| sink_error("table validation", error))?;
-    let (table, database) = destination.ok_or("HTTP response sink requires a permanent table")?;
+    let (table, database) =
+        table_location.ok_or("HTTP response sink requires a permanent table")?;
+    if Some(database.as_str()) != destination.source.database.as_deref() {
+        destination.source.validate().await?;
+    }
     let key = uuid::Uuid::new_v4();
     let inserted = sqlx::query(&format!(
         "INSERT INTO {table} (sink_key, body) VALUES ($1::pg_catalog.uuid, $2::pg_catalog.bytea)"
@@ -337,13 +367,14 @@ impl ResponseContent {
         )
     }
 
-    pub async fn store_in_sink(
+    pub(crate) async fn store_in_sink(
         &mut self,
         options: &HttpBodyOptions,
         submitted_by: &str,
         database: Option<&str>,
         semaphore: &Semaphore,
         timeout: Duration,
+        source: &crate::origin::Route,
     ) -> Result<(), String> {
         let Some(body) = self.sink_body.as_deref() else {
             return Ok(());
@@ -363,7 +394,7 @@ impl ResponseContent {
                 body,
                 sha256,
                 submitted_by,
-                database,
+                SinkDestination { database, source },
                 semaphore,
                 timeout,
             ),

@@ -61,6 +61,7 @@ DEFAULT_BUILD_PHASES=(
     "host-guc"
     "superuser-guc-off"
     "connlimit-backpressure"
+    "force-drop"
     "connlimit-timeout"
     "new-start-limit"
     "connlimit-startup"
@@ -75,6 +76,7 @@ ALL_PHASES=(
     "host-guc"
     "superuser-guc-off"
     "connlimit-backpressure"
+    "force-drop"
     "connlimit-timeout"
     "new-start-limit"
     "connlimit-startup"
@@ -151,6 +153,9 @@ phase_label() {
         connlimit-backpressure)
             echo "connection limit backpressure"
             ;;
+        force-drop)
+            echo "force-drop execution fence"
+            ;;
         connlimit-timeout)
             echo "connection limit timeout"
             ;;
@@ -195,6 +200,9 @@ phase_for_test() {
         44_connection_limit_backpressure)
             echo "connlimit-backpressure"
             ;;
+        78_multi_database_force_drop|79_multi_database_remote_origin|82_multi_database_ddl_cycle|83_multi_database_same_oid|84_multi_database_metadata_fence)
+            echo "force-drop"
+            ;;
         45_connection_limit_timeout)
             echo "connlimit-timeout"
             ;;
@@ -204,7 +212,7 @@ phase_for_test() {
         46_connection_limit_startup_validation)
             echo "connlimit-startup"
             ;;
-        54_reconcile_orphans)
+        54_reconcile_orphans|76_multi_database_reconcile)
             echo "reconcile"
             ;;
         69_http_allowed_domains)
@@ -216,7 +224,7 @@ phase_for_test() {
         47_http_dsl_disabled)
             echo "http-disabled"
             ;;
-        48_http_allow_all)
+        48_http_allow_all|80_multi_database_http_origin|85_multi_database_http_admission)
             echo "http-allow-all"
             ;;
         *)
@@ -583,13 +591,17 @@ configure_phase() {
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "2"
             ;;
-        connlimit-timeout)
+        force-drop|connlimit-timeout)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_user_connections" "1"
-            set_conf_line "pg_durable.execution_acquire_timeout" "2"
+            if [ "$phase" = "connlimit-timeout" ]; then
+                set_conf_line "pg_durable.execution_acquire_timeout" "2"
+            else
+                set_conf_line "pg_durable.reconcile_interval" "0"
+            fi
             ;;
         new-start-limit)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -630,6 +642,10 @@ configure_phase() {
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.http_allowed_domains" "''"
+            if [ "$phase" = "http-allow-all" ]; then
+                set_conf_line "pg_durable.max_user_connections" "1"
+                set_conf_line "pg_durable.reconcile_interval" "0"
+            fi
             ;;
     esac
 
@@ -694,7 +710,7 @@ prepare_phase() {
                 wait_for_worker_ready
             fi
             ;;
-        host-guc|connlimit-backpressure|connlimit-timeout)
+        host-guc|connlimit-backpressure|force-drop|connlimit-timeout)
             ensure_e2e_role
             wait_for_worker_ready
             ;;
@@ -854,12 +870,72 @@ assert_application_names_logged() {
     return 1
 }
 
+run_http_origin_test() (
+    local work_dir mock_pid attempt
+    local previous_ssl_cert_file="${SSL_CERT_FILE-}"
+    work_dir=$(mktemp -d)
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 \
+        -addext 'subjectAltName=IP:127.0.0.1' \
+        -keyout "$work_dir/key.pem" -out "$work_dir/cert.pem" >"$work_dir/cert.log" 2>&1 || {
+        cat "$work_dir/cert.log"
+        rm -f -- "$work_dir/key.pem" "$work_dir/cert.pem" "$work_dir/cert.log"
+        rmdir -- "$work_dir"
+        return 1
+    }
+    python3 "$PROJECT_DIR/tests/e2e/http_origin_server.py" \
+        "$work_dir/port" "$work_dir/cert.pem" "$work_dir/key.pem" >"$work_dir/server.log" 2>&1 &
+    mock_pid=$!
+    cleanup_origin_mock() {
+        local result=$?
+        stop_server
+        kill "$mock_pid" 2>/dev/null || true
+        wait "$mock_pid" 2>/dev/null || true
+        rm -f -- "$work_dir/port" "$work_dir/server.log" "$work_dir/key.pem" "$work_dir/cert.pem" "$work_dir/cert.log" "$work_dir/requests.json" "$work_dir/requests.tmp"
+        rmdir -- "$work_dir"
+        if [ -n "$previous_ssl_cert_file" ]; then
+            export SSL_CERT_FILE="$previous_ssl_cert_file"
+        else
+            unset SSL_CERT_FILE
+        fi
+        restart_server
+        wait_for_worker_ready
+        exit "$result"
+    }
+    trap cleanup_origin_mock EXIT
+    for attempt in $(seq 1 100); do
+        if [ -s "$work_dir/port" ]; then
+            export PGDURABLE_TEST_HTTP_PORT
+            PGDURABLE_TEST_HTTP_PORT=$(cat "$work_dir/port")
+            export PGDURABLE_TEST_SERVER_LOG="$LOG_FILE"
+            export PGDURABLE_TEST_HTTP_COUNTS="$work_dir/requests.json"
+            export SSL_CERT_FILE="$work_dir/cert.pem"
+            restart_server
+            wait_for_worker_ready
+            run_test_file "$1"
+            return $?
+        fi
+        if ! kill -0 "$mock_pid" 2>/dev/null; then
+            cat "$work_dir/server.log"
+            echo "TEST FAILED: HTTP origin mock exited before readiness"
+            return 1
+        fi
+        sleep 0.05
+    done
+    echo "TEST FAILED: HTTP origin mock readiness timed out"
+    return 1
+)
+
 run_test_file() {
     local test_file="$1"
     local test_name
     local output
 
     test_name=$(basename "$test_file" .sql)
+
+    if [[ "$test_name" = "80_multi_database_http_origin" || "$test_name" = "85_multi_database_http_admission" ]] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
+        run_http_origin_test "$test_file"
+        return $?
+    fi
 
     printf "  %-45s ... " "$test_name"
 

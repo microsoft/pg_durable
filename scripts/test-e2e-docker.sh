@@ -16,6 +16,10 @@
 #   ./scripts/test-e2e-docker.sh 04_parallel        # Run matching test
 #   ./scripts/test-e2e-docker.sh 04_parallel 5      # Run 5 times
 #   ./scripts/test-e2e-docker.sh --keep --rebuild   # Rebuild image, keep running
+#
+# This fixed-configuration image runs standard-phase tests only. Restart-sensitive
+# and local TLS-mock cases run through test-e2e-local.sh in the primary CI workflow.
+# Set PG_DURABLE_TEST_CONTAINER and PG_DURABLE_TEST_IMAGE for an isolated local run.
 
 set -e
 
@@ -23,8 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
 
-CONTAINER_NAME="pg_durable_e2e"
-IMAGE_NAME="pg_durable:latest"
+CONTAINER_NAME="${PG_DURABLE_TEST_CONTAINER:-pg_durable_e2e}"
+IMAGE_NAME="${PG_DURABLE_TEST_IMAGE:-pg_durable:latest}"
 
 # Tests that require a PostgreSQL mode Docker does not manage in this script
 SKIP_TESTS=(
@@ -44,6 +48,16 @@ SKIP_TESTS=(
     # container keeps the production defaults (reconcile_interval=3600,
     # retention_days=30), under which the orphan is never reclaimed in time.
     "54_reconcile_orphans"
+    "76_multi_database_reconcile"
+    # Require the force-drop phase (one execution slot, reconciliation disabled).
+    "78_multi_database_force_drop"
+    "79_multi_database_remote_origin"
+    "82_multi_database_ddl_cycle"
+    "83_multi_database_same_oid"
+    "84_multi_database_metadata_fence"
+    # Require http-allow-all and the local runner's TLS mock and environment.
+    "80_multi_database_http_origin"
+    "85_multi_database_http_admission"
 )
 
 # Defaults
@@ -161,6 +175,12 @@ for i in {1..90}; do
     sleep 1
 done
 
+if [ "$READY_COUNT" -lt 3 ]; then
+    echo " TIMEOUT"
+    docker logs "$CONTAINER_NAME"
+    exit 1
+fi
+
 # Extra wait for background worker to initialize
 sleep 2
 
@@ -174,8 +194,7 @@ fi
 
 # Show version
 echo -n "pg_durable version: "
-VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SELECT df.version();" 2>&1)
-if [ $? -ne 0 ]; then
+if ! VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SELECT df.version();" 2>&1); then
     echo -e "${RED}Failed to get version:${NC}"
     echo "$VERSION"
     docker logs "$CONTAINER_NAME" 2>&1 | tail -50
@@ -188,7 +207,7 @@ echo ""
 # Copy test files to container
 docker exec "$CONTAINER_NAME" mkdir -p /tests
 for f in "$SQL_DIR"/*.sql; do
-    docker cp "$f" "$CONTAINER_NAME:/tests/" 2>/dev/null || true
+    docker cp "$f" "$CONTAINER_NAME:/tests/"
 done
 
 # Run tests
@@ -226,24 +245,29 @@ for run in $(seq 1 $REPEAT_COUNT); do
 
         echo -n "  $test_name ... "
         
-        output=$(docker exec "$CONTAINER_NAME" psql -U postgres -v ON_ERROR_STOP=1 -f "/tests/$test_name.sql" 2>&1)
-        exit_code=$?
+        if output=$(docker exec "$CONTAINER_NAME" psql -U postgres -v ON_ERROR_STOP=1 -f "/tests/$test_name.sql" 2>&1); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
         
         if [ $exit_code -eq 0 ]; then
-            if echo "$output" | grep -q "TEST PASSED"; then
-                echo -e "${GREEN}PASS${NC}"
-                PASSED=$((PASSED + 1))
-            elif echo "$output" | grep -q "TEST FAILED"; then
+            if echo "$output" | grep -q "TEST FAILED"; then
                 echo -e "${RED}FAIL${NC}"
-                echo "$output" | grep -E "(NOTICE|ERROR|TEST FAILED)" | tail -15
+                printf '%s\n' "$output"
                 FAILED=$((FAILED + 1))
-            else
+            elif echo "$output" | grep -q "TEST PASSED"; then
                 echo -e "${GREEN}PASS${NC}"
                 PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}"
+                printf '%s\n' "$output"
+                echo "Missing TEST PASSED marker: test did not confirm completion"
+                FAILED=$((FAILED + 1))
             fi
         else
             echo -e "${RED}FAIL${NC}"
-            echo "$output" | grep -E "(NOTICE|ERROR)" | tail -15
+            printf '%s\n' "$output"
             FAILED=$((FAILED + 1))
         fi
     done
