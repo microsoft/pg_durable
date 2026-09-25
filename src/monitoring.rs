@@ -154,11 +154,14 @@ fn fetch_instance_info_map(
     pg_conn_str: &str,
     provider_schema: &str,
 ) -> HashMap<String, (String, i64, Option<String>)> {
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    let origin = crate::origin::backend_origin().unwrap_or_else(|e| pgrx::error!("{e}"));
     let engine_ids: Vec<String> = ids
         .iter()
-        .map(|id| crate::origin::backend_engine_id(id))
-        .collect::<Result<_, _>>()
-        .unwrap_or_else(|e| pgrx::error!("{e}"));
+        .map(|id| crate::origin::engine_id_for_origin(origin.as_ref(), id))
+        .collect();
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

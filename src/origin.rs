@@ -161,11 +161,19 @@ impl Origin {
 }
 
 pub(crate) fn backend_engine_id(local_id: &str) -> Result<String, String> {
+    Ok(engine_id_for_origin(backend_origin()?.as_ref(), local_id))
+}
+
+pub(crate) fn engine_id_for_origin(origin: Option<&Origin>, local_id: &str) -> String {
+    origin.map_or_else(|| local_id.to_string(), |origin| origin.engine_id(local_id))
+}
+
+pub(crate) fn backend_origin() -> Result<Option<Origin>, String> {
     let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
         .map_err(|error| error.to_string())?
         .ok_or("Caller database is unavailable")?;
     if database == types::get_database() {
-        return Ok(local_id.to_string());
+        return Ok(None);
     }
     let installation_id = Spi::get_one::<String>("SELECT id::text FROM df._installation")
         .map_err(|error| format!("Origin installation unavailable: {error}"))?
@@ -174,7 +182,7 @@ pub(crate) fn backend_engine_id(local_id: &str) -> Result<String, String> {
         database_oid: unsafe { pgrx::pg_sys::MyDatabaseId.to_u32() },
         installation_id: Uuid::parse_str(&installation_id).map_err(|error| error.to_string())?,
     };
-    Ok(origin.engine_id(local_id))
+    Ok(Some(origin))
 }
 
 #[pg_extern(schema = "df")]

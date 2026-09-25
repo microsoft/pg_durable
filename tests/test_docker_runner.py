@@ -125,6 +125,16 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(tests, [])
         self.assertFalse(any("-c" in args for args in calls))
 
+    def test_success_exit_without_completion_marker_fails(self):
+        for output in ("", "CREATE TABLE\nDO\n"):
+            with self.subTest(output=output):
+                result, _, _ = self.run_runner(
+                    ["00_failure"], FAILURE_CODE="0", FAILURE_OUTPUT=output
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Missing TEST PASSED marker", result.stdout)
+                self.assertIn("1 failed", result.stdout)
+
     def test_copy_failure_does_not_run_missing_tests(self):
         result, _, tests = self.run_runner(["01_success"], COPY_FAIL="1")
         self.assertNotEqual(result.returncode, 0)

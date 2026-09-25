@@ -256,9 +256,14 @@ for run in $(seq 1 $REPEAT_COUNT); do
                 echo -e "${RED}FAIL${NC}"
                 printf '%s\n' "$output"
                 FAILED=$((FAILED + 1))
-            else
+            elif echo "$output" | grep -q "TEST PASSED"; then
                 echo -e "${GREEN}PASS${NC}"
                 PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}"
+                printf '%s\n' "$output"
+                echo "Missing TEST PASSED marker: test did not confirm completion"
+                FAILED=$((FAILED + 1))
             fi
         else
             echo -e "${RED}FAIL${NC}"
