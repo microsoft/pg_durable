@@ -2272,6 +2272,15 @@ LOOP
 
 ## Monitoring
 
+`df.list_instances()` (both overloads), `df.instance_info()` and `df.metrics()`
+are best-effort reads. If a satellite cannot resolve the control store, they
+emit a warning and return no rows rather than aborting the SQL statement. An
+empty result during an outage is not proof that no instances exist or that
+metrics are zero. Retry after control connectivity recovers.
+`df.instance_executions()` intentionally remains strict: a history lookup failure
+raises an error rather than looking like an instance with no execution history.
+Submission, signal and cancellation operations also retain their strict errors.
+
 ### List All Instances
 
 `df.list_instances` has two overloads, selected by argument count: a **basic** form (0–2 args) returning 6 columns, and a **paginated** form (3–4 args) returning 9 columns (adding `created_at`, `completed_at`, `next_cursor`). To reach the paginated form, pass at least three arguments, using `NULL` for filters you want to skip.

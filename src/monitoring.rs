@@ -12,12 +12,22 @@ use std::collections::HashMap;
 
 use crate::types::{
     backend_duroxide_schema, connection_url_with_application_name, new_backend_provider,
-    postgres_connection_string, BACKEND_MONITORING_APPLICATION_NAME,
+    postgres_connection_string, try_backend_duroxide_schema, BACKEND_MONITORING_APPLICATION_NAME,
 };
 
 // ============================================================================
 // Monitoring Functions
 // ============================================================================
+
+fn monitoring_provider_schema(function: &str) -> Option<&'static str> {
+    match try_backend_duroxide_schema() {
+        Ok(schema) => Some(schema),
+        Err(error) => {
+            pgrx::warning!("{function}: could not resolve duroxide store: {error}");
+            None
+        }
+    }
+}
 
 /// Wire-format version of the opaque keyset cursor. Embedded as the first
 /// `|`-delimited component so the token shape can evolve (e.g. a future ordering
@@ -348,7 +358,9 @@ pub fn list_instances(
 
     let ids: Vec<String> = user_instances.iter().map(|(id, _, _)| id.clone()).collect();
     let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
+    let Some(provider_schema) = monitoring_provider_schema("df.list_instances") else {
+        return TableIterator::new(vec![]);
+    };
     let mut info_by_id = fetch_instance_info_map(&ids, &pg_conn_str, provider_schema);
 
     // Reassemble in df.instances order (created_at DESC). Instances with no
@@ -570,7 +582,9 @@ pub fn list_instances_paged(
     // and status is taken from df.instances so all monitoring APIs agree on it.
     let ids: Vec<String> = user_instances.iter().map(|(id, ..)| id.clone()).collect();
     let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
+    let Some(provider_schema) = monitoring_provider_schema("df.list_instances") else {
+        return TableIterator::new(vec![]);
+    };
     let mut info_by_id = fetch_instance_info_map(&ids, &pg_conn_str, provider_schema);
 
     // Reassemble in df.instances order (created_at DESC, id ASC). Instances with
@@ -664,7 +678,9 @@ pub fn instance_info(
     let engine_id =
         crate::origin::backend_engine_id(instance_id).unwrap_or_else(|e| pgrx::error!("{e}"));
     let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
+    let Some(provider_schema) = monitoring_provider_schema("df.instance_info") else {
+        return TableIterator::new(vec![]);
+    };
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -822,7 +838,9 @@ pub fn metrics() -> TableIterator<
     ),
 > {
     let pg_conn_str = postgres_connection_string();
-    let provider_schema = backend_duroxide_schema();
+    let Some(provider_schema) = monitoring_provider_schema("df.metrics") else {
+        return TableIterator::new(vec![]);
+    };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

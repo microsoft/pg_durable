@@ -182,16 +182,39 @@ SELECT pg_temp.e74_completed('replacement');
 SELECT pg_temp.e74_drain();
 
 -- Keep the bounded readiness lookup regression from the original guard test.
+CREATE TEMP TABLE _e74_monitoring(connection text, query text);
+INSERT INTO _e74_monitoring VALUES
+    ('e74submit', format('SELECT count(*)::text FROM df.instance_info(%L)',
+        (SELECT id FROM _e74_cases WHERE label = 'replacement'))),
+    ('e74submit', 'SELECT count(*)::text FROM df.list_instances(NULL, 100)'),
+    ('e74submit', 'SELECT count(*)::text FROM df.list_instances(NULL, 100, NULL, NULL)'),
+    ('e74admin', 'SELECT count(*)::text FROM df.metrics()');
 SELECT dblink_exec('e74ready', format('BEGIN; LOCK TABLE %I._worker_ready IN ACCESS EXCLUSIVE MODE',
     df.duroxide_schema()));
-SELECT dblink_send_query('e74submit', format('SELECT count(*)::text FROM df.instance_info(%L)',
+DO $$
+DECLARE item record; result text;
+BEGIN
+    FOR item IN SELECT * FROM _e74_monitoring LOOP
+        PERFORM dblink_send_query(item.connection, item.query);
+        PERFORM pg_temp.e74_wait($check$
+            SELECT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = current_database()
+                AND a.query LIKE '%_worker_ready%' AND a.wait_event_type = 'Lock'
+                AND (SELECT pid FROM _e74_connections WHERE name = 'e74ready') = ANY(pg_blocking_pids(a.pid)))
+        $check$, 'monitoring control lookup blocked', 2);
+        PERFORM pg_temp.e74_wait(format('SELECT dblink_is_busy(%L) = 0', item.connection),
+            'monitoring lookup has bounded fallback', 4);
+        SELECT remote.value INTO STRICT result FROM dblink_get_result(item.connection) AS remote(value text);
+        IF result IS DISTINCT FROM '0' OR dblink_error_message(item.connection) <> 'OK' THEN
+            RAISE EXCEPTION 'TEST FAILED: monitoring must return empty without an SQL error: %', item.query;
+        END IF;
+        PERFORM value FROM dblink_get_result(item.connection) AS remote(value text);
+    END LOOP;
+END $$;
+-- Execution history intentionally remains strict rather than disguising an
+-- unavailable store as an instance with no execution history.
+SELECT dblink_send_query('e74submit', format('SELECT count(*)::text FROM df.instance_executions(%L)',
     (SELECT id FROM _e74_cases WHERE label = 'replacement')));
-SELECT pg_temp.e74_wait($check$
-    SELECT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = current_database()
-        AND a.query LIKE '%_worker_ready%' AND a.wait_event_type = 'Lock'
-        AND (SELECT pid FROM _e74_connections WHERE name = 'e74ready') = ANY(pg_blocking_pids(a.pid)))
-$check$, 'control readiness blocked', 2);
-SELECT pg_temp.e74_wait('SELECT dblink_is_busy(''e74submit'') = 0', 'readiness deadline', 4);
+SELECT pg_temp.e74_wait('SELECT dblink_is_busy(''e74submit'') = 0', 'strict history deadline', 4);
 DO $$
 DECLARE message text; rows int;
 BEGIN
@@ -204,6 +227,16 @@ BEGIN
     PERFORM result FROM dblink_get_result('e74submit', false) AS remote(result text);
 END $$;
 SELECT dblink_exec('e74ready', 'ROLLBACK');
+DO $$
+DECLARE item record; result text;
+BEGIN
+    FOR item IN SELECT * FROM _e74_monitoring LOOP
+        SELECT remote.value INTO STRICT result FROM dblink(item.connection, item.query) AS remote(value text);
+        IF result::int < 1 THEN
+            RAISE EXCEPTION 'TEST FAILED: monitoring did not recover on the same satellite backend: %', item.query;
+        END IF;
+    END LOOP;
+END $$;
 SELECT pg_temp.e74_start('after-readiness', 7);
 SELECT pg_temp.e74_completed('after-readiness');
 SELECT pg_temp.e74_drain();
@@ -219,5 +252,5 @@ SELECT dblink_disconnect(name) FROM _e74_connections;
 DROP DATABASE _e2e74_origin WITH (FORCE);
 DROP FUNCTION public.e74_effect(int);
 DROP TABLE public.e74_effects;
-DROP TABLE _e74_cases, _e74_connections, _e74_relations, _e74_epoch;
+DROP TABLE _e74_cases, _e74_connections, _e74_relations, _e74_epoch, _e74_monitoring;
 SELECT 'TEST PASSED: short metadata transactions, DDL ordering and admission-based removal' AS result;

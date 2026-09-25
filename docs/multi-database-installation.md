@@ -69,7 +69,10 @@ must not assume that they are.
   control database's Duroxide schema.
 - **R5.** Dropping the control installation must stop the runtime and remove the
   provider schema as it does today. Remaining satellites must fail new control-plane
-  operations with a clear "control installation unavailable" error.
+  operations with a clear "control installation unavailable" error. Best-effort
+  monitoring (`list_instances`, `instance_info`, `metrics`) instead warns and
+  returns no rows on control-schema resolution failure; execution-history lookup
+  and workflow mutations remain strict.
 - **R6.** Loading `pg_durable` through `shared_preload_libraries` without a control
   installation must continue to leave no Duroxide schema behind.
 
