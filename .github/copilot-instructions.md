@@ -90,7 +90,7 @@ Tests in `tests/e2e/sql/` follow this pattern:
 4. Cleanup and output `SELECT 'TEST PASSED'`
 
 ### Binary Backward Compatibility
-The new `.so` must work against **all** previous versions' schemas (same major version) because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](../docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
+The new `.so` must work against **all** previous versions' schemas in the same major version, starting with v0.2.2, because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](../docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
 
 ## Common Tasks
 
@@ -102,7 +102,7 @@ The new `.so` must work against **all** previous versions' schemas (same major v
 
 **Changing the `df` extension schema:** If the upgrade script doesn't exist yet, follow the "Preparing for the next version" section in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Then: add DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`), ensure `.so` backward compat with all previous schemas, and add a section to "Version-Specific Changes" in [docs/upgrade-testing.md](../docs/upgrade-testing.md). Note: duroxide schema changes do not require extension upgrade script changes — the BGW applies them automatically at startup.
 
-For Scenario A, treat the upgrade path as the contract for already-shipped versions: before release, fresh install for the new version should match what an existing customer gets by installing the previous version and applying the upgrade chain.
+For Guarantee A, treat the upgrade path as the contract for already-shipped versions: before release, fresh install for the new version should match what an existing customer gets by installing the previous version and applying the upgrade chain. Align fresh-install DDL with that path unless there is a deliberate reason to change the contract.
 
 **Updating duroxide-pg dependency**: Treat `duroxide` and `duroxide-pg` as a compatible pair. Before changing `duroxide-pg`, check the `duroxide-pg` release notes or compatibility matrix to determine whether `duroxide` must also be updated. Update the crates.io version(s) in [`Cargo.toml`](../Cargo.toml), then run `cargo update -p duroxide-pg` or `cargo update -p duroxide -p duroxide-pg` as appropriate and rebuild. The BGW's embedded migration files update automatically via `include_dir!`. No changes to extension SQL, upgrade scripts, or any checked-in SQL copies are needed.
 

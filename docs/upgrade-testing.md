@@ -9,6 +9,8 @@ pg_durable follows a two-phase upgrade model:
 
 This means the new `.so` **must be backward compatible** with every older supported schema, not just the immediately previous version. The `.so` and the upgrade script are not atomic: the new binary may run against an older schema indefinitely.
 
+Supported schemas are previous releases in the **current major version**, starting at v0.2.2. That start is `PROVIDER_COMPAT_START_VERSION` in `scripts/test-upgrade.sh` (default `0.2.2`, overridable by downstream forks). The harness does not test earlier majors or versions before that boundary. Versions before v0.2.2 used a different durable-state provider and are not upgrade sources for open-source pg_durable.
+
 pg_durable was open-sourced at v0.2.2. Upgrade compatibility impact is tracked for each release starting with v0.2.3.
 
 We never downgrade. Downgrade scripts are not needed.
@@ -18,6 +20,8 @@ We never downgrade. Downgrade scripts are not needed.
 ### Guarantee A: Schema Upgrade Correctness
 
 **Goal:** Verify that `ALTER EXTENSION UPDATE` produces an identical schema to a fresh `CREATE EXTENSION`.
+
+**Contract:** For a not-yet-released version, the fresh-install schema must match what an existing customer gets by installing the immediately previous compatible release and applying the shipped upgrade chain. If fresh install and upgrade differ before release, align the new version's fresh-install DDL with the upgrade path unless there is a deliberate reason to change that contract.
 
 **Method:**
 1. Install current `.so` and all upgrade SQL files
@@ -30,17 +34,17 @@ We never downgrade. Downgrade scripts are not needed.
 - Wrong column types, defaults, or constraint names
 - Ordering issues in upgrade SQL
 
-**Versions tested:** The immediately previous release. Earlier upgrade scripts are frozen and were tested when they shipped; only the current work-in-progress script can introduce a new schema inconsistency.
+**Versions tested:** The immediately previous release, when that release is at or after v0.2.2. The harness skips this guarantee when the previous release is before `PROVIDER_COMPAT_START_VERSION`. Earlier upgrade scripts are frozen and were tested when they shipped; only the current work-in-progress script can introduce a new schema inconsistency.
 
 ### Guarantee B1: Binary Backward Compatibility
 
 **Goal:** Verify that the new `.so` works correctly against **all** previous versions' schemas, not just the immediately previous one. Customers may never run `ALTER EXTENSION UPDATE`, so the new binary must work against any older supported schema.
 
-**Versions tested:** All versions starting with v0.2.2, the first open-sourced release.
+**Versions tested:** Every previous release in the current major version, starting with v0.2.2. Earlier majors and versions before `PROVIDER_COMPAT_START_VERSION` are outside this guarantee.
 
 **Method:**
 1. Install the new `.so`
-2. For each previous version: create the extension with that version's install SQL
+2. For each previous version in that range, install from the highest checked-in fixture at or below the target, then apply upgrade scripts up to that version. Open-source versions from v0.2.2 upward reconstruct from `sql/pg_durable--0.2.2.sql`. Keep that fixture: without it, reconstruction would chain through `sql/pg_durable--0.1.1.sql`, whose embedded duroxide schema is incompatible with duroxide-pg migration tracking (`_duroxide_migrations`).
 3. Exercise all SQL-callable functions against each schema
 4. Verify: no errors, correct results
 
@@ -64,7 +68,7 @@ We never downgrade. Downgrade scripts are not needed.
 
 **Goal:** Verify that data created under the previous version remains accessible and functional after `ALTER EXTENSION UPDATE`.
 
-**Versions tested:** The immediately previous release.
+**Versions tested:** The immediately previous release, when that release is at or after v0.2.2. The harness skips this guarantee when the previous release is before `PROVIDER_COMPAT_START_VERSION`.
 
 **Method:**
 1. Create extension at previous version
@@ -126,7 +130,7 @@ Returns the version that was last installed/updated. Compare against known thres
 Each PR that changes the extension schema or modifies SQL queries in Rust code should:
 
 1. Add the necessary DDL to the upgrade script (`sql/pg_durable--<prev>--<current>.sql`)
-2. Ensure the `.so` is backward compatible with **all** schemas starting with v0.2.2 (Guarantee B1)
+2. Ensure the `.so` is backward compatible with **all** current-major schemas starting with v0.2.2 (Guarantee B1)
 3. Keep all new DDL — in the Rust install SQL *and* in any new upgrade script — schema-qualified so it passes the pgspot SQL security gate (`scripts/pgspot-gate.sh`): qualify operators as `OPERATOR(pg_catalog.<op>)`, functions/types/objects by schema (e.g. `pg_catalog.now()`), and qualify references inside anonymous `DO` blocks (they run under the session search_path). New upgrade scripts are gated automatically.
 4. Add version-specific notes to this document under "Version-Specific Changes" below
 5. Run `scripts/test-upgrade.sh` and `scripts/pgspot-gate.sh`
@@ -137,7 +141,7 @@ While the major version is zero, prepare a patch release (for example, v0.2.8 �
 
 1. Create an empty `sql/pg_durable--<previous>--<next>.sql` upgrade script.
 2. Bump the version in `Cargo.toml` to `<next>`.
-3. Run `scripts/test-upgrade.sh`. Add an install SQL fixture only if the test harness cannot reconstruct a version it must test.
+3. Run `scripts/test-upgrade.sh`. Add an install SQL fixture only if the harness cannot reconstruct a version it must test. Do not delete `sql/pg_durable--0.2.2.sql`; it is the reconstruction base for every supported open-source schema. A new major starts a new B1 range: check in an install fixture for the first version of that major, and do not expect B1 to keep testing the previous major.
 
 ### Upgrade scripts and the pgspot gate
 
@@ -343,7 +347,7 @@ the extension schema.
 - **DDL change (df schema):** Replaces `df.start(text, text, text)` with `df.start(text, text, text, text)`, bound to the new C symbol `start_v2_wrapper`. The new trailing `transaction_mode` argument defaults to `'caller'` (join the caller's transaction, the historical behaviour); `'new'` persists and enqueues the durable function on a *separate* PostgreSQL session so it commits independently and survives a rollback of the caller's transaction. This provides the rollback-survival outcome of an Oracle autonomous transaction for asynchronously started work, but the workflow completes later and its execution errors do not propagate through `df.start()`. Nothing about the started function changes; only the commit boundary of the start itself does.
 - **Upgrade script:** `sql/pg_durable--0.2.4--0.2.5.sql` runs `DROP FUNCTION IF EXISTS df.start(text, text, text)` followed by `CREATE FUNCTION df.start(...)` with the four-argument signature, copied verbatim from the pgrx-generated fresh-install DDL (same argument list, defaults, `RETURNS TEXT`, `LANGUAGE c`, and wrapper symbol). The drop is required, not cosmetic: both signatures default `label` and `database`, so a three-argument call such as `df.start(fut, label, database)` would match both and PostgreSQL would raise `function ... is not unique`. New `df.*` functions retain PostgreSQL's default PUBLIC `EXECUTE`, gated by `USAGE ON SCHEMA df`, so no explicit `GRANT` is needed.
 - **Guarantee A considerations:** A fresh install exposes exactly one `df.start`, the four-argument one — `src/dsl.rs` keeps a three-argument Rust `start()` for binary compatibility but marks it `#[pg_extern(sql = false)]`, so it contributes no DDL. The upgrade script's drop-then-create reaches the same single-overload end state, so the Guarantee A snapshot matches.
-- **Guarantee B1 considerations:** The `start_wrapper` symbol is deliberately preserved in the binary by that `sql = false` Rust function, which still takes exactly three arguments and delegates with `transaction_mode = 'caller'`. Pre-0.2.5 schemas (0.2.2, 0.2.3, 0.2.4) declare `df.start(text, text, text)` against `start_wrapper` and keep resolving to it with unchanged behaviour; they simply do not expose `transaction_mode`. Had the four-argument Rust function reused `start_wrapper`, those schemas would have invoked it with a three-argument `FunctionCallInfo`. `transaction_mode => 'new'` reads/writes only columns (`df.instances`, `df.nodes`) that exist in every shipped schema on this line — and it does so by calling `df.start()` with three positional arguments on the separate session, which resolves on old and new schemas alike, so it inherits whatever legacy-schema handling `df.start()` already performs.
+- **Guarantee B1 considerations:** The `start_wrapper` symbol is deliberately preserved in the binary by that `sql = false` Rust function, which still takes exactly three arguments and delegates with `transaction_mode = 'caller'`. Pre-0.2.5 schemas (0.2.2, 0.2.3, 0.2.4) declare `df.start(text, text, text)` against `start_wrapper` and keep resolving to it with unchanged behaviour; they simply do not expose `transaction_mode`. Had the four-argument Rust function reused `start_wrapper`, those schemas would have invoked it with a three-argument `FunctionCallInfo`. `transaction_mode => 'new'` reads/writes only columns (`df.instances`, `df.nodes`) that exist in every shipped schema starting with v0.2.2 — and it does so by calling `df.start()` with three positional arguments on the separate session, which resolves on old and new schemas alike, so it inherits whatever legacy-schema handling `df.start()` already performs.
 - **Guarantee B2 considerations:** No data migration; instances created before the upgrade are unaffected.
 
 ### v0.2.3 → v0.2.4
