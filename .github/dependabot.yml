@@ -5,14 +5,13 @@
 # org/repo setting. This lets it raise update PRs even where that setting is
 # disabled by policy.
 #
-# versioning-strategy: lockfile-only keeps Cargo.toml requirements untouched and
-# only refreshes Cargo.lock — equivalent to `cargo update`. This preserves the
-# exact `=` pins on pgrx, duroxide, and duroxide-pg (and the duroxide /
-# duroxide-pg compatible-pair invariant) while still picking up patched
-# transitive and range-versioned dependencies.
+# Update Cargo.toml when a new version requires it. The ignored crates need
+# coordinated manual upgrades: pgrx with pgrx-tests, and duroxide with duroxide-pg.
+# Exact `=` pins alone do not prevent Dependabot from proposing manifest edits.
 #
 # The single "cargo" group collapses all updates into one weekly PR instead of
-# one PR per crate. That PR is validated by the normal CI workflow.
+# one PR per crate. CI validates the committed lockfile. Review pre-1.0 minor
+# upgrades as potentially breaking, regardless of Dependabot's update label.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -22,7 +21,12 @@ updates:
       day: monday
       time: "03:00"
       timezone: "Etc/UTC"
-    versioning-strategy: lockfile-only
+    versioning-strategy: increase-if-necessary
+    ignore:
+      - dependency-name: pgrx
+      - dependency-name: pgrx-tests
+      - dependency-name: duroxide
+      - dependency-name: duroxide-pg
     open-pull-requests-limit: 5
     labels:
       - dependencies

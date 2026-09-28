@@ -86,6 +86,9 @@ jobs:
           cargo pgrx init --pg17 "$PG_CONFIG"
           echo "PG_CONFIG=$PG_CONFIG" >> "$GITHUB_ENV"
 
+      - name: Validate committed Cargo lockfile
+        run: cargo metadata --locked --format-version 1 --no-default-features --features pg17 > /dev/null
+
       - name: Test source package installation
         run: |
           ./scripts/test-make-install.sh
@@ -126,6 +129,10 @@ jobs:
           test ! -e "$pkglibdir/pg_durable.dylib"
           test ! -e "$extension_dir/pg_durable.control"
           test -z "$(find "$extension_dir" -name 'pg_durable--*.sql' -print -quit)"
+
+      - name: Verify Cargo lockfile is unchanged
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock
 
   format:
     name: Format Check
@@ -224,6 +231,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-deps-
 
+      - name: Validate committed Cargo lockfile
+        run: cargo metadata --locked --format-version 1 --no-default-features --features pg${{ matrix.pg_version }} > /dev/null
+
       - name: Cache PostgreSQL build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -254,7 +264,7 @@ jobs:
           fi
 
       - name: Run clippy
-        run: cargo clippy --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
+        run: cargo clippy --locked --no-default-features --features pg${{ matrix.pg_version }} -- -D warnings
 
       # pgspot SQL security gate (pg17 only; the install SQL is the shipped DDL).
       - name: Generate extension install SQL
@@ -315,3 +325,8 @@ jobs:
       - name: Stop PostgreSQL after pg_regress
         if: steps.pg_regress.outcome != 'skipped'
         run: ./scripts/pg-stop.sh --pg-version ${{ matrix.pg_version }}
+
+      # cargo-pgrx 0.16.1 does not expose --locked for its build/test commands.
+      - name: Verify Cargo lockfile is unchanged
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock
