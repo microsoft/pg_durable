@@ -111,11 +111,21 @@ pub extern "C-unwind" fn duroxide_worker_main(_arg: pg_sys::Datum) {
     let configured_identity_endpoint = crate::MANAGED_IDENTITY_ENDPOINT
         .get()
         .unwrap_or_else(|| error!("pg_durable.managed_identity_endpoint must not be NULL"));
+    let configured_client_id = crate::MANAGED_IDENTITY_CLIENT_ID.get().unwrap_or_default();
+    let client_id = crate::managed_identity::parse_client_id(
+        configured_client_id
+            .to_str()
+            .unwrap_or_else(|_| error!("pg_durable.managed_identity_client_id must be UTF-8")),
+    )
+    .unwrap_or_else(|err| {
+        error!("invalid value for parameter \"pg_durable.managed_identity_client_id\": {err}")
+    });
     let identity_client = Arc::new(
         crate::managed_identity::TokenClient::new(
             configured_identity_endpoint
                 .to_str()
                 .unwrap_or_else(|_| error!("pg_durable.managed_identity_endpoint must be UTF-8")),
+            client_id,
         )
         .unwrap_or_else(|err| {
             error!("invalid value for parameter \"pg_durable.managed_identity_endpoint\": {err}")

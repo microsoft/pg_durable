@@ -411,21 +411,30 @@ the extension schema.
 
 #### Managed identity endpoints
 
-- **Runtime change (no DDL):** The endpoint validator accepts
-  `auth_scheme 'managed-identity'` and optional UUID `client_id`. Only superusers
-  can configure this authentication; activities re-check superuser ownership,
-  caller permissions and destination policy before acquiring a token.
-- **Scenario A/B2 considerations:** No additional SQL objects, signatures, grants
-  or upgrade-script DDL. Tokens remain in worker memory, never catalog mappings
-  or durable activity results. The startup-only token-provider GUC is independent
-  of the extension schema.
+- **Runtime behavior:** `auth_scheme 'managed-identity'` uses the identity pinned
+  by the protected startup GUC `pg_durable.managed_identity_client_id`. Empty
+  disables MI without selecting a default identity. Endpoint `client_id` options
+  are rejected; resources remain derived from destinations.
+- **Scenario A/B2 considerations:** Fresh-install and 0.2.8-to-0.2.9 upgrade SQL
+  add `df.managed_identity_admin() RETURNS void` and revoke PUBLIC execution.
+  The validator requires its effective `EXECUTE` privilege for configuration;
+  activities check the owner's capability plus caller permissions and destination
+  policy on each attempt. The B2 probe verifies default denial and explicit
+  non-superuser delegation. Existing HTTP signatures and grants are unchanged.
+  Tokens remain in worker memory, never catalog mappings or durable results.
+  Provider and client-ID GUCs are independent of the extension schema.
 - **Scenario B1 considerations:** Existing workflows still run on previous
   supported schemas. Token-client construction performs no network access;
   workflows without managed-identity endpoints never contact a token provider.
-  Endpoint references retain the existing missing-schema check.
+  Endpoint references retain the existing missing-schema check. Capability lookup
+  checks native catalog identity and extension membership, and fails closed if
+  the capability is absent. B1 verifies the new function remains absent without
+  an extension update. No endpoint data conversion is required.
 - **Replay compatibility:** Activity names, operation order and serialized inputs
   are unchanged. Endpoint configuration and authentication are resolved only when
   an HTTP activity executes; recorded results replay without acquiring a token.
+  Changing the configured identity and restarting affects pending requests and
+  retries, not recorded completions.
 
 #### Add `df.with_http_options()`
 - **DDL change:** Adds `df.with_http_options(fut text, options jsonb) RETURNS text`. The input must be a single `HTTP` or `HTTP_MULTIPART` node. SQL `NULL` and `{}` preserve input bytes; `secret_bindings` and `form_fields` configure references and literal form data. Other values and unsupported keys raise an error.

@@ -969,11 +969,11 @@ a server does not authorize network access or bypass HTTP destination restrictio
 | `bearer` | None | `token` (without the `Bearer ` prefix) |
 | `header` | `header_name`, such as `x-api-key` | `header_value` |
 | `query` | None | `query_string`, already URL-encoded, optionally starting with `?` |
-| `managed-identity` | Optional `client_id` for a user-assigned identity | None |
+| `managed-identity` | None; uses the startup-configured identity | None |
 
 Unknown options and authentication schemes are rejected. The catalog does not
-accept free-form `resource` or `scope` settings. `client_id` must be a UUID and is
-accepted only for managed identity.
+accept `client_id`, `resource` or `scope` settings. Identity selection belongs to
+deployment configuration, not individual endpoints.
 Header names cannot override routing, framing or multipart content type.
 Credential values must be nonempty and valid for their transport; validation
 errors do not echo those values. The mapping validator checks individual options;
@@ -1034,21 +1034,41 @@ through `df.secret`, stored in user mappings, or added to workflow inputs or
 results. A destination can still return sensitive data, including an echoed
 request header; response contents are not automatically redacted.
 
-Only a superuser may create or alter a managed-identity endpoint, even when FDW
-creation has been delegated. Its owner must remain a superuser: execution fails
-after an ownership transfer to an ordinary role or demotion of the owner. Granting
-server `USAGE` delegates use of the selected identity, so restrict both this grant
-and the identity's Azure permissions. Each caller also needs the corresponding
-HTTP function grant.
+The server administrator selects one user-assigned identity for all MI-backed
+endpoints, then restarts PostgreSQL:
 
-Provision the endpoint as a superuser, then use an existing application role:
+```ini
+pg_durable.managed_identity_client_id = '11111111-1111-1111-1111-111111111111'
+```
+
+The value must be a nonzero client UUID. An empty value, the default, disables MI
+requests without affecting other HTTP authentication. There is no implicit
+system-assigned or provider-default identity. The identity must be available to
+the token provider and authorized for the target resources. Select an identity
+intended for customer-configured requests, not merely one used by a service for
+internal operations.
+
+Creating or altering an MI endpoint requires `EXECUTE` on
+`df.managed_identity_admin()`, in addition to native FDW and ownership permissions.
+This is a database-local capability with no `PUBLIC` grant. Calling the function
+returns no token and changes no settings. `df.grant_usage`, even with
+`with_grant => true`, does not grant this capability or FDW creation permission.
+
+A privileged provisioner can delegate configuration to an existing administrator
+role without making it a PostgreSQL superuser:
 
 ```sql
+GRANT USAGE ON SCHEMA df TO endpoint_admin;
+GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO endpoint_admin;
+GRANT EXECUTE ON FUNCTION df.managed_identity_admin() TO endpoint_admin;
+SELECT df.grant_usage('app_role', include_http => true);
+
+SET ROLE endpoint_admin;
 CREATE SERVER storage_identity FOREIGN DATA WRAPPER pg_durable_fdw
     OPTIONS (base_url 'https://account.blob.core.windows.net',
              auth_scheme 'managed-identity');
 GRANT USAGE ON FOREIGN SERVER storage_identity TO app_role;
-SELECT df.grant_usage('app_role', include_http => true);
+RESET ROLE;
 
 SET ROLE app_role;
 SELECT df.start(
@@ -1059,10 +1079,18 @@ SELECT df.start(
 RESET ROLE;
 ```
 
-Omit `client_id` to use the host's default identity. To select a user-assigned
-identity, add its application/client UUID as the server's `client_id` option.
-Workflow paths, headers, secret bindings and user mappings cannot select the
-identity, change its token resource, or replace its `Authorization` header.
+Each request rechecks that the endpoint owner retains the capability and that the
+caller has server `USAGE` and HTTP execution privileges. Revoking the owner's
+capability, or transferring ownership to an unauthorized role, blocks subsequent
+attempts even if a token is cached. Native privilege inheritance applies; another
+direct or inherited grant can still supply the capability. Revocation does not
+recall an already-authorized request.
+
+Endpoint administration does not permit changing the client-ID or provider GUCs.
+Endpoint options, workflow paths, headers, secret bindings and user mappings cannot
+select another identity, change its token resource, or replace its `Authorization`
+header. Pinning the identity controls pg_durable's requests, not host-wide access
+to credentials; provider isolation remains a deployment responsibility.
 
 The destination must use HTTPS on port 443. Token resources are fixed by hostname:
 
@@ -1087,10 +1115,13 @@ must supply an IMDS-compatible adapter and configure the startup-only
 [`pg_durable.managed_identity_endpoint`](docs/api-reference.md#pg_durablemanaged_identity_endpoint).
 Such adapters are not included in the extension.
 
-The worker caches tokens by identity and resource, refreshes before expiry, and
+The worker caches one token per resource for the configured identity, refreshes before expiry, and
 never returns a stale token after a refresh failure. Permissions and destination
 configuration are still checked on every request, including cache hits. Provider
 failures fail the activity without persisting the provider's response body.
+Changing the client ID and restarting clears the cache and changes the identity
+used by subsequent requests, including pending workflows and retries. Recorded
+activity results replay without acquiring tokens.
 
 ### Calling an Endpoint
 

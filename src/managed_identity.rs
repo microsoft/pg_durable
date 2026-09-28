@@ -13,16 +13,25 @@ pub const DEFAULT_TOKEN_ENDPOINT: &std::ffi::CStr =
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const REFRESH_MARGIN: Duration = Duration::from_secs(120);
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_CACHED_IDENTITIES: usize = 128;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Identity {
-    resource: &'static str,
-    client_id: Option<Uuid>,
+pub fn parse_client_id(value: &str) -> Result<Option<Uuid>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Uuid::parse_str(value)
+        .ok()
+        .filter(|client_id| !client_id.is_nil())
+        .map(Some)
+        .ok_or_else(|| "Managed identity client ID must be a nonzero UUID, or empty to disable managed identity".into())
 }
 
-impl Identity {
-    pub fn for_endpoint(url: &Url, client_id: Option<&str>) -> Result<Self, String> {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TokenResource {
+    resource: &'static str,
+}
+
+impl TokenResource {
+    pub fn for_endpoint(url: &Url) -> Result<Self, String> {
         if url.scheme() != "https" || url.port_or_known_default() != Some(443) {
             return Err("Managed identity destinations must use HTTPS on port 443".into());
         }
@@ -55,15 +64,7 @@ impl Identity {
             .map(|(_, resource)| resource)
             .ok_or("Managed identity is not supported for this destination hostname")?
         };
-        let client_id = client_id
-            .map(|value| {
-                Uuid::parse_str(value).map_err(|_| "Managed identity client_id must be a UUID")
-            })
-            .transpose()?;
-        Ok(Self {
-            resource,
-            client_id,
-        })
+        Ok(Self { resource })
     }
 }
 
@@ -103,13 +104,32 @@ pub(crate) unsafe extern "C-unwind" fn check_token_endpoint(
             .map_err(|_| "Managed identity token endpoint must be UTF-8".into())
             .and_then(validate_token_endpoint)
     };
+    check_guc_result("pg_durable.managed_identity_endpoint", result.map(|_| ()))
+}
+
+#[pgrx::pg_guard]
+pub(crate) unsafe extern "C-unwind" fn check_client_id(
+    newval: *mut *mut std::ffi::c_char,
+    _extra: *mut *mut std::ffi::c_void,
+    _source: pgrx::pg_sys::GucSource::Type,
+) -> bool {
+    let result = if unsafe { (*newval).is_null() } {
+        Ok(None)
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(*newval) }
+            .to_str()
+            .map_err(|_| "Managed identity client ID must be UTF-8".into())
+            .and_then(parse_client_id)
+    };
+    check_guc_result("pg_durable.managed_identity_client_id", result.map(|_| ()))
+}
+
+fn check_guc_result(parameter: &str, result: Result<(), String>) -> bool {
     match result {
         Ok(_) => true,
         Err(error) => {
             if unsafe { pgrx::pg_sys::process_shared_preload_libraries_in_progress } {
-                pgrx::error!(
-                    "invalid value for parameter \"pg_durable.managed_identity_endpoint\": {error}"
-                );
+                pgrx::error!("invalid value for parameter \"{parameter}\": {error}");
             }
             unsafe {
                 pgrx::pg_sys::GUC_check_errdetail_string =
@@ -156,7 +176,11 @@ struct CachedToken {
 }
 
 impl CachedToken {
-    fn parse(bytes: &[u8], identity: &Identity, requested_at: SystemTime) -> Result<Self, String> {
+    fn parse(
+        bytes: &[u8],
+        identity: &TokenResource,
+        requested_at: SystemTime,
+    ) -> Result<Self, String> {
         let response: TokenResponse =
             serde_json::from_slice(bytes).map_err(|_| "Invalid managed identity token response")?;
         if response.error.is_some()
@@ -213,57 +237,60 @@ impl CachedToken {
 
 pub struct TokenClient {
     endpoint: Url,
+    client_id: Option<Uuid>,
     client: OnceLock<Result<reqwest::Client, String>>,
-    tokens: Mutex<BTreeMap<Identity, Arc<Mutex<Option<CachedToken>>>>>,
+    tokens: Mutex<BTreeMap<TokenResource, Arc<Mutex<Option<CachedToken>>>>>,
 }
 
 impl TokenClient {
-    pub fn new(endpoint: &str) -> Result<Self, String> {
+    pub fn new(endpoint: &str, client_id: Option<Uuid>) -> Result<Self, String> {
         let endpoint = validate_token_endpoint(endpoint)?;
         Ok(Self {
             endpoint,
+            client_id,
             client: OnceLock::new(),
             tokens: Mutex::new(BTreeMap::new()),
         })
     }
 
-    pub async fn authorization(&self, identity: &Identity) -> Result<HeaderValue, String> {
-        tokio::time::timeout(TOKEN_TIMEOUT, self.cached_authorization(identity))
-            .await
-            .map_err(|_| "Managed identity token acquisition timed out")?
+    pub async fn authorization(&self, identity: &TokenResource) -> Result<HeaderValue, String> {
+        let client_id = self.client_id.ok_or("Managed identity is disabled; configure pg_durable.managed_identity_client_id and restart PostgreSQL")?;
+        tokio::time::timeout(
+            TOKEN_TIMEOUT,
+            self.cached_authorization(identity, client_id),
+        )
+        .await
+        .map_err(|_| "Managed identity token acquisition timed out")?
     }
 
-    async fn cached_authorization(&self, identity: &Identity) -> Result<HeaderValue, String> {
+    async fn cached_authorization(
+        &self,
+        identity: &TokenResource,
+        client_id: Uuid,
+    ) -> Result<HeaderValue, String> {
         let entry = {
             let mut tokens = self.tokens.lock().await;
-            if let Some(entry) = tokens.get(identity) {
-                entry.clone()
-            } else {
-                if tokens.len() >= MAX_CACHED_IDENTITIES {
-                    let removable = tokens
-                        .iter()
-                        .find(|(_, entry)| Arc::strong_count(entry) == 1)
-                        .map(|(key, _)| key.clone())
-                        .ok_or("Managed identity token cache is busy; retry the request")?;
-                    tokens.remove(&removable);
-                }
-                let entry = Arc::new(Mutex::new(None));
-                tokens.insert(identity.clone(), entry.clone());
-                entry
-            }
+            tokens
+                .entry(identity.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
         };
         let mut token = entry.lock().await;
         if let Some(token) = token.as_ref().filter(|token| token.is_fresh()) {
             return Ok(token.authorization.clone());
         }
         *token = None;
-        let fetched = self.fetch(identity).await?;
+        let fetched = self.fetch(identity, client_id).await?;
         let authorization = fetched.authorization.clone();
         *token = Some(fetched);
         Ok(authorization)
     }
 
-    async fn fetch(&self, identity: &Identity) -> Result<CachedToken, String> {
+    async fn fetch(
+        &self,
+        identity: &TokenResource,
+        client_id: Uuid,
+    ) -> Result<CachedToken, String> {
         let client = self
             .client
             .get_or_init(|| {
@@ -283,10 +310,8 @@ impl TokenClient {
             let mut query = url.query_pairs_mut();
             query
                 .append_pair("api-version", "2018-02-01")
-                .append_pair("resource", identity.resource);
-            if let Some(client_id) = identity.client_id {
-                query.append_pair("client_id", &client_id.to_string());
-            }
+                .append_pair("resource", identity.resource)
+                .append_pair("client_id", &client_id.to_string());
         }
         let mut response = client
             .get(url)
@@ -327,6 +352,31 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
+    const CLIENT_ID: &str = "11111111-1111-1111-1111-111111111111";
+
+    #[test]
+    fn managed_identity_validates_client_id_configuration() {
+        assert_eq!(parse_client_id("").unwrap(), None);
+        let client_id = "12345678-1234-1234-1234-123456789abc";
+        for value in [client_id.to_string(), client_id.to_ascii_uppercase()] {
+            assert_eq!(
+                parse_client_id(&value).unwrap().unwrap().to_string(),
+                client_id
+            );
+        }
+        for invalid in [
+            " ",
+            "\n",
+            "PRIVATE_VALUE",
+            "00000000-0000-0000-0000-000000000000",
+            "12345678-1234-1234-1234-123456789abc\n",
+            "12345678-1234-1234-1234-123456789abc,11111111-1111-1111-1111-111111111111",
+        ] {
+            let error = parse_client_id(invalid).unwrap_err();
+            assert!(!error.contains("PRIVATE_VALUE"));
+        }
+    }
+
     fn http_response(body: &str) -> String {
         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
@@ -365,15 +415,15 @@ mod tests {
             }
             requests
         });
-        (TokenClient::new(&endpoint).unwrap(), server)
+        (
+            TokenClient::new(&endpoint, parse_client_id(CLIENT_ID).unwrap()).unwrap(),
+            server,
+        )
     }
 
-    fn identity() -> Identity {
-        Identity::for_endpoint(
-            &Url::parse("https://account.blob.core.windows.net").unwrap(),
-            None,
-        )
-        .unwrap()
+    fn identity() -> TokenResource {
+        TokenResource::for_endpoint(&Url::parse("https://account.blob.core.windows.net").unwrap())
+            .unwrap()
     }
 
     fn response() -> serde_json::Value {
@@ -414,9 +464,10 @@ mod tests {
         ))
         .unwrap();
         let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(query.len(), 2);
+        assert_eq!(query.len(), 3);
         assert_eq!(query["api-version"], "2018-02-01");
         assert_eq!(query["resource"], "https://storage.azure.com/");
+        assert_eq!(query["client_id"], CLIENT_ID);
         assert_eq!(
             client.authorization(&identity()).await.unwrap(),
             "Bearer PRIVATE_TOKEN"
@@ -425,53 +476,58 @@ mod tests {
 
     #[tokio::test]
     async fn managed_identity_cache_separates_clients_and_resources() {
-        let storage = Url::parse("https://account.blob.core.windows.net").unwrap();
-        let identities = [
+        let resources = [
             identity(),
-            Identity::for_endpoint(&storage, Some("11111111-1111-1111-1111-111111111111")).unwrap(),
-            Identity::for_endpoint(&storage, Some("22222222-2222-2222-2222-222222222222")).unwrap(),
-            Identity::for_endpoint(
-                &Url::parse("https://example.openai.azure.com").unwrap(),
-                None,
-            )
-            .unwrap(),
+            TokenResource::for_endpoint(&Url::parse("https://example.openai.azure.com").unwrap())
+                .unwrap(),
         ];
-        let responses = identities
-            .iter()
-            .enumerate()
-            .map(|(index, identity)| {
-                let mut response = response();
-                response["resource"] = serde_json::json!(identity.resource);
-                response["access_token"] = serde_json::json!(format!("PRIVATE_TOKEN_{index}"));
-                http_response(&response.to_string())
+        let responses = (0..2)
+            .flat_map(|client_index| {
+                resources
+                    .iter()
+                    .enumerate()
+                    .map(move |(resource_index, resource)| {
+                        let mut response = response();
+                        response["resource"] = serde_json::json!(resource.resource);
+                        response["access_token"] = serde_json::json!(format!(
+                            "PRIVATE_TOKEN_{client_index}_{resource_index}"
+                        ));
+                        http_response(&response.to_string())
+                    })
             })
             .collect();
         let (client, server) = mock_provider(responses).await;
+        let other_client = TokenClient::new(
+            client.endpoint.as_str(),
+            parse_client_id("22222222-2222-2222-2222-222222222222").unwrap(),
+        )
+        .unwrap();
+        let clients = [client, other_client];
         for _ in 0..2 {
-            for (index, identity) in identities.iter().enumerate() {
-                assert_eq!(
-                    client.authorization(identity).await.unwrap(),
-                    format!("Bearer PRIVATE_TOKEN_{index}")
-                );
+            for (client_index, client) in clients.iter().enumerate() {
+                for (resource_index, resource) in resources.iter().enumerate() {
+                    assert_eq!(
+                        client.authorization(resource).await.unwrap(),
+                        format!("Bearer PRIVATE_TOKEN_{client_index}_{resource_index}")
+                    );
+                }
             }
         }
         let requests = server.await.unwrap();
-        assert_eq!(requests.len(), identities.len());
-        for (request, identity) in requests.iter().zip(identities) {
+        assert_eq!(requests.len(), clients.len() * resources.len());
+        for (request, (client, resource)) in requests.iter().zip(
+            clients
+                .iter()
+                .flat_map(|client| resources.iter().map(move |resource| (client, resource))),
+        ) {
             let url = Url::parse(&format!(
                 "http://localhost{}",
                 request.split_whitespace().nth(1).unwrap()
             ))
             .unwrap();
             let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-            assert_eq!(query["resource"], identity.resource);
-            assert_eq!(
-                query.get("client_id"),
-                identity
-                    .client_id
-                    .map(|client_id| client_id.to_string())
-                    .as_ref()
-            );
+            assert_eq!(query["resource"], resource.resource);
+            assert_eq!(query["client_id"], client.client_id.unwrap().to_string());
         }
     }
 
@@ -536,44 +592,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_identity_cache_is_bounded_without_evicting_active_entries() {
-        let (client, server) = mock_provider(vec![http_response(&response().to_string())]).await;
-        for index in 0..MAX_CACHED_IDENTITIES {
-            let mut identity = identity();
-            identity.client_id = Some(Uuid::from_u128(index as u128 + 1));
-            client
-                .tokens
-                .lock()
-                .await
-                .insert(identity, Arc::new(Mutex::new(None)));
-        }
-        let (active_identity, active) = {
-            let entries = client.tokens.lock().await;
-            let (identity, entry) = entries.first_key_value().unwrap();
-            (identity.clone(), entry.clone())
+    async fn managed_identity_unset_disables_token_acquisition() {
+        let client = TokenClient::new("http://127.0.0.1:9/token", None).unwrap();
+        let mut request = crate::endpoints::EndpointRequest {
+            url: Url::parse("https://account.blob.core.windows.net/").unwrap(),
+            credential_header: None,
+            managed_identity: Some(identity()),
         };
-        client.authorization(&identity()).await.unwrap();
-        assert_eq!(server.await.unwrap().len(), 1);
-        let entries = client.tokens.lock().await;
-        assert_eq!(entries.len(), MAX_CACHED_IDENTITIES);
-        assert!(Arc::ptr_eq(entries.get(&active_identity).unwrap(), &active));
-        let active_entries = entries.values().cloned().collect::<Vec<_>>();
-        drop(entries);
-        let mut another = identity();
-        another.client_id = Some(Uuid::from_u128(MAX_CACHED_IDENTITIES as u128 + 1));
-        assert!(client
-            .authorization(&another)
-            .await
-            .unwrap_err()
-            .contains("cache is busy"));
-        drop(active_entries);
+        let error = request.authorize(&client).await.unwrap_err();
+        assert!(error.contains("configure pg_durable.managed_identity_client_id"));
+        assert!(request.credential_header.is_none());
+        assert!(client.client.get().is_none());
+        assert!(client.tokens.lock().await.is_empty());
     }
 
     #[tokio::test]
     async fn managed_identity_timeout_releases_waiters() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client =
-            TokenClient::new(&format!("http://{}/token", listener.local_addr().unwrap())).unwrap();
+        let client = TokenClient::new(
+            &format!("http://{}/token", listener.local_addr().unwrap()),
+            parse_client_id(CLIENT_ID).unwrap(),
+        )
+        .unwrap();
         let server = tokio::spawn(async move {
             let (first, _) = listener.accept().await.unwrap();
             let (mut second, _) = listener.accept().await.unwrap();
@@ -594,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn managed_identity_is_not_contacted_for_other_authentication() {
-        let client = TokenClient::new(DEFAULT_TOKEN_ENDPOINT.to_str().unwrap()).unwrap();
+        let client = TokenClient::new(DEFAULT_TOKEN_ENDPOINT.to_str().unwrap(), None).unwrap();
         let mut request = crate::endpoints::EndpointRequest {
             url: Url::parse("https://api.github.com/").unwrap(),
             credential_header: None,
@@ -651,7 +691,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                Identity::for_endpoint(&Url::parse(url).unwrap(), None)
+                TokenResource::for_endpoint(&Url::parse(url).unwrap())
                     .unwrap()
                     .resource,
                 resource
@@ -669,27 +709,9 @@ mod tests {
             "https://169.254.169.254",
         ] {
             assert!(
-                Identity::for_endpoint(&Url::parse(url).unwrap(), None).is_err(),
+                TokenResource::for_endpoint(&Url::parse(url).unwrap()).is_err(),
                 "{url}"
             );
-        }
-    }
-
-    #[test]
-    fn managed_identity_validates_client_id() {
-        let url = Url::parse("https://account.blob.core.windows.net").unwrap();
-        let client_id = "12345678-1234-1234-1234-123456789abc";
-        assert_eq!(
-            Identity::for_endpoint(&url, Some(client_id))
-                .unwrap()
-                .client_id
-                .unwrap()
-                .to_string(),
-            client_id
-        );
-        for invalid in ["", "PRIVATE_VALUE", "identifier\nresource"] {
-            let error = Identity::for_endpoint(&url, Some(invalid)).unwrap_err();
-            assert!(!error.contains("PRIVATE_VALUE"));
         }
     }
 

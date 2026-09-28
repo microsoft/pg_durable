@@ -14,9 +14,9 @@ from urllib.parse import parse_qs, urlsplit
 
 HOST = "pg-durable-mi.blob.core.windows.net"
 CLIENT_ID = "11111111-1111-1111-1111-111111111111"
-FAILING_CLIENT_ID = "22222222-2222-2222-2222-222222222222"
 RESOURCE = "https://storage.azure.com/"
-TOKENS = {"system": "MI_PRIVATE_SYSTEM_TOKEN", CLIENT_ID: "MI_PRIVATE_USER_TOKEN"}
+FAILING_RESOURCE = "https://vault.azure.net"
+TOKEN = "MI_PRIVATE_USER_TOKEN"
 
 
 class State:
@@ -47,27 +47,25 @@ class TokenHandler(Handler):
     def do_GET(self):
         url = urlsplit(self.path)
         query = parse_qs(url.query, keep_blank_values=True)
-        client_id = query.get("client_id", ["system"])[0]
         if (
             url.path != "/metadata/identity/oauth2/token"
             or self.headers.get("Metadata") != "true"
             or query.get("api-version") != ["2018-02-01"]
-            or query.get("resource") != [RESOURCE]
+            or query.get("client_id") != [CLIENT_ID]
+            or query.get("resource") not in ([RESOURCE], [FAILING_RESOURCE])
             or set(query) - {"resource", "api-version", "client_id"}
         ):
             self.reply(400, {"error": "invalid_request"})
             return
+        resource = query["resource"][0]
         with self.server.state.lock:
             counts = self.server.state.token_requests
-            counts[client_id] = counts.get(client_id, 0) + 1
-        if client_id == FAILING_CLIENT_ID:
+            counts[resource] = counts.get(resource, 0) + 1
+        if resource == FAILING_RESOURCE:
             self.reply(400, {"error": "invalid_request", "error_description": "MI_PRIVATE_PROVIDER_ERROR"})
             return
-        if client_id not in TOKENS:
-            self.reply(400, {"error": "unknown_identity"})
-            return
         self.reply(200, {
-            "access_token": TOKENS[client_id],
+            "access_token": TOKEN,
             "token_type": "Bearer",
             "resource": RESOURCE,
             "expires_on": str(int(time.time()) + 3600),
@@ -83,8 +81,7 @@ class DestinationHandler(Handler):
 
     def respond(self):
         path = urlsplit(self.path).path
-        identity = CLIENT_ID if path.startswith("/user/") else "system"
-        if self.headers.get_all("Authorization") != ["Bearer " + TOKENS[identity]]:
+        if self.headers.get_all("Authorization") != ["Bearer " + TOKEN]:
             self.reply(401, {"error": "unexpected authorization"})
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -136,15 +133,15 @@ class ProxyServer(socketserver.ThreadingTCPServer):
 
 def self_test(token_server, proxy_server, certificate):
     connection = http.client.HTTPConnection(*token_server.server_address, timeout=5)
-    connection.request("GET", "/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F", headers={"Metadata": "true"})
+    connection.request("GET", f"/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F&client_id={CLIENT_ID}", headers={"Metadata": "true"})
     response = connection.getresponse()
     assert response.status == 200
-    assert json.loads(response.read())["access_token"] == TOKENS["system"]
+    assert json.loads(response.read())["access_token"] == TOKEN
     connection.close()
     context = ssl.create_default_context(cafile=certificate)
     connection = http.client.HTTPSConnection(*proxy_server.server_address, context=context, timeout=5)
     connection.set_tunnel(HOST, 443)
-    connection.request("GET", "/system/data", headers={"Authorization": "Bearer " + TOKENS["system"]})
+    connection.request("GET", "/system/data", headers={"Authorization": "Bearer " + TOKEN})
     response = connection.getresponse()
     assert response.status == 204
     response.read()
