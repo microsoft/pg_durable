@@ -66,31 +66,11 @@ For extension schema changes, also run the upgrade tests:
 
 ### Dependency updates
 
-Keep `Cargo.toml` and `Cargo.lock` consistent and commit any changes to them.
-Use Cargo to regenerate the lockfile after editing a requirement, then validate
-with `--locked`. Updates within an existing requirement may change only the
-lockfile. Routine builds and checks should not silently repair or change the
-committed dependency graph.
+Keep `Cargo.toml` and `Cargo.lock` consistent. After editing a requirement, regenerate the lockfile with Cargo and check it with `--locked`. A newer version that already fits the requirement may change only the lockfile. Do not let a routine build rewrite the committed graph.
 
-[Dependabot](.github/dependabot.yml) uses Cargo's `auto` update strategy to update
-ordinary dependencies, including manifest requirements. The following dependencies
-are excluded from both version-update and security-update pull requests and must
-be monitored for releases and security fixes manually. Each ignore entry sets
-`versions: [">= 0"]`. A name-only ignore would still let a security update rewrite
-one exact pin without its pair. Dependabot alerts for these crates still open.
+[Dependabot](.github/dependabot.yml) updates ordinary Cargo requirements automatically. These dependencies are excluded from version-update and security-update pull requests, so watch them manually. Alerts still open.
 
-- Upgrade `pgrx` and `pgrx-tests` together, including the `cargo-pgrx` tooling.
-- Upgrade `duroxide` and `duroxide-pg` as a compatible pair, checking the provider's
-  release notes or compatibility matrix first.
+- Upgrade `pgrx` and `pgrx-tests` together, including `cargo-pgrx`.
+- Upgrade `duroxide` and `duroxide-pg` as a compatible pair.
 
-Exact `=` pins constrain Cargo resolution but do not, by themselves, prevent
-Dependabot from proposing changes to those pins. The ignore ranges above are what
-block those proposals. Review pre-1.0 minor-version upgrades as potentially
-breaking, even when Dependabot labels them as minor updates.
-
-[CI](.github/workflows/ci.yml) resolves the full dependency graph with
-`cargo metadata --locked` before project builds and uses `--locked` for Clippy.
-Because cargo-pgrx 0.16.1 does not expose `--locked` for its build/test commands,
-CI also checks that `Cargo.lock` is unchanged after packaging and tests, even
-when an earlier step fails. Do not use `--no-deps` for the initial metadata
-check: it skips dependency resolution and can miss an inconsistent lockfile.
+Review pre-1.0 minor upgrades as potentially breaking. CI checks the lockfile with `cargo metadata --locked` and fails if packaging or tests change `Cargo.lock`.
