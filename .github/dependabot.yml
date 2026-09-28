@@ -8,6 +8,9 @@
 # Update Cargo.toml when a new version requires it. The ignored crates need
 # coordinated manual upgrades: pgrx with pgrx-tests, and duroxide with duroxide-pg.
 # Exact `=` pins alone do not prevent Dependabot from proposing manifest edits.
+# A name-only ignore suppresses version updates only. versions: [">= 0"] also
+# suppresses security-update PRs, which would otherwise rewrite one exact pin
+# without its pair. Dependabot alerts for these crates still open.
 #
 # The single "cargo" group collapses all updates into one weekly PR instead of
 # one PR per crate. CI validates the committed lockfile. Review pre-1.0 minor
@@ -24,9 +27,13 @@ updates:
     versioning-strategy: auto
     ignore:
       - dependency-name: pgrx
+        versions: [">= 0"]
       - dependency-name: pgrx-tests
+        versions: [">= 0"]
       - dependency-name: duroxide
+        versions: [">= 0"]
       - dependency-name: duroxide-pg
+        versions: [">= 0"]
     open-pull-requests-limit: 5
     labels:
       - dependencies

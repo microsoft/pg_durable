@@ -74,16 +74,19 @@ committed dependency graph.
 
 [Dependabot](.github/dependabot.yml) uses Cargo's `auto` update strategy to update
 ordinary dependencies, including manifest requirements. The following dependencies
-are excluded from automatic updates and must be monitored for releases and
-security fixes manually:
+are excluded from both version-update and security-update pull requests and must
+be monitored for releases and security fixes manually. Each ignore entry sets
+`versions: [">= 0"]`. A name-only ignore would still let a security update rewrite
+one exact pin without its pair. Dependabot alerts for these crates still open.
 
 - Upgrade `pgrx` and `pgrx-tests` together, including the `cargo-pgrx` tooling.
 - Upgrade `duroxide` and `duroxide-pg` as a compatible pair, checking the provider's
   release notes or compatibility matrix first.
 
-Exact `=` pins constrain Cargo resolution but do not prevent Dependabot from
-proposing changes to those pins. Review pre-1.0 minor-version upgrades as
-potentially breaking, even when Dependabot labels them as minor updates.
+Exact `=` pins constrain Cargo resolution but do not, by themselves, prevent
+Dependabot from proposing changes to those pins. The ignore ranges above are what
+block those proposals. Review pre-1.0 minor-version upgrades as potentially
+breaking, even when Dependabot labels them as minor updates.
 
 [CI](.github/workflows/ci.yml) resolves the full dependency graph with
 `cargo metadata --locked` before project builds and uses `--locked` for Clippy.
