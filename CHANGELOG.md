@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
+Pre-1.0 note: `pg_durable` has introduced incompatible changes even between patch releases within `0.2.x`. SemVer permits instability in major version `0`; version numbers alone do not establish upgrade compatibility. Review the [upgrade incompatibility inventory](docs/upgrade-incompatibilities.md) before upgrading.
 
 ## [0.2.9] - Unreleased
 
@@ -229,7 +229,7 @@ Provider-line note: v0.2.4 stays in the `duroxide-pg` provider compatibility lin
   - **Breaking for in-flight work:** the new activity-input shape changes the string duroxide records in orchestration history, and duroxide validates activity inputs by exact equality on replay, so any instance left **in flight across the 0.2.3 → 0.2.4 binary upgrade** cannot complete. Drain or cancel in-flight instances before deploying 0.2.4. The in-place `df.nodes` key restructure also takes an `ACCESS EXCLUSIVE` lock whose duration scales with table size — run the upgrade in a maintenance window. See the #129 section of `docs/upgrade-testing.md` for the full drain-before-upgrade contract.
 - **`df.grant_usage()` / `df.revoke_usage()`:** dropped the explicit per-function `EXECUTE` allowlist. Schema `USAGE` on `df` is the real access gate for ordinary `df.*` functions, so the helpers now grant/revoke schema `USAGE`, the table privileges, and `EXECUTE` only on the sensitive functions (`df.http`, `df.grant_usage`, `df.revoke_usage`). Function signatures are unchanged and existing privileges are unaffected (#242).
 - **`df.list_instances()` page-size cap is now a loud error (#146):** `df.list_instances()` previously truncated `limit_count` silently to a fixed ceiling of 10000. It now raises an error when `limit_count` exceeds the new `pg_durable.list_instances_max_limit` GUC (`SUSET` context, default `1000`, range `1`–`1000000`), so an over-cap request fails fast instead of returning a silently short page that is indistinguishable from "no more rows". Both the basic and paginated overloads enforce the cap; clients needing more rows should lower `limit_count` or use the paginated overload (`after_cursor`/`next_cursor`). A superuser can change the cap at runtime without a restart; by default an ordinary caller cannot.
-- **Renamed `df.wait_for_completion()` (#164):** the function was renamed and hardened against unsafe use. **Breaking:** callers of the old name must update to the new name.
+- **Completion-wait helper (#164):** `df.await_instance()` is the canonical name; `df.wait_for_completion()` remains a deprecated alias. **Behavior change:** calls from inside a workflow are rejected to avoid blocking a worker or deadlocking; use durable signal coordination there instead.
 - **Node statuses derived from execution lineage (#263, #283):** node status is now derived from the durable engine's execution lineage, reconciling the `df` control-plane with the engine so reported statuses match actual execution.
 - **`df.start()` fails fast on engine hand-off failure (#282):** if the hand-off to the durable engine fails, `df.start()` now returns an error immediately instead of leaving a stuck instance behind.
 - **Dependencies:** bumped `reqwest` to 0.13.4 (#260) and `uuid` to 1.23.4 (#273).

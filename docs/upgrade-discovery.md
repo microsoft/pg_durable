@@ -4,8 +4,8 @@ The local runner in [scripts/upgrade_replay.py](../scripts/upgrade_replay.py)
 builds older pg_durable releases and lets them create real graphs, execution
 histories, results and grants before upgrading the same database. The purpose
 is to test what happens to existing work, not just whether a new binary can
-create new work using an old schema. See [measured incompatibilities](upgrade-findings.md)
-for the results, and the [upgrade testing plan](upgrade-testing.md) for the
+create new work using an old schema. See the [upgrade incompatibility inventory](upgrade-incompatibilities.md)
+for documented changes and measured results, and the [upgrade testing plan](upgrade-testing.md) for the
 existing suite and contributor workflow.
 
 ## What the transitions test
@@ -15,7 +15,7 @@ The chain observes two distinct deployment actions:
 - **Binary replacement:** stop PostgreSQL, replace the `.so` and packaged SQL
   files, and restart without changing the installed extension catalog. Check
   that the new binary works on the old schema, resumes old work and can read
-  retained data. The new worker also applies its embedded provider migrations.
+  retained data. The new worker also applies its embedded duroxide provider migrations.
 - **SQL schema update:** with the newer binary already running, apply
   `ALTER EXTENSION UPDATE`. Check that pre-existing data, grants and surviving
   work remain usable after the catalog changes. Apply and inspect each
@@ -111,13 +111,13 @@ observed transition. Failed instances remain inspectable and are reported as
 `previously_failed` at later steps, not as passing continuity checks. A new
 inspection failure on an already-failed instance still fails the run.
 
-Binary replacement starts the new worker over retained provider state before
+Binary replacement starts the new worker over retained duroxide provider state before
 any extension SQL update. Startup failure, stalled/replay-failed old work, lost
 results and broken monitoring can therefore fail this harness even if
 `ALTER EXTENSION UPDATE` has not run. The report captures locked
-`duroxide`/`duroxide-pg` versions and the provider's `_duroxide_migrations`
+`duroxide`/`duroxide-pg` versions and the duroxide provider's `_duroxide_migrations`
 ledger at every state, alongside histories and worker logs. A failure at binary
-replacement alone does not prove a provider migration caused it.
+replacement alone does not prove a duroxide provider migration caused it.
 
 ## Running and retaining evidence
 
@@ -146,7 +146,7 @@ and `2` for setup errors or incomplete phase coverage. Strict mode (omit
 `--allow-known-replay-breaks`) fails on any observed break. The opt-in exception
 accepts only the documented baseline loop/held-sequence `update-node-status`
 schedule mismatches at the 0.2.2 to 0.2.5 binary replacement and the exact missing
-HTTP grants and delegation errors in the [findings](upgrade-findings.md).
+HTTP grants and delegation errors in the [measured findings](upgrade-incompatibilities.md#evidence).
 Despite the legacy flag name, this also covers those permission findings. It does not accept timeouts,
 unrelated engine errors, damaged graphs, incorrect committed step values, lost
 existing privileges or diagnostic failures. A green exception-enabled run does
@@ -180,10 +180,10 @@ Permission fixtures use direct grants; they do not establish coverage of
 inherited/group-role access, arbitrary custom grants or comprehensive cross-user
 isolation. Removed/renamed functions are not classified as ACL loss.
 
-Retained provider state alone does not establish provider-upgrade coverage.
-That requires a real old/new provider pair through compatible pg_durable
-binaries, with scenarios exercising the changed provider features. See the
-[measured provider limitation](upgrade-findings.md#provider-upgrade-not-exercised).
+Retained duroxide provider state alone does not establish duroxide provider upgrade coverage.
+That requires a real old/new duroxide provider pair through compatible pg_durable
+binaries, with scenarios exercising the changed duroxide provider features. See the
+[measured duroxide provider limitation](upgrade-incompatibilities.md#duroxide-provider-upgrade-not-exercised).
 
 Expand the fixture set incrementally: additional sequences, captures/substitution,
 conditionals, JOIN/RACE, nested loops, signals and external activity behavior.
