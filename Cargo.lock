@@ -1917,7 +1917,7 @@ dependencies = [
 name = "pg_durable"
 version = "0.2.9"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bigdecimal",
  "chrono",
  "cron",

@@ -65,7 +65,7 @@ sha2 = "0.10"
 url = "2.5"
 
 # For df.http_multipart() — base64-decodes part payloads carried in the config JSON.
-base64 = "0.22"
+base64 = "0.23"
 
 # For duroxide tracing integration
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
