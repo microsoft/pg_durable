@@ -7,13 +7,9 @@ pg_durable follows a two-phase upgrade model:
 1. **Binary update**: The new pg_durable version is installed, PostgreSQL is restarted, and the new `.so` is loaded.
 2. **Schema update** (customer-initiated): `ALTER EXTENSION pg_durable UPDATE TO '<version>'` runs the upgrade SQL script. Customers may defer this for days, months, or indefinitely.
 
-This means the new `.so` **must be backward compatible** with every older
-supported schema, not just the immediately previous version. The `.so` and the
-upgrade script are not atomic: the new binary may run against an older schema
-indefinitely.
+This means the new `.so` **must be backward compatible** with every older supported schema, not just the immediately previous version. The `.so` and the upgrade script are not atomic: the new binary may run against an older schema indefinitely.
 
-pg_durable was open-sourced at v0.2.2. Upgrade compatibility impact is tracked
-for each release starting with v0.2.3.
+pg_durable was open-sourced at v0.2.2. Upgrade compatibility impact is tracked for each release starting with v0.2.3.
 
 We never downgrade. Downgrade scripts are not needed.
 
@@ -34,19 +30,13 @@ We never downgrade. Downgrade scripts are not needed.
 - Wrong column types, defaults, or constraint names
 - Ordering issues in upgrade SQL
 
-**Versions tested:** The immediately previous release. Earlier upgrade scripts
-are frozen and were tested when they shipped; only the current work-in-progress
-script can introduce a new schema inconsistency.
+**Versions tested:** The immediately previous release. Earlier upgrade scripts are frozen and were tested when they shipped; only the current work-in-progress script can introduce a new schema inconsistency.
 
 ### Guarantee B1: Binary Backward Compatibility
 
-**Goal:** Verify that the new `.so` works correctly against **all** previous
-versions' schemas, not just the immediately previous one. Customers may never
-run `ALTER EXTENSION UPDATE`, so the new binary must work against any older
-supported schema.
+**Goal:** Verify that the new `.so` works correctly against **all** previous versions' schemas, not just the immediately previous one. Customers may never run `ALTER EXTENSION UPDATE`, so the new binary must work against any older supported schema.
 
-**Versions tested:** All versions starting with v0.2.2, the first open-sourced
-release.
+**Versions tested:** All versions starting with v0.2.2, the first open-sourced release.
 
 **Method:**
 1. Install the new `.so`
@@ -143,14 +133,11 @@ Each PR that changes the extension schema or modifies SQL queries in Rust code s
 
 ### Preparing for the next version
 
-While the major version is zero, prepare a patch release (for example,
-v0.2.8 → v0.2.9). For later major versions, prepare a minor release (for
-example, v1.0.0 → v1.1.0):
+While the major version is zero, prepare a patch release (for example, v0.2.8 → v0.2.9). For later major versions, prepare a minor release (for example, v1.0.0 → v1.1.0):
 
 1. Create an empty `sql/pg_durable--<previous>--<next>.sql` upgrade script.
 2. Bump the version in `Cargo.toml` to `<next>`.
-3. Run `scripts/test-upgrade.sh`. Add an install SQL fixture only if the test
-   harness cannot reconstruct a version it must test.
+3. Run `scripts/test-upgrade.sh`. Add an install SQL fixture only if the test harness cannot reconstruct a version it must test.
 
 ### Upgrade scripts and the pgspot gate
 
@@ -274,10 +261,7 @@ the extension schema.
 
 #### Other post-tag changes
 
-- **Dependencies (#390):** `uuid` 1.26.1 and `reqwest` 0.13.5 are binary updates,
-  not v0.2.8 dependencies. `reqwest` uses `base64` 0.23.1, while pg_durable's
-  direct dependency remains on 0.22.1. The `duroxide`/`duroxide-pg` pair is
-  unchanged.
+- **Dependencies (#390):** `uuid` 1.26.1 and `reqwest` 0.13.5 are binary updates, not v0.2.8 dependencies. `reqwest` uses `base64` 0.23.1, while pg_durable's direct dependency remains on 0.22.1. The `duroxide`/`duroxide-pg` pair is unchanged.
 - **Test and release tooling (#388, #389):** shared E2E HTTP grants are restored
   after lifecycle tests, and release-triggered Docker publication waits for
   package assets. Neither change modifies the installed extension schema.
