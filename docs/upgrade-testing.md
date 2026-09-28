@@ -17,6 +17,12 @@ We never downgrade. Downgrade scripts are not needed.
 
 ## Upgrade Guarantees
 
+SQL upgrade-chain correctness does not establish compatibility for replay of running
+workflows. Candidate-only catalog tests cannot establish that histories produced
+by older binaries survive replacement. The [historical upgrade tests](upgrade-discovery.md)
+build tagged releases to test that separately, without replacing the existing
+schema correctness, old-schema compatibility and data-retention checks.
+
 ### Guarantee A: Schema Upgrade Correctness
 
 **Goal:** Verify that `ALTER EXTENSION UPDATE` produces an identical schema to a fresh `CREATE EXTENSION`.

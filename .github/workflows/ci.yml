@@ -61,6 +61,9 @@ jobs:
       - name: Test upgrade lifecycle harness
         run: python3 -m unittest discover -s scripts -p test_upgrade_lifecycle.py
 
+      - name: Test upgrade replay harness
+        run: python3 -m unittest discover -s scripts -p test_upgrade_replay.py
+
   make_install_smoke:
     name: Source Install Checks
     runs-on: ubuntu-latest
