@@ -453,9 +453,8 @@ mod unit_tests {
         assert!(options.validate_destinations(&request, None).is_err());
         request.credential_header = None;
         request.managed_identity = Some(
-            crate::managed_identity::Identity::for_endpoint(
+            crate::managed_identity::TokenResource::for_endpoint(
                 &url::Url::parse("https://account.blob.core.windows.net").unwrap(),
-                None,
             )
             .unwrap(),
         );

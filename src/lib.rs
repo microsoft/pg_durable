@@ -31,6 +31,9 @@ pub static HTTP_ALLOWED_DOMAINS: GucSetting<Option<CString>> =
 pub static MANAGED_IDENTITY_ENDPOINT: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(managed_identity::DEFAULT_TOKEN_ENDPOINT));
 
+pub static MANAGED_IDENTITY_CLIENT_ID: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c""));
+
 pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(6);
 pub static MAX_ORIGIN_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(12);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
@@ -195,6 +198,17 @@ pub extern "C-unwind" fn _PG_init() {
             GucContext::Postmaster,
             GucFlags::SUPERUSER_ONLY,
             Some(managed_identity::check_token_endpoint),
+            None,
+            None,
+        );
+        GucRegistry::define_string_guc_with_hooks(
+            c"pg_durable.managed_identity_client_id",
+            c"User-assigned identity used by all managed identity endpoints",
+            c"An empty value disables managed identity without affecting other HTTP authentication. Requires a nonzero client UUID and a server restart to change. Does not grant endpoint administration privileges.",
+            &MANAGED_IDENTITY_CLIENT_ID,
+            GucContext::Postmaster,
+            GucFlags::SUPERUSER_ONLY,
+            Some(managed_identity::check_client_id),
             None,
             None,
         );

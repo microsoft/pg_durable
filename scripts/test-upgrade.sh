@@ -856,6 +856,10 @@ test_b1_http_options_absent() {
     assert_sql_equals "SELECT to_regprocedure('df.with_http_options(text,jsonb)') IS NULL;" "t"
 }
 
+test_b1_managed_identity_admin_absent() {
+    assert_sql_equals "SELECT to_regprocedure('df.managed_identity_admin()') IS NULL;" "t"
+}
+
 test_b1_dsl_chain() {
     assert_sql_contains "SELECT df.sql('SELECT 1') ~> df.sql('SELECT 2');" '"node_type":"THEN"'
 }
@@ -1117,7 +1121,10 @@ else
         run_test "B1 [v${B1_VERSION}]: df.loop(body, condition)" test_b1_conditional_loop
         run_test "B1 [v${B1_VERSION}]: df.http() construction" test_b1_http_construction
         if ! version_ge "$B1_VERSION" "0.2.9"; then
-            run_test "B1 [v${B1_VERSION}]: new HTTP options helper remains absent" test_b1_http_options_absent
+            run_test "B1 [v${B1_VERSION}]: HTTP options helper remains absent" test_b1_http_options_absent
+        fi
+        if ! version_ge "$B1_VERSION" "0.2.10"; then
+            run_test "B1 [v${B1_VERSION}]: MI capability remains absent" test_b1_managed_identity_admin_absent
         fi
         run_test "B1 [v${B1_VERSION}]: DSL chain (~>)" test_b1_dsl_chain
         run_test "B1 [v${B1_VERSION}]: conditional operators (?>/!>)" test_b1_conditional_operators
@@ -1334,6 +1341,7 @@ test_b2_endpoint_catalog_after_upgrade() {
     run_sql_capture "CREATE ROLE durable_b2_endpoint_probe LOGIN;
         SELECT df.grant_usage('durable_b2_endpoint_probe');" >/dev/null || return 1
     assert_sql_equals "SELECT pg_catalog.has_foreign_data_wrapper_privilege('durable_b2_endpoint_probe', 'pg_durable_fdw', 'USAGE');" "f" || return 1
+    assert_sql_equals "SELECT pg_catalog.has_function_privilege('durable_b2_endpoint_probe', 'df.managed_identity_admin()', 'EXECUTE');" "f" || return 1
     run_sql_capture "GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO durable_b2_endpoint_probe;
         SET ROLE durable_b2_endpoint_probe;
         CREATE SERVER durable_b2_endpoint FOREIGN DATA WRAPPER pg_durable_fdw
@@ -1359,7 +1367,16 @@ test_b2_endpoint_catalog_after_upgrade() {
         jsonb_build_object('secret_bindings', jsonb_build_object('form', jsonb_build_object('password', df.secret('durable_b2_endpoint', 'key'))),
             'form_fields', jsonb_build_object('ordinary', 'literal'))
         )::jsonb->>'query')::jsonb->'secret_bindings'->'form'->'password'->>'key') = 'key';" "t" || return 1
-    run_sql_capture "DROP SERVER durable_b2_endpoint, durable_b2_secrets CASCADE;
+    run_sql_capture "GRANT EXECUTE ON FUNCTION df.managed_identity_admin() TO durable_b2_endpoint_probe;
+        SET ROLE durable_b2_endpoint_probe;
+        SELECT df.managed_identity_admin();
+        CREATE SERVER durable_b2_identity FOREIGN DATA WRAPPER pg_durable_fdw
+            OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'managed-identity');
+        ALTER SERVER durable_b2_identity OPTIONS (SET base_url 'https://other.blob.core.windows.net');
+        RESET ROLE;
+        REVOKE EXECUTE ON FUNCTION df.managed_identity_admin() FROM durable_b2_endpoint_probe;" >/dev/null || return 1
+    assert_sql_equals "SELECT pg_catalog.has_function_privilege('durable_b2_endpoint_probe', 'df.managed_identity_admin()', 'EXECUTE');" "f" || return 1
+    run_sql_capture "DROP SERVER durable_b2_endpoint, durable_b2_secrets, durable_b2_identity CASCADE;
         DROP OWNED BY durable_b2_endpoint_probe;
         DROP ROLE durable_b2_endpoint_probe;" >/dev/null
 }

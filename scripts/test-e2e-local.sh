@@ -392,6 +392,7 @@ stop_identity_mock() {
         rm -rf -- "$IDENTITY_MOCK_DIR"
         IDENTITY_MOCK_DIR=""
         remove_conf_key "pg_durable.managed_identity_endpoint"
+        remove_conf_key "pg_durable.managed_identity_client_id"
     fi
     IDENTITY_TOKEN_ENDPOINT=""
     IDENTITY_PROXY=""
@@ -623,6 +624,7 @@ configure_phase() {
     remove_conf_key "pg_durable.http_security"
     set_conf_line "pg_durable.http_allowed_domains" "'$PG_DURABLE_TEST_HTTP_DOMAINS'"
     remove_conf_key "pg_durable.managed_identity_endpoint"
+    remove_conf_key "pg_durable.managed_identity_client_id"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
     set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
@@ -728,6 +730,7 @@ configure_phase() {
             set_conf_line "pg_durable.database" "'postgres'"
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.managed_identity_endpoint" "'$IDENTITY_TOKEN_ENDPOINT'"
+            set_conf_line "pg_durable.managed_identity_client_id" "'11111111-1111-1111-1111-111111111111'"
             ;;
     esac
 
@@ -767,6 +770,8 @@ prepare_phase() {
     elif [ "$phase" = "managed-identity" ]; then
         echo "Checking unsafe managed identity provider startup rejection..."
         assert_http_startup_rejected "pg_durable.managed_identity_endpoint" "http://identity.example/token" || exit 1
+        assert_http_startup_rejected "pg_durable.managed_identity_client_id" "not-a-uuid" || exit 1
+        assert_http_startup_rejected "pg_durable.managed_identity_client_id" "00000000-0000-0000-0000-000000000000" || exit 1
     fi
 
     if [ -f "$LOG_FILE" ]; then

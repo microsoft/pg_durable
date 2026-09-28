@@ -4,10 +4,15 @@ DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mi_no_http') THEN
         DROP OWNED BY mi_no_http;
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mi_endpoint_admin') THEN
+        DROP OWNED BY mi_endpoint_admin;
+    END IF;
 END $$;
-DROP ROLE IF EXISTS mi_no_http;
+DROP ROLE IF EXISTS mi_no_http, mi_endpoint_admin;
 CREATE ROLE mi_no_http LOGIN;
+CREATE ROLE mi_endpoint_admin LOGIN;
 SELECT df.grant_usage('mi_no_http');
+SELECT df.grant_usage('mi_endpoint_admin', include_http => true, with_grant => true);
 SELECT df.grant_usage('df_e2e_user', include_http => true);
 
 DO $$
@@ -18,10 +23,23 @@ BEGIN
         AND context = 'postmaster' AND source = 'configuration file' AND NOT pending_restart) THEN
         RAISE EXCEPTION 'TEST FAILED: managed identity provider must be a startup-only setting';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_settings WHERE name = 'pg_durable.managed_identity_client_id'
+        AND setting = '11111111-1111-1111-1111-111111111111' AND boot_val = ''
+        AND context = 'postmaster' AND source = 'configuration file' AND NOT pending_restart) THEN
+        RAISE EXCEPTION 'TEST FAILED: managed identity must be pinned at startup and default to disabled';
+    END IF;
+    IF pg_catalog.has_function_privilege('mi_endpoint_admin', 'df.managed_identity_admin()', 'EXECUTE')
+       OR pg_catalog.has_foreign_data_wrapper_privilege('mi_endpoint_admin', 'pg_durable_fdw', 'USAGE') THEN
+        RAISE EXCEPTION 'TEST FAILED: general administration grants enabled managed identity configuration';
+    END IF;
     FOREACH statement IN ARRAY ARRAY[
         'SET pg_durable.managed_identity_endpoint = ''http://127.0.0.1:9/token''',
         'ALTER ROLE df_e2e_user SET pg_durable.managed_identity_endpoint = ''http://127.0.0.1:9/token''',
-        format('ALTER DATABASE %I SET pg_durable.managed_identity_endpoint = ''http://127.0.0.1:9/token''', current_database())
+        format('ALTER DATABASE %I SET pg_durable.managed_identity_endpoint = ''http://127.0.0.1:9/token''', current_database()),
+        'SET pg_durable.managed_identity_client_id = ''22222222-2222-2222-2222-222222222222''',
+        'SET LOCAL pg_durable.managed_identity_client_id = ''22222222-2222-2222-2222-222222222222''',
+        'ALTER ROLE df_e2e_user SET pg_durable.managed_identity_client_id = ''22222222-2222-2222-2222-222222222222''',
+        format('ALTER DATABASE %I SET pg_durable.managed_identity_client_id = ''22222222-2222-2222-2222-222222222222''', current_database())
     ] LOOP
         BEGIN
             EXECUTE statement;
@@ -32,18 +50,68 @@ BEGIN
     END LOOP;
 END $$;
 
+ALTER SYSTEM SET pg_durable.managed_identity_client_id = '22222222-2222-2222-2222-222222222222';
+SELECT pg_reload_conf();
+CREATE TEMP TABLE _mi_reload (unchanged boolean);
+DO $$
+DECLARE
+    attempts integer := 0;
+BEGIN
+    LOOP
+        EXIT WHEN EXISTS (SELECT 1 FROM pg_settings
+            WHERE name = 'pg_durable.managed_identity_client_id' AND pending_restart)
+            OR attempts >= 100;
+        PERFORM pg_sleep(0.05);
+        attempts := attempts + 1;
+    END LOOP;
+    INSERT INTO _mi_reload SELECT setting = '11111111-1111-1111-1111-111111111111' AND pending_restart
+        FROM pg_settings WHERE name = 'pg_durable.managed_identity_client_id';
+END $$;
+ALTER SYSTEM RESET pg_durable.managed_identity_client_id;
+SELECT pg_reload_conf();
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM _mi_reload WHERE unchanged) THEN
+        RAISE EXCEPTION 'TEST FAILED: client ID changed without a server restart';
+    END IF;
+END $$;
+DROP TABLE _mi_reload;
+
 CREATE SERVER mi_system FOREIGN DATA WRAPPER pg_durable_fdw
     OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net/system', auth_scheme 'managed-identity');
-CREATE SERVER mi_user FOREIGN DATA WRAPPER pg_durable_fdw
-    OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net/user', auth_scheme 'managed-identity',
-             client_id '11111111-1111-1111-1111-111111111111');
 CREATE SERVER mi_error FOREIGN DATA WRAPPER pg_durable_fdw
-    OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net/error', auth_scheme 'managed-identity',
-             client_id '22222222-2222-2222-2222-222222222222');
+    OPTIONS (base_url 'https://pg-durable-mi.vault.azure.net/error', auth_scheme 'managed-identity');
 CREATE SERVER mi_denied FOREIGN DATA WRAPPER pg_durable_fdw
     OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net/system', auth_scheme 'managed-identity');
-GRANT USAGE ON FOREIGN SERVER mi_system, mi_user, mi_error TO df_e2e_user;
+GRANT USAGE ON FOREIGN SERVER mi_system, mi_error TO df_e2e_user;
 GRANT USAGE ON FOREIGN SERVER mi_system TO mi_no_http;
+
+GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO mi_endpoint_admin;
+GRANT EXECUTE ON FUNCTION df.managed_identity_admin() TO mi_endpoint_admin;
+SET SESSION AUTHORIZATION mi_endpoint_admin;
+SELECT df.managed_identity_admin();
+CREATE SERVER mi_user FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net/user', auth_scheme 'managed-identity');
+GRANT USAGE ON FOREIGN SERVER mi_user TO df_e2e_user;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_settings WHERE name IN ('pg_durable.managed_identity_client_id', 'pg_durable.managed_identity_endpoint')) THEN
+        RAISE EXCEPTION 'TEST FAILED: endpoint administration exposed protected provider settings';
+    END IF;
+    BEGIN
+        SET pg_durable.managed_identity_client_id = '22222222-2222-2222-2222-222222222222';
+        RAISE EXCEPTION 'TEST FAILED: endpoint administrator changed the configured identity';
+    EXCEPTION WHEN insufficient_privilege OR cant_change_runtime_param THEN
+        NULL;
+    END;
+    BEGIN
+        ALTER SERVER mi_user OPTIONS (ADD client_id '22222222-2222-2222-2222-222222222222');
+        RAISE EXCEPTION 'TEST FAILED: endpoint administrator selected an identity';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM NOT LIKE '%Unsupported endpoint server option%' THEN RAISE; END IF;
+    END;
+END $$;
+RESET SESSION AUTHORIZATION;
 
 CREATE TEMP TABLE _mi_cases (instance_id text, expected text, status_code integer, error_pattern text);
 GRANT SELECT, INSERT ON _mi_cases TO df_e2e_user, mi_no_http;
@@ -66,6 +134,42 @@ INSERT INTO _mi_cases VALUES
         jsonb_build_object('secret_bindings', jsonb_build_object('headers', jsonb_build_object('Authorization', df.secret('mi_system', 'absent')))))), 'failed', NULL, '%override endpoint authentication%'),
     (df.start(df.with_http_options(df.http_multipart(df.endpoint('mi_system', '/upload'), parts => '[{"name":"file","data_b64":"aGVsbG8="}]'),
         jsonb_build_object('secret_bindings', jsonb_build_object('headers', jsonb_build_object('authorization', df.secret('mi_system', 'absent')))))), 'failed', NULL, '%override endpoint authentication%');
+
+INSERT INTO _mi_cases
+SELECT df.start(jsonb_build_object('node_type', node_type, 'query', jsonb_build_object(
+    'endpoint', 'mi_user', 'url', CASE WHEN node_type = 'HTTP' THEN '/data' ELSE '/upload' END,
+    'method', CASE WHEN node_type = 'HTTP' THEN 'GET' ELSE 'POST' END,
+    'parts', '[{"name":"file","data_b64":"aGVsbG8="}]'::jsonb,
+    'client_id', '22222222-2222-2222-2222-222222222222', 'resource', 'https://vault.azure.net'
+)::text)::text, 'mi-forged-identity'), 'completed', 204, NULL
+FROM (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS node_types(node_type);
+
+DO $$
+DECLARE
+    test_case record;
+    actual_status text;
+    attempts integer;
+BEGIN
+    FOR test_case IN SELECT * FROM _mi_cases WHERE expected = 'completed' LOOP
+        attempts := 0;
+        LOOP
+            actual_status := df.status(test_case.instance_id);
+            EXIT WHEN actual_status IN ('completed', 'failed', 'cancelled') OR attempts >= 300;
+            PERFORM pg_sleep(0.1);
+            attempts := attempts + 1;
+        END LOOP;
+        IF actual_status IS DISTINCT FROM 'completed' THEN
+            RAISE EXCEPTION 'TEST FAILED: MI cache warmup failed: %', df.result(test_case.instance_id);
+        END IF;
+    END LOOP;
+END $$;
+
+RESET SESSION AUTHORIZATION;
+REVOKE EXECUTE ON FUNCTION df.managed_identity_admin() FROM mi_endpoint_admin;
+SET SESSION AUTHORIZATION df_e2e_user;
+INSERT INTO _mi_cases VALUES
+    (df.start(df.http(df.endpoint('mi_user', '/data'), 'GET'), 'mi-owner-revoked'), 'failed', NULL, '%owner must have EXECUTE%'),
+    (df.start(df.http_multipart(df.endpoint('mi_user', '/upload'), parts => '[{"name":"file","data_b64":"aGVsbG8="}]'), 'mi-owner-revoked-multipart'), 'failed', NULL, '%owner must have EXECUTE%');
 
 RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION mi_no_http;
@@ -150,16 +254,16 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: MI stats request failed: %', df.result(instance);
     END IF;
     stats := (df.result(instance)::jsonb->>'body')::jsonb;
-    IF stats->'token_requests' IS DISTINCT FROM '{"system":1,"11111111-1111-1111-1111-111111111111":1,"22222222-2222-2222-2222-222222222222":2}'::jsonb THEN
+    IF stats->'token_requests' IS DISTINCT FROM '{"https://storage.azure.com/":1,"https://vault.azure.net":2}'::jsonb THEN
         RAISE EXCEPTION 'TEST FAILED: MI token cache or permission gate mismatch: %', stats;
     END IF;
-    IF jsonb_array_length(stats->'requests') IS DISTINCT FROM 6 THEN
+    IF jsonb_array_length(stats->'requests') IS DISTINCT FROM 8 THEN
         RAISE EXCEPTION 'TEST FAILED: unexpected MI destination requests: %', stats;
     END IF;
 END $$;
 RESET SESSION AUTHORIZATION;
 DROP TABLE _mi_cases, _mi_stats;
 DROP SERVER mi_system, mi_user, mi_error, mi_denied;
-DROP OWNED BY mi_no_http;
-DROP ROLE mi_no_http;
+DROP OWNED BY mi_no_http, mi_endpoint_admin;
+DROP ROLE mi_no_http, mi_endpoint_admin;
 SELECT 'TEST PASSED' AS result;

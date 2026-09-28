@@ -73,6 +73,7 @@ The test suite is organized into 23 files. Files `01`–`09` open with `SET SESS
 | `16_heartbeat.sql` | Worker heartbeat liveness — `df._worker_epoch.last_seen_at` advances over time |
 | `52_node_id_collision_across_instances.sql` | Cross-instance node-ID collision — two instances own the same 8-hex node id; asserts composite-PK coexistence, that `(instance_id, id)` addresses exactly one row, `df.result()` is instance-scoped, and a scoped `update_node_status`-style UPDATE affects exactly one row (issue #129) |
 | `68_long_caller_transaction.sql` | Caller-transaction handoff beyond five seconds, transient graph-probe failure, whole rollback, and savepoint rollback |
+| `76_managed_identity_unconfigured.sql` | Unset identity disables MI for both HTTP forms while ordinary HTTP still succeeds |
 
 ### Startup-Phase Specific
 
@@ -89,7 +90,7 @@ restart with the phase's configuration, not a rebuild.
 | `48_http_allow_all.sql` | `http-allow-all` | Unrestricted mode admits plaintext HTTP, unlisted domains, and private destinations for both HTTP activities |
 | `69_http_allowed_domains.sql` | `http-custom-domains` | Custom allow-list enforcement, malformed startup rejection, protected mode settings, and restart-only policy changes |
 | `70_http_allowed_domains_empty.sql` | `http-empty-domains` | Empty restricted-mode allow-list denies all domains |
-| `75_managed_identity.sql` | `managed-identity` | Offline system/user-assigned identity requests, multipart authentication, permission gates, token caching, startup configuration and non-persistence |
+| `75_managed_identity.sql` | `managed-identity` | Offline startup-pinned UAMI requests, delegated ownership, revocation with a warm cache, override rejection, restart-only configuration and token non-persistence |
 
 The managed-identity phase needs Bash 4+, Python 3 and the `openssl` command, but
 no Azure account or network service. The runner starts the local token and TLS
@@ -99,7 +100,8 @@ generates a temporary certificate, and removes the fixtures on exit. It selects
 proxy; production code has no mock-provider bypass. The custom-domain and
 HTTP-disabled phases separately verify that managed identity cannot override
 those policies. With `--keep`, PostgreSQL remains available for state inspection,
-but the identity fixtures stop when the runner exits.
+but the identity fixtures stop when the runner exits. The separate unconfigured
+test runs in the standard phase and uses the usual `httpbingo.org` HTTP probe.
 
 ```bash
 ./scripts/test-e2e-local.sh managed_identity

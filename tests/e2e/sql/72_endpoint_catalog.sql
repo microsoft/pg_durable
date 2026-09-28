@@ -46,7 +46,7 @@ BEGIN
         ALTER SERVER ec_server OPTIONS (SET base_url 'https://account.blob.core.windows.net',
             SET auth_scheme 'managed-identity', DROP header_name);
     EXCEPTION WHEN OTHERS THEN
-        IF SQLERRM NOT LIKE '%Only superusers%' THEN RAISE; END IF;
+        IF SQLERRM NOT LIKE '%EXECUTE on df.managed_identity_admin()%' THEN RAISE; END IF;
         rejected := true;
     END;
     IF NOT rejected THEN RAISE EXCEPTION 'TEST FAILED: delegated endpoint owner enabled managed identity'; END IF;
