@@ -72,8 +72,8 @@ with `--locked`. Updates within an existing requirement may change only the
 lockfile. Routine builds and checks should not silently repair or change the
 committed dependency graph.
 
-[Dependabot](.github/dependabot.yml) updates ordinary Cargo dependencies and
-changes manifest requirements only when necessary. The following dependencies
+[Dependabot](.github/dependabot.yml) uses Cargo's `auto` update strategy to update
+ordinary dependencies, including manifest requirements. The following dependencies
 are excluded from automatic updates and must be monitored for releases and
 security fixes manually:
 

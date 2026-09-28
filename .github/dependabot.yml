@@ -21,7 +21,7 @@ updates:
       day: monday
       time: "03:00"
       timezone: "Etc/UTC"
-    versioning-strategy: increase-if-necessary
+    versioning-strategy: auto
     ignore:
       - dependency-name: pgrx
       - dependency-name: pgrx-tests
