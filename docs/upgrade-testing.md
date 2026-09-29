@@ -85,6 +85,68 @@ We never downgrade. Downgrade scripts are not needed.
 | In-flight work | Work started before `ALTER EXTENSION UPDATE` can still complete afterward (except across an activity-input change — see #129) |
 | New operations | `df.start()` works with new schema |
 
+### Real previous-binary lifecycle (N-1 to N)
+
+The default [upgrade harness](../scripts/test-upgrade.sh) also runs
+[upgrade_lifecycle.py](../scripts/upgrade_lifecycle.py) against the immediately
+previous compatible release. Unlike the reconstructed-schema tests above, this
+test builds and runs the tagged **previous binary** to produce real instances,
+results and durable histories before installing the candidate.
+
+The same database is retained through three phases:
+
+| Phase | Binary | Extension schema | Assertions |
+|-------|--------|------------------|------------|
+| Baseline | N-1 | N-1 | Complete one instance and hold two at durable signal subscriptions; check results, captured variables, owner and side effects. |
+| B1 | N | N-1 | Restart with the candidate binary without `ALTER EXTENSION`; revalidate old instances, resume one, and create both completed and waiting instances. |
+| B2 | N | N | Run `ALTER EXTENSION UPDATE`; revalidate both cohorts, resume instances created before and after the binary swap, and execute a new instance. |
+
+Each waiting instance has a recorded first SQL result and a persisted signal
+subscription before the transition. The continuation must use that captured
+result. Exact effect rows and a unique `(label, step)` key detect missing,
+reordered or duplicate execution; completed outputs must remain byte-identical.
+Checks exercise `df.status`, `df.result`, `df.list_instances` and
+`df.instance_info` as an ordinary granted role, and also check provider status
+so a stale extension status cannot hide a replay failure.
+
+This is **not** a historical release chain. Guarantee A, the all-supported-schema
+B1 matrix and the existing B2 catalog/grant checks remain in place. The new
+lifecycle adds real previous-binary evidence for N-1 only; it does not establish
+replay compatibility with every older binary.
+
+#### Running and diagnosing the lifecycle
+
+Requires Python 3.11+, the existing cargo-pgrx/PostgreSQL build tools, and the
+previous release tag (`git fetch origin --tags` if needed). N-1 is selected by
+the existing harness from the upgrade script targeting the current version.
+The normal `./scripts/test-upgrade.sh` invocation includes this test whenever
+that predecessor is within the supported compatibility boundary. To run only
+the lifecycle:
+
+```bash
+python3 scripts/upgrade_lifecycle.py \
+  --pg-config ~/.pgrx/17.10/pgrx-install/bin/pg_config \
+  --previous-version 0.2.8
+```
+
+The runner copies PostgreSQL into a private installation, uses a fresh cluster
+and ephemeral loopback port, and stops its cluster on success or failure. It
+never overwrites the shared PostgreSQL installation. Builds use the committed
+lockfiles without dependency updates. A missing tag, build failure, unexpected
+version, timeout or assertion failure fails the test; there is no accepted-break
+mode. Build logs, PostgreSQL logs and phase snapshots are retained under the
+printed `target/upgrade-lifecycle/` directory and uploaded by CI on failure.
+`--output-dir` selects a new evidence directory; `--timeout` controls each
+readiness/instance-validation deadline (default 60 seconds).
+
+#### Upgrade & Migration
+
+This change affects test infrastructure only. It adds no extension DDL,
+upgrade-script changes or production runtime detection. B1's supported-schema
+contract is unchanged. Test-only provider-schema discovery handles the existing
+`duroxide` and `_duroxide` layouts; provider migrations during candidate worker
+startup remain part of the real binary-upgrade test.
+
 ## Backward Compatibility Patterns
 
 When a new `.so` must support both old and new schemas (Guarantee B1), code should detect the schema state at runtime. Approaches:

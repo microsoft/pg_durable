@@ -21,6 +21,7 @@
 # Prerequisites:
 #   - cargo pgrx init (PostgreSQL installed)
 #   - sql/pg_durable--<first>.sql (first version install SQL for current major) exists
+#   - Python 3.11+ and the previous release tag (git fetch origin --tags)
 
 set -e
 
@@ -1234,6 +1235,11 @@ test_b2_endpoint_catalog_after_upgrade() {
         DROP ROLE durable_b2_endpoint_probe;" >/dev/null
 }
 
+test_previous_binary_lifecycle() {
+    python3 "$SCRIPT_DIR/upgrade_lifecycle.py" --pg-config "$PG_CONFIG" \
+        --previous-version "$PREV_VERSION"
+}
+
 if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: Pre-upgrade data survives ALTER EXTENSION UPDATE" test_b2_data_survives_upgrade
     run_test "B2: Pre-upgrade instance remains queryable" test_b2_pre_upgrade_instance_after_upgrade
@@ -1243,6 +1249,7 @@ if [ "$HAS_COMPAT_PREV" = true ]; then
     run_test "B2: df.grant_usage() works and df.debug_connection() is gone after upgrade" test_b2_grant_usage_after_upgrade
     run_test "B2: HTTP OIDs, grants and dependent views survive upgrade" test_b2_http_api_after_upgrade
     run_test "B2: Endpoint FDW, validator and delegated catalog DDL work after upgrade" test_b2_endpoint_catalog_after_upgrade
+    run_test "B1/B2: Real previous-binary instances survive both upgrade stages" test_previous_binary_lifecycle
 fi
 
 # ============================================================================

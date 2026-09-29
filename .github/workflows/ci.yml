@@ -58,6 +58,9 @@ jobs:
       - name: Test benchmark harness
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
 
+      - name: Test upgrade lifecycle harness
+        run: python3 -m unittest discover -s scripts -p test_upgrade_lifecycle.py
+
   make_install_smoke:
     name: Source Install Checks
     runs-on: ubuntu-latest
@@ -182,6 +185,8 @@ jobs:
     continue-on-error: ${{ matrix.pg_version == 18 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Free disk space and show usage
         run: |
@@ -306,6 +311,10 @@ jobs:
           path: |
             ~/.pgrx/${{ matrix.pg_version }}.log
             ~/.pgrx/data-${{ matrix.pg_version }}/log/*.log
+            target/upgrade-lifecycle/**/build.log
+            target/upgrade-lifecycle/**/postgres.log
+            target/upgrade-lifecycle/**/*.json
+            target/upgrade-lifecycle/**/error.txt
           if-no-files-found: warn
 
       - name: Run pg_regress tests
