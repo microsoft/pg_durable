@@ -1,0 +1,3 @@
+# Keep the fixed corpus and its runner diff-friendly across platforms.
+*.json text eol=lf
+*.py text eol=lf

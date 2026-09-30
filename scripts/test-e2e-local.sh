@@ -11,6 +11,7 @@
 #   --keep                    Leave PostgreSQL running after tests for investigation
 #   --clean                   Start with a fresh database cluster
 #   --verbose, -v             Show NOTICE messages and full test output
+#   --include-shapes          Also run the fixed DSL shape manifest (requires Python 3)
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
 #   --default-build-phases    Run standard phases, excluding disabled/unrestricted HTTP
 #   --http-disabled           Run only the explicitly HTTP-disabled startup phase
@@ -29,6 +30,7 @@
 #   ./scripts/test-e2e-local.sh http_allowed_domains
 #   ./scripts/test-e2e-local.sh --http-disabled 47_http_dsl_disabled
 #   ./scripts/test-e2e-local.sh --http-allow-all
+#   ./scripts/test-e2e-local.sh --include-shapes gen-
 # END_USAGE
 
 set -euo pipefail
@@ -36,12 +38,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_DIR="$PROJECT_DIR/tests/e2e/sql"
+MATRIX_RUNNER="$PROJECT_DIR/tests/e2e/shapes/runner.py"
+MATRIX_SQL_DIR=""
 
 . "$SCRIPT_DIR/pg-common.sh"
 
 KEEP_RUNNING=false
 CLEAN_START=false
 VERBOSE=false
+INCLUDE_SHAPES=false
 TEST_FILTER=""
 REPEAT_COUNT=1
 PG_VERSION="17"
@@ -239,6 +244,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --include-shapes)
+            INCLUDE_SHAPES=true
+            shift
+            ;;
         --pg-version)
             if [ $# -lt 2 ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
                 echo "Error: --pg-version requires a numeric argument"
@@ -324,6 +333,11 @@ stop_server() {
 }
 
 cleanup() {
+    if [ -n "$MATRIX_SQL_DIR" ]; then
+        rm -f -- "$MATRIX_SQL_DIR"/gen-*.sql
+        rmdir -- "$MATRIX_SQL_DIR"
+    fi
+
     if [ "$KEEP_RUNNING" = false ]; then
         stop_server
         return
@@ -744,6 +758,22 @@ collect_matched_tests() {
 
         MATCHED_TESTS+=("$test_file")
     done
+
+    if [ "$INCLUDE_SHAPES" = true ]; then
+        MATRIX_SQL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pg-durable-matrix.XXXXXX")
+        python3 "$MATRIX_RUNNER" --out "$MATRIX_SQL_DIR"
+
+        for test_file in "$MATRIX_SQL_DIR"/*.sql; do
+            [ -f "$test_file" ] || continue
+            test_name=$(basename "$test_file" .sql)
+
+            if [ -n "$TEST_FILTER" ] && [[ "$test_name" != *"$TEST_FILTER"* ]]; then
+                continue
+            fi
+
+            MATCHED_TESTS+=("$test_file")
+        done
+    fi
 
     if [ "${#MATCHED_TESTS[@]}" -eq 0 ]; then
         echo "Error: no E2E tests matched the current selection"

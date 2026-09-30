@@ -151,6 +151,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --package pg_durable -- --check
 
+  fixed_matrix:
+    name: Fixed DSL Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test manifest runner
+        run: python3 -m unittest discover -s tests/e2e/shapes -p 'test_*.py'
+
+      - name: Validate fixed manifest
+        run: python3 tests/e2e/shapes/runner.py --check
+
   prepare:
     name: Prepare Matrix
     runs-on: ubuntu-latest
@@ -174,7 +186,7 @@ jobs:
   test:
     name: Clippy & Tests (PG${{ matrix.pg_version }})
     runs-on: ubuntu-latest
-    needs: [azure_example_smoke, make_install_smoke, format, prepare]
+    needs: [azure_example_smoke, make_install_smoke, format, fixed_matrix, prepare]
     permissions:
       contents: read
     strategy:
@@ -289,7 +301,7 @@ jobs:
 
       - name: Run E2E tests (all startup policies)
         id: e2e_tests
-        run: ./scripts/test-e2e-local.sh --clean --pg-version ${{ matrix.pg_version }}
+        run: ./scripts/test-e2e-local.sh --clean --include-shapes --pg-version ${{ matrix.pg_version }}
 
       - name: Run upgrade tests
         id: upgrade_tests

@@ -127,7 +127,15 @@ Fast iteration using local pgrx PostgreSQL. Best for development.
 
 # Start fresh (wipe database)
 ./scripts/test-e2e-local.sh --clean
+
+# Run the fixed DSL nesting matrix (requires Python 3, no generation step)
+./scripts/test-e2e-local.sh --include-shapes gen-
 ```
+
+The fixed corpus, its provenance, and its exact marker-count assertions are
+documented in [the matrix README](../tests/e2e/shapes/README.md). The runner
+reads the committed definitions and expectations without recalculating either;
+the harness creates and removes temporary SQL wrappers automatically.
 
 **Investigation mode (`--keep`):**
 ```bash
@@ -333,4 +341,3 @@ Check Docker is running and has enough resources. Try:
 docker system prune -f
 ./scripts/test-e2e-docker.sh --rebuild
 ```
-
