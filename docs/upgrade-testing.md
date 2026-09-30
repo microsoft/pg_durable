@@ -97,19 +97,44 @@ The same database is retained through three phases:
 
 | Phase | Binary | Extension schema | Assertions |
 |-------|--------|------------------|------------|
-| Baseline | N-1 | N-1 | Complete one instance and hold two at durable signal subscriptions; check results, captured variables, owner and side effects. |
-| B1 | N | N-1 | Restart with the candidate binary without `ALTER EXTENSION`; revalidate old instances, resume one, and create both completed and waiting instances. |
-| B2 | N | N | Run `ALTER EXTENSION UPDATE`; revalidate both cohorts, resume instances created before and after the binary swap, and execute a new instance. |
+| Baseline | N-1 | N-1 | For every behavior family, hold two instances at a durable suspension inside the shape; also complete one `seq` instance. Check results, captured variables, owner and side effects. |
+| B1 | N | N-1 | Restart with the candidate binary without `ALTER EXTENSION`; revalidate suspended instances, resume each family's first instance, and create a fresh completed instance. |
+| B2 | N | N | Run `ALTER EXTENSION UPDATE`; revalidate, resume each family's second instance (created before the binary swap and now past a schema change too), and execute a new instance. |
 
-Each waiting instance has a recorded first SQL result and a persisted signal
-subscription before the transition. The continuation must use that captured
-result. Exact effect rows and a unique `(label, step)` key detect missing,
-reordered or duplicate execution; completed outputs must remain byte-identical.
+#### Behavior-family coverage
+
+Each suspended instance belongs to one behavior family, and every family is
+resumed once under B1 and once under B2, so replay is exercised across both
+boundaries. The families mirror the nested DSL combinators and the explicit
+else and break seeds in the fixed shape corpus
+([tests/e2e/shapes](../tests/e2e/shapes/README.md)); `df.sql` is exercised by
+every family:
+
+| Family | Suspension point | What replay must preserve |
+|--------|------------------|---------------------------|
+| `seq` | Between two sequenced markers | Ordered continuation and the captured variable |
+| `if-then` | Inside the taken then-branch | Branch selection; the else marker stays unrun |
+| `if-else` | Inside the taken else-branch | Explicit else selection; the then marker stays unrun |
+| `loop` | During the first iteration | Iteration state; later iterations run exactly once each |
+| `break` | Before the iteration that breaks | Break propagation without replaying earlier markers |
+| `join` | One branch done, one suspended | The completed branch is not re-run on resume |
+| `race` | Winner suspended, loser on a long timer | Race resolution; the cancelled loser never marks |
+
+Each family records path-tagged marker rows with a `(label, path, occurrence)`
+key, and the harness asserts exact per-path counts — including zero-count paths
+for unrun branches and cancelled losers — before and after resume. This detects
+missing, duplicate, reordered, or incorrectly selected work when an old history
+replays. The `seq` family additionally records a first SQL result and a
+persisted signal subscription before the transition; its continuation must reuse
+that captured result and the start-time variable capture even though the live
+variables changed. Completed outputs must remain byte-identical across phases.
 Checks exercise `df.status`, `df.result`, `df.list_instances` and
 `df.instance_info` as an ordinary granted role, and also check provider status
 so a stale extension status cannot hide a replay failure.
 
-This is **not** a historical release chain. Guarantee A, the all-supported-schema
+This is **not** a historical release chain, nor does it transplant the full
+shape corpus: it covers one in-flight instance per family through both upgrade
+boundaries, not every nested permutation. Guarantee A, the all-supported-schema
 B1 matrix and the existing B2 catalog/grant checks remain in place. The new
 lifecycle adds real previous-binary evidence for N-1 only; it does not establish
 replay compatibility with every older binary.

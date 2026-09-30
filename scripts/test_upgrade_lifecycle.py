@@ -12,26 +12,38 @@ from unittest.mock import Mock, patch
 import upgrade_lifecycle as lifecycle
 
 
-def case(waiting=False):
+def case(shape="seq", waiting=False):
+    spec = lifecycle.SHAPES[shape]
+    counts = spec["before"] if waiting else spec["after"]
+    captured = {} if waiting else spec.get("captured", {})
+    marks = []
+    for path, count in sorted(counts.items()):
+        for occurrence in range(1, count + 1):
+            marks.append({"path": path, "occurrence": occurrence,
+                          "value": captured.get(path), "executed_by": lifecycle.ROLE})
+    if waiting:
+        result = None
+    elif spec.get("result") is not None:
+        result = json.dumps(spec["result"])
+    else:
+        result = '{"rows":[{"value":null}],"row_count":1}'
     return {
-        "name": "test", "waiting": waiting,
+        "name": "test", "shape": shape, "waiting": waiting,
         "status": "running" if waiting else "completed",
         "engine_status": "running" if waiting else "completed",
         "info_status": "running" if waiting else "completed",
         "listed": True, "subscribed": waiting,
-        "result": None if waiting else '{"rows":[{"value":42}],"row_count":1}',
-        "marks": [
-            {"step": step, "value": 40 + step, "executed_by": lifecycle.ROLE}
-            for step in range(1, 2 if waiting else 3)
-        ],
+        "result": result,
+        "marks": marks,
     }
 
 
 class ValidationTests(unittest.TestCase):
-    def test_completed_and_waiting_instances(self):
-        for waiting in (False, True):
-            with self.subTest(waiting=waiting):
-                self.assertEqual(lifecycle.case_problems(case(waiting), {}), [])
+    def test_every_shape_passes_before_and_after(self):
+        for shape in lifecycle.FAMILIES:
+            for waiting in (True, False):
+                with self.subTest(shape=shape, waiting=waiting):
+                    self.assertEqual(lifecycle.case_problems(case(shape, waiting), {}), [])
 
     def test_checks_every_status_surface(self):
         for field in ("status", "engine_status", "info_status"):
@@ -46,36 +58,60 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("missing from df.list_instances", lifecycle.case_problems(value, {}))
 
     def test_requires_durable_subscription_before_upgrade(self):
-        value = case(True)
-        value["subscribed"] = False
-        self.assertIn("signal subscription is not yet durable", lifecycle.case_problems(value, {}))
+        for shape in lifecycle.FAMILIES:
+            value = case(shape, waiting=True)
+            value["subscribed"] = False
+            with self.subTest(shape=shape):
+                self.assertIn("signal subscription is not yet durable",
+                              lifecycle.case_problems(value, {}))
 
-    def test_rejects_incorrect_side_effects(self):
-        for change in ("duplicate", "missing", "order", "owner", "value"):
-            value = case()
+    def test_rejects_missing_duplicate_or_misowned_markers(self):
+        def mutate(value, change):
             if change == "duplicate":
                 value["marks"].append(copy.deepcopy(value["marks"][0]))
             elif change == "missing":
                 value["marks"].pop()
-            elif change == "order":
-                value["marks"].reverse()
             elif change == "owner":
                 value["marks"][0]["executed_by"] = "postgres"
-            else:
-                value["marks"][0]["value"] = 999
+        for change in ("duplicate", "missing", "owner"):
+            value = case("loop")
+            mutate(value, change)
             with self.subTest(change=change):
                 self.assertTrue(lifecycle.case_problems(value, {}))
+
+    def test_rejects_captured_value_drift(self):
+        value = case("seq")
+        next(m for m in value["marks"] if m["path"] == "r.1")["value"] = 999
+        self.assertTrue(any("captured value" in problem
+                            for problem in lifecycle.case_problems(value, {})))
+
+    def test_rejects_unexpected_branch_or_loser_markers(self):
+        for shape, stray in (("if-then", "r.e"), ("if-else", "r.t"), ("race", "r.l")):
+            value = case(shape)
+            value["marks"].append({"path": stray, "occurrence": 1, "value": None,
+                                   "executed_by": lifecycle.ROLE})
+            with self.subTest(shape=shape, stray=stray):
+                self.assertTrue(any("incorrect marker counts" in problem
+                                    for problem in lifecycle.case_problems(value, {})))
+
+    def test_waiting_case_must_not_run_post_suspension_markers(self):
+        # A join whose suspended branch leaked its continuation before resume.
+        value = case("join", waiting=True)
+        value["marks"].append({"path": "r.1", "occurrence": 1, "value": None,
+                               "executed_by": lifecycle.ROLE})
+        self.assertTrue(any("incorrect marker counts" in problem
+                            for problem in lifecycle.case_problems(value, {})))
 
     def test_rejects_wrong_result_shape_and_values(self):
         for result in ({}, {"rows": [{"value": 41}], "row_count": 1},
                        {"rows": [{"value": 42}], "row_count": 2}):
-            value = case()
+            value = case("seq")
             value["result"] = json.dumps(result)
             with self.subTest(result=result):
                 self.assertTrue(lifecycle.case_problems(value, {}))
 
     def test_completed_results_remain_byte_identical(self):
-        value = case()
+        value = case("seq")
         self.assertEqual(lifecycle.case_problems(value, {"test": value["result"]}), [])
         self.assertIn("previously completed result changed",
                       lifecycle.case_problems(value, {"test": "{}"}))
@@ -125,15 +161,15 @@ class LifecycleTests(unittest.TestCase):
                 unittest.mock.call("0.2.9", "0.2.9"),
                 unittest.mock.call("0.2.9", "0.2.9"),
             ])
-            self.assertEqual(cluster.start_cases.call_args_list, [
-                unittest.mock.call("old", ["b1", "b2"]),
-                unittest.mock.call("binary", ["b2"]),
-                unittest.mock.call("schema", []),
+            self.assertEqual(cluster.seed_families.call_count, 1)
+            self.assertEqual(cluster.start_completed.call_args_list, [
+                unittest.mock.call("seq-done-baseline"),
+                unittest.mock.call("seq-done-b1"),
+                unittest.mock.call("seq-done-b2"),
             ])
-            self.assertEqual(cluster.release.call_args_list, [
-                unittest.mock.call("old-b1"), unittest.mock.call("old-b2"),
-                unittest.mock.call("binary-b2"),
-            ])
+            self.assertEqual(cluster.release.call_args_list,
+                [unittest.mock.call(f"{family}-b1") for family in lifecycle.FAMILIES]
+                + [unittest.mock.call(f"{family}-b2") for family in lifecycle.FAMILIES])
             self.assertEqual(cluster.stop.call_count, 2)
             self.assertEqual(len(list(output.glob("*.json"))), 5)
 
