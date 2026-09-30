@@ -11,7 +11,7 @@
 #   --keep                    Leave PostgreSQL running after tests for investigation
 #   --clean                   Start with a fresh database cluster
 #   --verbose, -v             Show NOTICE messages and full test output
-#   --include-shapes          Also run the fixed DSL shape manifest (requires Python 3)
+#   --include-shapes          Also run fixed shape, semantic, and relation cases (Python 3)
 #   --pg-version VER          PostgreSQL major version to use (default: 17)
 #   --default-build-phases    Run standard phases, excluding disabled/unrestricted HTTP
 #   --http-disabled           Run only the explicitly HTTP-disabled startup phase
@@ -31,6 +31,8 @@
 #   ./scripts/test-e2e-local.sh --http-disabled 47_http_dsl_disabled
 #   ./scripts/test-e2e-local.sh --http-allow-all
 #   ./scripts/test-e2e-local.sh --include-shapes gen-
+#   ./scripts/test-e2e-local.sh --include-shapes sem-
+#   ./scripts/test-e2e-local.sh --include-shapes meta-
 # END_USAGE
 
 set -euo pipefail
@@ -334,7 +336,7 @@ stop_server() {
 
 cleanup() {
     if [ -n "$MATRIX_SQL_DIR" ]; then
-        rm -f -- "$MATRIX_SQL_DIR"/gen-*.sql
+        rm -f -- "$MATRIX_SQL_DIR"/gen-*.sql "$MATRIX_SQL_DIR"/sem-*.sql "$MATRIX_SQL_DIR"/meta-*.sql
         rmdir -- "$MATRIX_SQL_DIR"
     fi
 

@@ -130,12 +130,22 @@ Fast iteration using local pgrx PostgreSQL. Best for development.
 
 # Run the fixed DSL nesting matrix (requires Python 3, no generation step)
 ./scripts/test-e2e-local.sh --include-shapes gen-
+
+# Run fixed named-result / variable semantics or metamorphic pairs
+./scripts/test-e2e-local.sh --include-shapes sem-
+./scripts/test-e2e-local.sh --include-shapes meta-
 ```
 
-The fixed corpus, its provenance, and its exact marker-count assertions are
+The fixed corpus has 154 topology cases, 24 result/variable cases, and seven
+metamorphic pairs. Exact marker counts, 225 committed causal edges, typed JSON
+observations, and pairwise multiset equality provide complementary assertions.
+The corpus, its provenance, and its oracle limitations are
 documented in [the matrix README](../tests/e2e/shapes/README.md). The runner
 reads the committed definitions and expectations without recalculating either;
-the harness creates and removes temporary SQL wrappers automatically.
+the harness creates and removes temporary SQL wrappers automatically, including
+with `--keep`. Without a filter, `--include-shapes` includes all three families
+alongside the handwritten E2E suite. Existing CI runner checks and live E2E jobs
+cover all families without any generator or new CI job.
 
 **Investigation mode (`--keep`):**
 ```bash

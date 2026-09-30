@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "generator": "pg_durable_matrix_gen",
   "max_depth": 2,
   "combinators": ["seq", "if", "loop", "join", "race"],
@@ -18,7 +18,8 @@
         "r.t.e": 0,
         "r.t.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0002",
@@ -31,7 +32,8 @@
         "r.t.e": 0,
         "r.t.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0003",
@@ -44,7 +46,8 @@
         "r.t.e": 0,
         "r.t.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0004",
@@ -56,7 +59,8 @@
         "r.t.e": 0,
         "r.t.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0005",
@@ -69,7 +73,8 @@
         "r.t.e": 0,
         "r.t.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0006",
@@ -82,7 +87,8 @@
         "r.t.e": 0,
         "r.t.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0007",
@@ -95,7 +101,8 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0008",
@@ -108,7 +115,8 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0009",
@@ -121,7 +129,8 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0010",
@@ -133,7 +142,8 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0011",
@@ -146,7 +156,8 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0012",
@@ -159,7 +170,8 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0013",
@@ -172,7 +184,12 @@
         "r.t.b": 2,
         "r.t.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.b", 1, "r.t.c", 1],
+        ["r.t.c", 1, "r.t.b", 2],
+        ["r.t.b", 2, "r.t.c", 2]
+      ]
     },
     {
       "id": "gen-0014",
@@ -185,7 +202,12 @@
         "r.t.b": 2,
         "r.t.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.b", 1, "r.t.c", 1],
+        ["r.t.c", 1, "r.t.b", 2],
+        ["r.t.b", 2, "r.t.c", 2]
+      ]
     },
     {
       "id": "gen-0015",
@@ -198,7 +220,12 @@
         "r.t.b": 2,
         "r.t.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.b", 1, "r.t.c", 1],
+        ["r.t.c", 1, "r.t.b", 2],
+        ["r.t.b", 2, "r.t.c", 2]
+      ]
     },
     {
       "id": "gen-0016",
@@ -210,7 +237,12 @@
         "r.t.b": 2,
         "r.t.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.b", 1, "r.t.c", 1],
+        ["r.t.c", 1, "r.t.b", 2],
+        ["r.t.b", 2, "r.t.c", 2]
+      ]
     },
     {
       "id": "gen-0017",
@@ -223,7 +255,12 @@
         "r.t.b": 2,
         "r.t.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.b", 1, "r.t.c", 1],
+        ["r.t.c", 1, "r.t.b", 2],
+        ["r.t.b", 2, "r.t.c", 2]
+      ]
     },
     {
       "id": "gen-0018",
@@ -236,7 +273,12 @@
         "r.t.b": 2,
         "r.t.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.b", 1, "r.t.c", 1],
+        ["r.t.c", 1, "r.t.b", 2],
+        ["r.t.b", 2, "r.t.c", 2]
+      ]
     },
     {
       "id": "gen-0019",
@@ -248,7 +290,8 @@
         "r.e.t": 0,
         "r.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0020",
@@ -260,7 +303,8 @@
         "r.e.1": 0,
         "r.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0021",
@@ -272,7 +316,8 @@
         "r.e.c": 0,
         "r.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0022",
@@ -283,7 +328,8 @@
         "r.e": 0,
         "r.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0023",
@@ -295,7 +341,8 @@
         "r.e.w": 0,
         "r.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0024",
@@ -307,7 +354,8 @@
         "r.e.1": 0,
         "r.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0025",
@@ -320,7 +368,8 @@
         "r.t.l": 0,
         "r.t.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0026",
@@ -333,7 +382,8 @@
         "r.t.l": 0,
         "r.t.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0027",
@@ -346,7 +396,8 @@
         "r.t.l": 0,
         "r.t.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0028",
@@ -358,7 +409,8 @@
         "r.t.l": 0,
         "r.t.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0029",
@@ -371,7 +423,8 @@
         "r.t.l": 0,
         "r.t.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0030",
@@ -384,7 +437,8 @@
         "r.t.l": 0,
         "r.t.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0031",
@@ -397,7 +451,10 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.0", 1, "r.t.1", 1]
+      ]
     },
     {
       "id": "gen-0032",
@@ -410,7 +467,10 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.0", 1, "r.t.1", 1]
+      ]
     },
     {
       "id": "gen-0033",
@@ -423,7 +483,10 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.0", 1, "r.t.1", 1]
+      ]
     },
     {
       "id": "gen-0034",
@@ -435,7 +498,10 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.0", 1, "r.t.1", 1]
+      ]
     },
     {
       "id": "gen-0035",
@@ -448,7 +514,10 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.0", 1, "r.t.1", 1]
+      ]
     },
     {
       "id": "gen-0036",
@@ -461,7 +530,10 @@
         "r.t.0": 1,
         "r.t.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.t.0", 1, "r.t.1", 1]
+      ]
     },
     {
       "id": "gen-0037",
@@ -472,7 +544,8 @@
         "r.e": 1,
         "r.t": 0
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0038",
@@ -485,7 +558,8 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0039",
@@ -498,7 +572,8 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0040",
@@ -511,7 +586,12 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0041",
@@ -523,7 +603,8 @@
         "r.0.t": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0042",
@@ -536,7 +617,8 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0043",
@@ -549,7 +631,10 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0044",
@@ -562,7 +647,8 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0045",
@@ -575,7 +661,8 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0046",
@@ -588,7 +675,12 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0047",
@@ -600,7 +692,8 @@
         "r.0.1": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0048",
@@ -613,7 +706,8 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0049",
@@ -626,7 +720,10 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0050",
@@ -639,7 +736,12 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2]
+      ]
     },
     {
       "id": "gen-0051",
@@ -652,7 +754,12 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2]
+      ]
     },
     {
       "id": "gen-0052",
@@ -665,7 +772,15 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0053",
@@ -677,7 +792,12 @@
         "r.0.c": 2,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2]
+      ]
     },
     {
       "id": "gen-0054",
@@ -690,7 +810,12 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2]
+      ]
     },
     {
       "id": "gen-0055",
@@ -703,7 +828,13 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0056",
@@ -715,7 +846,8 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0057",
@@ -727,7 +859,8 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0058",
@@ -739,7 +872,12 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0059",
@@ -750,7 +888,8 @@
         "r.0": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0060",
@@ -762,7 +901,8 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0061",
@@ -774,7 +914,10 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0062",
@@ -787,7 +930,8 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0063",
@@ -800,7 +944,8 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0064",
@@ -813,7 +958,12 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0065",
@@ -825,7 +975,8 @@
         "r.0.w": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0066",
@@ -838,7 +989,8 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0067",
@@ -851,7 +1003,10 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0068",
@@ -864,7 +1019,10 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1]
+      ]
     },
     {
       "id": "gen-0069",
@@ -877,7 +1035,10 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1]
+      ]
     },
     {
       "id": "gen-0070",
@@ -890,7 +1051,13 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0071",
@@ -902,7 +1069,10 @@
         "r.0.1": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1]
+      ]
     },
     {
       "id": "gen-0072",
@@ -915,7 +1085,10 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1]
+      ]
     },
     {
       "id": "gen-0073",
@@ -928,7 +1101,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0074",
@@ -940,7 +1117,12 @@
         "r.b.t": 2,
         "r.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.b.t", 1, "r.c", 1],
+        ["r.c", 1, "r.b.t", 2],
+        ["r.b.t", 2, "r.c", 2]
+      ]
     },
     {
       "id": "gen-0075",
@@ -952,7 +1134,15 @@
         "r.b.1": 2,
         "r.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.b.0", 1, "r.c", 1],
+        ["r.b.1", 1, "r.c", 1],
+        ["r.c", 1, "r.b.0", 2],
+        ["r.c", 1, "r.b.1", 2],
+        ["r.b.0", 2, "r.c", 2],
+        ["r.b.1", 2, "r.c", 2]
+      ]
     },
     {
       "id": "gen-0076",
@@ -964,7 +1154,18 @@
         "r.b.c": 4,
         "r.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.b.b", 1, "r.b.c", 1],
+        ["r.b.c", 1, "r.b.b", 2],
+        ["r.b.b", 2, "r.b.c", 2],
+        ["r.b.c", 2, "r.c", 1],
+        ["r.c", 1, "r.b.b", 3],
+        ["r.b.b", 3, "r.b.c", 3],
+        ["r.b.c", 3, "r.b.b", 4],
+        ["r.b.b", 4, "r.b.c", 4],
+        ["r.b.c", 4, "r.c", 2]
+      ]
     },
     {
       "id": "gen-0077",
@@ -975,7 +1176,12 @@
         "r.b": 2,
         "r.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.b", 1, "r.c", 1],
+        ["r.c", 1, "r.b", 2],
+        ["r.b", 2, "r.c", 2]
+      ]
     },
     {
       "id": "gen-0078",
@@ -987,7 +1193,12 @@
         "r.b.w": 2,
         "r.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.b.w", 1, "r.c", 1],
+        ["r.c", 1, "r.b.w", 2],
+        ["r.b.w", 2, "r.c", 2]
+      ]
     },
     {
       "id": "gen-0079",
@@ -999,7 +1210,14 @@
         "r.b.1": 2,
         "r.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.b.0", 1, "r.b.1", 1],
+        ["r.b.1", 1, "r.c", 1],
+        ["r.c", 1, "r.b.0", 2],
+        ["r.b.0", 2, "r.b.1", 2],
+        ["r.b.1", 2, "r.c", 2]
+      ]
     },
     {
       "id": "gen-0080",
@@ -1009,7 +1227,11 @@
       "expected": {
         "r.0": 3
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.0", 2],
+        ["r.0", 2, "r.0", 3]
+      ]
     },
     {
       "id": "gen-0081",
@@ -1019,7 +1241,8 @@
       "expected": {
         "r": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0082",
@@ -1032,7 +1255,8 @@
         "r.w.e": 0,
         "r.w.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0083",
@@ -1045,7 +1269,8 @@
         "r.w.e": 0,
         "r.w.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0084",
@@ -1058,7 +1283,8 @@
         "r.w.e": 0,
         "r.w.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0085",
@@ -1070,7 +1296,8 @@
         "r.w.e": 0,
         "r.w.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0086",
@@ -1083,7 +1310,8 @@
         "r.w.e": 0,
         "r.w.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0087",
@@ -1096,7 +1324,8 @@
         "r.w.e": 0,
         "r.w.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0088",
@@ -1109,7 +1338,8 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0089",
@@ -1122,7 +1352,8 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0090",
@@ -1135,7 +1366,8 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0091",
@@ -1147,7 +1379,8 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0092",
@@ -1160,7 +1393,8 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0093",
@@ -1173,7 +1407,8 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0094",
@@ -1186,7 +1421,12 @@
         "r.w.b": 2,
         "r.w.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.b", 1, "r.w.c", 1],
+        ["r.w.c", 1, "r.w.b", 2],
+        ["r.w.b", 2, "r.w.c", 2]
+      ]
     },
     {
       "id": "gen-0095",
@@ -1199,7 +1439,12 @@
         "r.w.b": 2,
         "r.w.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.b", 1, "r.w.c", 1],
+        ["r.w.c", 1, "r.w.b", 2],
+        ["r.w.b", 2, "r.w.c", 2]
+      ]
     },
     {
       "id": "gen-0096",
@@ -1212,7 +1457,12 @@
         "r.w.b": 2,
         "r.w.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.b", 1, "r.w.c", 1],
+        ["r.w.c", 1, "r.w.b", 2],
+        ["r.w.b", 2, "r.w.c", 2]
+      ]
     },
     {
       "id": "gen-0097",
@@ -1224,7 +1474,12 @@
         "r.w.b": 2,
         "r.w.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.b", 1, "r.w.c", 1],
+        ["r.w.c", 1, "r.w.b", 2],
+        ["r.w.b", 2, "r.w.c", 2]
+      ]
     },
     {
       "id": "gen-0098",
@@ -1237,7 +1492,12 @@
         "r.w.b": 2,
         "r.w.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.b", 1, "r.w.c", 1],
+        ["r.w.c", 1, "r.w.b", 2],
+        ["r.w.b", 2, "r.w.c", 2]
+      ]
     },
     {
       "id": "gen-0099",
@@ -1250,7 +1510,12 @@
         "r.w.b": 2,
         "r.w.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.b", 1, "r.w.c", 1],
+        ["r.w.c", 1, "r.w.b", 2],
+        ["r.w.b", 2, "r.w.c", 2]
+      ]
     },
     {
       "id": "gen-0100",
@@ -1262,7 +1527,8 @@
         "r.l.t": 0,
         "r.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0101",
@@ -1274,7 +1540,8 @@
         "r.l.1": 0,
         "r.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0102",
@@ -1286,7 +1553,8 @@
         "r.l.c": 0,
         "r.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0103",
@@ -1297,7 +1565,8 @@
         "r.l": 0,
         "r.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0104",
@@ -1309,7 +1578,8 @@
         "r.l.w": 0,
         "r.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0105",
@@ -1321,7 +1591,8 @@
         "r.l.1": 0,
         "r.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0106",
@@ -1334,7 +1605,8 @@
         "r.w.l": 0,
         "r.w.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0107",
@@ -1347,7 +1619,8 @@
         "r.w.l": 0,
         "r.w.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0108",
@@ -1360,7 +1633,8 @@
         "r.w.l": 0,
         "r.w.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0109",
@@ -1372,7 +1646,8 @@
         "r.w.l": 0,
         "r.w.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0110",
@@ -1385,7 +1660,8 @@
         "r.w.l": 0,
         "r.w.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0111",
@@ -1398,7 +1674,8 @@
         "r.w.l": 0,
         "r.w.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": []
     },
     {
       "id": "gen-0112",
@@ -1411,7 +1688,10 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.0", 1, "r.w.1", 1]
+      ]
     },
     {
       "id": "gen-0113",
@@ -1424,7 +1704,10 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.0", 1, "r.w.1", 1]
+      ]
     },
     {
       "id": "gen-0114",
@@ -1437,7 +1720,10 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.0", 1, "r.w.1", 1]
+      ]
     },
     {
       "id": "gen-0115",
@@ -1449,7 +1735,10 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.0", 1, "r.w.1", 1]
+      ]
     },
     {
       "id": "gen-0116",
@@ -1462,7 +1751,10 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.0", 1, "r.w.1", 1]
+      ]
     },
     {
       "id": "gen-0117",
@@ -1475,7 +1767,10 @@
         "r.w.0": 1,
         "r.w.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.w.0", 1, "r.w.1", 1]
+      ]
     },
     {
       "id": "gen-0118",
@@ -1488,7 +1783,10 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.t", 1, "r.1.t", 1]
+      ]
     },
     {
       "id": "gen-0119",
@@ -1501,7 +1799,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.t", 1, "r.1.0", 1],
+        ["r.0.t", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0120",
@@ -1514,7 +1816,13 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.t", 1, "r.1.b", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0121",
@@ -1526,7 +1834,10 @@
         "r.0.t": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.t", 1, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0122",
@@ -1539,7 +1850,10 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.t", 1, "r.1.w", 1]
+      ]
     },
     {
       "id": "gen-0123",
@@ -1552,7 +1866,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.t", 1, "r.1.0", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0124",
@@ -1564,7 +1882,10 @@
         "r.0.t": 0,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.e", 1, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0125",
@@ -1577,7 +1898,11 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.1.t", 1],
+        ["r.0.1", 1, "r.1.t", 1]
+      ]
     },
     {
       "id": "gen-0126",
@@ -1590,7 +1915,13 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.1.0", 1],
+        ["r.0.0", 1, "r.1.1", 1],
+        ["r.0.1", 1, "r.1.0", 1],
+        ["r.0.1", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0127",
@@ -1603,7 +1934,14 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.1.b", 1],
+        ["r.0.1", 1, "r.1.b", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0128",
@@ -1615,7 +1953,11 @@
         "r.0.1": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.1", 1],
+        ["r.0.1", 1, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0129",
@@ -1628,7 +1970,11 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.1.w", 1],
+        ["r.0.1", 1, "r.1.w", 1]
+      ]
     },
     {
       "id": "gen-0130",
@@ -1641,7 +1987,12 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.1.0", 1],
+        ["r.0.1", 1, "r.1.0", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0131",
@@ -1654,7 +2005,13 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.0.c", 2, "r.1.t", 1]
+      ]
     },
     {
       "id": "gen-0132",
@@ -1667,7 +2024,14 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.0.c", 2, "r.1.0", 1],
+        ["r.0.c", 2, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0133",
@@ -1680,7 +2044,16 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.0.c", 2, "r.1.b", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0134",
@@ -1692,7 +2065,13 @@
         "r.0.c": 2,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.0.c", 2, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0135",
@@ -1705,7 +2084,13 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.0.c", 2, "r.1.w", 1]
+      ]
     },
     {
       "id": "gen-0136",
@@ -1718,7 +2103,14 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.b", 1, "r.0.c", 1],
+        ["r.0.c", 1, "r.0.b", 2],
+        ["r.0.b", 2, "r.0.c", 2],
+        ["r.0.c", 2, "r.1.0", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0137",
@@ -1730,7 +2122,10 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.1.t", 1]
+      ]
     },
     {
       "id": "gen-0138",
@@ -1742,7 +2137,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.1.0", 1],
+        ["r.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0139",
@@ -1754,7 +2153,13 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.1.b", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0140",
@@ -1765,7 +2170,10 @@
         "r.0": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0141",
@@ -1777,7 +2185,10 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.1.w", 1]
+      ]
     },
     {
       "id": "gen-0142",
@@ -1789,7 +2200,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0", 1, "r.1.0", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0143",
@@ -1802,7 +2217,10 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.w", 1, "r.1.t", 1]
+      ]
     },
     {
       "id": "gen-0144",
@@ -1815,7 +2233,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.w", 1, "r.1.0", 1],
+        ["r.0.w", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0145",
@@ -1828,7 +2250,13 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.w", 1, "r.1.b", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0146",
@@ -1840,7 +2268,10 @@
         "r.0.w": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.w", 1, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0147",
@@ -1853,7 +2284,10 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.w", 1, "r.1.w", 1]
+      ]
     },
     {
       "id": "gen-0148",
@@ -1866,7 +2300,11 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.w", 1, "r.1.0", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0149",
@@ -1879,7 +2317,11 @@
         "r.1.e": 0,
         "r.1.t": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.0.1", 1, "r.1.t", 1]
+      ]
     },
     {
       "id": "gen-0150",
@@ -1892,7 +2334,12 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.0.1", 1, "r.1.0", 1],
+        ["r.0.1", 1, "r.1.1", 1]
+      ]
     },
     {
       "id": "gen-0151",
@@ -1905,7 +2352,14 @@
         "r.1.b": 2,
         "r.1.c": 2
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.0.1", 1, "r.1.b", 1],
+        ["r.1.b", 1, "r.1.c", 1],
+        ["r.1.c", 1, "r.1.b", 2],
+        ["r.1.b", 2, "r.1.c", 2]
+      ]
     },
     {
       "id": "gen-0152",
@@ -1917,7 +2371,11 @@
         "r.0.1": 1,
         "r.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.0.1", 1, "r.1", 1]
+      ]
     },
     {
       "id": "gen-0153",
@@ -1930,7 +2388,11 @@
         "r.1.l": 0,
         "r.1.w": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.0.1", 1, "r.1.w", 1]
+      ]
     },
     {
       "id": "gen-0154",
@@ -1943,7 +2405,327 @@
         "r.1.0": 1,
         "r.1.1": 1
       },
-      "oracle": "exact-marker-counts"
+      "oracle": "exact-marker-counts",
+      "order": [
+        ["r.0.0", 1, "r.0.1", 1],
+        ["r.0.1", 1, "r.1.0", 1],
+        ["r.1.0", 1, "r.1.1", 1]
+      ]
+    }
+  ],
+  "semantic_count": 24,
+  "semantic_cases": [
+    {
+      "id": "sem-0001",
+      "name": "scalar-and-final-result",
+      "dsl": "df.seq(df.as($sql$SELECT 42 AS value$sql$, 'number'), df.seq($sql$SELECT public.df_gen_observe('sem-0001', 'r.value', to_jsonb($number))$sql$, $sql$SELECT $number AS answer$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.value", "iteration": 1, "value": 42}],
+      "result": {"rows": [{"answer": 42}], "row_count": 1},
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0002",
+      "name": "dot-notation-quoted-and-structured-values",
+      "dsl": "df.seq(df.as($sql$SELECT 7 AS id, 'O''Reilly'::text AS title, true AS enabled, '{\"a\":[1,false,null]}'::jsonb AS payload$sql$, 'doc'), $sql$SELECT public.df_gen_observe('sem-0002', 'r.doc', jsonb_build_object('id', $doc.id, 'title', $doc.title, 'enabled', $doc.enabled, 'payload', $doc.payload::jsonb))$sql$)",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.doc", "iteration": 1, "value": {"id": 7, "title": "O'Reilly", "enabled": true, "payload": {"a": [1, false, null]}}}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0003",
+      "name": "empty-result-null-safe-access",
+      "dsl": "df.seq(df.as($sql$SELECT 1 AS value WHERE false$sql$, 'empty'), $sql$SELECT public.df_gen_observe('sem-0003', 'r.nulls', jsonb_build_object('scalar', $empty?::int, 'column', $empty.value?::int, 'fallback', COALESCE($empty?, 9)))$sql$)",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.nulls", "iteration": 1, "value": {"scalar": null, "column": null, "fallback": 9}}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0004",
+      "name": "null-value-null-safe-access",
+      "dsl": "df.seq(df.as($sql$SELECT NULL::text AS value$sql$, 'nullable'), $sql$SELECT public.df_gen_observe('sem-0004', 'r.nulls', jsonb_build_object('scalar', $nullable?::text, 'column', $nullable.value?::text, 'fallback', COALESCE($nullable.value?, 'fallback')))$sql$)",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.nulls", "iteration": 1, "value": {"scalar": null, "column": null, "fallback": "fallback"}}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0005",
+      "name": "empty-result-strict-scalar-fails",
+      "dsl": "df.seq($sql$SELECT public.df_gen_observe('sem-0005', 'r.prefix', 'true'::jsonb)$sql$, df.seq(df.as($sql$SELECT 1 AS value WHERE false$sql$, 'empty'), $sql$SELECT public.df_gen_observe('sem-0005', 'r.forbidden', to_jsonb($empty))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "failed",
+      "error": "$empty has no rows",
+      "expected": [{"path": "r.prefix", "iteration": 1, "value": true}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0006",
+      "name": "empty-result-strict-column-fails",
+      "dsl": "df.seq($sql$SELECT public.df_gen_observe('sem-0006', 'r.prefix', 'true'::jsonb)$sql$, df.seq(df.as($sql$SELECT 1 AS value WHERE false$sql$, 'empty'), $sql$SELECT public.df_gen_observe('sem-0006', 'r.forbidden', to_jsonb($empty.value))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "failed",
+      "error": "$empty has no rows",
+      "expected": [{"path": "r.prefix", "iteration": 1, "value": true}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0007",
+      "name": "null-result-strict-scalar-fails",
+      "dsl": "df.seq($sql$SELECT public.df_gen_observe('sem-0007', 'r.prefix', 'true'::jsonb)$sql$, df.seq(df.as($sql$SELECT NULL::text AS value$sql$, 'nullable'), $sql$SELECT public.df_gen_observe('sem-0007', 'r.forbidden', to_jsonb($nullable))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "failed",
+      "error": "$nullable is NULL",
+      "expected": [{"path": "r.prefix", "iteration": 1, "value": true}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0008",
+      "name": "null-result-strict-column-fails",
+      "dsl": "df.seq($sql$SELECT public.df_gen_observe('sem-0008', 'r.prefix', 'true'::jsonb)$sql$, df.seq(df.as($sql$SELECT NULL::text AS value$sql$, 'nullable'), $sql$SELECT public.df_gen_observe('sem-0008', 'r.forbidden', to_jsonb($nullable.value))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "failed",
+      "error": "$nullable.value is NULL",
+      "expected": [{"path": "r.prefix", "iteration": 1, "value": true}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0009",
+      "name": "row-set-preserves-rows-columns-and-nulls",
+      "dsl": "df.seq(df.as($sql$SELECT * FROM (VALUES (1, 'a'::text), (2, 'O''Reilly'), (3, NULL)) AS t(id, label) ORDER BY id$sql$, 'batch'), $sql$SELECT public.df_gen_observe('sem-0009', 'r.rows', jsonb_agg(jsonb_build_object('id', id, 'label', label) ORDER BY id)) FROM $batch.*$sql$)",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.rows", "iteration": 1, "value": [{"id": 1, "label": "a"}, {"id": 2, "label": "O'Reilly"}, {"id": 3, "label": null}]}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0010",
+      "name": "empty-row-set-expansion",
+      "dsl": "df.seq(df.as($sql$SELECT 1 AS id WHERE false$sql$, 'batch'), $sql$SELECT public.df_gen_observe('sem-0010', 'r.count', to_jsonb(count(*))) FROM $batch.*$sql$)",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.count", "iteration": 1, "value": 0}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0011",
+      "name": "named-results-enter-and-leave-join",
+      "dsl": "df.seq(df.as($sql$SELECT 10 AS value$sql$, 'seed'), df.seq(df.join(df.as($sql$SELECT $seed + 1 AS value$sql$, 'left_value'), df.as($sql$SELECT $seed + 2 AS value$sql$, 'right_value')), $sql$SELECT public.df_gen_observe('sem-0011', 'r.join', jsonb_build_array($left_value, $right_value))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.join", "iteration": 1, "value": [11, 12]}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0012",
+      "name": "named-results-cross-loop-iterations-and-suffix",
+      "dsl": "df.seq(df.as($sql$SELECT 10 AS value$sql$, 'seed'), df.seq(df.loop(df.as($sql$SELECT public.df_gen_observe('sem-0012', 'r.body', to_jsonb($seed)) AS n$sql$, 'last_value'), $sql$SELECT $last_value.n < 2$sql$), $sql$SELECT public.df_gen_observe('sem-0012', 'r.suffix', jsonb_build_array($seed, $last_value.n))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.body", "iteration": 1, "value": 10}, {"path": "r.body", "iteration": 2, "value": 10}, {"path": "r.suffix", "iteration": 1, "value": [10, 2]}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0013",
+      "name": "vars-raw-fragments-numbers-and-literals",
+      "dsl": "df.sql($sql$SELECT public.df_gen_observe('sem-0013', 'r.vars', jsonb_build_object('greeting', '{greeting}', 'total', sum(n) + {increment})) FROM {source}$sql$)",
+      "vars": {"greeting": "Hello", "increment": "7", "source": "(VALUES (2), (3)) AS input(n)"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.vars", "iteration": 1, "value": {"greeting": "Hello", "total": 12}}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0014",
+      "name": "vars-start-snapshot-after-gated-mutation",
+      "dsl": "df.seq(df.as(df.wait_for_signal('snapshot_ready', 60), 'gate'), $sql$SELECT public.df_gen_observe('sem-0014', 'r.snapshot', jsonb_build_object('value', '{captured}', 'timed_out', $gate.timed_out))$sql$)",
+      "vars": {"captured": "before"},
+      "post_start_vars": {"captured": "after"},
+      "release_signal": "snapshot_ready",
+      "status": "completed",
+      "expected": [{"path": "r.snapshot", "iteration": 1, "value": {"value": "before", "timed_out": false}}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0015",
+      "name": "vars-nested-join-branches",
+      "dsl": "df.seq($sql$SELECT 1$sql$, df.join($sql$SELECT public.df_gen_observe('sem-0015', 'r.left', to_jsonb('{shared}'::text))$sql$, df.seq($sql$SELECT 2$sql$, $sql$SELECT public.df_gen_observe('sem-0015', 'r.right', to_jsonb('{shared}'::text))$sql$)))",
+      "vars": {"shared": "join-value"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.left", "iteration": 1, "value": "join-value"}, {"path": "r.right", "iteration": 1, "value": "join-value"}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0016",
+      "name": "vars-race-winning-branch",
+      "dsl": "df.race($sql$SELECT public.df_gen_observe('sem-0016', 'r.winner', to_jsonb('{shared}'::text))$sql$, df.seq(df.sleep(30), $sql$SELECT public.df_gen_observe('sem-0016', 'r.loser', to_jsonb('{shared}'::text))$sql$))",
+      "vars": {"shared": "race-value"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.winner", "iteration": 1, "value": "race-value"}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0017",
+      "name": "vars-loop-iterations-and-suffix",
+      "dsl": "df.seq(df.loop($sql$SELECT public.df_gen_observe('sem-0017', 'r.body', to_jsonb('{shared}'::text))$sql$, $sql$SELECT count(*) < 2 FROM public.df_gen_trace WHERE shape_id = 'sem-0017' AND node_path = 'r.body'$sql$), $sql$SELECT public.df_gen_observe('sem-0017', 'r.suffix', to_jsonb('{shared}'::text))$sql$)",
+      "vars": {"shared": "loop-value"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.body", "iteration": 1, "value": "loop-value"}, {"path": "r.body", "iteration": 2, "value": "loop-value"}, {"path": "r.suffix", "iteration": 1, "value": "loop-value"}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0018",
+      "name": "system-vars-use-actual-instance-and-label",
+      "dsl": "df.sql($sql$SELECT public.df_gen_observe('sem-0018', 'r.system', jsonb_build_object('label', '{sys_label}', 'instance_matches', '{sys_instance_id}' = (SELECT id FROM df.instances WHERE label = 'sem-0018' ORDER BY created_at DESC LIMIT 1)))$sql$)",
+      "vars": {"sys_label": "must-not-shadow", "sys_instance_id": "must-not-shadow"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.system", "iteration": 1, "value": {"label": "sem-0018", "instance_matches": true}}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0019",
+      "name": "named-result-inserted-text-is-not-rescanned",
+      "dsl": "df.seq(df.as($sql$SELECT '$other'::text AS value$sql$, 'literal'), df.seq(df.as($sql$SELECT 'expanded'::text AS value$sql$, 'other'), $sql$SELECT public.df_gen_observe('sem-0019', 'r.literal', jsonb_build_array($literal, $other))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.literal", "iteration": 1, "value": ["$other", "expanded"]}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0020",
+      "name": "vars-inserted-text-is-not-rescanned",
+      "dsl": "df.sql($sql$SELECT public.df_gen_observe('sem-0020', 'r.literal', jsonb_build_array('{literal}', '{other}'))$sql$)",
+      "vars": {"literal": "{other}", "other": "expanded"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.literal", "iteration": 1, "value": ["{other}", "expanded"]}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0021",
+      "name": "vars-pass-precedes-result-substitution",
+      "dsl": "df.seq(df.as($sql$SELECT 7 AS value$sql$, 'number'), $sql$SELECT public.df_gen_observe('sem-0021', 'r.mixed', to_jsonb({expression}))$sql$)",
+      "vars": {"expression": "$number + 1"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.mixed", "iteration": 1, "value": 8}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0022",
+      "name": "named-results-enter-and-leave-race",
+      "dsl": "df.seq(df.as($sql$SELECT 10 AS value$sql$, 'seed'), df.seq(df.race(df.as($sql$SELECT $seed + 1 AS value$sql$, 'winner'), df.seq(df.sleep(30), df.as($sql$SELECT public.df_gen_observe('sem-0022', 'r.loser', 'false'::jsonb)$sql$, 'loser'))), $sql$SELECT public.df_gen_observe('sem-0022', 'r.winner', to_jsonb($winner))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.winner", "iteration": 1, "value": 11}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0023",
+      "name": "named-result-prefix-boundaries-and-repeated-use",
+      "dsl": "df.seq(df.as($sql$SELECT 2 AS value$sql$, 'x'), df.seq(df.as($sql$SELECT 3 AS value$sql$, 'xy'), $sql$SELECT public.df_gen_observe('sem-0023', 'r.names', jsonb_build_array($x, $xy, $x + $xy, $x))$sql$))",
+      "vars": {},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.names", "iteration": 1, "value": [2, 3, 5, 2]}],
+      "oracle": "exact-observations"
+    },
+    {
+      "id": "sem-0024",
+      "name": "named-conditional-result-and-variable-condition",
+      "dsl": "df.seq(df.as(df.if($sql$SELECT {choose_then}$sql$, $sql$SELECT 41 AS value$sql$, $sql$SELECT 42 AS value$sql$), 'decision'), $sql$SELECT public.df_gen_observe('sem-0024', 'r.choice', to_jsonb($decision.value))$sql$)",
+      "vars": {"choose_then": "false"},
+      "post_start_vars": {},
+      "status": "completed",
+      "expected": [{"path": "r.choice", "iteration": 1, "value": 42}],
+      "oracle": "exact-observations"
+    }
+  ],
+  "relation_count": 7,
+  "relations": [
+    {
+      "id": "meta-0001",
+      "name": "seq-assoc",
+      "rationale": "Re-grouping sequence preserves the marker multiset. Causal ordering is checked independently by the shape corpus.",
+      "dsl_a": "df.seq(df.sql($mk$SELECT public.df_gen_mark('meta-0001-a', 'r.a')$mk$), df.seq(df.sql($mk$SELECT public.df_gen_mark('meta-0001-a', 'r.b')$mk$), df.sql($mk$SELECT public.df_gen_mark('meta-0001-a', 'r.c')$mk$)))",
+      "dsl_b": "df.seq(df.seq(df.sql($mk$SELECT public.df_gen_mark('meta-0001-b', 'r.a')$mk$), df.sql($mk$SELECT public.df_gen_mark('meta-0001-b', 'r.b')$mk$)), df.sql($mk$SELECT public.df_gen_mark('meta-0001-b', 'r.c')$mk$))",
+      "expected": {"r.a": 1, "r.b": 1, "r.c": 1},
+      "oracle": "equivalent-marker-counts"
+    },
+    {
+      "id": "meta-0002",
+      "name": "if-true",
+      "rationale": "A constant-true IF has the same marker multiset as its then branch; the else branch never runs.",
+      "dsl_a": "df.if($c$SELECT true$c$, df.sql($mk$SELECT public.df_gen_mark('meta-0002-a', 'r.a')$mk$), df.sql($mk$SELECT public.df_gen_mark('meta-0002-a', 'r.b')$mk$))",
+      "dsl_b": "df.sql($mk$SELECT public.df_gen_mark('meta-0002-b', 'r.a')$mk$)",
+      "expected": {"r.a": 1},
+      "oracle": "equivalent-marker-counts"
+    },
+    {
+      "id": "meta-0003",
+      "name": "if-false",
+      "rationale": "A constant-false IF has the same marker multiset as its else branch; the then branch never runs.",
+      "dsl_a": "df.if($c$SELECT false$c$, df.sql($mk$SELECT public.df_gen_mark('meta-0003-a', 'r.a')$mk$), df.sql($mk$SELECT public.df_gen_mark('meta-0003-a', 'r.b')$mk$))",
+      "dsl_b": "df.sql($mk$SELECT public.df_gen_mark('meta-0003-b', 'r.b')$mk$)",
+      "expected": {"r.b": 1},
+      "oracle": "equivalent-marker-counts"
+    },
+    {
+      "id": "meta-0004",
+      "name": "join-comm",
+      "rationale": "Swapping independent JOIN branches preserves their marker multiset, not their completion order or aggregate result array.",
+      "dsl_a": "df.join(df.sql($mk$SELECT public.df_gen_mark('meta-0004-a', 'r.a')$mk$), df.sql($mk$SELECT public.df_gen_mark('meta-0004-a', 'r.b')$mk$))",
+      "dsl_b": "df.join(df.sql($mk$SELECT public.df_gen_mark('meta-0004-b', 'r.b')$mk$), df.sql($mk$SELECT public.df_gen_mark('meta-0004-b', 'r.a')$mk$))",
+      "expected": {"r.a": 1, "r.b": 1},
+      "oracle": "equivalent-marker-counts"
+    },
+    {
+      "id": "meta-0005",
+      "name": "race-winner",
+      "rationale": "A marker racing a 30-second sleep has the winner-only marker multiset, provided the marker completes before the timer.",
+      "dsl_a": "df.race(df.sql($mk$SELECT public.df_gen_mark('meta-0005-a', 'r.a')$mk$), df.sleep(30))",
+      "dsl_b": "df.sql($mk$SELECT public.df_gen_mark('meta-0005-b', 'r.a')$mk$)",
+      "expected": {"r.a": 1},
+      "oracle": "equivalent-marker-counts"
+    },
+    {
+      "id": "meta-0006",
+      "name": "do-while-once",
+      "rationale": "A do-while loop with a false condition after its first body run has the single-body marker multiset.",
+      "dsl_a": "df.loop(df.sql($mk$SELECT public.df_gen_mark('meta-0006-a', 'r.a')$mk$), $c$SELECT count(*) < 1 FROM public.df_gen_trace WHERE shape_id = 'meta-0006-a' AND node_path = 'r.a'$c$)",
+      "dsl_b": "df.sql($mk$SELECT public.df_gen_mark('meta-0006-b', 'r.a')$mk$)",
+      "expected": {"r.a": 1},
+      "oracle": "equivalent-marker-counts"
+    },
+    {
+      "id": "meta-0007",
+      "name": "loop-break-once",
+      "rationale": "A loop breaking immediately after its first body run has the single-body marker multiset, without equating final return values.",
+      "dsl_a": "df.loop(df.seq(df.sql($mk$SELECT public.df_gen_mark('meta-0007-a', 'r.a')$mk$), df.if($c$SELECT count(*) >= 1 FROM public.df_gen_trace WHERE shape_id = 'meta-0007-a' AND node_path = 'r.a'$c$, df.break(), $c$SELECT 1$c$)), $c$SELECT true$c$)",
+      "dsl_b": "df.sql($mk$SELECT public.df_gen_mark('meta-0007-b', 'r.a')$mk$)",
+      "expected": {"r.a": 1},
+      "oracle": "equivalent-marker-counts"
     }
   ]
 }
