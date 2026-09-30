@@ -98,8 +98,13 @@ The same database is retained through three phases:
 | Phase | Binary | Extension schema | Assertions |
 |-------|--------|------------------|------------|
 | Baseline | N-1 | N-1 | For every behavior family, hold two instances at a durable suspension inside the shape; also complete one `seq` instance. Check results, captured variables, owner and side effects. |
-| B1 | N | N-1 | Restart with the candidate binary without `ALTER EXTENSION`; revalidate suspended instances, resume each family's first instance, and create a fresh completed instance. |
-| B2 | N | N | Run `ALTER EXTENSION UPDATE`; revalidate, resume each family's second instance (created before the binary swap and now past a schema change too), and execute a new instance. |
+| B1 | N | N-1 | Restart with the candidate binary without `ALTER EXTENSION`; revalidate suspended instances, resume each family's first instance, and create both a completed `seq` instance and a suspended `seq-binary-b2` instance. |
+| B2 | N | N | Run `ALTER EXTENSION UPDATE`; revalidate, resume each family's second instance and `seq-binary-b2`, and execute a new instance. |
+
+The additional `seq-binary-b2` instance preserves the original lifecycle's
+new-binary/old-schema to new-binary/new-schema scenario. Together with the
+N-1 family instances, it verifies that histories created both before and after
+the binary swap survive the schema upgrade. The final phase validates 18 instances.
 
 #### Behavior-family coverage
 
@@ -116,18 +121,27 @@ every family:
 | `if-then` | Inside the taken then-branch | Branch selection; the else marker stays unrun |
 | `if-else` | Inside the taken else-branch | Explicit else selection; the then marker stays unrun |
 | `loop` | During the first iteration | Iteration state; later iterations run exactly once each |
-| `break` | Before the iteration that breaks | Break propagation without replaying earlier markers |
+| `break` | During logical iteration 1, before breaking on iteration 3 | Captured iteration state and exactly one marker for each of iterations 1, 2, 3 |
 | `join` | One branch done, one suspended | The completed branch is not re-run on resume |
-| `race` | Winner suspended, loser on a long timer | Race resolution; the cancelled loser never marks |
+| `race` | Winner suspended, loser on a durably recorded long timer | Race resolution; the loser reaches terminal cancellation and never marks |
 
 Each family records path-tagged marker rows with a `(label, path, occurrence)`
 key, and the harness asserts exact per-path counts — including zero-count paths
-for unrun branches and cancelled losers — before and after resume. This detects
-missing, duplicate, reordered, or incorrectly selected work when an old history
-replays. The `seq` family additionally records a first SQL result and a
+for unrun branches and cancelled losers — before and after resume. The `break`
+family uses a captured logical iteration counter independent of marker counts,
+and asserts marker values `[1]` before resume and `[1, 2, 3]` afterward. Duplicating
+an effect cannot advance the break condition and hide a missing iteration.
+The `race` family checks the exact loser child's current provider execution:
+it must be running with a recorded `TimerCreated` before resume, then reach
+`failed` with an `OrchestrationFailed` application `Cancelled` error afterward.
+An absent marker alone is not evidence of cancellation while the timer sleeps.
+The `seq` family additionally records a first SQL result and a
 persisted signal subscription before the transition; its continuation must reuse
 that captured result and the start-time variable capture even though the live
-variables changed. Completed outputs must remain byte-identical across phases.
+variables changed. Its first marker must equal `41` both before and after resume,
+and its continuation must equal `42`. Both markers resolve `{sys_label}` at
+execution time rather than embedding the label during graph construction.
+Completed outputs must remain byte-identical across phases.
 Checks exercise `df.status`, `df.result`, `df.list_instances` and
 `df.instance_info` as an ordinary granted role, and also check provider status
 so a stale extension status cannot hide a replay failure.

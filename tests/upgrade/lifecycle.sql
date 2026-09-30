@@ -10,8 +10,8 @@ CREATE TABLE public.upgrade_lifecycle_cases (
     shape text NOT NULL,
     waiting boolean NOT NULL
 );
--- One row per marker execution. The (label, path, occurrence) key detects
--- missing, duplicate, or reordered side effects when old histories replay.
+-- One row per marker execution; assertions check counts and logical iteration
+-- values separately from the occurrence assigned at insertion.
 CREATE TABLE public.upgrade_lifecycle_marks (
     label text NOT NULL,
     path text NOT NULL,
@@ -79,14 +79,14 @@ DECLARE
 BEGIN
     CASE shape
         WHEN 'seq' THEN
-            -- seed -> [wait] -> continuation reusing the captured seed.
+            -- Resolve the label at runtime as well as reusing the captured seed.
             graph := df.as(
-                public.upgrade_lifecycle_mark_sql(label, 'r.0', '{lifecycle_seed}'), 'seed');
+                public.upgrade_lifecycle_mark_sql('{sys_label}', 'r.0', '{lifecycle_seed}'), 'seed');
             IF waiting THEN
                 graph := df.seq(graph, gate);
             END IF;
             graph := df.seq(graph, public.upgrade_lifecycle_mark_sql(
-                label, 'r.1', '$seed::integer + {lifecycle_increment}'));
+                '{sys_label}', 'r.1', '$seed::integer + {lifecycle_increment}'));
 
         WHEN 'if-then' THEN
             -- Then branch suspends mid-branch; the else branch must stay unrun.
@@ -115,16 +115,18 @@ BEGIN
                 public.upgrade_lifecycle_count_sql(label, 'r.c', '% 2 <> 0'));
 
         WHEN 'break' THEN
-            -- Suspend on the first iteration, then loop until the break fires on
-            -- the third marker. The pre-suspension marker must not be replayed.
-            graph := df.loop(
-                df.seq(
-                    df.seq(public.upgrade_lifecycle_mark_sql(label, 'r.0'),
-                        df.if(public.upgrade_lifecycle_count_sql(label, 'r.0', '= 1'),
-                              gate, 'SELECT 1')),
-                    df.if(public.upgrade_lifecycle_count_sql(label, 'r.0', '% 3 = 0'),
-                          df.break(), 'SELECT 1')),
-                'SELECT true');
+            -- Control iterations independently of marker effects, so a replayed
+            -- marker cannot make the break fire early and hide a lost iteration.
+            graph := df.seq(df.as('SELECT 0', 'iteration'),
+                df.loop(
+                    df.seq(
+                        df.seq(
+                            df.as('SELECT $iteration::integer + 1', 'iteration'),
+                            df.seq(public.upgrade_lifecycle_mark_sql(
+                                       label, 'r.0', '$iteration::integer'),
+                                df.if('SELECT $iteration::integer = 1', gate, 'SELECT 1'))),
+                        df.if('SELECT $iteration::integer = 3', df.break(), 'SELECT 1')),
+                    'SELECT true'));
 
         WHEN 'join' THEN
             -- One branch completes immediately; the other suspends. Resuming must

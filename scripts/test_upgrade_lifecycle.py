@@ -16,11 +16,13 @@ def case(shape="seq", waiting=False):
     spec = lifecycle.SHAPES[shape]
     counts = spec["before"] if waiting else spec["after"]
     captured = {} if waiting else spec.get("captured", {})
+    values = spec.get("before_values" if waiting else "after_values", {})
     marks = []
     for path, count in sorted(counts.items()):
         for occurrence in range(1, count + 1):
             marks.append({"path": path, "occurrence": occurrence,
-                          "value": captured.get(path), "executed_by": lifecycle.ROLE})
+                          "value": values[path][occurrence - 1] if path in values else captured.get(path),
+                          "executed_by": lifecycle.ROLE})
     if waiting:
         result = None
     elif spec.get("result") is not None:
@@ -35,6 +37,10 @@ def case(shape="seq", waiting=False):
         "listed": True, "subscribed": waiting,
         "result": result,
         "marks": marks,
+        "race_loser_id": "test::1::loser" if shape == "race" else None,
+        "race_loser_status": "running" if waiting else "failed",
+        "race_loser_timer_created": shape == "race",
+        "race_loser_cancelled": shape == "race" and not waiting,
     }
 
 
@@ -84,6 +90,68 @@ class ValidationTests(unittest.TestCase):
         next(m for m in value["marks"] if m["path"] == "r.1")["value"] = 999
         self.assertTrue(any("captured value" in problem
                             for problem in lifecycle.case_problems(value, {})))
+
+    def test_sequence_requires_seed_value_before_and_after_resume(self):
+        for waiting in (True, False):
+            for seed in (None, 40, 999):
+                value = case("seq", waiting=waiting)
+                value["marks"][0]["value"] = seed
+                with self.subTest(waiting=waiting, seed=seed):
+                    self.assertIn("incorrect marker values at r.0",
+                                  "; ".join(lifecycle.case_problems(value, {})))
+
+    def test_break_requires_logical_iterations_not_just_three_effects(self):
+        for iterations in ([1, 1, 2], [1, 2, 2], [1, 3, 2], [2, 3, 4]):
+            value = case("break")
+            for mark, iteration in zip(value["marks"], iterations):
+                mark["value"] = iteration
+            with self.subTest(iterations=iterations):
+                self.assertIn("incorrect marker values at r.0",
+                              "; ".join(lifecycle.case_problems(value, {})))
+
+    def test_break_requires_first_iteration_before_resume(self):
+        value = case("break", waiting=True)
+        value["marks"][0]["value"] = 2
+        self.assertIn("incorrect marker values at r.0",
+                      "; ".join(lifecycle.case_problems(value, {})))
+
+    def test_race_requires_exact_loser_and_durable_timer(self):
+        for waiting in (True, False):
+            for field, invalid in (("race_loser_id", None), ("race_loser_timer_created", False)):
+                value = case("race", waiting=waiting)
+                value[field] = invalid
+                with self.subTest(waiting=waiting, field=field):
+                    self.assertTrue(lifecycle.case_problems(value, {}))
+
+    def test_race_requires_running_loser_before_resume(self):
+        for status, cancelled in (("failed", True), ("completed", False), ("running", True)):
+            value = case("race", waiting=True)
+            value.update(race_loser_status=status, race_loser_cancelled=cancelled)
+            with self.subTest(status=status, cancelled=cancelled):
+                self.assertIn("race loser must still be running before resume",
+                              lifecycle.case_problems(value, {}))
+
+    def test_race_requires_terminal_cancellation_not_merely_no_loser_marks(self):
+        for status, cancelled in (("running", False), ("running", True),
+                                  ("failed", False), ("completed", False), (None, False)):
+            value = case("race")
+            value.update(race_loser_status=status, race_loser_cancelled=cancelled)
+            with self.subTest(status=status, cancelled=cancelled):
+                self.assertIn("race loser cancellation is not yet terminal",
+                              lifecycle.case_problems(value, {}))
+
+    def test_validate_waits_for_race_loser_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cluster = lifecycle.Cluster(Path(directory), Path(directory), 1)
+            pending = case("race")
+            pending.update(race_loser_status="running", race_loser_cancelled=False)
+            terminal = case("race")
+            cluster.state = Mock(side_effect=[[pending], [terminal]])
+            completed = {}
+            with patch.object(lifecycle.time, "sleep"):
+                self.assertEqual(cluster.validate(["test"], completed), [terminal])
+            self.assertEqual(cluster.state.call_count, 2)
+            self.assertEqual(completed, {"test": terminal["result"]})
 
     def test_rejects_unexpected_branch_or_loser_markers(self):
         for shape, stray in (("if-then", "r.e"), ("if-else", "r.t"), ("race", "r.l")):
@@ -135,13 +203,33 @@ class ValidationTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_start_sequence_captures_variables_then_changes_live_values(self):
+        for waiting in (True, False):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(waiting=waiting):
+                cluster = lifecycle.Cluster(Path(directory), Path(directory), 1)
+                cluster.set_vars = Mock()
+                cluster.start_case = Mock()
+                events = Mock()
+                events.attach_mock(cluster.set_vars, "set_vars")
+                events.attach_mock(cluster.start_case, "start_case")
+                cluster.start_sequence("seq-test", waiting=waiting)
+                self.assertEqual(events.mock_calls, [
+                    unittest.mock.call.set_vars(41, 1),
+                    unittest.mock.call.start_case("seq-test", "seq", waiting),
+                    unittest.mock.call.set_vars(999, 999),
+                ])
+
     @patch.object(lifecycle, "install")
     def test_phase_order_and_instance_cohorts(self, install):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             cluster = Mock(prefix=output, schema="_duroxide")
             cluster.sql.return_value = "999"
-            cluster.validate.return_value = []
+            cohorts = []
+            def validate(names, completed):
+                cohorts.append(set(names))
+                return []
+            cluster.validate.side_effect = validate
             events = Mock()
             events.attach_mock(cluster, "cluster")
             events.attach_mock(install, "install")
@@ -153,6 +241,22 @@ class LifecycleTests(unittest.TestCase):
                 "ALTER EXTENSION pg_durable UPDATE TO '0.2.9';"))
             self.assertLess(old_install, new_install)
             self.assertLess(new_install, alter)
+            binary_wait_start = calls.index(unittest.mock.call.cluster.start_sequence(
+                "seq-binary-b2", waiting=True))
+            binary_wait_release = calls.index(unittest.mock.call.cluster.release("seq-binary-b2"))
+            validations = [i for i, call in enumerate(calls) if call[0] == "cluster.validate"]
+            self.assertLess(new_install, binary_wait_start)
+            self.assertLess(binary_wait_start, validations[2])
+            self.assertLess(validations[2], alter)
+            self.assertLess(alter, validations[3])
+            self.assertLess(validations[3], binary_wait_release)
+            self.assertLess(binary_wait_release, validations[4])
+            baseline = {f"{family}-{boundary}" for family in lifecycle.FAMILIES
+                        for boundary in ("b1", "b2")} | {"seq-done-baseline"}
+            binary = baseline | {"seq-done-b1", "seq-binary-b2"}
+            self.assertEqual(cohorts, [
+                baseline, baseline, binary, binary, binary | {"seq-done-b2"},
+            ])
             self.assertEqual(cluster.versions.call_args_list, [
                 unittest.mock.call("0.2.8", "0.2.8"),
                 unittest.mock.call("0.2.8", "0.2.8"),
@@ -162,14 +266,16 @@ class LifecycleTests(unittest.TestCase):
                 unittest.mock.call("0.2.9", "0.2.9"),
             ])
             self.assertEqual(cluster.seed_families.call_count, 1)
-            self.assertEqual(cluster.start_completed.call_args_list, [
+            self.assertEqual(cluster.start_sequence.call_args_list, [
                 unittest.mock.call("seq-done-baseline"),
                 unittest.mock.call("seq-done-b1"),
+                unittest.mock.call("seq-binary-b2", waiting=True),
                 unittest.mock.call("seq-done-b2"),
             ])
             self.assertEqual(cluster.release.call_args_list,
                 [unittest.mock.call(f"{family}-b1") for family in lifecycle.FAMILIES]
-                + [unittest.mock.call(f"{family}-b2") for family in lifecycle.FAMILIES])
+                + [unittest.mock.call(f"{family}-b2") for family in lifecycle.FAMILIES]
+                + [unittest.mock.call("seq-binary-b2")])
             self.assertEqual(cluster.stop.call_count, 2)
             self.assertEqual(len(list(output.glob("*.json"))), 5)
 

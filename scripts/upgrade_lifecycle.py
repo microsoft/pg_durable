@@ -34,12 +34,14 @@ FAMILIES = ["seq", "if-then", "if-else", "loop", "break", "join", "race"]
 # reused the pre-suspension variable capture; "result" pins the instance output.
 SHAPES = {
     "seq": {"before": {"r.0": 1}, "after": {"r.0": 1, "r.1": 1},
+            "before_values": {"r.0": [41]}, "after_values": {"r.0": [41]},
             "captured": {"r.1": 42},
             "result": {"rows": [{"value": 42}], "row_count": 1}},
     "if-then": {"before": {"r.t.0": 1}, "after": {"r.t.0": 1, "r.t.1": 1}},
     "if-else": {"before": {"r.e.0": 1}, "after": {"r.e.0": 1, "r.e.1": 1}},
     "loop": {"before": {"r.b": 1}, "after": {"r.b": 2, "r.c": 2}},
-    "break": {"before": {"r.0": 1}, "after": {"r.0": 3}},
+    "break": {"before": {"r.0": 1}, "after": {"r.0": 3},
+              "before_values": {"r.0": [1]}, "after_values": {"r.0": [1, 2, 3]}},
     "join": {"before": {"r.0": 1, "r.b": 1}, "after": {"r.0": 1, "r.b": 1, "r.1": 1}},
     "race": {"before": {"r.w": 1}, "after": {"r.w": 1, "r.w2": 1}},
 }
@@ -189,10 +191,9 @@ class Cluster:
             self.start_case(f"{family}-b2", family, True)
         self.set_vars(999, 999)
 
-    def start_completed(self, name):
-        # A fresh seq instance that completes immediately in the current phase.
+    def start_sequence(self, name, waiting=False):
         self.set_vars(41, 1)
-        self.start_case(name, "seq", False)
+        self.start_case(name, "seq", waiting)
         self.set_vars(999, 999)
 
     def release(self, name):
@@ -213,6 +214,22 @@ class Cluster:
                             WHERE l.instance_id=c.instance_id) AS listed,
                     lower(e.status) AS engine_status,
                     e.output AS engine_output,
+                    loser.instance_id AS race_loser_id,
+                    lower(loser_e.status) AS race_loser_status,
+                    EXISTS (SELECT FROM {self.schema}.history h
+                            WHERE h.instance_id=loser.instance_id
+                              AND h.execution_id=loser.current_execution_id
+                              AND h.event_data::jsonb->>'type'='TimerCreated')
+                        AS race_loser_timer_created,
+                    -- Duroxide persists cancellation as an application failure,
+                    -- not a separate execution status.
+                    EXISTS (SELECT FROM {self.schema}.history h
+                            WHERE h.instance_id=loser.instance_id
+                              AND h.execution_id=loser.current_execution_id
+                              AND h.event_data::jsonb->>'type'='OrchestrationFailed'
+                              AND h.event_data::jsonb
+                                  #> '{{details,Application,kind,Cancelled}}' IS NOT NULL)
+                        AS race_loser_cancelled,
                     -- The 'resume' subscription is durable in the root execution
                     -- for simple shapes, or in a spawned join/race branch whose
                     -- child instance id is prefixed with the root id.
@@ -231,6 +248,12 @@ class Cluster:
                 LEFT JOIN {self.schema}.instances i ON i.instance_id=c.instance_id
                 LEFT JOIN {self.schema}.executions e ON e.instance_id=i.instance_id
                     AND e.execution_id=i.current_execution_id
+                LEFT JOIN df.nodes race ON c.shape='race'
+                    AND race.instance_id=c.instance_id AND race.node_type='RACE'
+                LEFT JOIN {self.schema}.instances loser ON loser.instance_id=
+                    c.instance_id || '::' || i.current_execution_id::text || '::' || race.right_node
+                LEFT JOIN {self.schema}.executions loser_e ON loser_e.instance_id=loser.instance_id
+                    AND loser_e.execution_id=loser.current_execution_id
             ) c;
         """, role=ROLE))
 
@@ -268,6 +291,20 @@ def case_problems(case, completed):
         problems.append(f"incorrect marker counts: {actual_counts} != {expected_counts}")
     if any(mark["executed_by"] != ROLE for mark in case["marks"]):
         problems.append("marker executed by unexpected role")
+    for path, expected in shape.get("before_values" if waiting else "after_values", {}).items():
+        values = [mark["value"] for mark in case["marks"] if mark["path"] == path]
+        if values != expected:
+            problems.append(f"incorrect marker values at {path}: {values} != {expected}")
+    if case["shape"] == "race":
+        if not case["race_loser_id"]:
+            problems.append("race loser child is missing")
+        if not case["race_loser_timer_created"]:
+            problems.append("race loser timer is not yet durable")
+        if waiting:
+            if case["race_loser_status"] != "running" or case["race_loser_cancelled"]:
+                problems.append("race loser must still be running before resume")
+        elif case["race_loser_status"] != "failed" or not case["race_loser_cancelled"]:
+            problems.append("race loser cancellation is not yet terminal")
     if waiting:
         if not case["subscribed"]:
             problems.append("signal subscription is not yet durable")
@@ -312,11 +349,11 @@ def exercise(cluster, previous, current, old_package, new_package, output):
         # Baseline: every family holds two N-1 instances at a durable suspension,
         # plus a completed seq instance to track a byte-identical result.
         cluster.seed_families()
-        cluster.start_completed("seq-done-baseline")
+        cluster.start_sequence("seq-done-baseline")
         names += ["seq-done-baseline"]
         check("baseline", previous, previous)
 
-        # B1: new binary, old schema. Resume every -b1 case and start a fresh one.
+        # B1: also create new-binary history to resume across the schema upgrade.
         cluster.stop()
         install(new_package, cluster.prefix)
         cluster.start()
@@ -324,8 +361,9 @@ def exercise(cluster, previous, current, old_package, new_package, output):
         check("b1-before-resume", current, previous)
         for family in FAMILIES:
             cluster.release(f"{family}-b1")
-        cluster.start_completed("seq-done-b1")
-        names += ["seq-done-b1"]
+        cluster.start_sequence("seq-done-b1")
+        cluster.start_sequence("seq-binary-b2", waiting=True)
+        names += ["seq-done-b1", "seq-binary-b2"]
         check("b1", current, previous)
 
         # B2: new binary, new schema. Resume every -b2 case and start a fresh one.
@@ -333,7 +371,8 @@ def exercise(cluster, previous, current, old_package, new_package, output):
         check("b2-before-resume", current, current)
         for family in FAMILIES:
             cluster.release(f"{family}-b2")
-        cluster.start_completed("seq-done-b2")
+        cluster.release("seq-binary-b2")
+        cluster.start_sequence("seq-done-b2")
         names += ["seq-done-b2"]
         check("b2", current, current)
     finally:
