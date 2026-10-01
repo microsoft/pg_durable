@@ -596,10 +596,10 @@ Request headers and bodies are not directly included in request traces, but an
 endpoint can echo them in its response.
 
 > **Not covered by URL redaction:** stored request inputs, response headers and
-> inline response bodies. A workflow's final result is logged, and inline
-> response-body previews appear in 5xx errors. A response containing a credential,
-> including an echoed request URL or a token returned by an endpoint, can still
-> expose it in logs and stored results.
+> inline response bodies. Successful completion logs only the result's byte
+> count, but inline response-body previews appear in 5xx errors. A response
+> containing a credential, including an echoed request URL or a token returned
+> by an endpoint, can still expose it in logs and stored results.
 > URL redaction does not make `df.vars` secret storage; see
 > [Variables and secrets](../USER_GUIDE.md#variables-and-secrets).
 
