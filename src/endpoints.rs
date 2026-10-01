@@ -8,6 +8,25 @@ use url::Url;
 
 pub const FDW_NAME: &str = "pg_durable_fdw";
 
+const MANAGED_IDENTITY_ADMIN_CHECK: &str =
+        "SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_depend AS dependency
+                JOIN pg_catalog.pg_extension AS extension
+                    ON extension.oid OPERATOR(pg_catalog.=) dependency.refobjid
+                JOIN pg_catalog.pg_proc AS capability
+                    ON capability.oid OPERATOR(pg_catalog.=) dependency.objid
+                JOIN pg_catalog.pg_namespace AS namespace
+                    ON namespace.oid OPERATOR(pg_catalog.=) capability.pronamespace
+                WHERE dependency.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass
+                    AND namespace.nspname OPERATOR(pg_catalog.=) 'df'
+                    AND capability.proname OPERATOR(pg_catalog.=) 'managed_identity_admin'
+                    AND capability.pronargs OPERATOR(pg_catalog.=) 0
+                    AND dependency.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+                    AND dependency.deptype OPERATOR(pg_catalog.=) 'e'
+                    AND extension.extname OPERATOR(pg_catalog.=) 'pg_durable'
+                    AND pg_catalog.has_function_privilege($1::pg_catalog.oid, dependency.objid, 'EXECUTE')
+        )";
+
 pgrx::extension_sql!(
     "CREATE TYPE df.http_endpoint AS (server pg_catalog.text, path pg_catalog.text);",
     name = "create_endpoint_type",
@@ -128,6 +147,26 @@ fn compose_endpoint_url(base: &Url, path: &str) -> Result<Url, String> {
 pub struct EndpointRequest {
     pub url: Url,
     pub credential_header: Option<(HeaderName, HeaderValue)>,
+    pub managed_identity: Option<crate::managed_identity::TokenResource>,
+}
+
+impl EndpointRequest {
+    pub fn credential_header_name(&self) -> Option<&HeaderName> {
+        self.credential_header
+            .as_ref()
+            .map(|(name, _)| name)
+            .or_else(|| self.managed_identity.as_ref().map(|_| &AUTHORIZATION))
+    }
+
+    pub async fn authorize(
+        &mut self,
+        client: &crate::managed_identity::TokenClient,
+    ) -> Result<(), String> {
+        if let Some(identity) = &self.managed_identity {
+            self.credential_header = Some((AUTHORIZATION, client.authorization(identity).await?));
+        }
+        Ok(())
+    }
 }
 
 fn prepare_endpoint_request(
@@ -137,7 +176,7 @@ fn prepare_endpoint_request(
 ) -> Result<EndpointRequest, String> {
     let mut url = compose_endpoint_url(&endpoint.base_url, path)?;
     let credential_name = match &endpoint.auth {
-        EndpointAuth::Bearer(_) => Some(&AUTHORIZATION),
+        EndpointAuth::Bearer(_) | EndpointAuth::ManagedIdentity(_) => Some(&AUTHORIZATION),
         EndpointAuth::Header { name, .. } => Some(name),
         _ => None,
     };
@@ -153,10 +192,15 @@ fn prepare_endpoint_request(
             }
         }
     }
+    let mut managed_identity = None;
     let credential_header = match endpoint.auth {
         EndpointAuth::None => None,
         EndpointAuth::Bearer(value) => Some((AUTHORIZATION, value)),
         EndpointAuth::Header { name, value } => Some((name, value)),
+        EndpointAuth::ManagedIdentity(identity) => {
+            managed_identity = Some(identity);
+            None
+        }
         EndpointAuth::Query(query) => {
             let credential_url = Url::parse(&format!("https://endpoint.invalid/?{query}"))
                 .map_err(|_| "Invalid endpoint credential query")?;
@@ -181,6 +225,7 @@ fn prepare_endpoint_request(
     Ok(EndpointRequest {
         url,
         credential_header,
+        managed_identity,
     })
 }
 
@@ -199,6 +244,7 @@ pub async fn prepare_request(
         None => Ok(EndpointRequest {
             url: crate::ssrf::parse_request_url(url)?,
             credential_header: None,
+            managed_identity: None,
         }),
     }
 }
@@ -209,6 +255,7 @@ pub enum AuthScheme {
     Bearer,
     Header(HeaderName),
     Query,
+    ManagedIdentity(crate::managed_identity::TokenResource),
 }
 
 #[derive(Clone)]
@@ -302,12 +349,14 @@ impl EndpointConfig {
                 }
                 AuthScheme::Header(name)
             }
-            "managed-identity" => {
-                return Err("Managed identity is not supported in this version".into())
-            }
+            "managed-identity" => AuthScheme::ManagedIdentity(
+                crate::managed_identity::TokenResource::for_endpoint(
+                    base_url.as_ref().ok_or("Managed identity requires endpoint base_url")?,
+                )?,
+            ),
             _ => {
                 return Err(
-                    "Unsupported endpoint auth_scheme; allowed: none, bearer, header, query".into(),
+                    "Unsupported endpoint auth_scheme; allowed: none, bearer, header, query, managed-identity".into(),
                 )
             }
         };
@@ -359,9 +408,34 @@ fn validate_mapping_options(options: &[String]) -> Result<(), String> {
 }
 
 #[pg_extern(schema = "df")]
+pub fn managed_identity_admin() {}
+
+pgrx::extension_sql!(
+    r#"
+REVOKE ALL ON FUNCTION df.managed_identity_admin() FROM PUBLIC;
+COMMENT ON FUNCTION df.managed_identity_admin() IS
+    'EXECUTE authorizes managed identity endpoint administration. Calling this function does not acquire tokens.';
+"#,
+    name = "managed_identity_admin_acl",
+    requires = [managed_identity_admin]
+);
+
+#[pg_extern(schema = "df")]
 pub fn endpoint_option_validator(options: Vec<String>, catalog: pg_sys::Oid) {
     let result = if catalog == pg_sys::ForeignServerRelationId {
-        EndpointConfig::from_options(&options).map(|_| ())
+        EndpointConfig::from_options(&options).and_then(|config| {
+            if matches!(config.auth_scheme, AuthScheme::ManagedIdentity(_)) {
+                let permitted = Spi::get_one_with_args::<bool>(
+                    MANAGED_IDENTITY_ADMIN_CHECK,
+                    &[unsafe { pg_sys::GetUserId() }.into()],
+                ).map_err(|_| "Managed identity administration privilege check failed")?
+                    .unwrap_or(false);
+                if !permitted {
+                    return Err("Permission denied: EXECUTE on df.managed_identity_admin() is required to configure managed identity endpoints".into());
+                }
+            }
+            Ok(())
+        })
     } else if catalog == pg_sys::UserMappingRelationId {
         validate_mapping_options(&options)
     } else if catalog == pg_sys::ForeignDataWrapperRelationId {
@@ -396,6 +470,7 @@ pub enum EndpointAuth {
         value: HeaderValue,
     },
     Query(String),
+    ManagedIdentity(crate::managed_identity::TokenResource),
 }
 
 pub struct ResolvedEndpoint {
@@ -408,6 +483,7 @@ fn resolve_auth(config: AuthScheme, mapping: &[String]) -> Result<EndpointAuth, 
     let mapping = parse_options(mapping)?;
     match config {
         AuthScheme::None => Ok(EndpointAuth::None),
+        AuthScheme::ManagedIdentity(identity) => Ok(EndpointAuth::ManagedIdentity(identity)),
         AuthScheme::Bearer => {
             let mut value =
                 HeaderValue::from_str(&format!("Bearer {}", required(&mapping, "token")?))
@@ -428,6 +504,15 @@ fn resolve_auth(config: AuthScheme, mapping: &[String]) -> Result<EndpointAuth, 
             ))
         }
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct CatalogServerRow {
+    oid: i64,
+    correct_wrapper: bool,
+    permitted: bool,
+    owner_oid: sqlx::postgres::types::Oid,
+    options: Option<Vec<String>>,
 }
 
 struct CatalogServer {
@@ -524,22 +609,28 @@ impl<'a> EndpointCatalog<'a> {
                 .connection()
                 .await
                 .map_err(|error| format!("Endpoint server {server:?}: {error}"))?;
-            let endpoint: Option<(i64, bool, bool, Option<Vec<String>>)> = sqlx::query_as(
-                "SELECT server.oid::pg_catalog.int8,
-                        wrapper.fdwname = $2,
-                        pg_catalog.has_server_privilege(server.oid, 'USAGE'),
-                        server.srvoptions
+            let endpoint = sqlx::query_as::<_, CatalogServerRow>(
+                "SELECT server.oid::pg_catalog.int8 AS oid,
+                        wrapper.fdwname = $2 AS correct_wrapper,
+                        pg_catalog.has_server_privilege(server.oid, 'USAGE') AS permitted,
+                        server.srvowner AS owner_oid,
+                        server.srvoptions AS options
                  FROM pg_catalog.pg_foreign_server AS server
                  JOIN pg_catalog.pg_foreign_data_wrapper AS wrapper ON wrapper.oid = server.srvfdw
                  WHERE server.srvname = $1",
             )
             .bind(server)
             .bind(FDW_NAME)
-            .fetch_optional(connection)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(|_| "Endpoint server lookup failed")?;
-            let (oid, correct_wrapper, permitted, options) =
-                endpoint.ok_or("Endpoint server does not exist")?;
+            let CatalogServerRow {
+                oid,
+                correct_wrapper,
+                permitted,
+                owner_oid,
+                options,
+            } = endpoint.ok_or("Endpoint server does not exist")?;
             if !correct_wrapper {
                 return Err("Endpoint server must use pg_durable_fdw".into());
             }
@@ -547,6 +638,16 @@ impl<'a> EndpointCatalog<'a> {
                 return Err("Permission denied: endpoint server USAGE is required".into());
             }
             let config = EndpointConfig::from_options(options.as_deref().unwrap_or_default())?;
+            if matches!(config.auth_scheme, AuthScheme::ManagedIdentity(_)) {
+                let owner_permitted: bool = sqlx::query_scalar(MANAGED_IDENTITY_ADMIN_CHECK)
+                    .bind(owner_oid)
+                    .fetch_one(connection)
+                    .await
+                    .map_err(|_| "Managed identity endpoint owner privilege check failed")?;
+                if !owner_permitted {
+                    return Err("Permission denied: managed identity endpoint owner must have EXECUTE on df.managed_identity_admin()".into());
+                }
+            }
             self.servers.insert(
                 server.to_owned(),
                 CatalogServer {
@@ -597,8 +698,11 @@ impl<'a> EndpointCatalog<'a> {
                 "Endpoint server {server:?} has no base_url; it can only be used for named secrets"
             )
         })?;
-        let auth = if matches!(config.auth_scheme, AuthScheme::None) {
-            EndpointAuth::None
+        let auth = if matches!(
+            config.auth_scheme,
+            AuthScheme::None | AuthScheme::ManagedIdentity(_)
+        ) {
+            resolve_auth(config.auth_scheme, &[])?
         } else {
             resolve_auth(config.auth_scheme, self.load_mapping(server).await?)?
         };
@@ -791,6 +895,65 @@ mod unit_tests {
     }
 
     #[test]
+    fn endpoint_managed_identity_options_and_headers() {
+        let config = EndpointConfig::from_options(&options(&[
+            "base_url=https://account.blob.core.windows.net/container",
+            "auth_scheme=managed-identity",
+        ]))
+        .unwrap();
+        assert!(matches!(config.auth_scheme, AuthScheme::ManagedIdentity(_)));
+        let endpoint = || ResolvedEndpoint {
+            base_url: config.base_url.clone().unwrap(),
+            auth: resolve_auth(config.auth_scheme.clone(), &[]).unwrap(),
+        };
+        for header in ["Authorization", "aUtHoRiZaTiOn", "Host"] {
+            assert!(prepare_endpoint_request(
+                endpoint(),
+                "/blob",
+                Some(&serde_json::json!({header: "override"}))
+            )
+            .is_err());
+        }
+        let request = prepare_endpoint_request(endpoint(), "/blob", None).unwrap();
+        assert!(request.credential_header.is_none());
+        assert_eq!(request.credential_header_name(), Some(&AUTHORIZATION));
+        assert!(request.managed_identity.is_some());
+        for invalid in [
+            vec!["auth_scheme=managed-identity"],
+            vec![
+                "base_url=https://account.blob.core.windows.net",
+                "auth_scheme=managed-identity",
+                "client_id=12345678-1234-1234-1234-123456789abc",
+            ],
+            vec![
+                "base_url=https://account.blob.core.windows.net",
+                "auth_scheme=managed-identity",
+                "client_id=PRIVATE_VALUE",
+            ],
+            vec![
+                "base_url=https://account.blob.core.windows.net",
+                "auth_scheme=managed-identity",
+                "resource=PRIVATE_VALUE",
+            ],
+            vec![
+                "base_url=https://account.blob.core.windows.net",
+                "auth_scheme=managed-identity",
+                "scope=PRIVATE_VALUE",
+            ],
+            vec![
+                "base_url=https://account.blob.core.windows.net",
+                "auth_scheme=none",
+                "client_id=PRIVATE_VALUE",
+            ],
+        ] {
+            let error = EndpointConfig::from_options(&options(&invalid))
+                .err()
+                .unwrap();
+            assert!(!error.contains("PRIVATE_VALUE"));
+        }
+    }
+
+    #[test]
     fn endpoint_valid_options() {
         let secrets_only = EndpointConfig::from_options(&options(&["auth_scheme=none"])).unwrap();
         assert!(secrets_only.base_url.is_none());
@@ -893,6 +1056,129 @@ mod unit_tests {
 #[pg_schema]
 mod tests {
     use super::*;
+
+    fn endpoint_managed_identity_permissions() {
+        let admin = Spi::get_one::<String>("SELECT CURRENT_USER::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut connection = crate::types::connect_as_user(&admin, Some(&database)).await.unwrap();
+            sqlx::raw_sql(r#"
+                DROP ROLE IF EXISTS endpoint_mi_user, endpoint_mi_other, endpoint_mi_owner, endpoint_mi_admin;
+                CREATE ROLE endpoint_mi_user LOGIN;
+                CREATE ROLE endpoint_mi_other LOGIN;
+                CREATE ROLE endpoint_mi_owner SUPERUSER;
+                CREATE ROLE endpoint_mi_admin;
+                GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO endpoint_mi_user;
+                CREATE SERVER endpoint_mi_test FOREIGN DATA WRAPPER pg_durable_fdw
+                    OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'managed-identity');
+                CREATE SERVER endpoint_mi_plain FOREIGN DATA WRAPPER pg_durable_fdw
+                    OPTIONS (base_url 'https://api.github.com', auth_scheme 'none');
+                GRANT USAGE ON FOREIGN SERVER endpoint_mi_test TO endpoint_mi_user;
+                GRANT USAGE ON FOREIGN SERVER endpoint_mi_plain TO endpoint_mi_user;
+            "#).execute(&mut connection).await.unwrap();
+            let permitted: bool = sqlx::query_scalar("SELECT pg_catalog.has_function_privilege('endpoint_mi_user', 'df.managed_identity_admin()', 'EXECUTE')")
+                .fetch_one(&mut connection).await.unwrap();
+            assert!(!permitted);
+            let mut user = crate::types::connect_as_user("endpoint_mi_user", Some(&database)).await.unwrap();
+            let endpoint = resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_test").await.unwrap();
+            assert!(matches!(endpoint.auth, EndpointAuth::ManagedIdentity(_)));
+            assert!(resolve_endpoint("endpoint_mi_other", Some(&database), "endpoint_mi_test").await.err().unwrap().contains("USAGE"));
+
+            let error = sqlx::raw_sql("CREATE SERVER endpoint_mi_owned FOREIGN DATA WRAPPER pg_durable_fdw OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'managed-identity')")
+                .execute(&mut user).await.unwrap_err();
+            assert!(error.to_string().contains("EXECUTE on df.managed_identity_admin()"));
+            sqlx::raw_sql("CREATE SERVER endpoint_mi_owned FOREIGN DATA WRAPPER pg_durable_fdw OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'none')")
+                .execute(&mut user).await.unwrap();
+            let error = sqlx::raw_sql("ALTER SERVER endpoint_mi_owned OPTIONS (SET auth_scheme 'managed-identity')")
+                .execute(&mut user).await.unwrap_err();
+            assert!(error.to_string().contains("EXECUTE on df.managed_identity_admin()"));
+
+            sqlx::raw_sql("ALTER SERVER endpoint_mi_test OWNER TO endpoint_mi_user").execute(&mut connection).await.unwrap();
+            let error = resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_test").await.err().unwrap();
+            assert!(error.contains("owner must have EXECUTE on df.managed_identity_admin()"), "{error}");
+            let error = sqlx::raw_sql("ALTER SERVER endpoint_mi_test OPTIONS (SET base_url 'https://other.blob.core.windows.net')")
+                .execute(&mut user).await.unwrap_err();
+            assert!(error.to_string().contains("EXECUTE on df.managed_identity_admin()"));
+
+            sqlx::raw_sql("GRANT EXECUTE ON FUNCTION df.managed_identity_admin() TO endpoint_mi_user")
+                .execute(&mut connection).await.unwrap();
+            sqlx::raw_sql("ALTER SERVER endpoint_mi_owned OPTIONS (SET auth_scheme 'managed-identity');
+                CREATE SERVER endpoint_mi_delegated FOREIGN DATA WRAPPER pg_durable_fdw
+                    OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'managed-identity')")
+                .execute(&mut user).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_test").await.is_ok());
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_owned").await.is_ok());
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_delegated").await.is_ok());
+            sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION df.managed_identity_admin() FROM endpoint_mi_user")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_delegated").await.err().unwrap().contains("owner must have EXECUTE"));
+
+            sqlx::raw_sql("GRANT EXECUTE ON FUNCTION df.managed_identity_admin() TO endpoint_mi_admin;
+                GRANT USAGE ON FOREIGN DATA WRAPPER pg_durable_fdw TO endpoint_mi_admin;
+                GRANT endpoint_mi_admin TO endpoint_mi_user")
+                .execute(&mut connection).await.unwrap();
+            sqlx::raw_sql("ALTER SERVER endpoint_mi_delegated OPTIONS (SET base_url 'https://other.blob.core.windows.net')")
+                .execute(&mut user).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_delegated").await.is_ok());
+            sqlx::raw_sql("REVOKE endpoint_mi_admin FROM endpoint_mi_user;
+                ALTER ROLE endpoint_mi_user NOINHERIT;
+                GRANT endpoint_mi_admin TO endpoint_mi_user")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_delegated").await.err().unwrap().contains("owner must have EXECUTE"));
+            let error = sqlx::raw_sql("ALTER SERVER endpoint_mi_delegated OPTIONS (SET base_url 'https://account.blob.core.windows.net')")
+                .execute(&mut user).await.unwrap_err();
+            assert!(error.to_string().contains("EXECUTE on df.managed_identity_admin()"));
+            sqlx::raw_sql("SET ROLE endpoint_mi_admin;
+                CREATE SERVER endpoint_mi_group FOREIGN DATA WRAPPER pg_durable_fdw
+                    OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'managed-identity');
+                RESET ROLE")
+                .execute(&mut user).await.unwrap();
+            sqlx::raw_sql("GRANT USAGE ON FOREIGN SERVER endpoint_mi_group TO endpoint_mi_user")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_group").await.is_ok());
+
+            sqlx::raw_sql("ALTER EXTENSION pg_durable DROP FUNCTION df.managed_identity_admin()")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_group").await.err().unwrap().contains("owner must have EXECUTE"));
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_plain").await.is_ok());
+            let error = sqlx::raw_sql("CREATE SERVER endpoint_mi_forged FOREIGN DATA WRAPPER pg_durable_fdw
+                OPTIONS (base_url 'https://account.blob.core.windows.net', auth_scheme 'managed-identity')")
+                .execute(&mut connection).await.unwrap_err();
+            assert!(error.to_string().contains("EXECUTE on df.managed_identity_admin()"));
+            sqlx::raw_sql("ALTER EXTENSION pg_durable ADD FUNCTION df.managed_identity_admin();
+                ALTER FUNCTION df.managed_identity_admin() RENAME TO endpoint_mi_admin_hidden")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_group").await.err().unwrap().contains("owner must have EXECUTE"));
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_plain").await.is_ok());
+            sqlx::raw_sql("ALTER FUNCTION df.endpoint_mi_admin_hidden() RENAME TO managed_identity_admin")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_group").await.is_ok());
+            sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION df.managed_identity_admin() FROM endpoint_mi_admin")
+                .execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_group").await.err().unwrap().contains("owner must have EXECUTE"));
+
+            sqlx::raw_sql("ALTER SERVER endpoint_mi_test OWNER TO endpoint_mi_owner; ALTER ROLE endpoint_mi_owner NOSUPERUSER; GRANT USAGE ON FOREIGN SERVER endpoint_mi_test TO endpoint_mi_user")
+                .execute(&mut connection).await.unwrap();
+            let error = resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_test").await.err().unwrap();
+            assert!(error.contains("owner must have EXECUTE on df.managed_identity_admin()"), "{error}");
+            sqlx::raw_sql("ALTER SERVER endpoint_mi_test OWNER TO CURRENT_USER").execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_test").await.is_ok());
+            sqlx::raw_sql("REVOKE USAGE ON FOREIGN SERVER endpoint_mi_test FROM endpoint_mi_user").execute(&mut connection).await.unwrap();
+            assert!(resolve_endpoint("endpoint_mi_user", Some(&database), "endpoint_mi_test").await.err().unwrap().contains("USAGE"));
+
+            user.close().await.unwrap();
+            sqlx::raw_sql(r#"
+                DROP SERVER endpoint_mi_test, endpoint_mi_owned, endpoint_mi_delegated, endpoint_mi_group, endpoint_mi_plain;
+                DROP OWNED BY endpoint_mi_user, endpoint_mi_other, endpoint_mi_owner, endpoint_mi_admin;
+                DROP ROLE endpoint_mi_user, endpoint_mi_other, endpoint_mi_owner, endpoint_mi_admin;
+            "#).execute(&mut connection).await.unwrap();
+            connection.close().await.unwrap();
+        });
+    }
 
     async fn resolve_endpoint(
         submitted_by: &str,
@@ -1231,6 +1517,7 @@ mod tests {
 
     #[pg_test]
     fn endpoint_catalog_permissions() {
+        endpoint_managed_identity_permissions();
         let admin = Spi::get_one::<String>("SELECT CURRENT_USER::text")
             .unwrap()
             .unwrap();
