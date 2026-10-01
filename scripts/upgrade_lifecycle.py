@@ -379,10 +379,30 @@ def exercise(cluster, previous, current, old_package, new_package, output):
         cluster.stop()
 
 
+def materialize_previous(output, previous):
+    """Extract the previous release's source tree from its git tag.
+
+    Returns ``(source_dir, commit)``. Shared by the lifecycle and the canary so
+    the N-1 tree is prepared the same way whether it is built here or built once
+    and reused across several lifecycle runs.
+    """
+    commit = run("git", "rev-parse", "--verify", f"v{previous}^{{commit}}", cwd=PROJECT)
+    source = output / "previous-source"
+    source.mkdir()
+    archive = output / "previous.tar"
+    run("git", "archive", "--format=tar", "-o", archive, commit, cwd=PROJECT)
+    run("tar", "-xf", archive, "-C", source)
+    archive.unlink()
+    require_equal(tomllib.loads((source / "Cargo.toml").read_text())["package"]["version"], previous)
+    return source, commit
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pg-config", type=Path, required=True)
     parser.add_argument("--previous-version", required=True)
+    parser.add_argument("--previous-package", type=Path,
+                        help="Prebuilt N-1 package dir to reuse instead of rebuilding it")
     parser.add_argument("--output-dir", type=Path, help="New directory for builds, logs and phase results")
     parser.add_argument("--timeout", type=float, default=60)
     args = parser.parse_args()
@@ -406,15 +426,12 @@ def main():
         previous = args.previous_version
         if not (PROJECT / f"sql/pg_durable--{previous}--{current}.sql").is_file():
             raise RuntimeError(f"No direct upgrade script from {previous} to {current}")
-        commit = run("git", "rev-parse", "--verify", f"v{previous}^{{commit}}", cwd=PROJECT)
-        source = output / "previous-source"
-        source.mkdir()
-        archive = output / "previous.tar"
-        run("git", "archive", "--format=tar", "-o", archive, commit, cwd=PROJECT)
-        run("tar", "-xf", archive, "-C", source)
-        archive.unlink()
-        require_equal(tomllib.loads((source / "Cargo.toml").read_text())["package"]["version"], previous)
-        old_package = build(source, output / "previous", pg_config, pg_major)
+        if args.previous_package:
+            old_package = args.previous_package.resolve()
+            commit = run("git", "rev-parse", "--verify", f"v{previous}^{{commit}}", cwd=PROJECT)
+        else:
+            source, commit = materialize_previous(output, previous)
+            old_package = build(source, output / "previous", pg_config, pg_major)
         new_package = build(PROJECT, output / "candidate", pg_config, pg_major)
         (output / "versions.json").write_text(json.dumps({
             "previous": previous, "previous_commit": commit, "candidate": current,

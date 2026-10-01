@@ -64,6 +64,25 @@ For extension schema changes, also run the upgrade tests:
 ./scripts/test-upgrade.sh
 ```
 
+### Replay compatibility
+
+The background worker replays durable histories created by **previous** binaries. A change can keep every new instance correct — passing unit and E2E tests — while making an in-flight instance started under the previous binary fail to replay. Fresh-execution tests cannot catch this; the real previous-binary lifecycle in `./scripts/test-upgrade.sh` can. See [docs/upgrade-testing.md](docs/upgrade-testing.md) for the full strategy.
+
+Run `./scripts/test-upgrade.sh` (it includes the N-1 lifecycle) when your change touches any of the following, because each is replay-visible:
+
+- orchestration code in `src/orchestrations/`, or any helper it transitively calls;
+- an activity or orchestration `NAME` constant;
+- how a scheduled activity or sub-orchestration **input** is constructed (including adding, removing, renaming, or reordering a serialized field — the recorded bytes must match, even when deserialization stays backward compatible);
+- the `continue_as_new` input;
+- timers, signals, durable-clock (`ctx.utc_now()`) calls, branching, the order durable operations are scheduled, or an orchestration's returned output;
+- any serialized graph, orchestration, or activity envelope.
+
+`ctx.utc_now()` is deterministic, but **adding, removing, or reordering** a durable call like it changes the recorded operation sequence and breaks replay of older histories.
+
+When a replay-visible change is genuinely required, prefer durable versioning: record a version in the new orchestration input, default old inputs to the old behavior, and keep old operation names and input shapes while their histories are still supported. Do not branch on current process or schema state during replay. If versioning is infeasible, document a drain/cancel-before-upgrade contract in [docs/upgrade-testing.md](docs/upgrade-testing.md) and [CHANGELOG.md](CHANGELOG.md) rather than silently shipping an incompatibility.
+
+If you add a new DSL behavior family or a new durable suspension pattern that the existing lifecycle families do not represent, extend [tests/upgrade/lifecycle.sql](tests/upgrade/lifecycle.sql) and [scripts/upgrade_lifecycle.py](scripts/upgrade_lifecycle.py) so real N-1 histories cover it.
+
 ### Dependency updates
 
 Keep `Cargo.toml` and `Cargo.lock` consistent. After editing a requirement, regenerate the lockfile with Cargo and check it with `--locked`. A newer version that already fits the requirement may change only the lockfile. Do not let a routine build rewrite the committed graph.

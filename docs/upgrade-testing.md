@@ -178,13 +178,76 @@ printed `target/upgrade-lifecycle/` directory and uploaded by CI on failure.
 `--output-dir` selects a new evidence directory; `--timeout` controls each
 readiness/instance-validation deadline (default 60 seconds).
 
+#### Negative controls (lifecycle canaries)
+
+Passing the lifecycle only means something if the lifecycle would fail when a
+real compatibility break is introduced. [upgrade_lifecycle_canary.py](../scripts/upgrade_lifecycle_canary.py)
+asserts that sensitivity directly. Each canary applies one small, exact source
+mutation to a throwaway git worktree, runs the lifecycle against it, and
+requires the lifecycle to **fail** during resume with a duroxide
+`nondeterministic: schedule mismatch`, after the N-1 baseline has already
+validated. A canary that instead passes the lifecycle is itself a failure: it
+means the lifecycle stopped catching a break it is meant to catch.
+
+Two canaries pin the two layers of real-history coverage:
+
+| Canary | Mutation | What it proves |
+|--------|----------|----------------|
+| `activity-input-bytes` | Add a semantically ignored field to the `execute_sql` activity input | The lifecycle rejects changed durable input bytes even when deserialization stays backward compatible and every new instance is unaffected — the real previous-binary histories added for N-1 are what catch it. |
+| `join-branch-order` | Schedule JOIN branches right-to-left and reverse the collected results so fresh output is unchanged | The lifecycle rejects a reordered durable operation sequence that unit and E2E tests cannot see. The suspended JOIN **behavior family** is required to catch it: a lifecycle that only suspended a simple sequence would not. |
+
+Both mutations keep every fresh instance correct, so the ordinary unit and E2E
+suites pass; only replay of a real old history fails. This is the empirical
+evidence that fresh-execution tests cannot establish replay compatibility, that
+real N-1 histories are load-bearing, and that per-family suspension points add
+coverage a single-shape lifecycle lacks.
+
+```bash
+python3 scripts/upgrade_lifecycle_canary.py \
+  --pg-config ~/.pgrx/17.10/pgrx-install/bin/pg_config \
+  --previous-version 0.2.8
+# --only <name> runs a single canary; --base-ref picks the commit under test.
+```
+
+Each canary builds its own candidate binary and runs a private PostgreSQL
+cluster (the N-1 binary is built once and reused), so this is a
+manual/scheduled pre-release control, **not** a required per-PR gate — the
+ordinary lifecycle stays in required CI. The anchors each mutation targets are
+also checked by the fast unit tests in
+[test_upgrade_lifecycle_canary.py](../scripts/test_upgrade_lifecycle_canary.py),
+so a refactor that moves an anchor fails in milliseconds instead of after a
+multi-minute build.
+
 #### Upgrade & Migration
 
 This change affects test infrastructure only. It adds no extension DDL,
 upgrade-script changes or production runtime detection. B1's supported-schema
 contract is unchanged. Test-only provider-schema discovery handles the existing
 `duroxide` and `_duroxide` layouts; provider migrations during candidate worker
-startup remain part of the real binary-upgrade test.
+startup remain part of the real binary-upgrade test. The canaries mutate only
+throwaway worktrees and never change checked-in source.
+
+### Coverage boundaries and known gaps
+
+The real previous-binary lifecycle and its canaries prove in-flight replay
+compatibility for a specific, bounded slice. This section is the canonical
+statement of what that evidence does and does **not** establish. Open a focused
+issue for any row the project intends to close, and link it here.
+
+| Dimension | Current evidence | Not yet covered |
+|-----------|------------------|-----------------|
+| Real binary history depth | Immediate predecessor (N-1) only | Real histories created by every supported older binary, and multi-hop upgrade chains |
+| Behavior-shape breadth | One suspended instance each for `seq`, both `if` branches, `loop`, `break`, `join`, `race` | Nested permutations and suspension at every durable boundary within a shape |
+| Node/activity breadth | `df.sql`, signals and timers are exercised | HTTP, multipart, table sinks, `wait_for_schedule`, retry/failure paths, and other specialized activity payloads |
+| Schema breadth | The candidate `.so` is checked against every supported schema (Guarantee B1); real old-binary history is N-1 only | Real old-binary histories replayed against every supported schema |
+| Provider-version changes | Provider startup and migrations run during the lifecycle | A deliberate old/new `duroxide-pg` provider-version transition matrix (see #398 findings) |
+| Packaging and platforms | Source-built tagged predecessor on the CI PostgreSQL and platform | Published package artifacts, other PostgreSQL majors, and other OS/arch combinations |
+| Compatibility policy | Fail-closed lifecycle; release notes record individual accepted breaks and drain contracts | A centralized inventory of accepted replay breaks, a versioning strategy, and a stated support window |
+
+Closed [PR #398](https://github.com/microsoft/pg_durable/pull/398) is useful
+prior art for the historical-chain approach and a measured-incompatibility
+inventory, but a closed PR is not a tracker. Surviving gaps belong in this
+matrix with issues attached.
 
 ## Backward Compatibility Patterns
 

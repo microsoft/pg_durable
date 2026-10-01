@@ -1,0 +1,118 @@
+name: Upgrade Replay Canary
+
+# Negative controls that prove the real previous-binary upgrade lifecycle still
+# fails when a replay-incompatible change is introduced. Each canary mutates a
+# throwaway worktree and runs scripts/upgrade_lifecycle.py, expecting it to fail
+# with a duroxide schedule mismatch. The N-1 binary is built once and reused,
+# but each canary still builds its own candidate binary and private PostgreSQL
+# cluster, so it is a scheduled/manual pre-release control, NOT a required
+# per-PR gate. The ordinary lifecycle stays in required CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_version:
+        description: 'Override the N-1 version (default: derived from the upgrade script)'
+        required: false
+        default: ''
+        type: string
+  schedule:
+    # Weekly, Monday 07:00 UTC.
+    - cron: '0 7 * * 1'
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: upgrade-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    name: Upgrade Replay Canary (PG17)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags so the lifecycle can build the N-1 tag.
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          docker system prune -af || true
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              pkg-config \
+              libssl-dev \
+              libclang-dev \
+              clang \
+              bison \
+              flex \
+              libreadline-dev \
+              zlib1g-dev \
+              libxml2-dev \
+              libxslt1-dev \
+              libicu-dev
+
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx &> /dev/null || ! cargo pgrx --version | grep -q "0.16.1"; then
+            cargo install cargo-pgrx --version 0.16.1 --locked
+          fi
+
+      - name: Initialize pgrx
+        run: |
+          if [ ! -d "$HOME/.pgrx/17."* ]; then
+            cargo pgrx init --pg17 download
+          fi
+
+      - name: Resolve previous version
+        id: resolve
+        run: |
+          set -euo pipefail
+          current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          previous="${{ inputs.previous_version }}"
+          if [ -z "$previous" ]; then
+            previous=$(for f in sql/pg_durable--*--"${current}".sql; do
+              fname=$(basename "$f")
+              if [[ "$fname" =~ ^pg_durable--([0-9]+\.[0-9]+\.[0-9]+)--${current//./\.}\.sql$ ]]; then
+                echo "${BASH_REMATCH[1]}"
+              fi
+            done | sort -V | tail -1)
+          fi
+          if [ -z "$previous" ]; then
+            echo "Could not resolve the previous version for $current" >&2
+            exit 1
+          fi
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "Running canaries for $previous -> $current"
+
+      - name: Run upgrade replay canaries
+        run: |
+          PG_CONFIG=$(ls -d "$HOME"/.pgrx/17.*/pgrx-install/bin/pg_config | sort -V | tail -1)
+          python3 scripts/upgrade_lifecycle_canary.py \
+            --pg-config "$PG_CONFIG" \
+            --previous-version "${{ steps.resolve.outputs.previous }}"
+
+      - name: Upload canary evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-canary-evidence
+          path: |
+            target/upgrade-canary/**/lifecycle-*/build.log
+            target/upgrade-canary/**/lifecycle-*/postgres.log
+            target/upgrade-canary/**/lifecycle-*/*.json
+            target/upgrade-canary/**/lifecycle-*/error.txt
+          if-no-files-found: warn

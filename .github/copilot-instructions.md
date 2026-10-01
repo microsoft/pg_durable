@@ -70,6 +70,7 @@ For the same orchestration input and recorded history, code must produce the sam
 - Do not serialize unordered maps directly into activity, sub-orchestration, `continue_as_new`, or orchestration output payloads. Canonicalize map keys first; use `serialize_string_map` or `string_map_to_json` for string maps.
 - Do not select a "first" or "last" item from an unordered collection. Define the ordering explicitly.
 - When changing an orchestration or a transitive helper, consider replay of histories created by the previous binary. Treat changes to durable operation names, order, inputs, timers, branching, and returned output as in-flight compatibility changes.
+- Fresh-execution tests (unit, E2E) cannot prove replay compatibility. A replay-visible change includes durable operation names/order/inputs, the `continue_as_new` input, a serialized field (even one that is semantically ignored and stays deserialization-compatible), timers, signals, where a `ctx.utc_now()` call sits, or an activity/orchestration `NAME`. Before making one, follow the **Replay compatibility** checklist in [CONTRIBUTING.md](../CONTRIBUTING.md) — it is the canonical guide for what to run (`./scripts/test-upgrade.sh`), when to version vs. drain in-flight work, and when to extend the N-1 lifecycle for a new behavior family.
 - Add determinism regression tests for order-sensitive logic. Construct logically identical maps in different insertion orders and assert byte-identical outputs; for substitution/transformation code, include values containing placeholder-like text to catch accidental rescanning.
 
 ### Activity Naming Convention
@@ -91,6 +92,8 @@ Tests in `tests/e2e/sql/` follow this pattern:
 
 ### Binary Backward Compatibility
 The new `.so` must work against **all** previous versions' schemas in the same major version, starting with v0.2.2, because customers may never run `ALTER EXTENSION UPDATE`. When changing SQL queries in Rust code, ensure they work against both old and new schemas (see [docs/upgrade-testing.md](../docs/upgrade-testing.md)). CI enforces this via `scripts/test-upgrade.sh`.
+
+Schema compatibility (above) and **replay compatibility** (the determinism rules above) are distinct. The new `.so` must also replay durable histories created by the previous binary — see "Orchestrations Must Be Deterministic". `scripts/test-upgrade.sh` runs the real N-1 lifecycle for both, and `scripts/upgrade_lifecycle_canary.py` is a manual/scheduled negative control proving that lifecycle still fails on a replay break (changed activity input bytes, reordered durable operations).
 
 ## Common Tasks
 
