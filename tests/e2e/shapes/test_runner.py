@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from runner import (
@@ -303,7 +304,7 @@ class RunnerTests(unittest.TestCase):
         self.assertLess(sql.index("df.clearvars()"), sql.index("df.setvar("))
         self.assertLess(sql.index("df.start("), sql.index("'after'"))
         self.assertLess(sql.index("df.clearvars()", sql.index("df.start(")),
-                        sql.index("df.wait_for_completion"))
+                        sql.index("df.await_instance"))
         self.assertIn("IS DISTINCT FROM", sql)
         self.assertIn("df.result(inst_id)::jsonb", sql)
         self.assertIn("unexpected observation", sql)
@@ -329,7 +330,7 @@ class RunnerTests(unittest.TestCase):
         cleanup_at = sql.index("SELECT df.clearvars();", start_at)
         self.assertLess(sql.index("'after'", start_at), cleanup_at)
         self.assertLess(cleanup_at, sql.index(signal))
-        self.assertLess(sql.index(signal), sql.index("df.wait_for_completion"))
+        self.assertLess(sql.index(signal), sql.index("df.await_instance"))
         self.assertIn("release_deadline TIMESTAMPTZ := clock_timestamp() + INTERVAL '60 seconds'", sql)
         self.assertIn("clock_timestamp() >= release_deadline", sql)
         self.assertIn("release signal timed out", sql)
@@ -402,7 +403,7 @@ class RunnerTests(unittest.TestCase):
         sql = sql_test(case)
         self.assertIn("SET SESSION AUTHORIZATION df_e2e_user;", sql)
         self.assertIn("DELETE FROM public.df_gen_trace WHERE shape_id = 'gen-0001';", sql)
-        self.assertIn("df.wait_for_completion(inst_id, 60)", sql)
+        self.assertIn("df.await_instance(inst_id, 60)", sql)
         self.assertIn("status IS DISTINCT FROM 'completed'", sql)
         self.assertIn("node_path = 'r.e') <> 0", sql)
         self.assertIn("node_path IS NULL OR node_path NOT IN ('r.e', 'r.t')", sql)
@@ -473,7 +474,7 @@ class LiveRunnerTests(unittest.TestCase):
         if inject:
             # Tamper only after execution, so a negative test exercises the oracle.
             inject = (
-                "SELECT df.wait_for_completion(instance_id, 60) FROM _gen_state;\n" + inject
+                "SELECT df.await_instance(instance_id, 60) FROM _gen_state;\n" + inject
             )
             sql = sql.replace("\nDO $GEN$\n", "\n" + inject + "\nDO $GEN$\n", 1)
         result = self.psql(sql)
@@ -607,11 +608,15 @@ END $CHECK$;
         case = SemanticCase("sem-9002", "Unconsumed release", "df.sleep(60)", {}, {},
                             "completed", [], release_signal="snapshot_ready")
         sql = sql_test(case).replace("INTERVAL '60 seconds'", "INTERVAL '0 seconds'")
+        start = time.monotonic()
         try:
             result = self.psql(sql)
+            elapsed = time.monotonic() - start
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("release signal timed out", result.stderr)
-            self.assertNotIn("df.wait_for_completion() is deprecated", result.stderr)
+            # Failing at the release gate must not fall through to the completion
+            # wait, which would otherwise block on df.sleep(60).
+            self.assertLess(elapsed, 30)
         finally:
             result = self.psql("""
 SET SESSION AUTHORIZATION df_e2e_user;

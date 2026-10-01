@@ -264,6 +264,9 @@ RETURNS INT
 LANGUAGE sql VOLATILE SECURITY INVOKER
 SET search_path = pg_catalog
 AS $MARK$
+    -- iteration is MAX(iteration)+1 without locking. This is race-free because
+    -- no two activities ever mark the same (shape_id, node_path) concurrently:
+    -- distinct nodes have distinct paths, and loop iterations run sequentially.
     INSERT INTO public.df_gen_trace (shape_id, node_path, iteration)
     VALUES (p_shape_id, p_path,
         (SELECT COALESCE(MAX(iteration), 0) + 1 FROM public.df_gen_trace
@@ -436,7 +439,7 @@ END $RELEASE$;
     failure_output TEXT;
 BEGIN
     FOR inst_id IN SELECT instance_id FROM _gen_state LOOP
-        SELECT df.wait_for_completion(inst_id, 60) INTO status;
+        SELECT df.await_instance(inst_id, 60) INTO status;
         statuses := array_append(statuses, status);
     END LOOP;
     FOREACH status IN ARRAY statuses LOOP
