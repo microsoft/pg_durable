@@ -249,6 +249,12 @@ the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
   bypass satellite identity requirements. An installation whose metadata or
   `df` namespace has been reassigned to a different owner now fails admission
   rather than being used under worker credentials.
+- **Routing and maintenance corrections:** typed retryable routing failures reuse
+  the existing transaction-aware graph retry payload. Prompt maintenance paging,
+  SQL-filtered legacy candidates and removed-registration cleanup require no new
+  extension/provider tables, indexes or migration DDL. Existing `_origins`
+  registrations are reused; no instance IDs, activity inputs or replay decisions
+  are rewritten. Old control schemas retain their legacy provider resolution.
 
 See [deferred lifetime guarantees](multi-database-installation.md#release-blockers)
 for the separate runtime shutdown and server-side cancellation limitations.

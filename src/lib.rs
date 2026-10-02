@@ -301,8 +301,8 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.reconcile_interval",
-        c"Seconds between background reconciliation passes (0 disables reconciliation)",
-        c"Each background reconciliation pass removes expired terminal instances and reclaims orphaned engine records left by a rolled-back df.start(). Set to 0 to disable background reconciliation entirely.",
+        c"Idle seconds between reconciliation scans (0 disables reconciliation)",
+        c"Unfinished bounded pages continue promptly between scans. Reconciliation removes expired terminal instances, orphaned engine records, and confirmed removed registrations with no engine work. Set to 0 to disable all reconciliation.",
         &RECONCILE_INTERVAL,
         0,
         86400,

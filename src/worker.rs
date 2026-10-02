@@ -900,18 +900,34 @@ async fn write_worker_ready(
     Ok(())
 }
 
-pub(crate) async fn register_origin(pool: &sqlx::PgPool, origin: &Origin) -> Result<(), String> {
+pub(crate) async fn register_origin(
+    pool: &sqlx::PgPool,
+    origin: &Origin,
+) -> Result<(), sqlx::Error> {
     let schema = resolve_duroxide_schema_pool(pool).await;
     let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    register_origin_in_schema(pool, &schema, origin).await
+}
+
+async fn register_origin_in_schema(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    origin: &Origin,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::origin::configure_metadata_transaction(&mut tx).await?;
+    // The false UPDATE predicate locks an existing registration without creating
+    // a new tuple version. DO NOTHING would not serialize with GC's row lock.
     sqlx::query(&format!(
         "INSERT INTO {schema}._origins (database_oid, installation_id)
-         VALUES ($1, $2) ON CONFLICT (database_oid, installation_id) DO NOTHING"
+         VALUES ($1, $2) ON CONFLICT (database_oid, installation_id)
+         DO UPDATE SET database_oid = EXCLUDED.database_oid WHERE false"
     ))
     .bind(i64::from(origin.database_oid))
     .bind(origin.installation_id)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("register origin: {error}"))?;
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1044,7 +1060,14 @@ async fn select_expired_instance_ids(
     max_keep: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let ids = select_expired_instance_ids_tx(&mut tx, retention_days, max_keep, None).await?;
+    crate::origin::configure_metadata_transaction(&mut tx).await?;
+    let ids = select_expired_instance_ids_tx(
+        &mut tx,
+        retention_days,
+        max_keep,
+        Some(i64::from(RECLAIM_BATCH)),
+    )
+    .await?;
     tx.commit().await?;
     Ok(ids)
 }
@@ -1090,6 +1113,9 @@ async fn run_until_extension_dropped_or_shutdown(
     let router = Router::new(Arc::new(maintenance_pool.clone()));
     let mut origin_cursor = OriginRetentionCursor::default();
     let mut engine_cursor = String::new();
+    let mut legacy_cursor = String::new();
+    let mut registration_cursor = (0i64, uuid::Uuid::nil());
+    let mut pending = MaintenanceProgress::new();
 
     let mut drop_check = tokio::time::interval(drop_poll_interval);
     drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1103,11 +1129,8 @@ async fn run_until_extension_dropped_or_shutdown(
     } else {
         reconcile_interval
     };
-    let mut reconcile_check = tokio::time::interval_at(
-        tokio::time::Instant::now() + effective_reconcile_interval,
-        effective_reconcile_interval,
-    );
-    reconcile_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let reconcile_check = tokio::time::sleep(effective_reconcile_interval);
+    tokio::pin!(reconcile_check);
 
     'processing: loop {
         tokio::select! {
@@ -1128,15 +1151,17 @@ async fn run_until_extension_dropped_or_shutdown(
                     break;
                 }
             }
-            _ = reconcile_check.tick(), if reconcile_enabled => {
+            _ = &mut reconcile_check, if reconcile_enabled => {
                 let maintenance = async {
                 let retention_days = get_retention_days();
+                let schema = resolve_duroxide_schema_pool(maintenance_pool).await;
+                let schema = format!("\"{}\"", schema.replace('"', "\"\""));
 
                 // Engine-first: retire the engine record before the df row, so a
                 // failed pass only leaves the harmless direction — an engine record
                 // with no df row (invisible to df.list_instances, reclaimed below),
                 // never the reverse. The stores are thus eventually consistent.
-                match select_expired_instance_ids(
+                if pending.control { match select_expired_instance_ids(
                     maintenance_pool,
                     retention_days,
                     TERMINAL_INSTANCE_MAX_KEEP,
@@ -1144,11 +1169,13 @@ async fn run_until_extension_dropped_or_shutdown(
                 .await
                 {
                     Ok(candidates) if !candidates.is_empty() => {
+                        pending.control = false;
                         // Only delete the df rows once the engine records are gone;
                         // if that fails, leave both in place and retry next pass.
                         if retire_engine_records(&client, &candidates).await {
                             match delete_expired_instances(maintenance_pool, &candidates, None).await {
                                 Ok(stats) => {
+                                    pending.control = candidates.len() == RECLAIM_BATCH as usize;
                                     if stats.instances_deleted > 0 || stats.nodes_deleted > 0 {
                                         log!(
                                             "pg_durable: removed {} expired instance(s) and {} node row(s)",
@@ -1163,36 +1190,52 @@ async fn run_until_extension_dropped_or_shutdown(
                             }
                         }
                     }
-                    Ok(_) => {}
-                    Err(e) => log!("pg_durable: selecting expired instances failed: {e}"),
-                }
+                    Ok(_) => pending.control = false,
+                    Err(e) => { pending.control = false; log!("pg_durable: selecting expired instances failed: {e}"); },
+                } }
 
                 let retention = Duration::from_secs(retention_days as u64 * 86_400);
-                match reclaim_orphaned_instances(maintenance_pool, &client, retention).await {
+                if pending.legacy { match reclaim_orphaned_instances(maintenance_pool, &client, &schema, retention, &mut legacy_cursor).await {
                     Ok(reclaimed) if reclaimed > 0 => {
                         log!("pg_durable: reclaimed {reclaimed} orphaned engine record(s)");
                     }
                     Ok(_) => {}
-                    Err(e) => log!("pg_durable: reclaiming orphaned engine records failed: {e}"),
+                    Err(e) => { legacy_cursor.clear(); log!("pg_durable: reclaiming orphaned engine records failed: {e}"); },
                 }
+                pending.legacy = !legacy_cursor.is_empty(); }
 
-                    let schema = resolve_duroxide_schema_pool(maintenance_pool).await;
-                    let schema = format!("\"{}\"", schema.replace('"', "\"\""));
-                    if let Err(error) = sweep_registered_origins(
+                    if pending.origins { match sweep_registered_origins(
                         maintenance_pool, &client, &router, &schema, retention_days, &mut origin_cursor,
                     ).await {
-                        log!("pg_durable: origin retention failed: {error}");
-                    }
+                        Ok(more) => pending.origins = more,
+                        Err(error) => { pending.origins = false; origin_cursor = OriginRetentionCursor::default(); log!("pg_durable: origin retention failed: {error}"); },
+                    } }
+                    if pending.engine {
                     if let Err(error) = reclaim_origin_instances(
                         maintenance_pool, &client, &router, &schema, retention, &mut engine_cursor,
                     ).await {
+                        engine_cursor.clear();
                         log!("pg_durable: origin reconciliation failed: {error}");
                     }
+                    pending.engine = !engine_cursor.is_empty(); }
+                    if pending.registrations { match cleanup_origin_registrations(
+                        maintenance_pool, &schema, &mut registration_cursor,
+                    ).await {
+                        Ok(more) => pending.registrations = more,
+                        Err(error) => { pending.registrations = registration_cursor.0 != 0; log!("pg_durable: registration cleanup deferred: {error}"); },
+                    } }
+                    let more = pending.has_work();
+                    if !more { pending = MaintenanceProgress::new(); }
+                    more
                 };
                 tokio::pin!(maintenance);
                 loop {
                     tokio::select! {
-                        _ = &mut maintenance => break,
+                        more = &mut maintenance => {
+                            reconcile_check.as_mut().reset(tokio::time::Instant::now()
+                                + if more { MAINTENANCE_CONTINUATION_DELAY } else { effective_reconcile_interval });
+                            break;
+                        },
                         _ = wait_for_shutdown() => break 'processing,
                         _ = drop_check.tick() => {
                             let still_valid = match epoch_id {
@@ -1213,26 +1256,54 @@ async fn run_until_extension_dropped_or_shutdown(
     teardown_runtime(duroxide_runtime, duroxide_store).await;
 }
 
-const ORIGIN_BATCH: i64 = 8;
+const ORIGIN_BATCH: i64 = 1;
 const ORIGIN_ENGINE_BATCH: i64 = 100;
 const ORIGIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const MAINTENANCE_CONTINUATION_DELAY: Duration = Duration::from_millis(100);
+
+struct MaintenanceProgress {
+    control: bool,
+    legacy: bool,
+    origins: bool,
+    engine: bool,
+    registrations: bool,
+}
+
+impl MaintenanceProgress {
+    fn new() -> Self {
+        Self {
+            control: true,
+            legacy: true,
+            origins: true,
+            engine: true,
+            registrations: true,
+        }
+    }
+
+    fn has_work(&self) -> bool {
+        self.control || self.legacy || self.origins || self.engine || self.registrations
+    }
+}
 
 #[derive(Default)]
 struct OriginRetentionCursor {
     origin: (i64, uuid::Uuid),
     after_id: Option<String>,
+    pending: BTreeMap<(i64, uuid::Uuid), String>,
+    visited: HashSet<(i64, uuid::Uuid)>,
 }
 
 impl OriginRetentionCursor {
     fn enter(&mut self, origin: (i64, uuid::Uuid)) {
-        if self.origin != origin {
-            self.after_id = None;
-        }
+        self.visited.insert(origin);
+        self.after_id = self.pending.remove(&origin);
         self.origin = origin;
     }
 
     fn resume_after_pass(&mut self, previous_id: Option<String>) -> bool {
         if self.after_id.is_some() && self.after_id != previous_id {
+            self.pending
+                .insert(self.origin, self.after_id.take().expect("checked cursor"));
             return true;
         }
         self.after_id = None;
@@ -1282,22 +1353,31 @@ async fn sweep_registered_origins(
     schema: &str,
     retention_days: i32,
     cursor: &mut OriginRetentionCursor,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
     let origins: Vec<(i64, uuid::Uuid)> = sqlx::query_as(&format!(
         "SELECT database_oid, installation_id FROM {schema}._origins
-         WHERE (database_oid, installation_id) > ($1, $2)
-            OR ((database_oid, installation_id) = ($1, $2) AND $4)
+         WHERE (database_oid, installation_id) OPERATOR(pg_catalog.>) ($1, $2)
          ORDER BY database_oid, installation_id LIMIT $3"
     ))
     .bind(cursor.origin.0)
     .bind(cursor.origin.1)
     .bind(ORIGIN_BATCH)
-    .bind(cursor.after_id.is_some())
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|error| format!("list registered origins: {error}"))?;
+    tx.commit().await.map_err(|error| error.to_string())?;
     if origins.is_empty() {
-        *cursor = OriginRetentionCursor::default();
+        cursor.origin = (0, uuid::Uuid::nil());
+        cursor.after_id = None;
+        cursor
+            .pending
+            .retain(|origin, _| cursor.visited.contains(origin));
+        cursor.visited.clear();
+        return Ok(!cursor.pending.is_empty());
     }
     for (database_oid, installation_id) in origins {
         cursor.enter((database_oid, installation_id));
@@ -1326,11 +1406,9 @@ async fn sweep_registered_origins(
             Ok(Err(error)) => log!("pg_durable: retention for origin {origin:?} deferred: {error}"),
             Err(_) => log!("pg_durable: retention for origin {origin:?} timed out"),
         }
-        if cursor.resume_after_pass(previous_id) {
-            break;
-        }
+        cursor.resume_after_pass(previous_id);
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn retire_origin_instances(
@@ -1343,32 +1421,17 @@ async fn retire_origin_instances(
     let mut tx = crate::origin::begin_metadata(pool, Some(origin))
         .await
         .map_err(|error| error.to_string())?;
-    let candidates: Vec<OriginRetentionCandidate> = sqlx::query_as(
-        r#"
-        WITH terminal_instances AS (
-            SELECT id, COALESCE(completed_at, created_at) AS terminal_at,
-                pg_catalog.row_number() OVER (
-                    ORDER BY COALESCE(completed_at, created_at) DESC NULLS LAST, id DESC
-                ) AS terminal_rank
-            FROM df.instances
-            WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
-        )
-        SELECT id, terminal_rank,
-            terminal_at OPERATOR(pg_catalog.<)
-                (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $1::int))
-                AS expired_by_age
-        FROM terminal_instances
-        WHERE $2::text IS NULL OR id OPERATOR(pg_catalog.>) $2
-        ORDER BY id LIMIT $3
-        "#,
+    let candidates = origin_retention_candidates(
+        &mut tx,
+        retention_days,
+        after_id.as_deref(),
+        TERMINAL_INSTANCE_MAX_KEEP,
+        i64::from(RECLAIM_BATCH),
     )
-    .bind(retention_days)
-    .bind(after_id.as_deref())
-    .bind(i64::from(RECLAIM_BATCH))
-    .fetch_all(&mut *tx)
     .await
     .map_err(|error| error.to_string())?;
     tx.commit().await.map_err(|error| error.to_string())?;
+    let full_page = candidates.len() == RECLAIM_BATCH as usize;
     retire_origin_candidates(
         candidates,
         after_id,
@@ -1390,6 +1453,45 @@ async fn retire_origin_instances(
             Ok(())
         },
     )
+    .await?;
+    if !full_page {
+        *after_id = None;
+    }
+    Ok(())
+}
+
+async fn origin_retention_candidates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    retention_days: i32,
+    after_id: Option<&str>,
+    max_keep: i64,
+    limit: i64,
+) -> Result<Vec<OriginRetentionCandidate>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        WITH retained AS MATERIALIZED (
+            SELECT id
+            FROM df.instances
+            WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
+            ORDER BY COALESCE(completed_at, created_at) DESC NULLS LAST, id DESC
+            LIMIT $4
+        )
+        SELECT i.id, ($4::pg_catalog.int8 OPERATOR(pg_catalog.+) 1) AS terminal_rank,
+            false AS expired_by_age
+        FROM df.instances i
+        WHERE i.status OPERATOR(pg_catalog.=) ANY (ARRAY['completed', 'failed', 'cancelled'])
+          AND ($2::pg_catalog.text IS NULL OR i.id OPERATOR(pg_catalog.>) $2)
+          AND (COALESCE(i.completed_at, i.created_at) OPERATOR(pg_catalog.<)
+                  (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $1::pg_catalog.int4))
+               OR NOT EXISTS (SELECT 1 FROM retained r WHERE r.id OPERATOR(pg_catalog.=) i.id))
+        ORDER BY i.id LIMIT $3
+        "#,
+    )
+    .bind(retention_days)
+    .bind(after_id)
+    .bind(limit)
+    .bind(max_keep)
+    .fetch_all(&mut **tx)
     .await
 }
 
@@ -1424,22 +1526,29 @@ async fn reclaim_origin_instances(
     retention: Duration,
     cursor: &mut String,
 ) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
     let candidates: Vec<(String, String)> = sqlx::query_as(&format!(
         "SELECT i.instance_id, e.status FROM {schema}.instances i
-         JOIN {schema}.executions e ON e.instance_id = i.instance_id
-             AND e.execution_id = i.current_execution_id
-         WHERE i.instance_id > $1 AND i.parent_instance_id IS NULL
-             AND i.instance_id NOT LIKE '%::%'
+         JOIN {schema}.executions e ON e.instance_id OPERATOR(pg_catalog.=) i.instance_id
+             AND e.execution_id OPERATOR(pg_catalog.=) i.current_execution_id
+         WHERE i.instance_id OPERATOR(pg_catalog.>) $1 AND i.parent_instance_id IS NULL
+             AND i.instance_id OPERATOR(pg_catalog.!~~) '%::%'
              AND EXISTS (SELECT 1 FROM {schema}._origins o
-                 WHERE i.instance_id LIKE 'pgdf-' || o.database_oid::text || '-' ||
-                     pg_catalog.replace(o.installation_id::text, '-', '') || '-%')
+                 WHERE i.instance_id OPERATOR(pg_catalog.~~) ('pgdf-' OPERATOR(pg_catalog.||)
+                     o.database_oid::pg_catalog.text OPERATOR(pg_catalog.||) '-' OPERATOR(pg_catalog.||)
+                     pg_catalog.replace(o.installation_id::pg_catalog.text, '-', '')
+                     OPERATOR(pg_catalog.||) '-%'))
          ORDER BY i.instance_id LIMIT $2"
     ))
     .bind(cursor.as_str())
     .bind(ORIGIN_ENGINE_BATCH)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|error| format!("list registered origin engine roots: {error}"))?;
+    tx.commit().await.map_err(|error| error.to_string())?;
     if let Some((last_id, _)) = candidates.last() {
         *cursor = last_id.clone();
     } else {
@@ -1515,7 +1624,7 @@ async fn reclaim_existing_origin(
         .await
         .map_err(|error| format!("Reconciliation origin validation failed: {error}"))?;
     let present: HashSet<String> =
-        sqlx::query_scalar("SELECT id FROM df.instances WHERE id = ANY($1)")
+        sqlx::query_scalar("SELECT id FROM df.instances WHERE id OPERATOR(pg_catalog.=) ANY($1)")
             .bind(&local_ids)
             .fetch_all(&mut *tx)
             .await
@@ -1775,12 +1884,11 @@ pub(crate) fn select_orphans(
 async fn reclaim_orphaned_instances(
     pool: &sqlx::PgPool,
     client: &Client,
+    schema: &str,
     retention: Duration,
+    cursor: &mut String,
 ) -> Result<u64, String> {
-    let candidates: Vec<String> = client
-        .list_instances_by_status("Failed")
-        .await
-        .map_err(|e| format!("list failed instances: {e:?}"))?;
+    let candidates = legacy_orphan_candidates(pool, schema, cursor).await?;
     if candidates.is_empty() {
         return Ok(0);
     }
@@ -1788,7 +1896,7 @@ async fn reclaim_orphaned_instances(
     // Keep only ids with no df.instances row (orphans). The worker pool bypasses
     // RLS, so this sees every user's rows.
     let present: std::collections::HashSet<String> =
-        sqlx::query_scalar("SELECT id FROM df.instances WHERE id = ANY($1)")
+        sqlx::query_scalar("SELECT id FROM df.instances WHERE id OPERATOR(pg_catalog.=) ANY($1)")
             .bind(&candidates)
             .fetch_all(pool)
             .await
@@ -1811,6 +1919,124 @@ async fn reclaim_orphaned_instances(
         .await
         .map_err(|e| format!("delete_instance_bulk: {e:?}"))?;
     Ok(result.instances_deleted)
+}
+
+async fn legacy_orphan_candidates(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    cursor: &mut String,
+) -> Result<Vec<String>, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let candidates: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT i.instance_id FROM {schema}.instances i
+         JOIN {schema}.executions e ON e.instance_id OPERATOR(pg_catalog.=) i.instance_id
+             AND e.execution_id OPERATOR(pg_catalog.=) i.current_execution_id
+         WHERE e.status OPERATOR(pg_catalog.=) 'Failed'
+           AND i.instance_id OPERATOR(pg_catalog.>) $1
+           AND i.instance_id OPERATOR(pg_catalog.!~~) 'pgdf-%'
+           AND i.instance_id OPERATOR(pg_catalog.!~~) '%::%'
+           AND i.parent_instance_id IS NULL
+         ORDER BY i.instance_id LIMIT $2"
+    ))
+    .bind(cursor.as_str())
+    .bind(i64::from(RECLAIM_BATCH))
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("page legacy failed roots: {error}"))?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    *cursor = candidates.last().cloned().unwrap_or_default();
+    Ok(candidates)
+}
+
+async fn cleanup_origin_registrations(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    cursor: &mut (i64, uuid::Uuid),
+) -> Result<bool, String> {
+    let mut scan = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut scan)
+        .await
+        .map_err(|error| error.to_string())?;
+    let next: Option<(i64, uuid::Uuid)> = sqlx::query_as(&format!(
+        "SELECT database_oid, installation_id FROM {schema}._origins
+         WHERE (database_oid, installation_id) OPERATOR(pg_catalog.>) ($1, $2)
+         ORDER BY database_oid, installation_id LIMIT 1"
+    ))
+    .bind(cursor.0)
+    .bind(cursor.1)
+    .fetch_optional(&mut *scan)
+    .await
+    .map_err(|error| format!("page origin registrations: {error}"))?;
+    scan.commit().await.map_err(|error| error.to_string())?;
+    let Some((database_oid, installation_id)) = next else {
+        *cursor = (0, uuid::Uuid::nil());
+        return Ok(false);
+    };
+    *cursor = (database_oid, installation_id);
+    let origin = Origin {
+        database_oid: u32::try_from(database_oid).map_err(|_| "Invalid registered database OID")?,
+        installation_id,
+    };
+    let removed = tokio::time::timeout(ORIGIN_OPERATION_TIMEOUT, origin_is_removed(pool, &origin))
+        .await
+        .map_err(|_| "Registration absence probe timed out")??;
+    if !removed {
+        return Ok(true);
+    }
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    sqlx::query("SET LOCAL lock_timeout = '1500ms'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    // Serialize with register_origin's INSERT/ON CONFLICT. A concurrent activity
+    // either retains this row or inserts it again after this transaction commits.
+    sqlx::query(&format!(
+        "SELECT database_oid FROM {schema}._origins
+         WHERE database_oid OPERATOR(pg_catalog.=) $1
+           AND installation_id OPERATOR(pg_catalog.=) $2 FOR UPDATE"
+    ))
+    .bind(database_oid)
+    .bind(installation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("lock origin registration: {error}"))?;
+    let prefix = format!("{}%", origin.engine_id(""));
+    let no_work = [
+        "instances",
+        "executions",
+        "history",
+        "orchestrator_queue",
+        "worker_queue",
+        "instance_locks",
+    ]
+    .iter()
+    .map(|table| {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM {schema}.{table}
+         WHERE instance_id OPERATOR(pg_catalog.~~) $3)"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" AND ");
+    sqlx::query(&format!(
+        "DELETE FROM {schema}._origins WHERE database_oid OPERATOR(pg_catalog.=) $1
+         AND installation_id OPERATOR(pg_catalog.=) $2 AND {no_work}"
+    ))
+    .bind(database_oid)
+    .bind(installation_id)
+    .bind(&prefix)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("delete removed registration: {error}"))?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 /// Best-effort deletion of duroxide engine records by id, ahead of deleting the
@@ -1857,7 +2083,118 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
 mod tests {
     use super::*;
     use crate::origin::Origin;
-    use std::collections::HashSet;
+
+    #[pg_test]
+    fn maintenance_queries_bound_candidates_and_preserve_work() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
+            let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2)
+                .connect_with(sqlx::postgres::PgConnectOptions::from_str(&postgres_connection_string()).unwrap()
+                    .username(&admin).database(&database)).await.unwrap();
+            sqlx::raw_sql(
+                "CREATE SCHEMA maintenance_candidate_test;
+                 CREATE TABLE maintenance_candidate_test.instances(instance_id text PRIMARY KEY, current_execution_id bigint, parent_instance_id text);
+                 CREATE TABLE maintenance_candidate_test.executions(instance_id text, execution_id bigint, status text);
+                 CREATE TABLE maintenance_candidate_test._origins(database_oid bigint, installation_id uuid, PRIMARY KEY(database_oid,installation_id));
+                 CREATE TABLE maintenance_candidate_test.history(instance_id text);
+                 CREATE TABLE maintenance_candidate_test.worker_queue(instance_id text);
+                 CREATE TABLE maintenance_candidate_test.orchestrator_queue(instance_id text);
+                 CREATE TABLE maintenance_candidate_test.instance_locks(instance_id text);
+                 INSERT INTO maintenance_candidate_test.instances
+                 SELECT 'pgdf-42-00000000000000000000000000000001-' || lpad(to_hex(n),8,'0'),1,NULL FROM generate_series(1,3500) n;
+                 INSERT INTO maintenance_candidate_test.instances
+                 SELECT lpad(to_hex(n),8,'0'),1,NULL FROM generate_series(1,1300) n;
+                 INSERT INTO maintenance_candidate_test.instances VALUES ('sub::legacy',1,NULL),('00000001::2::child',1,NULL);
+                 INSERT INTO maintenance_candidate_test.executions SELECT instance_id,1,'Failed' FROM maintenance_candidate_test.instances;",
+            ).execute(&mut connection).await.unwrap();
+            let mut cursor = String::new();
+            let first = legacy_orphan_candidates(&pool, "maintenance_candidate_test", &mut cursor).await.unwrap();
+            assert_eq!(first.len(), RECLAIM_BATCH as usize);
+            assert!(first.iter().all(|id| id.len() == 8));
+            let second = legacy_orphan_candidates(&pool, "maintenance_candidate_test", &mut cursor).await.unwrap();
+            assert_eq!(second.len(), 300);
+            assert!(first.last().unwrap() < second.first().unwrap());
+            assert!(legacy_orphan_candidates(&pool, "maintenance_candidate_test", &mut cursor).await.unwrap().is_empty());
+            assert!(cursor.is_empty());
+
+            let removed = Origin { database_oid: u32::MAX, installation_id: uuid::Uuid::from_u128(9) };
+            sqlx::query("INSERT INTO maintenance_candidate_test._origins VALUES ($1,$2)")
+                .bind(i64::from(removed.database_oid)).bind(removed.installation_id)
+                .execute(&mut connection).await.unwrap();
+            for table in ["instances","executions","history","orchestrator_queue","worker_queue","instance_locks"] {
+                sqlx::query(&format!("INSERT INTO maintenance_candidate_test.{table}(instance_id) VALUES ($1)"))
+                    .bind(format!("{}::1::child", removed.engine_id("deadbeef"))).execute(&mut connection).await.unwrap();
+                let mut registration_cursor = (0,uuid::Uuid::nil());
+                assert!(cleanup_origin_registrations(&pool,"maintenance_candidate_test",&mut registration_cursor).await.unwrap());
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._origins").fetch_one(&mut connection).await.unwrap();
+                assert_eq!(count,1,"must retain registration for {table}");
+                sqlx::query(&format!("DELETE FROM maintenance_candidate_test.{table} WHERE instance_id = $1"))
+                    .bind(format!("{}::1::child", removed.engine_id("deadbeef"))).execute(&mut connection).await.unwrap();
+            }
+            let mut registration_cursor = (0,uuid::Uuid::nil());
+            cleanup_origin_registrations(&pool,"maintenance_candidate_test",&mut registration_cursor).await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._origins").fetch_one(&mut connection).await.unwrap();
+            assert_eq!(count,0);
+            assert!(!cleanup_origin_registrations(&pool,"maintenance_candidate_test",&mut registration_cursor).await.unwrap());
+            register_origin_in_schema(&pool,"maintenance_candidate_test",&removed).await.unwrap();
+            let mut gc = connection.begin().await.unwrap();
+            sqlx::query("SELECT database_oid FROM maintenance_candidate_test._origins FOR UPDATE")
+                .fetch_all(&mut *gc).await.unwrap();
+            let gc_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gc).await.unwrap();
+            let registration = register_origin_in_schema(&pool,"maintenance_candidate_test",&removed);
+            tokio::pin!(registration);
+            {
+                let deadline = tokio::time::sleep(Duration::from_secs(1));
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        result = &mut registration => panic!("registration must wait for GC row lock: {result:?}"),
+                        _ = &mut deadline => panic!("concurrent registration lock wait not observed"),
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                            let waiting: bool = sqlx::query_scalar(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+                            ).bind(gc_pid).fetch_one(&mut *gc).await.unwrap();
+                            if waiting { break; }
+                        }
+                    }
+                }
+            }
+            sqlx::query("DELETE FROM maintenance_candidate_test._origins").execute(&mut *gc).await.unwrap();
+            gc.commit().await.unwrap();
+            registration.await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._origins").fetch_one(&mut connection).await.unwrap();
+            assert_eq!(count,1,"registration must survive concurrent GC deletion");
+            sqlx::query("DROP SCHEMA maintenance_candidate_test CASCADE").execute(&mut connection).await.unwrap();
+            pool.close().await;
+
+            let mut tx = connection.begin().await.unwrap();
+            sqlx::query(
+                "INSERT INTO df.instances(id,root_node,submitted_by,status,created_at,completed_at)
+                 SELECT lpad(to_hex(n),8,'0'),'00000000',current_user::regrole,'completed',now(),now()
+                 FROM generate_series(1,11000) n",
+            ).execute(&mut *tx).await.unwrap();
+            // Retained rows must not consume the candidate budget.
+            let page = origin_retention_candidates(&mut tx,30,None,10000,1000).await.unwrap();
+            assert_eq!(page.len(),1000);
+            let next = origin_retention_candidates(&mut tx,30,Some(&page.last().unwrap().id),10000,1000).await.unwrap();
+            assert!(next.is_empty());
+            let retained = origin_retention_candidates(&mut tx,30,None,12000,1000).await.unwrap();
+            assert!(retained.is_empty());
+            sqlx::query("UPDATE df.instances SET completed_at=now()-interval '31 days' WHERE id='00002af8'")
+                .execute(&mut *tx).await.unwrap();
+            let aged = origin_retention_candidates(&mut tx,30,None,12000,1000).await.unwrap();
+            assert_eq!(aged.len(),1);
+            assert_eq!(aged[0].id,"00002af8");
+            tx.rollback().await.unwrap();
+            connection.close().await.unwrap();
+        });
+    }
 
     #[pg_test]
     fn satellite_metadata_startup_ignores_untrusted_search_paths() {
@@ -2059,8 +2396,11 @@ mod tests {
                 let mut cursor = OriginRetentionCursor {
                     origin: (42, uuid::Uuid::from_u128(7)),
                     after_id,
+                    pending: BTreeMap::new(),
+                    visited: HashSet::new(),
                 };
                 assert!(cursor.resume_after_pass(None));
+                cursor.enter(cursor.origin);
                 let mut retired = Vec::new();
                 let candidates = ["00000001", "00000002"]
                     .into_iter()
@@ -2143,6 +2483,9 @@ mod tests {
         let mut cursor = OriginRetentionCursor::default();
         cursor.enter(first);
         cursor.after_id = Some("deadbeef".to_string());
+        assert!(cursor.resume_after_pass(None));
+        cursor.enter((43, uuid::Uuid::from_u128(8)));
+        assert_eq!(cursor.after_id, None);
         cursor.enter(first);
         assert_eq!(cursor.after_id.as_deref(), Some("deadbeef"));
         cursor.enter(replacement);

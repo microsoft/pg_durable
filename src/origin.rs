@@ -13,6 +13,31 @@ use crate::types;
 static ORIGIN_CONNECTION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 pub(crate) const REPLACED: &str = "Origin installation removed or replaced";
 
+#[derive(Debug)]
+pub(crate) enum RoutingError {
+    Retryable(String),
+    Permanent(String),
+}
+
+impl RoutingError {
+    fn database(operation: &str, error: sqlx::Error) -> Self {
+        let message = format!("{operation}: {error}");
+        if crate::activities::load_function_graph::is_retryable_database_error(&error) {
+            Self::Retryable(message)
+        } else {
+            Self::Permanent(message)
+        }
+    }
+}
+
+impl From<RoutingError> for String {
+    fn from(error: RoutingError) -> Self {
+        match error {
+            RoutingError::Retryable(message) | RoutingError::Permanent(message) => message,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MetadataScope {
     Installation,
@@ -304,25 +329,28 @@ pub(crate) struct Route {
 
 impl Route {
     pub async fn validate(&self) -> Result<(), String> {
+        self.validate_typed().await.map_err(String::from)
+    }
+
+    async fn validate_typed(&self) -> Result<(), RoutingError> {
         if let Some(origin) = self.origin.as_ref() {
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|error| format!("Origin admission unavailable: {error}"))?;
+            let mut tx =
+                self.pool.begin().await.map_err(|error| {
+                    RoutingError::database("Origin admission unavailable", error)
+                })?;
             sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| RoutingError::database("Origin admission isolation", error))?;
             configure_metadata_transaction(&mut tx)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| RoutingError::database("Origin admission timeouts", error))?;
             lock_and_validate(&mut tx, origin)
                 .await
-                .map_err(|error| format!("Origin admission unavailable: {error}"))?;
+                .map_err(|error| RoutingError::database("Origin admission unavailable", error))?;
             tx.rollback()
                 .await
-                .map_err(|error| format!("Origin admission close failed: {error}"))?;
+                .map_err(|error| RoutingError::database("Origin admission close failed", error))?;
         }
         Ok(())
     }
@@ -358,7 +386,12 @@ impl Router {
     }
 
     pub async fn route(&self, engine_id: &str) -> Result<Route, String> {
-        let Some(origin) = Origin::from_engine_id(engine_id)? else {
+        self.route_typed(engine_id).await.map_err(String::from)
+    }
+
+    pub async fn route_typed(&self, engine_id: &str) -> Result<Route, RoutingError> {
+        let Some(origin) = Origin::from_engine_id(engine_id).map_err(RoutingError::Permanent)?
+        else {
             return Ok(Route {
                 pool: self.control.clone(),
                 database: None,
@@ -366,20 +399,34 @@ impl Router {
                 permit: None,
             });
         };
-        crate::worker::register_origin(&self.control, &origin).await?;
-        self.connect(&origin).await
+        crate::worker::register_origin(&self.control, &origin)
+            .await
+            .map_err(|error| RoutingError::database("Register origin", error))?;
+        self.connect_typed(&origin).await
     }
 
     pub async fn connect(&self, origin: &Origin) -> Result<Route, String> {
-        let permit = acquire_connections(1).await?;
-        let database: String = sqlx::query_scalar(
-            "SELECT datname FROM pg_catalog.pg_database WHERE oid = $1::bigint::oid AND datallowconn",
+        self.connect_typed(origin).await.map_err(String::from)
+    }
+
+    async fn connect_typed(&self, origin: &Origin) -> Result<Route, RoutingError> {
+        let permit = acquire_connections(1)
+            .await
+            .map_err(RoutingError::Retryable)?;
+        let (database, allowed): (String, bool) = sqlx::query_as(
+            "SELECT datname, datallowconn FROM pg_catalog.pg_database
+             WHERE oid OPERATOR(pg_catalog.=) $1::pg_catalog.int8::pg_catalog.oid",
         )
         .bind(i64::from(origin.database_oid))
         .fetch_optional(self.control.as_ref())
         .await
-        .map_err(|error| format!("Origin database lookup failed: {error}"))?
-        .ok_or("Origin database removed or connections disabled")?;
+        .map_err(|error| RoutingError::database("Origin database lookup failed", error))?
+        .ok_or_else(|| RoutingError::Permanent("Origin database removed".into()))?;
+        if !allowed {
+            return Err(RoutingError::Retryable(
+                "Origin database connections disabled".into(),
+            ));
+        }
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_secs(5))
@@ -394,14 +441,14 @@ impl Router {
                     ]),
             )
             .await
-            .map_err(|error| format!("Origin database connection failed: {error}"))?;
+            .map_err(|error| RoutingError::database("Origin database connection failed", error))?;
         let route = Route {
             pool: Arc::new(pool),
             database: Some(database),
             origin: Some(origin.clone()),
             permit: Some(permit),
         };
-        route.validate().await?;
+        route.validate_typed().await?;
         Ok(route)
     }
 }
@@ -626,6 +673,18 @@ mod tests {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+
+    #[test]
+    fn routing_errors_preserve_admission_classification() {
+        assert!(matches!(
+            RoutingError::database("lookup", sqlx::Error::PoolTimedOut),
+            RoutingError::Retryable(_)
+        ));
+        assert!(matches!(
+            RoutingError::database("identity", sqlx::Error::Protocol(REPLACED.into())),
+            RoutingError::Permanent(_)
+        ));
+    }
 
     #[test]
     fn batch_identity_mapping_preserves_legacy_and_satellite_ids() {

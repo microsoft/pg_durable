@@ -2554,11 +2554,26 @@ terminal engine deletion still respects retention. Connection failures defer
 cleanup rather than establish absence. Control removal is destructive to every
 origin's engine state. Retention resumes from a bounded cursor so undeletable
 engine records do not permanently block later candidates.
+Once a scan begins, unfinished pages continue after a 100 ms yield rather than
+waiting for another `reconcile_interval`. Each slice visits one registered origin
+for at most one 1,000-candidate page, then other origins get a turn before a busy
+origin resumes. Only age-expired or excess-over-10,000 rows consume the retention
+candidate budget. Legacy orphan candidates exclude satellite roots and children
+in SQL before their bounded page is loaded into memory.
+
+Metadata queries have server-side deadlines and satellite operations have a
+15-second overall deadline. The candidate limit bounds materialized rows, not
+every row PostgreSQL might examine when determining the newest retained set.
+Slow or unavailable origins are deferred without being presumed removed.
+Confirmed removed/replaced registrations are eventually deleted only when no
+matching engine instances, executions, history, queues or locks remain. Concurrent
+activity registration is serialized with that deletion.
 
 Two Postmaster-context GUCs govern it (set in `postgresql.conf`, restart to apply):
 
 ```ini
-# How often (seconds) a reconciliation pass runs. 0 disables reconciliation.
+# Idle interval between reconciliation scans; unfinished pages continue promptly.
+# 0 disables reconciliation, including continuation slices.
 pg_durable.reconcile_interval = 3600
 
 # Days a terminal instance is retained before reconciliation removes it (and its

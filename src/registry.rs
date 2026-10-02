@@ -90,7 +90,14 @@ pub fn create_activity_registry(
             move |ctx: ActivityContext, input_json: String| {
                 let pool = transaction_graph_pool.clone();
                 async move {
-                    let route = pool.route(ctx.instance_id()).await?;
+                    let route = match pool.route_typed(ctx.instance_id()).await {
+                        Ok(route) => route,
+                        Err(error) => {
+                            return activities::load_function_graph::routing_error_outcome(
+                                &ctx, error,
+                            )
+                        }
+                    };
                     let result = activities::load_function_graph::probe_transaction(
                         ctx,
                         route.pool.clone(),

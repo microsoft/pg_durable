@@ -281,6 +281,25 @@ not synchronously register the origin. Only origins submitting work are discover
 not all installed extensions. The registry supports maintenance, not ownership or
 an exact transactional reference count.
 
+Idle scans follow `pg_durable.reconcile_interval`; pending pages continue after a
+100 ms yield. Maintenance tracks independent control-retention, legacy-orphan,
+satellite-retention, satellite-engine and registration-cleanup scans so an
+exhausted scan is not restarted on every continuation. Satellite retention takes
+one bounded page per origin, rotates to peers, and resumes saved per-origin
+cursors on subsequent rounds. Queries filter for age/max-keep eligibility before
+the 1,000-row candidate limit; they retain at most the newest 10,000 IDs instead
+of ranking the entire terminal population. This bounds result size, not a
+guarantee of constant server work: catalog/metadata queries and origin operations
+still have deadlines. An unreachable origin is never proof of removal.
+
+Legacy Failed candidates exclude `pgdf-` roots and children in SQL and use keyset
+pages before materialization. Registration cleanup separately scans even origins
+with no remaining engine roots. After catalog-confirmed removal/replacement it
+locks the registration and deletes only if a fresh query finds no engine instance,
+execution, history, queue or instance-lock rows for that origin prefix. Registration
+uses a conflict-row lock without a tuple update, so a simultaneous registrant
+cannot lose its row to cleanup.
+
 Exact cross-database reference counting is not reliable with ordinary extension
 DDL: extension catalogs and dependencies are database-local, and registration over
 a second connection commits or rolls back independently. There is no all-database
@@ -289,6 +308,15 @@ metadata transactions and fresh side-effect admission checks. Reconciliation is
 eventual cleanup, not an admission fence.
 
 ## Lifecycle And Failure Semantics
+
+### Transient Graph Admission
+
+The transaction-aware graph activity preserves routing error classification.
+Connection/resource waits, temporary disabled connections and retryable database
+errors feed the existing typed `retry` response and bounded orchestration backoff.
+Confirmed missing/replaced installations and malformed identities remain permanent
+errors. Other activities retain their existing error handling; no activity name,
+recorded input shape or SQL API changes are required.
 
 ### Satellite Drop
 

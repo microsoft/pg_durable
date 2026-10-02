@@ -66,6 +66,7 @@ DEFAULT_BUILD_PHASES=(
     "new-start-limit"
     "connlimit-startup"
     "reconcile"
+    "maintenance-backlog"
     "http-custom-domains"
     "http-empty-domains"
 )
@@ -81,6 +82,7 @@ ALL_PHASES=(
     "new-start-limit"
     "connlimit-startup"
     "reconcile"
+    "maintenance-backlog"
     "http-custom-domains"
     "http-empty-domains"
     "http-disabled"
@@ -214,6 +216,9 @@ phase_for_test() {
             ;;
         54_reconcile_orphans|76_multi_database_reconcile)
             echo "reconcile"
+            ;;
+        88_multi_database_maintenance_backlog)
+            echo "maintenance-backlog"
             ;;
         69_http_allowed_domains)
             echo "http-custom-domains"
@@ -618,7 +623,7 @@ configure_phase() {
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.max_duroxide_connections" "1"
             ;;
-        reconcile)
+        reconcile|maintenance-backlog)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
@@ -626,8 +631,13 @@ configure_phase() {
             # Short reconcile cadence and zero retention so a pass acts within the
             # test window instead of the conservative production defaults
             # (retention_days=0 makes an aged-out orphan eligible at once).
-            set_conf_line "pg_durable.reconcile_interval" "2"
-            set_conf_line "pg_durable.retention_days" "0"
+            if [ "$phase" = "maintenance-backlog" ]; then
+                set_conf_line "pg_durable.reconcile_interval" "60"
+                set_conf_line "pg_durable.retention_days" "30"
+            else
+                set_conf_line "pg_durable.reconcile_interval" "2"
+                set_conf_line "pg_durable.retention_days" "0"
+            fi
             ;;
         http-custom-domains|http-disabled)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
@@ -730,7 +740,7 @@ prepare_phase() {
             ;;
         connlimit-startup)
             ;;
-        reconcile)
+        reconcile|maintenance-backlog)
             wait_for_worker_ready
             ;;
         http-custom-domains|http-empty-domains|http-disabled|http-allow-all)

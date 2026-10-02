@@ -49,6 +49,7 @@ SKIP_TESTS=(
     # retention_days=30), under which the orphan is never reclaimed in time.
     "54_reconcile_orphans"
     "76_multi_database_reconcile"
+    "88_multi_database_maintenance_backlog"
     # Require the force-drop phase (one execution slot, reconciliation disabled).
     "78_multi_database_force_drop"
     "79_multi_database_remote_origin"

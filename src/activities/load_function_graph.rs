@@ -144,6 +144,22 @@ fn classify_sqlx_error(error: &sqlx::Error) -> ErrorClass {
     }
 }
 
+pub(crate) fn is_retryable_database_error(error: &sqlx::Error) -> bool {
+    classify_sqlx_error(error) == ErrorClass::Transient
+}
+
+pub(crate) fn routing_error_outcome(
+    ctx: &ActivityContext,
+    error: crate::origin::RoutingError,
+) -> Result<String, String> {
+    match error {
+        crate::origin::RoutingError::Retryable(message) => {
+            retry_probe(ctx, "origin routing", ctx.instance_id(), message)
+        }
+        crate::origin::RoutingError::Permanent(message) => Err(message),
+    }
+}
+
 /// Wrap a sqlx error observed while loading a graph into the appropriately
 /// classified `LoadGraphError`, embedding the SQLSTATE (or "unknown") so
 /// terminal failures are diagnosable.

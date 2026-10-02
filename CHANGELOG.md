@@ -99,6 +99,13 @@ see [deferred guarantees](docs/multi-database-installation.md#release-blockers).
 
 ### Fixed
 
+- **Satellite graph admission and maintenance:** transient routing contention
+  now uses the graph retry protocol. Retention continues bounded pages promptly
+  and rotates between origins; retained rows do not consume its candidate budget.
+  Legacy orphan IDs are filtered and paged in SQL. Removed registrations are
+  collected once all corresponding engine work is gone, without treating
+  connection failures as proof of removal.
+
 - **Satellite metadata trust:** worker-role satellite connections use catalog-first
   startup name resolution. Catalog-only type, ownership and extension-membership
   checks run before and after metadata locks, before any identity data is read.
