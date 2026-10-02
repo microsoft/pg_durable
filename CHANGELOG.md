@@ -99,6 +99,12 @@ see [deferred guarantees](docs/multi-database-installation.md#release-blockers).
 
 ### Fixed
 
+- **Satellite metadata trust:** worker-role satellite connections use catalog-first
+  startup name resolution. Catalog-only type, ownership and extension-membership
+  checks run before and after metadata locks, before any identity data is read.
+  Replacement views and changed object identities fail closed without evaluation;
+  user SQL and response-sink search paths remain unchanged.
+
 - **Release automation (#389):** release-triggered Docker publication retries
   package downloads while the package workflow attaches release assets. Manual
   dispatch remains fail-fast when assets are missing.

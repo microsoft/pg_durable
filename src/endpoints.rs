@@ -475,6 +475,25 @@ impl<'a> EndpointCatalog<'a> {
             let mut connection = crate::types::connect_as_user(self.submitted_by, self.database)
                 .await
                 .map_err(|error| format!("Endpoint catalog connection failed: {error}"))?;
+            // Attest before BEGIN so a lock wait cannot leave the credential
+            // snapshot pinned to the installation that existed before the wait.
+            let attestation = if let Some(origin) = self.origin {
+                Some(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        crate::origin::attest_metadata(
+                            &mut connection,
+                            origin,
+                            crate::origin::MetadataScope::Installation,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "Endpoint origin fence timed out")?
+                    .map_err(|_| "Endpoint origin fence unavailable")?,
+                )
+            } else {
+                None
+            };
             sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut connection)
                 .await
@@ -483,14 +502,15 @@ impl<'a> EndpointCatalog<'a> {
                 .execute(&mut connection)
                 .await
                 .map_err(|_| "Endpoint catalog search path setup failed")?;
-            if let Some(origin) = self.origin {
+            if let (Some(origin), Some(attestation)) = (self.origin, attestation.as_ref()) {
                 crate::origin::configure_metadata_transaction(&mut connection)
                     .await
                     .map_err(|_| "Endpoint origin timeout setup failed")?;
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    crate::origin::lock_and_validate(&mut connection, origin),
-                )
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    crate::origin::lock_attested_metadata(&mut connection, origin, attestation)
+                        .await?;
+                    crate::origin::check_identity(&mut connection, origin).await
+                })
                 .await
                 .map_err(|_| "Endpoint origin fence timed out")?
                 .map_err(|_| "Endpoint origin fence unavailable")?;
@@ -938,6 +958,74 @@ mod tests {
     }
 
     #[pg_test]
+    fn endpoint_origin_attestation_wait_uses_fresh_snapshot() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
+            let (database_oid, installation_id): (i64, uuid::Uuid) = sqlx::query_as(
+                "SELECT d.oid::bigint, i.id FROM pg_catalog.pg_database d CROSS JOIN df._installation i
+                 WHERE d.datname = pg_catalog.current_database()",
+            ).fetch_one(&mut connection).await.unwrap();
+            let origin = crate::origin::Origin { database_oid: u32::try_from(database_oid).unwrap(), installation_id };
+            sqlx::raw_sql(
+                "CREATE FUNCTION public.endpoint_origin_canary() RETURNS uuid
+                 LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $fn$
+                 BEGIN RAISE EXCEPTION 'ENDPOINT_ORIGIN_CANARY'; END $fn$",
+            ).execute(&mut connection).await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut connection).await.unwrap();
+            let mut ddl = connection.begin().await.unwrap();
+            sqlx::raw_sql(
+                "ALTER TABLE df._installation RENAME TO endpoint_original_identity;
+                 CREATE VIEW df._installation AS SELECT public.endpoint_origin_canary() AS id",
+            ).execute(&mut *ddl).await.unwrap();
+            let semaphore = Semaphore::new(1);
+            let mut catalog = EndpointCatalog::new(&admin, &semaphore, Some(&database), Some(&origin));
+            {
+                let waiting = catalog.connection();
+                tokio::pin!(waiting);
+                let deadline = tokio::time::sleep(std::time::Duration::from_secs(1));
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        result = &mut waiting => panic!("endpoint did not wait on identity lock: {result:?}"),
+                        _ = &mut deadline => panic!("endpoint lock wait not observed"),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                            let blocked: bool = sqlx::query_scalar(
+                                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l
+                                 WHERE l.locktype = 'relation' AND NOT l.granted
+                                   AND $1 = ANY(pg_catalog.pg_blocking_pids(l.pid)))",
+                            ).bind(pid).fetch_one(&mut *ddl).await.unwrap();
+                            if blocked { break; }
+                        }
+                    }
+                }
+                ddl.commit().await.unwrap();
+                let error = waiting.await.unwrap_err();
+                assert!(error.contains("Endpoint origin fence unavailable"), "{error}");
+                assert!(!error.contains("ENDPOINT_ORIGIN_CANARY"));
+            }
+            catalog.close().await.unwrap();
+            sqlx::raw_sql(
+                "DROP VIEW df._installation;
+                 ALTER TABLE df.endpoint_original_identity RENAME TO _installation;
+                 DROP FUNCTION public.endpoint_origin_canary()",
+            ).execute(&mut connection).await.unwrap();
+            let mut catalog = EndpointCatalog::new(&admin, &semaphore, Some(&database), Some(&origin));
+            let (isolation, read_only): (String, String) = sqlx::query_as(
+                "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')",
+            ).fetch_one(catalog.connection().await.unwrap()).await.unwrap();
+            assert_eq!((isolation.as_str(), read_only.as_str()), ("repeatable read", "on"));
+            catalog.close().await.unwrap();
+            connection.close().await.unwrap();
+        });
+    }
+
+    #[pg_test]
     fn endpoint_catalog_snapshot_and_admission() {
         use std::future::Future;
         use std::task::Poll;
@@ -1194,6 +1282,7 @@ mod tests {
             .unwrap()
             .unwrap();
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let catalog_guard = crate::origin::metadata_test_connection(&admin, &database).await;
             let options = sqlx::postgres::PgConnectOptions::new()
                 .username(&admin).database(&database)
                 .host(&crate::types::get_host()).port(crate::types::get_port());
@@ -1240,6 +1329,7 @@ mod tests {
                 DROP ROLE endpoint_grant_raw, endpoint_grant_typed, endpoint_grant_user, endpoint_grant_admin;
             "#).execute(&pool).await.unwrap();
             pool.close().await;
+            catalog_guard.close().await.unwrap();
         });
     }
 
@@ -1256,9 +1346,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let mut connection = crate::types::connect_as_user(&admin, Some(&database))
-                    .await
-                    .unwrap();
+                let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
                 sqlx::raw_sql(
                     r#"
                     DROP ROLE IF EXISTS "endpoint Alice", endpoint_bob;

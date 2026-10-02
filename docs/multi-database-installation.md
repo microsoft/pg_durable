@@ -207,6 +207,13 @@ Graph visibility probes, graph loads, node/instance status writes, retention and
 reconciliation each validate identity and access metadata in the **same short
 transaction on one connection**. Locks cover the actual metadata operation.
 Identity is read after any lock wait, using a fresh READ COMMITTED snapshot.
+Before reading satellite metadata, a catalog-only statement attests its ordinary,
+permanent table kind, extension membership and installer ownership, including the
+`df` namespace owner and identity column type. Transaction-scoped `ONLY` locks
+are followed by a separate catalog recheck of the exact extension/namespace/table
+OIDs and owner before the UUID query is prepared. The identity read also uses
+`ONLY`, excluding inherited rows. A missing or counterfeit relation is never
+queried to decide whether it is trusted.
 No metadata transaction spans visibility-poll sleeps, engine RPCs, user SQL, or
 HTTP transfer. Ordinary PostgreSQL lock conflicts can still fail with a bounded
 metadata timeout; the separate idle-guard/client-side lock cycle is removed.
@@ -220,6 +227,9 @@ after catalog-slot waits. Endpoint settings and all named secrets retain their
 one-attempt consistent snapshot; rotation is visible to subsequent attempts,
 not a reread of half the credentials during the same request. Existing domain
 policy and secret redaction remain in effect.
+For the repeatable-read endpoint path, pre-attestation occurs before `BEGIN`.
+Post-lock attestation takes the first snapshot in that transaction, so a lock
+wait cannot pin credential reads to pre-replacement catalog state.
 
 `pg_durable.max_origin_connections` bounds origin connections across activities and
 maintenance: default `12`, minimum `2`, maximum `1000`, Postmaster context (restart
@@ -341,6 +351,17 @@ This readiness protocol, not equal extension version strings, gates installation
   database-local `CONNECT`, access to `df` metadata and installation identity, and
   permission to perform origin-local HTTP privilege lookup in every managed origin.
   `BYPASSRLS` bypasses row policies only; it grants no database or object privileges.
+- Satellite database ownership does not imply trust with worker credentials.
+  Both privileged satellite connection paths (routing and absence probes) set
+  `search_path=pg_catalog,pg_temp` in connection startup options, overriding
+  database and role defaults. Catalogs precede temporary objects; application
+  schemas are excluded. User-authenticated SQL, sink and new-start connections
+  retain their existing search-path semantics.
+- The extension installer and its metadata ownership remain trusted. Attestation
+  rejects views, missing membership, unexpected owners and replaced OIDs; it is
+  not a sandbox for an authorized installer modifying executable dependencies.
+  This change does not introduce a least-privilege role redesign or a general
+  guarantee against arbitrary login/startup callbacks.
 - The caller must never be allowed to supply an arbitrary origin database or
   installation ID in raw workflow JSON. The C entrypoint derives origin identity
   from the current database and local installation row.
@@ -417,6 +438,12 @@ replacement rows remain untouched. `85_multi_database_http_admission` uses a
 successful-authorization log barrier and occupied catalog permit to test
 revocation, reconnect and replacement with zero disallowed network sends.
 These are normal regressions, not expected-failure diagnostics. Pure
+and PostgreSQL-backed security tests cover shadow operators, database/role
+startup overrides, counterfeit metadata views, owner/type/membership rejection,
+and replacements across real lock waits in read-committed and repeatable-read
+transactions. `86_multi_database_untrusted_origin` verifies that queued work
+after authorized uninstall cannot evaluate replacement views created by the
+less-privileged database owner or send its remote SQL. Pure
 tests cover identity parsing, bounded control probes, and retention cursor progress.
 The release gates remain full unit/E2E suites, formatting, build, Clippy, and upgrade
 testing; focused regressions do not replace them.

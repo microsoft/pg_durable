@@ -241,6 +241,14 @@ the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
   validation/access are atomic with installation DDL; side-effect admission and
   remote dispatch are separate boundaries. Normal DROP no longer retains locks
   across arbitrary activities.
+- **Metadata trust hardening:** worker satellite connections pin catalog-first
+  name resolution at startup. Catalog-only checks attest relation kind,
+  extension membership and installer ownership before and after locking, before
+  reading identity or graph data. This requires no new SQL objects, grants,
+  ownership migration or replay payload changes. Legacy control paths still
+  bypass satellite identity requirements. An installation whose metadata or
+  `df` namespace has been reassigned to a different owner now fails admission
+  rather than being used under worker credentials.
 
 See [deferred lifetime guarantees](multi-database-installation.md#release-blockers)
 for the separate runtime shutdown and server-side cancellation limitations.

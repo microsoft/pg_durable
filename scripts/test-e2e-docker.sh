@@ -55,6 +55,7 @@ SKIP_TESTS=(
     "82_multi_database_ddl_cycle"
     "83_multi_database_same_oid"
     "84_multi_database_metadata_fence"
+    "86_multi_database_untrusted_origin"
     # Require http-allow-all and the local runner's TLS mock and environment.
     "80_multi_database_http_origin"
     "85_multi_database_http_admission"

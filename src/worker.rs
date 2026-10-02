@@ -1589,7 +1589,8 @@ async fn origin_is_removed(pool: &sqlx::PgPool, origin: &Origin) -> Result<bool,
         &postgres_connection_string_with_application_name(WORKER_MANAGEMENT_APPLICATION_NAME),
     )
     .map_err(|error| error.to_string())?
-    .database(&database);
+    .database(&database)
+    .options([("search_path", "pg_catalog,pg_temp")]);
     let mut probe = tokio::time::timeout(
         Duration::from_secs(5),
         sqlx::PgConnection::connect_with(&options),
@@ -1613,6 +1614,10 @@ async fn probe_origin_installation(
         .begin()
         .await
         .map_err(|error| error.to_string())?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
     sqlx::query("SET LOCAL lock_timeout = '1500ms'")
         .execute(&mut *tx)
         .await
@@ -1622,8 +1627,8 @@ async fn probe_origin_installation(
         .await
         .map_err(|error| error.to_string())?;
     let database_oid: i64 = sqlx::query_scalar(
-        "SELECT oid::bigint FROM pg_catalog.pg_database
-         WHERE datname = pg_catalog.current_database()",
+        "SELECT oid::pg_catalog.int8 FROM pg_catalog.pg_database
+         WHERE datname OPERATOR(pg_catalog.=) pg_catalog.current_database()",
     )
     .fetch_one(&mut *tx)
     .await
@@ -1633,35 +1638,34 @@ async fn probe_origin_installation(
     }
     let owned: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e
-         JOIN pg_catalog.pg_depend d ON d.refobjid = e.oid
-             AND d.refclassid = 'pg_catalog.pg_extension'::regclass AND d.deptype = 'e'
-         JOIN pg_catalog.pg_class c ON c.oid = d.objid
-             AND d.classid = 'pg_catalog.pg_class'::regclass
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         WHERE e.extname = 'pg_durable' AND n.nspname = 'df' AND c.relname = '_installation')",
+         JOIN pg_catalog.pg_depend d ON d.refobjid OPERATOR(pg_catalog.=) e.oid
+             AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+             AND d.deptype OPERATOR(pg_catalog.=) 'e'
+             AND d.objsubid OPERATOR(pg_catalog.=) 0 AND d.refobjsubid OPERATOR(pg_catalog.=) 0
+         JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) d.objid
+             AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+         WHERE e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+           AND n.nspname OPERATOR(pg_catalog.=) 'df'
+           AND c.relname OPERATOR(pg_catalog.=) '_installation')",
     )
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| error.to_string())?;
     if !owned {
+        tx.rollback().await.map_err(|error| error.to_string())?;
         return Ok(true);
     }
-    sqlx::query("LOCK TABLE df._installation IN ACCESS SHARE MODE")
-        .execute(&mut *tx)
+    let before =
+        crate::origin::attest_metadata(&mut tx, origin, crate::origin::MetadataScope::Installation)
+            .await
+            .map_err(|error| error.to_string())?;
+    crate::origin::lock_attested_metadata(&mut tx, origin, &before)
         .await
         .map_err(|error| error.to_string())?;
-    let present: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM df._installation i
-         JOIN pg_catalog.pg_depend d ON d.objid = 'df._installation'::regclass
-             AND d.classid = 'pg_catalog.pg_class'::regclass AND d.deptype = 'e'
-             AND d.refclassid = 'pg_catalog.pg_extension'::regclass
-         JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-         WHERE i.id = $1)",
-    )
-    .bind(origin.installation_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|error| error.to_string())?;
+    let present = crate::origin::installation_matches(&mut tx, origin)
+        .await
+        .map_err(|error| error.to_string())?;
     tx.commit().await.map_err(|error| error.to_string())?;
     Ok(!present)
 }
@@ -1848,11 +1852,130 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
 mod tests {
     use super::*;
     use crate::origin::Origin;
     use std::collections::HashSet;
+
+    #[pg_test]
+    fn satellite_metadata_startup_ignores_untrusted_search_paths() {
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
+            let (database_oid, installation_id): (i64, uuid::Uuid) = sqlx::query_as(
+                "SELECT d.oid::bigint, i.id FROM pg_catalog.pg_database d CROSS JOIN df._installation i
+                 WHERE d.datname = pg_catalog.current_database()",
+            ).fetch_one(&mut connection).await.unwrap();
+            let origin = Origin { database_oid: u32::try_from(database_oid).unwrap(), installation_id };
+            sqlx::raw_sql(
+                "CREATE SCHEMA origin_path_trap;
+                 CREATE TABLE origin_path_trap.user_path_probe(value integer);
+                 INSERT INTO origin_path_trap.user_path_probe VALUES (86);
+                 CREATE FUNCTION origin_path_trap.equal_oid(oid, oid) RETURNS bool
+                 LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $fn$
+                 BEGIN RAISE EXCEPTION 'ORIGIN_PATH_CANARY'; END $fn$;
+                 CREATE OPERATOR origin_path_trap.= (FUNCTION = origin_path_trap.equal_oid,
+                     LEFTARG = oid, RIGHTARG = oid);
+                 CREATE FUNCTION origin_path_trap.identity_canary() RETURNS uuid
+                 LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $fn$
+                 BEGIN RAISE EXCEPTION 'ORIGIN_VIEW_CANARY'; END $fn$",
+            ).execute(&mut connection).await.unwrap();
+            let quoted_database = format!("\"{}\"", database.replace('"', "\"\""));
+            let quoted_worker = format!("\"{}\"", crate::types::get_worker_role().replace('"', "\"\""));
+            // pgrx may initialize its private cluster with the OS user, without
+            // the configured worker login. Supply only test metadata read rights.
+            let worker_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1)",
+            ).bind(crate::types::get_worker_role()).fetch_one(&mut connection).await.unwrap();
+            if !worker_exists {
+                sqlx::raw_sql(&format!(
+                    "CREATE ROLE {quoted_worker} LOGIN;
+                     GRANT USAGE ON SCHEMA df, origin_path_trap TO {quoted_worker};
+                     GRANT SELECT ON ALL TABLES IN SCHEMA df, origin_path_trap TO {quoted_worker}"
+                )).execute(&mut connection).await.unwrap();
+            }
+            let control = Arc::new(sqlx::postgres::PgPoolOptions::new().max_connections(1)
+                .connect_with(sqlx::postgres::PgConnectOptions::from_str(&postgres_connection_string()).unwrap()
+                    .database(&database).options([("search_path", "pg_catalog,pg_temp")]))
+                .await.unwrap());
+            let router = Router::new(control.clone());
+            for setting in [
+                format!("ALTER DATABASE {quoted_database} SET search_path = origin_path_trap, pg_catalog"),
+                format!("ALTER ROLE {quoted_worker} IN DATABASE {quoted_database} SET search_path = origin_path_trap, pg_catalog"),
+            ] {
+                sqlx::query(&setting).execute(&mut connection).await.unwrap();
+                let mut unsafe_connection = crate::types::connect_as_user(
+                    &crate::types::get_worker_role(), Some(&database),
+                ).await.unwrap();
+                let marker = sqlx::query("SELECT '1'::oid = '1'::oid")
+                    .fetch_one(&mut unsafe_connection).await.unwrap_err();
+                assert!(marker.to_string().contains("ORIGIN_PATH_CANARY"));
+                let user_value: i32 = sqlx::query_scalar("SELECT value FROM user_path_probe")
+                    .fetch_one(&mut unsafe_connection).await.unwrap();
+                assert_eq!(user_value, 86);
+                unsafe_connection.close().await.unwrap();
+
+                let route = router.connect(&origin).await.unwrap();
+                let path: String = sqlx::query_scalar("SHOW search_path").fetch_one(route.pool.as_ref()).await.unwrap();
+                assert_eq!(path, "pg_catalog,pg_temp");
+                let mut tx = crate::origin::begin_metadata(&route.pool, Some(&origin)).await.unwrap();
+                // Exercise the previously unqualified role-join operator.
+                sqlx::query("SELECT r.rolname FROM pg_catalog.pg_roles r JOIN df._installation i ON r.oid = r.oid LIMIT 1")
+                    .fetch_all(&mut *tx).await.unwrap();
+                tx.rollback().await.unwrap();
+                route.close().await;
+                assert!(!origin_is_removed(&control, &origin).await.unwrap());
+                let old = Origin { installation_id: uuid::Uuid::new_v4(), ..origin.clone() };
+                assert!(origin_is_removed(&control, &old).await.unwrap());
+                // Leave the DB default clean so the second iteration tests the
+                // role-in-database default independently.
+                sqlx::query(&format!("ALTER DATABASE {quoted_database} RESET search_path"))
+                    .execute(&mut connection).await.unwrap();
+            }
+            sqlx::query(&format!("ALTER ROLE {quoted_worker} IN DATABASE {quoted_database} RESET search_path"))
+                .execute(&mut connection).await.unwrap();
+            let mut locked = connection.begin().await.unwrap();
+            sqlx::query("LOCK TABLE df._installation IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *locked).await.unwrap();
+            let unavailable = origin_is_removed(&control, &origin).await.unwrap_err();
+            assert!(unavailable.contains("lock timeout"), "{unavailable}");
+            locked.rollback().await.unwrap();
+            assert!(!origin_is_removed(&control, &origin).await.unwrap());
+            sqlx::raw_sql(
+                "ALTER TABLE df._installation RENAME TO original_identity;
+                 CREATE VIEW df._installation AS SELECT origin_path_trap.identity_canary() AS id",
+            ).execute(&mut connection).await.unwrap();
+            let error = match router.connect(&origin).await {
+                Ok(route) => { route.close().await; panic!("counterfeit route was admitted"); }
+                Err(error) => error,
+            };
+            assert!(error.contains(crate::origin::REPLACED), "{error}");
+            assert!(!error.contains("ORIGIN_VIEW_CANARY"));
+            assert!(origin_is_removed(&control, &origin).await.unwrap());
+            sqlx::raw_sql(
+                "DROP VIEW df._installation;
+                 ALTER TABLE df.original_identity RENAME TO _installation",
+            ).execute(&mut connection).await.unwrap();
+            assert!(!origin_is_removed(&control, &origin).await.unwrap());
+            control.close().await;
+            sqlx::query("DROP SCHEMA origin_path_trap CASCADE").execute(&mut connection).await.unwrap();
+            if !worker_exists {
+                sqlx::raw_sql(&format!(
+                    "REVOKE ALL ON SCHEMA df FROM {quoted_worker};
+                     REVOKE ALL ON ALL TABLES IN SCHEMA df FROM {quoted_worker};
+                     DROP ROLE {quoted_worker}"
+                )).execute(&mut connection).await.unwrap();
+            }
+            connection.close().await.unwrap();
+        });
+    }
 
     #[test]
     fn worker_origin_retention_advances_past_running_and_undecidable_prefix() {

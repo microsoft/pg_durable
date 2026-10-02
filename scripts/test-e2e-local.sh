@@ -200,7 +200,7 @@ phase_for_test() {
         44_connection_limit_backpressure)
             echo "connlimit-backpressure"
             ;;
-        78_multi_database_force_drop|79_multi_database_remote_origin|82_multi_database_ddl_cycle|83_multi_database_same_oid|84_multi_database_metadata_fence)
+        78_multi_database_force_drop|79_multi_database_remote_origin|82_multi_database_ddl_cycle|83_multi_database_same_oid|84_multi_database_metadata_fence|86_multi_database_untrusted_origin)
             echo "force-drop"
             ;;
         45_connection_limit_timeout)

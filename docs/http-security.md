@@ -291,6 +291,10 @@ Satellite catalog identity is validated on that same connection after admission
 and installation-lock acquisition. The snapshot remains consistent for the
 attempt; the final source/HTTP privilege check does not reread a subset of its
 secrets or change their snapshot semantics.
+The catalog-only ownership/type/membership precheck runs before the repeatable-read
+transaction. A post-lock catalog recheck establishes its first snapshot, and only
+then is the installation UUID read. This rejects replacement views without
+planning a query against them, including replacement during a lock wait.
 
 Server owners must be trusted with credentials sent through their endpoints:
 changing a destination can redirect subsequent authenticated requests, even when

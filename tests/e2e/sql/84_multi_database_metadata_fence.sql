@@ -74,12 +74,12 @@ SELECT dblink_exec('e84gate', 'COMMIT');
 SELECT pg_temp.e84_wait($check$
     SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = '_e84_origin'
         AND application_name = 'pg_durable:worker:management'
-        AND query LIKE 'LOCK TABLE df._installation, df.instances, df.nodes%'
+        AND query LIKE 'LOCK TABLE ONLY df._installation, ONLY df.instances, ONLY df.nodes%'
         AND wait_event_type = 'Lock')
 $check$, 'completion metadata is blocked before identity validation');
 CREATE TEMP TABLE _e84_blocked AS SELECT pid FROM pg_stat_activity
     WHERE datname = '_e84_origin' AND application_name = 'pg_durable:worker:management'
-        AND query LIKE 'LOCK TABLE df._installation, df.instances, df.nodes%' AND wait_event_type = 'Lock';
+        AND query LIKE 'LOCK TABLE ONLY df._installation, ONLY df.instances, ONLY df.nodes%' AND wait_event_type = 'Lock';
 ALTER DATABASE _e84_origin ALLOW_CONNECTIONS false;
 SELECT pg_terminate_backend(pid) FROM _e84_blocked;
 SELECT pg_temp.e84_wait('SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid IN (SELECT pid FROM _e84_blocked))',

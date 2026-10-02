@@ -115,7 +115,7 @@ SELECT dblink_exec('e74gate', 'COMMIT');
 SELECT pg_temp.e74_wait($check$
     SELECT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = '_e2e74_origin'
         AND a.application_name = 'pg_durable:worker:management'
-        AND a.query LIKE 'LOCK TABLE df._installation, df.instances, df.nodes%'
+        AND a.query LIKE 'LOCK TABLE ONLY df._installation, ONLY df.instances, ONLY df.nodes%'
         AND a.wait_event_type = 'Lock'
         AND (SELECT pid FROM _e74_connections WHERE name = 'e74ddl') = ANY(pg_blocking_pids(a.pid)))
 $check$, 'metadata validation waits behind DDL');
