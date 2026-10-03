@@ -11,14 +11,16 @@
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use duroxide::Client;
 use pgrx::prelude::*;
+use sqlx::Connection;
 use tokio::runtime::Runtime;
 
 use crate::types::{
-    backend_duroxide_schema, connect_as_user_for_new_transaction, new_backend_provider,
-    postgres_connection_string,
+    backend_control_connection_options, connect_as_user_for_new_transaction, new_backend_provider,
+    postgres_connection_string, read_backend_control_state, BackendControlState,
 };
 
 /// Cached tokio runtime for client operations.
@@ -29,45 +31,57 @@ static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 // the client to be reset on connection failures (unlike OnceLock which
 // is permanent).
 thread_local! {
-    static DUROXIDE_CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+    static DUROXIDE_CLIENT: RefCell<Option<(String, BackendControlState, Client)>> = const { RefCell::new(None) };
+    static CONTROL_CONNECTION: RefCell<Option<(String, sqlx::PgConnection)>> = const { RefCell::new(None) };
 }
 
-/// Check whether the background worker has finished initializing the duroxide
-/// schema for the current binary's expected schema version.
-///
-/// Returns `false` if `<provider_schema>._worker_ready` does not exist, has no
-/// row, or has a `schema_version` below `WORKER_SCHEMA_VERSION`. This is a fast
-/// SPI read called once per session on the first call to any `df.*` function
-/// that needs the duroxide client.
-fn is_worker_ready() -> bool {
-    let schema = backend_duroxide_schema();
+const CONTROL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-    // First check if the readiness table exists via the catalogue.  Querying
-    // the non-existent table directly would raise a PostgreSQL ERROR that
-    // aborts the current (sub)transaction — even if caught in Rust.
-    let table_exists = Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
-         WHERE schemaname = $1 AND tablename = '_worker_ready')",
-        &[schema.into()],
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(false);
+pub(crate) fn backend_control_state(database_url: &str) -> Result<BackendControlState, String> {
+    if let Some(state) = crate::types::backend_local_control_state()? {
+        return Ok(state);
+    }
+    CONTROL_CONNECTION.with(|cell| {
+        get_client_runtime().block_on(refresh_backend_control_state(
+            database_url,
+            &mut cell.borrow_mut(),
+        ))
+    })
+}
 
-    if !table_exists {
-        return false;
+async fn refresh_backend_control_state(
+    database_url: &str,
+    cached: &mut Option<(String, sqlx::PgConnection)>,
+) -> Result<BackendControlState, String> {
+    if cached.as_ref().is_some_and(|(url, _)| url != database_url) {
+        *cached = None;
     }
 
-    Spi::get_one_with_args::<bool>(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM {}._worker_ready WHERE schema_version >= $1)",
-            schema
-        ),
-        &[crate::WORKER_SCHEMA_VERSION.into()],
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(false)
+    let result = tokio::time::timeout(CONTROL_LOOKUP_TIMEOUT, async {
+        if cached.is_none() {
+            let options = backend_control_connection_options(database_url)?;
+            let connection = sqlx::PgConnection::connect_with(&options)
+                .await
+                .map_err(|error| format!("pg_durable control installation unavailable: {error}"))?;
+            *cached = Some((database_url.to_string(), connection));
+        }
+        let (_, connection) = cached
+            .as_mut()
+            .ok_or_else(|| "Control connection unexpectedly missing".to_string())?;
+        read_backend_control_state(connection).await
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "pg_durable control installation unavailable: control lookup timed out after {}ms",
+            CONTROL_LOOKUP_TIMEOUT.as_millis()
+        ))
+    });
+
+    if result.is_err() {
+        *cached = None;
+    }
+    result
 }
 
 /// Get or create the cached tokio runtime.
@@ -88,22 +102,34 @@ fn with_duroxide_client<T, F>(f: F) -> Result<T, String>
 where
     F: FnOnce(&Client, &Runtime) -> Result<T, String>,
 {
-    let rt = get_client_runtime();
+    let pg_conn_str = postgres_connection_string();
+    let control = match backend_control_state(&pg_conn_str) {
+        Ok(control) if control.ready => control,
+        result => {
+            DUROXIDE_CLIENT.with(|cell| *cell.borrow_mut() = None);
+            return Err(result.err().unwrap_or_else(|| {
+                "pg_durable control background worker not yet initialized - try again in a moment"
+                    .to_string()
+            }));
+        }
+    };
+    DUROXIDE_CLIENT.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached
+            .as_ref()
+            .is_some_and(|(url, previous, _)| url != &pg_conn_str || previous != &control)
+        {
+            *cached = None;
+        }
+    });
 
+    let rt = get_client_runtime();
     // Try to use existing client
     let has_client = DUROXIDE_CLIENT.with(|cell| cell.borrow().is_some());
 
     if !has_client {
         // Need to create a new client
-        if !is_worker_ready() {
-            return Err(
-                "pg_durable background worker not yet initialized — try again in a moment"
-                    .to_string(),
-            );
-        }
-
-        let pg_conn_str = postgres_connection_string();
-        let schema = backend_duroxide_schema();
+        let schema = control.schema;
         let client = rt.block_on(async {
             // Limit backend provider to 1 connection — backends need minimal
             // duroxide access (start/cancel/signal only).
@@ -120,14 +146,14 @@ where
         })?;
 
         DUROXIDE_CLIENT.with(|cell| {
-            *cell.borrow_mut() = Some(client);
+            *cell.borrow_mut() = Some((pg_conn_str, control, client));
         });
     }
 
     // Execute the operation with the client
     let result = DUROXIDE_CLIENT.with(|cell| {
         let borrow = cell.borrow();
-        let client = borrow
+        let (_, _, client) = borrow
             .as_ref()
             .ok_or_else(|| "Client unexpectedly missing".to_string())?;
         f(client, rt)
@@ -209,7 +235,7 @@ pub fn start_durable_function(
     );
 
     let fn_name = function_name.to_string();
-    let inst_id = instance_id.to_string();
+    let inst_id = crate::origin::backend_engine_id(instance_id)?;
     let inp = input.to_string();
 
     with_duroxide_client(|client, rt| {
@@ -342,14 +368,12 @@ pub fn start_in_new_transaction(
     let label = label.map(|s| s.to_string());
     let database = database.map(|s| s.to_string());
     let user = user.to_string();
+    let origin_database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+        .map_err(|e| format!("Failed to resolve caller database: {e}"))?
+        .ok_or_else(|| "Failed to resolve caller database".to_string())?;
 
     rt.block_on(async {
-        // The extension lives in exactly one database (see docs/multi-database.md),
-        // so `database=None` resolves to that control database — the same one
-        // holding the `df` tables this backend writes through SPI. The `database`
-        // argument is forwarded to the inner `df.start()`, which records it as an
-        // instance property for the worker to execute against.
-        let mut conn = connect_as_user_for_new_transaction(&user).await?;
+        let mut conn = connect_as_user_for_new_transaction(&user, &origin_database).await?;
 
         let result = start_on_new_session(&mut conn, &fut, &label, &database).await;
 
@@ -373,7 +397,7 @@ pub fn start_in_new_transaction(
 
 /// Cancel a durable function.
 pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), String> {
-    let inst_id = instance_id.to_string();
+    let inst_id = crate::origin::backend_engine_id(instance_id)?;
     let rsn = reason.to_string();
 
     with_duroxide_client(|client, rt| {
@@ -389,7 +413,7 @@ pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), St
 
 /// Raise an external event (signal) to a running orchestration.
 pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> Result<(), String> {
-    let inst_id = instance_id.to_string();
+    let inst_id = crate::origin::backend_engine_id(instance_id)?;
     let evt_name = event_name.to_string();
     let evt_data = data.to_string();
 
@@ -421,7 +445,85 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{format_new_transaction_start_error, is_connection_error};
+    use super::{
+        backend_control_connection_options, format_new_transaction_start_error,
+        is_connection_error, refresh_backend_control_state, CONTROL_LOOKUP_TIMEOUT,
+    };
+    use sqlx::Connection;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn accept_control_stub(listener: &TcpListener, authenticate: bool) -> TcpStream {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let length = socket.read_u32().await.unwrap();
+        let mut startup = vec![0; length as usize - 4];
+        socket.read_exact(&mut startup).await.unwrap();
+        let startup = String::from_utf8(startup).unwrap();
+        assert!(startup.contains("-c statement_timeout=1500ms -c lock_timeout=1500ms"));
+        if authenticate {
+            socket
+                .write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I")
+                .await
+                .unwrap();
+        }
+        socket
+    }
+
+    fn assert_control_timeout_closes_socket(cached_connection: bool) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(CONTROL_LOOKUP_TIMEOUT + Duration::from_secs(2), async {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let url = format!(
+                        "postgres://worker@{}/control?sslmode=disable",
+                        listener.local_addr().unwrap()
+                    );
+                    let mut cached = None;
+                    let socket = if cached_connection {
+                        let options = backend_control_connection_options(&url).unwrap();
+                        let (connection, socket) = tokio::join!(
+                            sqlx::PgConnection::connect_with(&options),
+                            accept_control_stub(&listener, true),
+                        );
+                        cached = Some((url.clone(), connection.unwrap()));
+                        Some(socket)
+                    } else {
+                        None
+                    };
+                    let (result, received) =
+                        tokio::join!(refresh_backend_control_state(&url, &mut cached), async {
+                            let mut socket = match socket {
+                                Some(socket) => socket,
+                                None => accept_control_stub(&listener, false).await,
+                            };
+                            let mut received = Vec::new();
+                            socket.read_to_end(&mut received).await.unwrap();
+                            received
+                        });
+                    assert!(result
+                        .unwrap_err()
+                        .contains("control lookup timed out after 5000ms"));
+                    assert!(cached.is_none());
+                    assert_eq!(!received.is_empty(), cached_connection);
+                })
+                .await
+                .expect("control lookup must return and close its socket within the total budget");
+            });
+    }
+
+    #[test]
+    fn control_lookup_bounds_connection_setup() {
+        assert_control_timeout_closes_socket(false);
+    }
+
+    #[test]
+    fn control_lookup_discards_stalled_cached_connection() {
+        assert_control_timeout_closes_socket(true);
+    }
 
     #[test]
     fn detects_connection_refused() {

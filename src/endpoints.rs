@@ -439,6 +439,7 @@ struct CatalogServer {
 pub struct EndpointCatalog<'a> {
     submitted_by: &'a str,
     database: Option<&'a str>,
+    origin: Option<&'a crate::origin::Origin>,
     semaphore: &'a Semaphore,
     connection: Option<sqlx::PgConnection>,
     permit: Option<SemaphorePermit<'a>>,
@@ -446,10 +447,16 @@ pub struct EndpointCatalog<'a> {
 }
 
 impl<'a> EndpointCatalog<'a> {
-    pub fn new(submitted_by: &'a str, semaphore: &'a Semaphore) -> Self {
+    pub(crate) fn new(
+        submitted_by: &'a str,
+        semaphore: &'a Semaphore,
+        database: Option<&'a str>,
+        origin: Option<&'a crate::origin::Origin>,
+    ) -> Self {
         Self {
             submitted_by,
-            database: None,
+            database,
+            origin,
             semaphore,
             connection: None,
             permit: None,
@@ -468,6 +475,25 @@ impl<'a> EndpointCatalog<'a> {
             let mut connection = crate::types::connect_as_user(self.submitted_by, self.database)
                 .await
                 .map_err(|error| format!("Endpoint catalog connection failed: {error}"))?;
+            // Attest before BEGIN so a lock wait cannot leave the credential
+            // snapshot pinned to the installation that existed before the wait.
+            let attestation = if let Some(origin) = self.origin {
+                Some(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        crate::origin::attest_metadata(
+                            &mut connection,
+                            origin,
+                            crate::origin::MetadataScope::Installation,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "Endpoint origin fence timed out")?
+                    .map_err(|_| "Endpoint origin fence unavailable")?,
+                )
+            } else {
+                None
+            };
             sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut connection)
                 .await
@@ -476,6 +502,19 @@ impl<'a> EndpointCatalog<'a> {
                 .execute(&mut connection)
                 .await
                 .map_err(|_| "Endpoint catalog search path setup failed")?;
+            if let (Some(origin), Some(attestation)) = (self.origin, attestation.as_ref()) {
+                crate::origin::configure_metadata_transaction(&mut connection)
+                    .await
+                    .map_err(|_| "Endpoint origin timeout setup failed")?;
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    crate::origin::lock_attested_metadata(&mut connection, origin, attestation)
+                        .await?;
+                    crate::origin::check_identity(&mut connection, origin).await
+                })
+                .await
+                .map_err(|_| "Endpoint origin fence timed out")?
+                .map_err(|_| "Endpoint origin fence unavailable")?;
+            }
             let identity_matches: bool = sqlx::query_scalar(
                 "SELECT CURRENT_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1
                     AND SESSION_USER::pg_catalog.text OPERATOR(pg_catalog.=) $1",
@@ -900,8 +939,7 @@ mod tests {
         server: &str,
     ) -> Result<ResolvedEndpoint, String> {
         let semaphore = Semaphore::new(1);
-        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore);
-        catalog.database = database;
+        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore, database, None);
         let endpoint = catalog.resolve_endpoint(server).await?;
         catalog.close().await?;
         Ok(endpoint)
@@ -913,11 +951,78 @@ mod tests {
         server: &str,
     ) -> Result<BTreeMap<String, String>, String> {
         let semaphore = Semaphore::new(1);
-        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore);
-        catalog.database = database;
+        let mut catalog = EndpointCatalog::new(submitted_by, &semaphore, database, None);
         let values = catalog.resolve_named_secrets(server).await?;
         catalog.close().await?;
         Ok(values)
+    }
+
+    #[pg_test]
+    fn endpoint_origin_attestation_wait_uses_fresh_snapshot() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
+            let (database_oid, installation_id): (i64, uuid::Uuid) = sqlx::query_as(
+                "SELECT d.oid::bigint, i.id FROM pg_catalog.pg_database d CROSS JOIN df._installation i
+                 WHERE d.datname = pg_catalog.current_database()",
+            ).fetch_one(&mut connection).await.unwrap();
+            let origin = crate::origin::Origin { database_oid: u32::try_from(database_oid).unwrap(), installation_id };
+            sqlx::raw_sql(
+                "CREATE FUNCTION public.endpoint_origin_canary() RETURNS uuid
+                 LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $fn$
+                 BEGIN RAISE EXCEPTION 'ENDPOINT_ORIGIN_CANARY'; END $fn$",
+            ).execute(&mut connection).await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut connection).await.unwrap();
+            let mut ddl = connection.begin().await.unwrap();
+            sqlx::raw_sql(
+                "ALTER TABLE df._installation RENAME TO endpoint_original_identity;
+                 CREATE VIEW df._installation AS SELECT public.endpoint_origin_canary() AS id",
+            ).execute(&mut *ddl).await.unwrap();
+            let semaphore = Semaphore::new(1);
+            let mut catalog = EndpointCatalog::new(&admin, &semaphore, Some(&database), Some(&origin));
+            {
+                let waiting = catalog.connection();
+                tokio::pin!(waiting);
+                let deadline = tokio::time::sleep(std::time::Duration::from_secs(1));
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        result = &mut waiting => panic!("endpoint did not wait on identity lock: {result:?}"),
+                        _ = &mut deadline => panic!("endpoint lock wait not observed"),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                            let blocked: bool = sqlx::query_scalar(
+                                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l
+                                 WHERE l.locktype = 'relation' AND NOT l.granted
+                                   AND $1 = ANY(pg_catalog.pg_blocking_pids(l.pid)))",
+                            ).bind(pid).fetch_one(&mut *ddl).await.unwrap();
+                            if blocked { break; }
+                        }
+                    }
+                }
+                ddl.commit().await.unwrap();
+                let error = waiting.await.unwrap_err();
+                assert!(error.contains("Endpoint origin fence unavailable"), "{error}");
+                assert!(!error.contains("ENDPOINT_ORIGIN_CANARY"));
+            }
+            catalog.close().await.unwrap();
+            sqlx::raw_sql(
+                "DROP VIEW df._installation;
+                 ALTER TABLE df.endpoint_original_identity RENAME TO _installation;
+                 DROP FUNCTION public.endpoint_origin_canary()",
+            ).execute(&mut connection).await.unwrap();
+            let mut catalog = EndpointCatalog::new(&admin, &semaphore, Some(&database), Some(&origin));
+            let (isolation, read_only): (String, String) = sqlx::query_as(
+                "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')",
+            ).fetch_one(catalog.connection().await.unwrap()).await.unwrap();
+            assert_eq!((isolation.as_str(), read_only.as_str()), ("repeatable read", "on"));
+            catalog.close().await.unwrap();
+            connection.close().await.unwrap();
+        });
     }
 
     #[pg_test]
@@ -950,8 +1055,7 @@ mod tests {
             let occupied = crate::types::acquire_execution_permit(
                 &semaphore, std::time::Duration::from_secs(30), 1,
             ).await.unwrap();
-            let mut catalog = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
-            catalog.database = Some(&database);
+            let mut catalog = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, Some(&database), None);
             {
                 let waiting = catalog.load_server("endpoint_snapshot");
                 tokio::pin!(waiting);
@@ -1015,8 +1119,7 @@ mod tests {
             catalog.close().await.unwrap();
             assert_eq!(semaphore.available_permits(), 1);
 
-            let mut next = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
-            next.database = Some(&database);
+            let mut next = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, Some(&database), None);
             let endpoint = next.resolve_endpoint("endpoint_snapshot").await.unwrap();
             assert_eq!(endpoint.base_url.as_str(), "https://new.azurewebsites.net/");
             assert!(matches!(endpoint.auth, EndpointAuth::Bearer(value) if value == "Bearer NEW_TOKEN"));
@@ -1026,7 +1129,7 @@ mod tests {
             assert_eq!(semaphore.available_permits(), 1);
 
             let occupied = semaphore.acquire().await.unwrap();
-            let mut unused = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
+            let mut unused = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, None, None);
             let mut request = prepare_request(&mut unused, None, "https://api.github.com/", None).await.unwrap();
             let options: crate::secrets::SecretOptions = serde_json::from_value(
                 serde_json::json!({"form_fields":{"literal":"$result"}}),
@@ -1038,8 +1141,7 @@ mod tests {
             drop(occupied);
 
             {
-                let mut failed = EndpointCatalog::new("endpoint_snapshot_user", &semaphore);
-                failed.database = Some(&database);
+                let mut failed = EndpointCatalog::new("endpoint_snapshot_user", &semaphore, Some(&database), None);
                 assert!(failed.resolve_endpoint("endpoint_snapshot_missing").await.is_err());
             }
             assert_eq!(semaphore.available_permits(), 1);
@@ -1180,6 +1282,7 @@ mod tests {
             .unwrap()
             .unwrap();
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let catalog_guard = crate::origin::metadata_test_connection(&admin, &database).await;
             let options = sqlx::postgres::PgConnectOptions::new()
                 .username(&admin).database(&database)
                 .host(&crate::types::get_host()).port(crate::types::get_port());
@@ -1194,9 +1297,9 @@ mod tests {
             "#).execute(&pool).await.unwrap();
             for multipart in [false, true] {
                 for endpoint in [false, true] {
-                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_raw", endpoint, multipart).await.is_ok(), !endpoint);
-                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_typed", endpoint, multipart).await.is_ok(), endpoint);
-                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.is_err());
+                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_raw", endpoint, multipart, None).await.is_ok(), !endpoint);
+                    assert_eq!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_typed", endpoint, multipart, None).await.is_ok(), endpoint);
+                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart, None).await.is_err());
                 }
             }
             sqlx::raw_sql(r#"
@@ -1208,7 +1311,7 @@ mod tests {
             "#).execute(&pool).await.unwrap();
             for multipart in [false, true] {
                 for endpoint in [false, true] {
-                    crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.unwrap();
+                    crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart, None).await.unwrap();
                 }
             }
             sqlx::raw_sql(r#"
@@ -1218,7 +1321,7 @@ mod tests {
             "#).execute(&pool).await.unwrap();
             for multipart in [false, true] {
                 for endpoint in [false, true] {
-                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart).await.is_err());
+                    assert!(crate::activities::execute_http::check_http_privilege(&pool, "endpoint_grant_user", endpoint, multipart, None).await.is_err());
                 }
             }
             sqlx::raw_sql(r#"
@@ -1226,6 +1329,7 @@ mod tests {
                 DROP ROLE endpoint_grant_raw, endpoint_grant_typed, endpoint_grant_user, endpoint_grant_admin;
             "#).execute(&pool).await.unwrap();
             pool.close().await;
+            catalog_guard.close().await.unwrap();
         });
     }
 
@@ -1242,9 +1346,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let mut connection = crate::types::connect_as_user(&admin, Some(&database))
-                    .await
-                    .unwrap();
+                let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
                 sqlx::raw_sql(
                     r#"
                     DROP ROLE IF EXISTS "endpoint Alice", endpoint_bob;

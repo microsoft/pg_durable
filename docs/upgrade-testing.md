@@ -354,8 +354,58 @@ what the upgrade script handles, and any backward compatibility considerations.
 ### v0.2.8 → v0.2.9
 
 The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
-development cycle, not the published v0.2.8 release. Of these, only #380 changes
-the extension schema.
+development cycle, not the published v0.2.8 release. Multi-database installation
+identity and HTTP endpoint/secret DDL also belong in this unreleased migration;
+the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
+
+#### Multi-database installation
+
+- **Local DDL:** [0.2.8 to 0.2.9](../sql/pg_durable--0.2.8--0.2.9.sql)
+  adds `df._installation` (singleton UUID, public read-only access) and
+  `df.validate_installation()`, then invokes the validator. No provider DDL
+  or engine-ID mapping column is added by this migration.
+- **Control first:** create control in `pg_durable.database` and wait for the
+  new worker before creating satellites. Satellite install/upgrade checks
+  control readiness over SQLx; equal extension versions are not required.
+- **Worker-owned initialization:** readiness schema version `2` includes
+  `_origins`. Provider migrations remain worker-only `ApplyAll` in control.
+  Satellites receive local extension-owned `df` objects, not provider objects.
+- **B1:** control IDs bypass `df._installation`, preserving operation against
+  every supported old control schema (0.2.2 through shipped 0.2.8), without
+  `ALTER EXTENSION UPDATE`. A missing `df.duroxide_schema()` retains the legacy
+  `duroxide` fallback. Test a current satellite beside each older control.
+- **B2/replay:** public IDs stay eight characters. Satellite engine IDs use
+  `pgdf-<databaseOID>-<installationUUID>-<localID>`. Routing derives origin
+  from activity context, not new recorded payload fields. Existing control
+  histories, child composition and `continue_as_new` inputs remain unchanged.
+- **Scenario A:** compare fresh and upgraded control schemas like-for-like;
+  verify local identity, grants and absence of provider objects on satellites
+  separately. Test upgrades from shipped packages as well as reconstructed
+  fixtures. The migration must preserve existing ABIs, OIDs and ACLs.
+
+- **Admission implementation:** short same-connection metadata fences and
+  autocommit SQL preflights require no additional upgrade DDL or recorded payload
+  changes. Control histories still bypass satellite identity checks. Metadata
+  validation/access are atomic with installation DDL; side-effect admission and
+  remote dispatch are separate boundaries. Normal DROP no longer retains locks
+  across arbitrary activities.
+- **Metadata trust hardening:** worker satellite connections pin catalog-first
+  name resolution at startup. Catalog-only checks attest relation kind,
+  extension membership and installer ownership before and after locking, before
+  reading identity or graph data. This requires no new SQL objects, grants,
+  ownership migration or replay payload changes. Legacy control paths still
+  bypass satellite identity requirements. An installation whose metadata or
+  `df` namespace has been reassigned to a different owner now fails admission
+  rather than being used under worker credentials.
+- **Routing and maintenance corrections:** typed retryable routing failures reuse
+  the existing transaction-aware graph retry payload. Prompt maintenance paging,
+  SQL-filtered legacy candidates and removed-registration cleanup require no new
+  extension/provider tables, indexes or migration DDL. Existing `_origins`
+  registrations are reused; no instance IDs, activity inputs or replay decisions
+  are rewritten. Old control schemas retain their legacy provider resolution.
+
+See [deferred lifetime guarantees](multi-database-installation.md#release-blockers)
+for the separate runtime shutdown and server-side cancellation limitations.
 
 #### Typed HTTP endpoints
 
@@ -468,7 +518,7 @@ the extension schema.
 
 ### v0.2.7 → v0.2.8
 
-#### Loop failure continuation
+#### Loop API and lifetime
 
 - `sql/pg_durable--0.2.7--0.2.8.sql` renames `df.loop(text, text)` to
   `df._loop_legacy(text, text)`, preserving its function OID and dependent

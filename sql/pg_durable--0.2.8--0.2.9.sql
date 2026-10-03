@@ -6,6 +6,24 @@
 -- See docs/upgrade-testing.md for the upgrade-script and backward-compatibility
 -- requirements (Scenario A / B1 / B2).
 --
+CREATE TABLE df._installation (
+    singleton pg_catalog.bool PRIMARY KEY DEFAULT true CHECK (singleton),
+    id pg_catalog.uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid()
+);
+INSERT INTO df._installation (singleton) VALUES (true);
+REVOKE ALL ON TABLE df._installation FROM PUBLIC;
+GRANT SELECT ON TABLE df._installation TO PUBLIC;
+
+CREATE FUNCTION df.validate_installation() RETURNS bool
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'validate_installation_wrapper';
+
+DO $$
+BEGIN
+    PERFORM df.validate_installation();
+END $$;
+
 -- HTTP options are additive; existing function ABIs, OIDs and ACLs stay unchanged.
 CREATE FUNCTION df."with_http_options"(
     "fut" TEXT,

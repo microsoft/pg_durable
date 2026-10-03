@@ -157,11 +157,18 @@ fn explain_instance(instance_id: &str) -> String {
 
 /// Get instance info from Duroxide store
 fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
-    use crate::types::{backend_duroxide_schema, new_backend_provider, postgres_connection_string};
+    use crate::types::{
+        new_backend_provider, postgres_connection_string, try_backend_duroxide_schema,
+    };
     use duroxide::Client;
 
+    let engine_id =
+        crate::origin::backend_engine_id(instance_id).unwrap_or_else(|e| pgrx::error!("{e}"));
     let pg_conn_str = postgres_connection_string();
-    let schema = backend_duroxide_schema();
+    let schema = match try_backend_duroxide_schema() {
+        Ok(schema) => schema,
+        Err(_) => return (String::new(), None),
+    };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -179,7 +186,7 @@ fn get_duroxide_instance_info(instance_id: &str) -> (String, Option<String>) {
 
         let client = Client::new(store);
 
-        match client.get_instance_info(instance_id).await {
+        match client.get_instance_info(&engine_id).await {
             Ok(info) => (info.status, info.output),
             Err(_) => (String::new(), None),
         }
