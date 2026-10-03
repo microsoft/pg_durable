@@ -286,8 +286,11 @@ Idle scans follow `pg_durable.reconcile_interval`; pending pages continue after 
 satellite-retention, satellite-engine and registration-cleanup scans so an
 exhausted scan is not restarted on every continuation. Satellite retention takes
 one bounded page per origin, rotates to peers, and resumes saved per-origin
-cursors on subsequent rounds. Queries filter for age/max-keep eligibility before
-the 1,000-row candidate limit; they retain at most the newest 10,000 IDs instead
+cursors on subsequent rounds. Origins that finish or cannot make progress stay exhausted
+for the entire maintenance cycle, including while other scans continue. They are
+eligible again at the next scheduled cycle; a replacement installation UUID has
+its own independent cursor state. Queries filter age/max-keep eligibility before
+the 1,000-row candidate limit and retain at most the newest 10,000 IDs instead
 of ranking the entire terminal population. This bounds result size, not a
 guarantee of constant server work: catalog/metadata queries and origin operations
 still have deadlines. An unreachable origin is never proof of removal.

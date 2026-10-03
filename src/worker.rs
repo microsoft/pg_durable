@@ -1224,9 +1224,7 @@ async fn run_until_extension_dropped_or_shutdown(
                         Ok(more) => pending.registrations = more,
                         Err(error) => { pending.registrations = registration_cursor.0 != 0; log!("pg_durable: registration cleanup deferred: {error}"); },
                     } }
-                    let more = pending.has_work();
-                    if !more { pending = MaintenanceProgress::new(); }
-                    more
+                    pending.finish_slice(&mut origin_cursor)
                 };
                 tokio::pin!(maintenance);
                 loop {
@@ -1283,6 +1281,15 @@ impl MaintenanceProgress {
     fn has_work(&self) -> bool {
         self.control || self.legacy || self.origins || self.engine || self.registrations
     }
+
+    fn finish_slice(&mut self, origins: &mut OriginRetentionCursor) -> bool {
+        let more = self.has_work();
+        if !more {
+            *self = Self::new();
+            *origins = OriginRetentionCursor::default();
+        }
+        more
+    }
 }
 
 #[derive(Default)]
@@ -1291,13 +1298,19 @@ struct OriginRetentionCursor {
     after_id: Option<String>,
     pending: BTreeMap<(i64, uuid::Uuid), String>,
     visited: HashSet<(i64, uuid::Uuid)>,
+    finished: HashSet<(i64, uuid::Uuid)>,
 }
 
 impl OriginRetentionCursor {
-    fn enter(&mut self, origin: (i64, uuid::Uuid)) {
+    fn enter(&mut self, origin: (i64, uuid::Uuid)) -> bool {
         self.visited.insert(origin);
-        self.after_id = self.pending.remove(&origin);
         self.origin = origin;
+        self.after_id = None;
+        if self.finished.contains(&origin) {
+            return false;
+        }
+        self.after_id = self.pending.remove(&origin);
+        true
     }
 
     fn resume_after_pass(&mut self, previous_id: Option<String>) -> bool {
@@ -1307,7 +1320,17 @@ impl OriginRetentionCursor {
             return true;
         }
         self.after_id = None;
+        self.finished.insert(self.origin);
         false
+    }
+
+    fn finish_round(&mut self) -> bool {
+        self.origin = (0, uuid::Uuid::nil());
+        self.after_id = None;
+        self.pending
+            .retain(|origin, _| self.visited.contains(origin));
+        self.visited.clear();
+        !self.pending.is_empty()
     }
 }
 
@@ -1371,16 +1394,12 @@ async fn sweep_registered_origins(
     .map_err(|error| format!("list registered origins: {error}"))?;
     tx.commit().await.map_err(|error| error.to_string())?;
     if origins.is_empty() {
-        cursor.origin = (0, uuid::Uuid::nil());
-        cursor.after_id = None;
-        cursor
-            .pending
-            .retain(|origin, _| cursor.visited.contains(origin));
-        cursor.visited.clear();
-        return Ok(!cursor.pending.is_empty());
+        return Ok(cursor.finish_round());
     }
     for (database_oid, installation_id) in origins {
-        cursor.enter((database_oid, installation_id));
+        if !cursor.enter((database_oid, installation_id)) {
+            continue;
+        }
         let origin = Origin {
             database_oid: u32::try_from(database_oid)
                 .map_err(|_| "Invalid registered database OID")?,
@@ -2398,6 +2417,7 @@ mod tests {
                     after_id,
                     pending: BTreeMap::new(),
                     visited: HashSet::new(),
+                    finished: HashSet::new(),
                 };
                 assert!(cursor.resume_after_pass(None));
                 cursor.enter(cursor.origin);
@@ -2431,6 +2451,17 @@ mod tests {
                 .unwrap();
                 assert!(!cursor.resume_after_pass(Some("00000002".to_string())));
                 assert_eq!(cursor.after_id, None);
+                let origin = cursor.origin;
+                assert!(!cursor.enter(origin));
+                let mut progress = MaintenanceProgress {
+                    control: false,
+                    legacy: false,
+                    origins: false,
+                    engine: false,
+                    registrations: false,
+                };
+                assert!(!progress.finish_slice(&mut cursor));
+                assert!(cursor.enter(origin));
                 let candidates = vec![OriginRetentionCandidate {
                     id: "00000001".to_string(),
                     terminal_rank: 1,
@@ -2496,6 +2527,106 @@ mod tests {
         cursor.after_id = Some("deadbeef".to_string());
         assert!(!cursor.resume_after_pass(Some("deadbeef".to_string())));
         assert_eq!(cursor.after_id, None);
+        assert!(!cursor.enter((43, uuid::Uuid::from_u128(8))));
+        assert!(cursor.enter((43, uuid::Uuid::from_u128(9))));
+    }
+
+    #[test]
+    fn origin_retention_exhaustion_lasts_for_entire_cycle() {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let origins: Vec<_> = (1..=4).map(|oid| (oid, uuid::Uuid::from_u128(7))).collect();
+                let mut cursor = OriginRetentionCursor::default();
+                let mut attempts = [0; 4];
+                for cycle in 0..2 {
+                    let mut visits = [0; 4];
+                    let mut rounds = 0;
+                    loop {
+                        rounds += 1;
+                        for (index, origin) in origins.iter().enumerate() {
+                            if !cursor.enter(*origin) {
+                                continue;
+                            }
+                            visits[index] += 1;
+                            let previous = cursor.after_id.clone();
+                            // Empty, persistently failing, unavailable, and long scan.
+                            if index != 2 {
+                                let count = match index {
+                                    1 => 1,
+                                    3 => 9,
+                                    _ => 0,
+                                };
+                                let candidates: Vec<_> = (1..=count)
+                                    .map(|n| OriginRetentionCandidate {
+                                        id: format!("{n:08x}"),
+                                        terminal_rank: 1,
+                                        expired_by_age: true,
+                                    })
+                                    .filter(|row| {
+                                        cursor.after_id.as_ref().is_none_or(|last| row.id > *last)
+                                    })
+                                    .take(2)
+                                    .collect();
+                                let full = candidates.len() == 2;
+                                let result = retire_origin_candidates(
+                                    candidates,
+                                    &mut cursor.after_id,
+                                    10,
+                                    |_| {
+                                        attempts[index] += 1;
+                                        std::future::ready(if index == 1 {
+                                            Err("persistent failure".into())
+                                        } else {
+                                            Ok(())
+                                        })
+                                    },
+                                )
+                                .await;
+                                if result.is_ok() && !full {
+                                    cursor.after_id = None;
+                                }
+                            }
+                            cursor.resume_after_pass(previous);
+                        }
+                        if !cursor.finish_round() {
+                            break;
+                        }
+                        assert!(rounds < 10, "exhausted origins must not restart a cycle");
+                    }
+                    assert_eq!(rounds, 5);
+                    assert_eq!(visits, [1, 2, 1, 5]);
+                    assert_eq!(attempts, [0, cycle + 1, 0, 9 * (cycle + 1)]);
+                    let mut progress = MaintenanceProgress {
+                        control: false,
+                        legacy: false,
+                        origins: false,
+                        engine: true,
+                        registrations: false,
+                    };
+                    assert!(progress.finish_slice(&mut cursor));
+                    for origin in &origins {
+                        assert!(!cursor.enter(*origin));
+                    }
+                    progress.engine = false;
+                    assert!(!progress.finish_slice(&mut cursor));
+                    assert!(progress.origins);
+                }
+            });
+    }
+
+    #[test]
+    fn origin_retention_discards_pending_deleted_registrations() {
+        let mut cursor = OriginRetentionCursor::default();
+        let removed = (42, uuid::Uuid::from_u128(7));
+        assert!(cursor.enter(removed));
+        cursor.after_id = Some("00000001".into());
+        assert!(cursor.resume_after_pass(None));
+        assert!(cursor.finish_round());
+        // The registration is no longer seen on the following registry traversal.
+        assert!(!cursor.finish_round());
+        assert!(cursor.pending.is_empty());
     }
 
     #[test]

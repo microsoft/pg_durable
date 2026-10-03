@@ -8,6 +8,10 @@ END $$;
 DROP DATABASE IF EXISTS _e88_busy WITH (FORCE);
 DROP DATABASE IF EXISTS _e88_peer WITH (FORCE);
 DROP DATABASE IF EXISTS _e88_unavailable WITH (FORCE);
+DROP DATABASE IF EXISTS _e88_failed WITH (FORCE);
+-- Lower OID than the long scan makes the failed origin appear first in every
+-- round, so a third round deterministically exposes accidental restarts.
+CREATE DATABASE _e88_failed;
 CREATE DATABASE _e88_busy;
 CREATE DATABASE _e88_peer;
 CREATE DATABASE _e88_unavailable;
@@ -15,7 +19,7 @@ CREATE TEMP TABLE _e88_origins(name text, oid oid, installation uuid);
 DO $$
 DECLARE database_name text;
 BEGIN
-    FOREACH database_name IN ARRAY ARRAY['_e88_busy','_e88_peer','_e88_unavailable'] LOOP
+    FOREACH database_name IN ARRAY ARRAY['_e88_failed','_e88_busy','_e88_peer','_e88_unavailable'] LOOP
         PERFORM dblink_connect(database_name,format('host=localhost port=%s dbname=%L user=postgres',
             current_setting('port'),database_name));
         PERFORM dblink_exec(database_name,'CREATE EXTENSION pg_durable');
@@ -24,6 +28,23 @@ BEGIN
             AS source(oid oid,id uuid);
     END LOOP;
 END $$;
+SELECT dblink_exec('_e88_failed', $sql$
+    CREATE SEQUENCE public.e88_retirement_attempts;
+    CREATE FUNCTION public.e88_reject_retirement() RETURNS trigger LANGUAGE plpgsql AS $fn$
+    BEGIN
+        -- Sequence increments survive the deletion rollback, unlike table writes.
+        PERFORM nextval('public.e88_retirement_attempts');
+        RAISE EXCEPTION 'E88 persistent retirement failure';
+    END $fn$;
+    CREATE TRIGGER e88_reject_retirement BEFORE DELETE ON df.nodes
+        FOR EACH ROW EXECUTE FUNCTION public.e88_reject_retirement();
+    BEGIN;
+    INSERT INTO df.instances(id,root_node,submitted_by,status,created_at,completed_at)
+        VALUES ('00000001','00000001',current_user::regrole,'completed',now()-interval '31 days',now()-interval '31 days');
+    INSERT INTO df.nodes(id,instance_id,node_type,query,submitted_by,status,result)
+        VALUES ('00000001','00000001','SQL','SELECT 1',current_user::regrole,'completed','{}');
+    COMMIT;
+$sql$);
 SELECT dblink_exec('_e88_busy', $sql$
     BEGIN;
     SET CONSTRAINTS ALL DEFERRED;
@@ -54,15 +75,23 @@ BEGIN
             df.duroxide_schema()) USING item.oid::bigint,item.installation;
     END LOOP;
 END $$;
-CREATE TEMP TABLE _e88_progress(first_progress timestamptz, peer_done timestamptz, busy_done timestamptz);
-INSERT INTO _e88_progress VALUES (NULL,NULL,NULL);
+CREATE TEMP TABLE _e88_progress(first_progress timestamptz, peer_done timestamptz,
+    busy_done timestamptz, first_attempt timestamptz, next_cycle_attempt timestamptz);
+INSERT INTO _e88_progress VALUES (NULL,NULL,NULL,NULL,NULL);
 DO $$
 DECLARE deadline timestamptz := clock_timestamp()+interval '120 seconds';
-    busy_count bigint; peer_count bigint;
+    busy_count bigint; peer_count bigint; attempts bigint;
 BEGIN
     LOOP
         SELECT n INTO busy_count FROM dblink('_e88_busy','SELECT count(*) FROM df.instances') AS source(n bigint);
         SELECT n INTO peer_count FROM dblink('_e88_peer','SELECT count(*) FROM df.instances') AS source(n bigint);
+        SELECT n INTO attempts FROM dblink('_e88_failed',
+            'SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.e88_retirement_attempts')
+            AS source(n bigint);
+        IF attempts > 0 THEN UPDATE _e88_progress SET first_attempt=COALESCE(first_attempt,clock_timestamp()); END IF;
+        IF attempts > 1 THEN
+            RAISE EXCEPTION 'TEST FAILED: exhausted origin retried within the same maintenance cycle (% attempts)', attempts;
+        END IF;
         IF busy_count < 12011 THEN UPDATE _e88_progress SET first_progress=COALESCE(first_progress,clock_timestamp()); END IF;
         IF peer_count = 0 THEN UPDATE _e88_progress SET peer_done=COALESCE(peer_done,clock_timestamp()); END IF;
         IF busy_count = 10000 THEN
@@ -78,6 +107,31 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: pages or peer waited for the next 60-second maintenance interval: %',
             (SELECT row_to_json(p) FROM _e88_progress p);
     END IF;
+    IF (SELECT first_attempt FROM _e88_progress) IS NULL THEN
+        RAISE EXCEPTION 'TEST FAILED: persistent retirement failure was not exercised';
+    END IF;
+END $$;
+-- The short scan must stay exhausted after its cursor reaches the end, but
+-- become eligible again once the worker starts its next scheduled cycle.
+DO $$
+DECLARE deadline timestamptz := clock_timestamp()+interval '90 seconds'; attempts bigint;
+BEGIN
+    LOOP
+        SELECT n INTO attempts FROM dblink('_e88_failed',
+            'SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.e88_retirement_attempts')
+            AS source(n bigint);
+        IF attempts > 1 THEN
+            IF attempts <> 2 OR clock_timestamp() <
+                (SELECT first_attempt+interval '55 seconds' FROM _e88_progress) THEN
+                RAISE EXCEPTION 'TEST FAILED: failed origin retried before next scheduled cycle: %', attempts;
+            END IF;
+            UPDATE _e88_progress SET next_cycle_attempt=clock_timestamp();
+            EXIT;
+        END IF;
+        IF clock_timestamp()>deadline THEN RAISE EXCEPTION 'TEST FAILED: failed origin not retried next cycle'; END IF;
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    RAISE NOTICE 'E88 exhaustion evidence: %', (SELECT row_to_json(p) FROM _e88_progress p);
 END $$;
 DO $$
 DECLARE registered bool;
@@ -92,6 +146,7 @@ SELECT dblink_disconnect(name) FROM _e88_origins;
 DROP DATABASE _e88_busy WITH (FORCE);
 DROP DATABASE _e88_peer WITH (FORCE);
 DROP DATABASE _e88_unavailable WITH (FORCE);
+DROP DATABASE _e88_failed WITH (FORCE);
 -- Registration GC must work even if there have never been engine roots.
 DO $$
 DECLARE deadline timestamptz:=clock_timestamp()+interval '90 seconds'; remaining int;
