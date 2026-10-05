@@ -53,11 +53,13 @@ pub static LIST_INSTANCES_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(10
 /// Days a terminal ('completed'/'failed'/'cancelled') instance is retained
 /// before reconciliation removes it and its engine record. The same age bound
 /// governs when orphaned engine records left by a rolled-back `df.start()` are
-/// reclaimed. `0` removes terminal instances as soon as the next pass runs.
+/// reclaimed and completed historical executions are pruned. The current
+/// execution is always preserved. `0` makes cleanup eligible on the next pass.
 pub static RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(30);
 
 /// Seconds between background reconciliation passes. Each pass removes expired
-/// terminal instances and reclaims orphaned engine records. `0` disables it.
+/// terminal instances, reclaims orphaned engine records, and prunes historical
+/// executions. `0` disables it.
 pub static RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(3600);
 
 /// When `false`, the worker log omits the SQL text of executed workflow nodes.
@@ -290,8 +292,8 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"pg_durable.retention_days",
-        c"Days a terminal instance is retained before reconciliation removes it",
-        c"Background reconciliation removes 'completed'/'failed'/'cancelled' df.instances rows (and their engine records) once they are older than this many days, subject to a fixed hard cap on the number retained. The same age bound governs when orphaned engine records left by a rolled-back df.start() are reclaimed. 0 removes terminal instances as soon as the next pass runs.",
+        c"Days to retain terminal instances and completed historical executions",
+        c"Background reconciliation removes 'completed'/'failed'/'cancelled' df.instances rows (and their engine records) once they are older than this many days, subject to a fixed hard cap on the number retained. The same age bound governs orphaned engine records and completed historical executions, including those of running workflows. Pruning always preserves the current execution. 0 makes cleanup eligible on the next pass.",
         &RETENTION_DAYS,
         0,
         36500,
@@ -302,7 +304,7 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_int_guc(
         c"pg_durable.reconcile_interval",
         c"Idle seconds between reconciliation scans (0 disables reconciliation)",
-        c"Unfinished bounded pages continue promptly between scans. Reconciliation removes expired terminal instances, orphaned engine records, and confirmed removed registrations with no engine work. Set to 0 to disable all reconciliation.",
+        c"Unfinished bounded pages continue promptly between scans. Reconciliation removes expired terminal instances, orphaned engine records, completed historical executions, and confirmed removed registrations with no engine work. Set to 0 to disable all reconciliation.",
         &RECONCILE_INTERVAL,
         0,
         86400,

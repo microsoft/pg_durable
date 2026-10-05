@@ -407,6 +407,24 @@ the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
 See [deferred lifetime guarantees](multi-database-installation.md#release-blockers)
 for the separate runtime shutdown and server-side cancellation limitations.
 
+#### Historical execution pruning
+
+- **B1:** background reconciliation prunes completed non-current execution
+  generations using `pg_durable.retention_days`, including running workflows and
+  nested loops in every origin. The query uses existing provider tables, so no
+  extension upgrade DDL or new `df` schema detection is needed.
+- **Provider migration:** the worker's startup `ApplyAll` applies migration `0024`
+  before starting the runtime. It timestamps `ContinuedAsNew` executions and
+  backfills older NULL timestamps from terminal history events. Unrecoverable
+  timestamps remain NULL with a warning; those generations are not age-pruned.
+  Stop any other runtimes sharing the provider schema during this one-time
+  backfill. Existing histories may make startup slower.
+- **Replay:** no orchestration code, durable-operation inputs, or continuation
+  payloads change. Pruning preserves the current and running executions.
+- **Release blocker:** the provider is temporarily pinned to the timestamp-fix
+  git revision in `Cargo.toml`. Replace the `DONOTLAND` pin with a released
+  compatible version before landing.
+
 #### Typed HTTP endpoints
 
 - Adds composite type `df.http_endpoint(server text, path text)`,

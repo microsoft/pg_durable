@@ -98,7 +98,8 @@ pub fn get_new_transaction_start_timeout() -> Duration {
 }
 
 /// Days a terminal instance is retained before reconciliation removes it and its
-/// engine record; also the age bound for reclaiming orphaned engine records.
+/// engine record; also the age bound for orphaned engine records and completed
+/// historical executions.
 pub fn get_retention_days() -> i32 {
     crate::RETENTION_DAYS.get()
 }

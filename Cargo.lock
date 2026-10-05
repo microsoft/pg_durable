@@ -713,9 +713,8 @@ dependencies = [
 
 [[package]]
 name = "duroxide-pg"
-version = "0.1.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd3d51000bd6b0433be07bc2f4ba5dd7d8fc4336fc90ff2321f527cd51a3eac"
+version = "0.1.35"
+source = "git+https://github.com/microsoft/duroxide-pg?branch=thomcc%2Fcontinue_as_new_completed_at#e7773b34bee0127efafd796cdf8c732cd537cd2d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3093,7 +3092,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
