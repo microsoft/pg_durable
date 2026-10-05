@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::runtime;
-use duroxide::{Client, ClientError, InstanceFilter};
+use duroxide::{Client, ClientError, InstanceFilter, PruneOptions, PruneResult};
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
@@ -1114,6 +1114,7 @@ async fn run_until_extension_dropped_or_shutdown(
     let mut origin_cursor = OriginRetentionCursor::default();
     let mut engine_cursor = String::new();
     let mut legacy_cursor = String::new();
+    let mut execution_cursor = String::new();
     let mut registration_cursor = (0i64, uuid::Uuid::nil());
     let mut pending = MaintenanceProgress::new();
 
@@ -1195,6 +1196,27 @@ async fn run_until_extension_dropped_or_shutdown(
                 } }
 
                 let retention = Duration::from_secs(retention_days as u64 * 86_400);
+                if pending.executions {
+                    let previous_cursor = execution_cursor.clone();
+                    pending.executions = match tokio::time::timeout(
+                        ORIGIN_OPERATION_TIMEOUT,
+                        prune_old_executions(
+                            maintenance_pool, &client, &schema,
+                            retention_cutoff_ms(retention), &mut execution_cursor,
+                        ),
+                    ).await {
+                        Ok(Ok(more)) => more,
+                        Ok(Err(error)) => {
+                            log!("pg_durable: execution pruning deferred: {error}");
+                            execution_cursor != previous_cursor
+                        },
+                        Err(_) => {
+                            log!("pg_durable: execution pruning timed out");
+                            execution_cursor != previous_cursor
+                        },
+                    };
+                    if !pending.executions { execution_cursor.clear(); }
+                }
                 if pending.legacy { match reclaim_orphaned_instances(maintenance_pool, &client, &schema, retention, &mut legacy_cursor).await {
                     Ok(reclaimed) if reclaimed > 0 => {
                         log!("pg_durable: reclaimed {reclaimed} orphaned engine record(s)");
@@ -1265,6 +1287,7 @@ struct MaintenanceProgress {
     origins: bool,
     engine: bool,
     registrations: bool,
+    executions: bool,
 }
 
 impl MaintenanceProgress {
@@ -1275,11 +1298,17 @@ impl MaintenanceProgress {
             origins: true,
             engine: true,
             registrations: true,
+            executions: true,
         }
     }
 
     fn has_work(&self) -> bool {
-        self.control || self.legacy || self.origins || self.engine || self.registrations
+        self.control
+            || self.legacy
+            || self.origins
+            || self.engine
+            || self.registrations
+            || self.executions
     }
 
     fn finish_slice(&mut self, origins: &mut OriginRetentionCursor) -> bool {
@@ -1873,6 +1902,69 @@ fn retention_cutoff_ms(retention: Duration) -> u64 {
     since_epoch.saturating_sub(retention).as_millis() as u64
 }
 
+async fn prune_old_executions(
+    pool: &sqlx::PgPool,
+    client: &Client,
+    schema: &str,
+    completed_before: u64,
+    cursor: &mut String,
+) -> Result<bool, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    // The bulk API has no cursor; its limit can repeatedly select the same
+    // instances. Page only eligible histories, including child orchestrations.
+    let candidates: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT i.instance_id FROM {schema}.instances i
+         WHERE i.instance_id OPERATOR(pg_catalog.>) $1
+           AND EXISTS (
+               SELECT 1 FROM {schema}.executions e
+               WHERE e.instance_id OPERATOR(pg_catalog.=) i.instance_id
+                 AND e.execution_id OPERATOR(pg_catalog.<>) i.current_execution_id
+                 AND e.status OPERATOR(pg_catalog.<>) 'Running'
+                 AND e.completed_at OPERATOR(pg_catalog.<)
+                     pg_catalog.to_timestamp($2::bigint OPERATOR(pg_catalog./) 1000.0)
+           )
+         ORDER BY i.instance_id LIMIT $3"
+    ))
+    .bind(cursor.as_str())
+    .bind(completed_before as i64)
+    .bind(i64::from(RECLAIM_BATCH))
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select execution pruning candidates: {error}"))?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    let more = candidates.len() == RECLAIM_BATCH as usize;
+    let mut total = PruneResult::default();
+    for id in candidates {
+        // Advance before I/O so an error or timeout cannot starve later IDs.
+        *cursor = id;
+        let result = client
+            .prune_executions(
+                cursor,
+                PruneOptions {
+                    completed_before: Some(completed_before),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| format!("prune executions for {cursor}: {error}"))?;
+        total.instances_processed += result.instances_processed;
+        total.executions_deleted += result.executions_deleted;
+        total.events_deleted += result.events_deleted;
+    }
+    if total.executions_deleted > 0 {
+        log!(
+            "pg_durable: pruned {} old execution(s) and {} history event(s) across {} instance(s)",
+            total.executions_deleted,
+            total.events_deleted,
+            total.instances_processed
+        );
+    }
+    Ok(more)
+}
+
 /// From the engine's `Failed` instance ids and the set that still have a
 /// df.instances row, select the orphans to reclaim: those with no df row and that
 /// are not sub-orchestrations. Both legacy engine-named children and current
@@ -2102,6 +2194,166 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
 mod tests {
     use super::*;
     use crate::origin::Origin;
+
+    #[pg_test]
+    fn execution_pruning_retention_and_failure_progress() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let mut url = url::Url::parse(&postgres_connection_string()).unwrap();
+        url.set_username(&admin).unwrap();
+        url.set_path(&database);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let store = Arc::new(
+                    PostgresProvider::new_with_config(worker_provider_config(
+                        url.as_str(),
+                        "execution_pruning_test",
+                    ))
+                    .await
+                    .unwrap(),
+                );
+                let pool = store.pool();
+                let client = Client::new(store.clone());
+                sqlx::raw_sql(
+                    "INSERT INTO execution_pruning_test.instances
+                         (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
+                     SELECT 'a' || lpad(n::text,8,'0'), 'test', 1, now(), now()
+                         FROM generate_series(1,1100) n;
+                     INSERT INTO execution_pruning_test.executions
+                         (instance_id,execution_id,status,completed_at,started_at)
+                     SELECT instance_id,1,'Completed','2000-01-01 UTC','2000-01-01 UTC'
+                         FROM execution_pruning_test.instances;
+                     INSERT INTO execution_pruning_test.instances
+                         (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
+                     SELECT 'b' || lpad(n::text,8,'0'), 'test', 6, now(), now()
+                         FROM generate_series(1,1001) n;
+                     INSERT INTO execution_pruning_test.instances
+                         (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
+                     SELECT id,'test',6,now(),now() FROM (VALUES
+                         ('pgdf-42-00000000000000000000000000000001-cafe0001'),
+                         ('pgdf-42-00000000000000000000000000000001-cafe0001::1::child'),
+                         ('sub::legacy'), ('cafe0001::1::child'), ('zterminal')
+                     ) AS cases(id);
+                     INSERT INTO execution_pruning_test.executions
+                         (instance_id,execution_id,status,completed_at,started_at)
+                     SELECT i.instance_id,e.id,e.status,e.completed,'2000-01-01 UTC'
+                     FROM execution_pruning_test.instances i CROSS JOIN (VALUES
+                         (1,'ContinuedAsNew','2023-12-31 23:59:59.999 UTC'::timestamptz),
+                         (2,'ContinuedAsNew','2024-01-01 UTC'::timestamptz),
+                         (3,'Completed','2024-01-02 UTC'::timestamptz),
+                         (4,'Running','2000-01-01 UTC'::timestamptz),
+                         (5,'Completed',NULL), (6,'Running',NULL)
+                     ) AS e(id,status,completed) WHERE i.current_execution_id=6;
+                     UPDATE execution_pruning_test.executions
+                         SET status='Completed',completed_at='2000-01-01 UTC'
+                         WHERE instance_id='zterminal' AND execution_id=6;
+                     INSERT INTO execution_pruning_test.history
+                         (instance_id,execution_id,event_id,event_type,event_data,created_at)
+                     SELECT instance_id,execution_id,1,'test','{}',now()
+                         FROM execution_pruning_test.executions;
+                     CREATE FUNCTION execution_pruning_test.reject_prune() RETURNS trigger
+                         LANGUAGE plpgsql AS $fn$ BEGIN
+                             IF OLD.instance_id='b00000001' THEN
+                                 RAISE EXCEPTION 'intentional pruning failure';
+                             END IF;
+                             RETURN OLD;
+                         END $fn$;
+                     CREATE TRIGGER reject_prune BEFORE DELETE
+                         ON execution_pruning_test.executions FOR EACH ROW
+                         EXECUTE FUNCTION execution_pruning_test.reject_prune();",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+
+                let cutoff = 1_704_067_200_000;
+                let mut cursor = String::new();
+                let error = prune_old_executions(
+                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("intentional pruning failure"), "{error}");
+                assert_eq!(cursor, "b00000001");
+                assert!(prune_old_executions(
+                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
+                )
+                .await
+                .unwrap());
+                assert_eq!(cursor, "b00001001");
+                assert!(!prune_old_executions(
+                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
+                )
+                .await
+                .unwrap());
+                assert_eq!(cursor, "zterminal");
+
+                sqlx::query("DROP TRIGGER reject_prune ON execution_pruning_test.executions")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                cursor.clear();
+                assert!(!prune_old_executions(
+                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
+                )
+                .await
+                .unwrap());
+                assert_eq!(cursor, "b00000001", "retry the failed instance next cycle");
+                let counts: (i64, i64, i64) = sqlx::query_as(
+                    "SELECT
+                         (SELECT count(*) FROM execution_pruning_test.instances),
+                         (SELECT count(*) FROM execution_pruning_test.executions),
+                         (SELECT count(*) FROM execution_pruning_test.history)",
+                )
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                assert_eq!(counts, (2106, 6130, 6130));
+                let survivors: Vec<i64> = sqlx::query_scalar(
+                    "SELECT DISTINCT e.execution_id FROM execution_pruning_test.executions e
+                     JOIN execution_pruning_test.instances i USING(instance_id)
+                     WHERE i.current_execution_id=6 ORDER BY e.execution_id",
+                )
+                .fetch_all(pool)
+                .await
+                .unwrap();
+                assert_eq!(survivors, [2, 3, 4, 5, 6]);
+                assert!(!prune_old_executions(
+                    pool, &client, "execution_pruning_test", cutoff, &mut String::new(),
+                )
+                .await
+                .unwrap(), "an exhausted scan must not select protected histories");
+                sqlx::query("DROP SCHEMA execution_pruning_test CASCADE")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                pool.close().await;
+            });
+    }
+
+    #[test]
+    fn execution_pruning_keeps_maintenance_cycle_open() {
+        let mut progress = MaintenanceProgress {
+            control: false,
+            legacy: false,
+            origins: false,
+            engine: false,
+            registrations: false,
+            executions: true,
+        };
+        let mut origins = OriginRetentionCursor::default();
+        assert!(progress.finish_slice(&mut origins));
+        progress.executions = false;
+        assert!(!progress.finish_slice(&mut origins));
+        assert!(progress.executions, "pruning must resume on the next scan");
+    }
 
     #[pg_test]
     fn maintenance_queries_bound_candidates_and_preserve_work() {
@@ -2459,6 +2711,7 @@ mod tests {
                     origins: false,
                     engine: false,
                     registrations: false,
+                    executions: false,
                 };
                 assert!(!progress.finish_slice(&mut cursor));
                 assert!(cursor.enter(origin));
@@ -2604,6 +2857,7 @@ mod tests {
                         origins: false,
                         engine: true,
                         registrations: false,
+                        executions: false,
                     };
                     assert!(progress.finish_slice(&mut cursor));
                     for origin in &origins {
