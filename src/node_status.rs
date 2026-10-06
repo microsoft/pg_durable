@@ -81,9 +81,9 @@ pub(crate) fn status_details_select_expr(client: &pgrx::spi::SpiClient) -> &'sta
             "SELECT EXISTS (
                  SELECT 1
                  FROM information_schema.columns
-                 WHERE table_schema = 'df'
-                   AND table_name = 'nodes'
-                   AND column_name = 'status_details'
+                 WHERE table_schema OPERATOR(pg_catalog.=) 'df'
+                   AND table_name OPERATOR(pg_catalog.=) 'nodes'
+                   AND column_name OPERATOR(pg_catalog.=) 'status_details'
              )",
             None,
             &[],
@@ -94,9 +94,9 @@ pub(crate) fn status_details_select_expr(client: &pgrx::spi::SpiClient) -> &'sta
         .unwrap_or(false);
 
     if present {
-        "status_details::text"
+        "status_details::pg_catalog.text"
     } else {
-        "NULL::text"
+        "NULL::pg_catalog.text"
     }
 }
 

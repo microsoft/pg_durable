@@ -368,9 +368,10 @@ pub fn start_in_new_transaction(
     let label = label.map(|s| s.to_string());
     let database = database.map(|s| s.to_string());
     let user = user.to_string();
-    let origin_database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
-        .map_err(|e| format!("Failed to resolve caller database: {e}"))?
-        .ok_or_else(|| "Failed to resolve caller database".to_string())?;
+    let origin_database =
+        Spi::get_one::<String>("SELECT pg_catalog.current_database()::pg_catalog.text")
+            .map_err(|e| format!("Failed to resolve caller database: {e}"))?
+            .ok_or_else(|| "Failed to resolve caller database".to_string())?;
 
     rt.block_on(async {
         let mut conn = connect_as_user_for_new_transaction(&user, &origin_database).await?;

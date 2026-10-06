@@ -13,8 +13,8 @@ pub const NAME: &str = "pg_durable::activity::update-node-status";
 async fn status_details_present(connection: &mut sqlx::PgConnection) -> Result<bool, String> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
-         WHERE table_schema = 'df' AND table_name = 'nodes' \
-         AND column_name = 'status_details')",
+         WHERE table_schema OPERATOR(pg_catalog.=) 'df' AND table_name OPERATOR(pg_catalog.=) 'nodes' \
+         AND column_name OPERATOR(pg_catalog.=) 'status_details')",
     )
     .fetch_one(connection)
     .await
@@ -104,7 +104,7 @@ fn push_status_update<'a>(
         update
             .push(", result = ")
             .push_bind(json_result)
-            .push("::jsonb");
+            .push("::pg_catalog.jsonb");
     } else if !matches!(status, "completed" | "failed") {
         // When marking as non-terminal, clear any stale result from a previous
         // transition to satisfy nodes_result_status_chk
@@ -117,7 +117,7 @@ fn push_status_update<'a>(
         update
             .push(", status_details = ")
             .push_bind(details)
-            .push("::jsonb");
+            .push("::pg_catalog.jsonb");
     }
 }
 
@@ -184,7 +184,7 @@ pub async fn execute(
     // generations (including running -> terminal within the same generation) are accepted.
     if write_details {
         let existing_details = sqlx::query_scalar::<_, Option<serde_json::Value>>(
-            "SELECT status_details FROM df.nodes WHERE id = $1 AND instance_id = $2 FOR UPDATE",
+            "SELECT status_details FROM df.nodes WHERE id OPERATOR(pg_catalog.=) $1 AND instance_id OPERATOR(pg_catalog.=) $2 FOR UPDATE",
         )
         .bind(node_id)
         .bind(instance_id)
@@ -207,9 +207,9 @@ pub async fn execute(
         }
 
         update
-            .push(", updated_at = now() WHERE id = ")
+            .push(", updated_at = pg_catalog.now() WHERE id OPERATOR(pg_catalog.=) ")
             .push_bind(node_id)
-            .push(" AND instance_id = ")
+            .push(" AND instance_id OPERATOR(pg_catalog.=) ")
             .push_bind(instance_id);
 
         let done = update
@@ -234,9 +234,9 @@ pub async fn execute(
     }
 
     update
-        .push(", updated_at = now() WHERE id = ")
+        .push(", updated_at = pg_catalog.now() WHERE id OPERATOR(pg_catalog.=) ")
         .push_bind(node_id)
-        .push(" AND instance_id = ")
+        .push(" AND instance_id OPERATOR(pg_catalog.=) ")
         .push_bind(instance_id);
 
     match update.build().execute(&mut *tx).await {

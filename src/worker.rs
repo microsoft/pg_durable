@@ -424,7 +424,7 @@ async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Du
 
 async fn check_extension_exists(pool: &sqlx::PgPool) -> bool {
     let result: Result<(bool,), sqlx::Error> =
-        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_durable')")
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname OPERATOR(pg_catalog.=) 'pg_durable')")
             .fetch_one(pool)
             .await;
 
@@ -439,7 +439,7 @@ async fn check_extension_exists(pool: &sqlx::PgPool) -> bool {
 /// Callers must keep those cases distinct — see `extension_epoch_replaced`.
 async fn capture_extension_epoch(pool: &sqlx::PgPool) -> Result<Option<i64>, sqlx::Error> {
     let row: Option<(i64,)> =
-        sqlx::query_as("SELECT oid::bigint FROM pg_extension WHERE extname = 'pg_durable'")
+        sqlx::query_as("SELECT oid::pg_catalog.int8 FROM pg_catalog.pg_extension WHERE extname OPERATOR(pg_catalog.=) 'pg_durable'")
             .fetch_optional(pool)
             .await?;
 
@@ -516,15 +516,15 @@ async fn check_duroxide_schema_owned(pool: &sqlx::PgPool, schema_name: &str) -> 
     let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
         "SELECT EXISTS (
             SELECT 1
-            FROM pg_namespace n
-            JOIN pg_depend d
-                ON d.objid = n.oid
-                AND d.classid = 'pg_namespace'::regclass
-                AND d.deptype = 'e'
-            JOIN pg_extension e
-                ON e.oid = d.refobjid
-                AND e.extname = 'pg_durable'
-            WHERE n.nspname = $1
+            FROM pg_catalog.pg_namespace n
+            JOIN pg_catalog.pg_depend d
+                ON d.objid OPERATOR(pg_catalog.=) n.oid
+                AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_namespace'::pg_catalog.regclass
+                AND d.deptype OPERATOR(pg_catalog.=) 'e'
+            JOIN pg_catalog.pg_extension e
+                ON e.oid OPERATOR(pg_catalog.=) d.refobjid
+                AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+            WHERE n.nspname OPERATOR(pg_catalog.=) $1
         )",
     )
     .bind(schema_name)
@@ -549,99 +549,99 @@ async fn release_extension_owned_duroxide_objects(
     sqlx::query(&format!(
         r#"DO $$
 DECLARE
-    r RECORD;
+    r pg_catalog.record;
 BEGIN
     -- Release triggers before their functions: ALTER EXTENSION DROP TRIGGER only
     -- removes the pg_depend row; the trigger itself stays on the table.  Must
     -- precede the function loop so that CASCADE on function drops doesn't error
     -- trying to drop a still-extension-owned trigger.
     FOR r IN
-        SELECT quote_ident(t.tgname)                                        AS trigger_name,
-               quote_ident(n.nspname) || '.' || quote_ident(c.relname)     AS table_name
-        FROM pg_trigger t
-        JOIN pg_class c     ON c.oid = t.tgrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid    = t.oid
-            AND d.classid = 'pg_trigger'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
+        SELECT pg_catalog.quote_ident(t.tgname) AS trigger_name,
+               pg_catalog.quote_ident(n.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname) AS table_name
+        FROM pg_catalog.pg_trigger t
+        JOIN pg_catalog.pg_class c     ON c.oid OPERATOR(pg_catalog.=) t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+        JOIN pg_catalog.pg_depend d
+            ON d.objid OPERATOR(pg_catalog.=) t.oid
+            AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_trigger'::pg_catalog.regclass
+            AND d.deptype OPERATOR(pg_catalog.=) 'e'
+        JOIN pg_catalog.pg_extension e
+            ON e.oid OPERATOR(pg_catalog.=) d.refobjid
+            AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+        WHERE n.nspname OPERATOR(pg_catalog.=) '{schema}'
     LOOP
         EXECUTE 'ALTER EXTENSION pg_durable DROP TRIGGER '
-                || r.trigger_name || ' ON ' || r.table_name;
+                OPERATOR(pg_catalog.||) r.trigger_name OPERATOR(pg_catalog.||) ' ON ' OPERATOR(pg_catalog.||) r.table_name;
     END LOOP;
 
     -- Release functions (regular, window, and procedures)
     FOR r IN
-        SELECT p.oid::regprocedure::text AS sig
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        JOIN pg_depend d
-            ON d.objid = p.oid
-            AND d.classid = 'pg_proc'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}'
+        SELECT p.oid::pg_catalog.regprocedure::pg_catalog.text AS sig
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+        JOIN pg_catalog.pg_depend d
+            ON d.objid OPERATOR(pg_catalog.=) p.oid
+            AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass
+            AND d.deptype OPERATOR(pg_catalog.=) 'e'
+        JOIN pg_catalog.pg_extension e
+            ON e.oid OPERATOR(pg_catalog.=) d.refobjid
+            AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+        WHERE n.nspname OPERATOR(pg_catalog.=) '{schema}'
     LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP FUNCTION ' || r.sig;
+        EXECUTE 'ALTER EXTENSION pg_durable DROP FUNCTION ' OPERATOR(pg_catalog.||) r.sig;
     END LOOP;
 
     -- Release tables
     FOR r IN
-        SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid = c.oid
-            AND d.classid = 'pg_class'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'r'
+        SELECT pg_catalog.quote_ident(n.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname) AS name
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+        JOIN pg_catalog.pg_depend d
+            ON d.objid OPERATOR(pg_catalog.=) c.oid
+            AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+            AND d.deptype OPERATOR(pg_catalog.=) 'e'
+        JOIN pg_catalog.pg_extension e
+            ON e.oid OPERATOR(pg_catalog.=) d.refobjid
+            AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+        WHERE n.nspname OPERATOR(pg_catalog.=) '{schema}' AND c.relkind OPERATOR(pg_catalog.=) 'r'
     LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP TABLE ' || r.name;
+        EXECUTE 'ALTER EXTENSION pg_durable DROP TABLE ' OPERATOR(pg_catalog.||) r.name;
     END LOOP;
 
     -- Release indexes: must be de-registered before migration scripts can
     -- DROP them; PostgreSQL rejects DROP INDEX (even with IF EXISTS) when the
     -- index is still an extension member.
     FOR r IN
-        SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid = c.oid
-            AND d.classid = 'pg_class'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'i'
+        SELECT pg_catalog.quote_ident(n.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname) AS name
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+        JOIN pg_catalog.pg_depend d
+            ON d.objid OPERATOR(pg_catalog.=) c.oid
+            AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+            AND d.deptype OPERATOR(pg_catalog.=) 'e'
+        JOIN pg_catalog.pg_extension e
+            ON e.oid OPERATOR(pg_catalog.=) d.refobjid
+            AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+        WHERE n.nspname OPERATOR(pg_catalog.=) '{schema}' AND c.relkind OPERATOR(pg_catalog.=) 'i'
     LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP INDEX ' || r.name;
+        EXECUTE 'ALTER EXTENSION pg_durable DROP INDEX ' OPERATOR(pg_catalog.||) r.name;
     END LOOP;
 
     -- Release sequences
     FOR r IN
-        SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS name
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_depend d
-            ON d.objid = c.oid
-            AND d.classid = 'pg_class'::regclass
-            AND d.deptype = 'e'
-        JOIN pg_extension e
-            ON e.oid = d.refobjid
-            AND e.extname = 'pg_durable'
-        WHERE n.nspname = '{schema}' AND c.relkind = 'S'
+        SELECT pg_catalog.quote_ident(n.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname) AS name
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+        JOIN pg_catalog.pg_depend d
+            ON d.objid OPERATOR(pg_catalog.=) c.oid
+            AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+            AND d.deptype OPERATOR(pg_catalog.=) 'e'
+        JOIN pg_catalog.pg_extension e
+            ON e.oid OPERATOR(pg_catalog.=) d.refobjid
+            AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+        WHERE n.nspname OPERATOR(pg_catalog.=) '{schema}' AND c.relkind OPERATOR(pg_catalog.=) 'S'
     LOOP
-        EXECUTE 'ALTER EXTENSION pg_durable DROP SEQUENCE ' || r.name;
+        EXECUTE 'ALTER EXTENSION pg_durable DROP SEQUENCE ' OPERATOR(pg_catalog.||) r.name;
     END LOOP;
 END $$"#,
         schema = schema_name
@@ -659,26 +659,26 @@ async fn has_extension_owned_duroxide_objects(pool: &sqlx::PgPool, schema_name: 
     let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
         "SELECT EXISTS (
             SELECT 1
-            FROM pg_depend d
-            JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-            JOIN pg_class c     ON c.oid = d.objid
-            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-            WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e'
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_extension e ON e.oid OPERATOR(pg_catalog.=) d.refobjid AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+            JOIN pg_catalog.pg_class c     ON c.oid OPERATOR(pg_catalog.=) d.objid
+            JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace AND n.nspname OPERATOR(pg_catalog.=) $1
+            WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass AND d.deptype OPERATOR(pg_catalog.=) 'e'
             UNION ALL
             SELECT 1
-            FROM pg_depend d
-            JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-            JOIN pg_proc p      ON p.oid = d.objid
-            JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = $1
-            WHERE d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_extension e ON e.oid OPERATOR(pg_catalog.=) d.refobjid AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+            JOIN pg_catalog.pg_proc p      ON p.oid OPERATOR(pg_catalog.=) d.objid
+            JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace AND n.nspname OPERATOR(pg_catalog.=) $1
+            WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.deptype OPERATOR(pg_catalog.=) 'e'
             UNION ALL
             SELECT 1
-            FROM pg_depend d
-            JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_durable'
-            JOIN pg_trigger t   ON t.oid = d.objid
-            JOIN pg_class c     ON c.oid = t.tgrelid
-            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-            WHERE d.classid = 'pg_trigger'::regclass AND d.deptype = 'e'
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_extension e ON e.oid OPERATOR(pg_catalog.=) d.refobjid AND e.extname OPERATOR(pg_catalog.=) 'pg_durable'
+            JOIN pg_catalog.pg_trigger t   ON t.oid OPERATOR(pg_catalog.=) d.objid
+            JOIN pg_catalog.pg_class c     ON c.oid OPERATOR(pg_catalog.=) t.tgrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace AND n.nspname OPERATOR(pg_catalog.=) $1
+            WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_trigger'::pg_catalog.regclass AND d.deptype OPERATOR(pg_catalog.=) 'e'
         )",
     )
     .bind(schema_name)
@@ -805,7 +805,7 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
     sqlx::query("DELETE FROM df._worker_epoch")
         .execute(pool)
         .await?;
-    sqlx::query("INSERT INTO df._worker_epoch (epoch_id, started_at, last_seen_at) VALUES ($1::uuid, now(), now())")
+    sqlx::query("INSERT INTO df._worker_epoch (epoch_id, started_at, last_seen_at) VALUES ($1::pg_catalog.uuid, pg_catalog.now(), pg_catalog.now())")
         .bind(&epoch_id)
         .execute(pool)
         .await?;
@@ -833,7 +833,7 @@ async fn write_worker_ready(
         .execute(&mut *transaction)
         .await?;
     let current_epoch: Option<i64> = sqlx::query_scalar(
-        "SELECT oid::bigint FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+        "SELECT oid::pg_catalog.int8 FROM pg_catalog.pg_extension WHERE extname OPERATOR(pg_catalog.=) 'pg_durable'",
     )
     .fetch_optional(&mut *transaction)
     .await?;
@@ -845,8 +845,8 @@ async fn write_worker_ready(
     let schema_name = format!("\"{}\"", schema_name.replace('"', "\"\""));
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {schema_name}._origins (
-            database_oid BIGINT NOT NULL,
-            installation_id UUID NOT NULL,
+            database_oid pg_catalog.int8 NOT NULL,
+            installation_id pg_catalog.uuid NOT NULL,
             PRIMARY KEY (database_oid, installation_id)
         )"
     ))
@@ -858,10 +858,10 @@ async fn write_worker_ready(
 
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
-            sentinel        BOOLEAN PRIMARY KEY DEFAULT TRUE,
+            sentinel        pg_catalog.bool PRIMARY KEY DEFAULT TRUE,
             CONSTRAINT      only_one_sentinel CHECK (sentinel),
-            schema_version  INT NOT NULL,
-            initialized_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            schema_version  pg_catalog.int4 NOT NULL,
+            initialized_at  pg_catalog.timestamptz NOT NULL DEFAULT pg_catalog.now()
         )",
         schema = schema_name
     ))
@@ -885,11 +885,11 @@ async fn write_worker_ready(
 
     sqlx::query(&format!(
         "INSERT INTO {schema}._worker_ready (sentinel, schema_version, initialized_at) \
-         VALUES (TRUE, $1, now()) \
+         VALUES (TRUE, $1, pg_catalog.now()) \
          ON CONFLICT (sentinel) DO UPDATE SET \
              schema_version = EXCLUDED.schema_version, \
              initialized_at = EXCLUDED.initialized_at \
-         WHERE {schema}._worker_ready.schema_version != EXCLUDED.schema_version",
+         WHERE {schema}._worker_ready.schema_version OPERATOR(pg_catalog.<>) EXCLUDED.schema_version",
         schema = schema_name
     ))
     .bind(crate::WORKER_SCHEMA_VERSION)
@@ -938,7 +938,7 @@ async fn register_origin_in_schema(
 /// or drop+recreated).
 async fn check_epoch_sentinel(pool: &sqlx::PgPool, epoch_id: &str) -> bool {
     let result = sqlx::query(
-        "UPDATE df._worker_epoch SET last_seen_at = now() WHERE epoch_id = $1::uuid RETURNING epoch_id",
+        "UPDATE df._worker_epoch SET last_seen_at = pg_catalog.now() WHERE epoch_id OPERATOR(pg_catalog.=) $1::pg_catalog.uuid RETURNING epoch_id",
     )
     .bind(epoch_id)
     .fetch_optional(pool)
@@ -991,7 +991,7 @@ async fn select_expired_instance_ids_tx(
                 SELECT id FROM terminal_instances
                 WHERE terminal_rank OPERATOR(pg_catalog.>) $1
                     OR terminal_at OPERATOR(pg_catalog.<)
-                        (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::int))
+                        (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::pg_catalog.int4))
                 ORDER BY terminal_rank DESC
                 LIMIT $3
           ) expired
@@ -1026,19 +1026,19 @@ async fn delete_expired_instances_tx(
         r#"
         WITH deleted_nodes AS (
             DELETE FROM df.nodes n
-            USING pg_catalog.unnest($1::text[]) AS t(id)
+            USING pg_catalog.unnest($1::pg_catalog.text[]) AS t(id)
             WHERE n.instance_id OPERATOR(pg_catalog.=) t.id
             RETURNING n.instance_id
         ),
         deleted_instances AS (
             DELETE FROM df.instances i
-            USING pg_catalog.unnest($1::text[]) AS t(id)
+            USING pg_catalog.unnest($1::pg_catalog.text[]) AS t(id)
             WHERE i.id OPERATOR(pg_catalog.=) t.id
             RETURNING i.id
         )
         SELECT
             (SELECT pg_catalog.array_agg(id) FROM deleted_instances) AS deleted_ids,
-            (SELECT pg_catalog.count(*)::bigint FROM deleted_nodes) AS nodes_deleted
+            (SELECT pg_catalog.count(*)::pg_catalog.int8 FROM deleted_nodes) AS nodes_deleted
         "#,
     )
     .bind(ids)
@@ -1703,7 +1703,7 @@ async fn reclaim_removed_origin(
 
 async fn origin_is_removed(pool: &sqlx::PgPool, origin: &Origin) -> Result<bool, String> {
     let database: Option<String> = sqlx::query_scalar(
-        "SELECT datname FROM pg_catalog.pg_database WHERE oid = $1::bigint::oid",
+        "SELECT datname FROM pg_catalog.pg_database WHERE oid OPERATOR(pg_catalog.=) $1::pg_catalog.int8::pg_catalog.oid",
     )
     .bind(i64::from(origin.database_oid))
     .fetch_optional(pool)
@@ -2102,6 +2102,170 @@ async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
 mod tests {
     use super::*;
     use crate::origin::Origin;
+
+    #[pg_test]
+    fn worker_schema_qualification_ignores_search_path() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut connection =
+                    crate::origin::metadata_test_connection(&admin, &database).await;
+                sqlx::raw_sql(
+                    "CREATE SCHEMA worker_qualification;
+                     CREATE FUNCTION worker_qualification.unexpected(name, name)
+                     RETURNS boolean LANGUAGE plpgsql AS $$
+                     BEGIN RAISE EXCEPTION 'worker operator trap'; END $$;
+                     CREATE OPERATOR worker_qualification.= (
+                         LEFTARG = name, RIGHTARG = name,
+                         FUNCTION = worker_qualification.unexpected);
+                     CREATE FUNCTION worker_qualification.now()
+                     RETURNS timestamptz LANGUAGE plpgsql AS $$
+                     BEGIN RAISE EXCEPTION 'worker function trap'; END $$;
+                     CREATE SCHEMA worker_qualification_objects;
+                     CREATE TABLE worker_qualification_objects.test_table(id int);
+                     CREATE SEQUENCE worker_qualification_objects.test_sequence;
+                     CREATE FUNCTION worker_qualification_objects.test_function()
+                     RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+                     ALTER EXTENSION pg_durable ADD SCHEMA worker_qualification_objects;
+                     ALTER EXTENSION pg_durable ADD TABLE worker_qualification_objects.test_table;
+                     ALTER EXTENSION pg_durable ADD SEQUENCE worker_qualification_objects.test_sequence;
+                     ALTER EXTENSION pg_durable ADD FUNCTION worker_qualification_objects.test_function();",
+                )
+                .execute(&mut connection)
+                .await
+                .unwrap();
+
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(
+                        sqlx::postgres::PgConnectOptions::from_str(&postgres_connection_string())
+                            .unwrap()
+                            .username(&admin)
+                            .database(&database)
+                            .options([("search_path", "worker_qualification,pg_catalog")]),
+                    )
+                    .await
+                    .unwrap();
+                for catalog in [
+                    "pg_extension",
+                    "pg_namespace",
+                    "pg_depend",
+                    "pg_class",
+                    "pg_proc",
+                    "pg_trigger",
+                ] {
+                    sqlx::query(&format!(
+                        "CREATE TEMP TABLE {catalog} (LIKE pg_catalog.{catalog})"
+                    ))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+                sqlx::raw_sql(
+                    "CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (false);
+                     CREATE DOMAIN pg_temp.jsonb AS pg_catalog.jsonb CHECK (false);
+                     CREATE DOMAIN pg_temp.oid AS pg_catalog.oid CHECK (false);
+                     CREATE DOMAIN pg_temp.regclass AS pg_catalog.regclass CHECK (false);
+                     CREATE DOMAIN pg_temp.regprocedure AS pg_catalog.regprocedure CHECK (false);
+                     CREATE DOMAIN pg_temp.uuid AS pg_catalog.uuid CHECK (false);
+                     CREATE DOMAIN pg_temp.timestamptz AS pg_catalog.timestamptz CHECK (false);",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                let shadowed: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension)")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert!(!shadowed);
+                let error = sqlx::query("SELECT now()")
+                    .execute(&pool)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("worker function trap"));
+                let error = sqlx::query("SELECT 'x'::pg_catalog.name = 'x'::pg_catalog.name")
+                    .execute(&pool)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("worker operator trap"));
+                let shadowed_signature: bool = sqlx::query_scalar(
+                    "SELECT pg_catalog.to_regprocedure('df.http(text,text,text,jsonb,integer)') IS NULL",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(shadowed_signature);
+                for endpoint in [false, true] {
+                    for multipart in [false, true] {
+                        crate::activities::execute_http::check_http_privilege(
+                            &pool, &admin, endpoint, multipart, None,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+
+                assert!(check_extension_exists(&pool).await);
+                let epoch = capture_extension_epoch(&pool).await.unwrap().unwrap();
+                assert!(!extension_epoch_replaced(&pool, epoch).await);
+                assert_eq!(resolve_duroxide_schema_pool(&pool).await, "_duroxide");
+                assert!(
+                    check_duroxide_schema_owned(&pool, "worker_qualification_objects").await
+                );
+                assert!(
+                    has_extension_owned_duroxide_objects(&pool, "worker_qualification_objects")
+                        .await
+                );
+                release_extension_owned_duroxide_objects(&pool, "worker_qualification_objects")
+                    .await
+                    .unwrap();
+                assert!(
+                    !has_extension_owned_duroxide_objects(&pool, "worker_qualification_objects")
+                        .await
+                );
+                write_worker_ready(&pool, "worker_qualification_objects", epoch)
+                    .await
+                    .unwrap();
+                write_worker_ready(&pool, "worker_qualification_objects", epoch)
+                    .await
+                    .unwrap();
+                let ready: bool = sqlx::query_scalar(
+                    "SELECT schema_version OPERATOR(pg_catalog.=) $1
+                     FROM worker_qualification_objects._worker_ready",
+                )
+                .bind(crate::WORKER_SCHEMA_VERSION)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(ready);
+                let state = crate::types::read_backend_control_state(
+                    &mut pool.acquire().await.unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(state.extension_oid, epoch);
+                assert_eq!(state.schema, "_duroxide");
+                pool.close().await;
+                sqlx::raw_sql(
+                    "ALTER EXTENSION pg_durable DROP SCHEMA worker_qualification_objects;
+                     DROP SCHEMA worker_qualification_objects CASCADE;
+                     DROP SCHEMA worker_qualification CASCADE;",
+                )
+                .execute(&mut connection)
+                .await
+                .unwrap();
+                connection.close().await.unwrap();
+            });
+    }
 
     #[pg_test]
     fn maintenance_queries_bound_candidates_and_preserve_work() {

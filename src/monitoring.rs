@@ -98,7 +98,7 @@ fn cursor_timestamp_well_formed(ts: &str) -> bool {
     Spi::connect(|client| {
         let mut ok = false;
         if let Ok(table) = client.select(
-            "SELECT $1 ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}[+-][0-9]{2}(:[0-9]{2})?$'",
+            "SELECT $1 OPERATOR(pg_catalog.~) '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}[+-][0-9]{2}(:[0-9]{2})?$'",
             None,
             &[ts.into()],
         ) {
@@ -204,7 +204,7 @@ fn fetch_instance_info_map(
 
         let batch_sql = format!(
             "SELECT gi.instance_id, gi.orchestration_name, gi.current_execution_id, gi.output \
-             FROM unnest($1::text[]) AS t(id) \
+             FROM pg_catalog.unnest($1::pg_catalog.text[]) AS t(id) \
              CROSS JOIN LATERAL {schema}.get_instance_info(t.id) AS gi",
             schema = provider_schema
         );
@@ -330,7 +330,7 @@ pub fn list_instances(
 
         let (sql, args): (&str, Vec<DatumWithOid>) = if let Some(status) = status_filter {
             (
-                "SELECT id, label, status FROM df.instances WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                "SELECT id, label, status FROM df.instances WHERE status OPERATOR(pg_catalog.=) $1 ORDER BY created_at DESC LIMIT $2",
                 vec![status.into(), (limit_count as i64).into()],
             )
         } else {
@@ -492,11 +492,11 @@ pub fn list_instances_paged(
 
         if let Some(status) = status_filter {
             args.push(status.into());
-            conds.push(format!("status = ${}", args.len()));
+            conds.push(format!("status OPERATOR(pg_catalog.=) ${}", args.len()));
         }
         if let Some(label) = label_filter {
             args.push(label.into());
-            conds.push(format!("label = ${}", args.len()));
+            conds.push(format!("label OPERATOR(pg_catalog.=) ${}", args.len()));
         }
         if let Some((cur_ts, cur_id)) = cursor.as_ref() {
             args.push(cur_ts.as_str().into());
@@ -509,9 +509,10 @@ pub fn list_instances_paged(
             // to the result set) but gives the btree a tight upper bound on the
             // leading index column instead of an unSARGable OR.
             conds.push(format!(
-                "(created_at <= ${ts_idx}::timestamptz \
-                 AND (created_at < ${ts_idx}::timestamptz \
-                 OR (created_at = ${ts_idx}::timestamptz AND id > ${id_idx})))"
+                "(created_at OPERATOR(pg_catalog.<=) ${ts_idx}::pg_catalog.timestamptz \
+                 AND (created_at OPERATOR(pg_catalog.<) ${ts_idx}::pg_catalog.timestamptz \
+                 OR (created_at OPERATOR(pg_catalog.=) ${ts_idx}::pg_catalog.timestamptz \
+                     AND id OPERATOR(pg_catalog.>) ${id_idx})))"
             ));
         }
 
@@ -526,7 +527,7 @@ pub fn list_instances_paged(
         };
         let sql = format!(
             "SELECT id, label, status, created_at, completed_at, \
-             to_char(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') \
+             pg_catalog.to_char(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') \
              FROM df.instances{where_clause} \
              ORDER BY created_at DESC, id ASC LIMIT ${limit_idx}"
         );
@@ -655,7 +656,7 @@ pub fn instance_info(
     let row: Option<(Option<String>, String)> = Spi::connect(|client| {
         client
             .select(
-                "SELECT label, status FROM df.instances WHERE id = $1",
+                "SELECT label, status FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1",
                 Some(1),
                 &[instance_id.into()],
             )
@@ -751,7 +752,7 @@ pub fn instance_executions(
     // A non-existent or non-owned instance legitimately has no history to show,
     // so an empty rowset (not an error) is the correct response here.
     let exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1)",
         &[instance_id.into()],
     )
     .ok()
@@ -913,8 +914,8 @@ fn load_instance_nodes(instance_id: &str) -> (Option<String>, Vec<NodeRow>) {
         let status_details_expr = crate::node_status::status_details_select_expr(client);
         let node_sql = format!(
             "SELECT id, node_type, query, result_name, left_node, right_node,
-                    status, result::text, {status_details_expr}, updated_at
-             FROM df.nodes WHERE instance_id = $1"
+                    status, result::pg_catalog.text, {status_details_expr}, updated_at
+             FROM df.nodes WHERE instance_id OPERATOR(pg_catalog.=) $1"
         );
         let mut nodes = Vec::new();
         if let Ok(table) = client.select(&node_sql, None, &[instance_id.into()]) {
@@ -938,7 +939,7 @@ fn load_instance_nodes(instance_id: &str) -> (Option<String>, Vec<NodeRow>) {
 
         let mut root: Option<String> = None;
         if let Ok(table) = client.select(
-            "SELECT root_node FROM df.instances WHERE id = $1",
+            "SELECT root_node FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1",
             None,
             &[instance_id.into()],
         ) {
@@ -1064,8 +1065,8 @@ pub fn instance_nodes(
     let instance_id = instance_id_param.to_string();
     let rows: Vec<CompatRow> = Spi::connect(|client| {
         let sql = "SELECT id, node_type, query, result_name, left_node, right_node,
-                          status, result::text, updated_at
-                   FROM df.nodes WHERE instance_id = $1";
+                          status, result::pg_catalog.text, updated_at
+                   FROM df.nodes WHERE instance_id OPERATOR(pg_catalog.=) $1";
         let mut rows = Vec::new();
         if let Ok(table) = client.select(sql, None, &[instance_id.as_str().into()]) {
             for row in table {

@@ -37,11 +37,25 @@ pub(crate) async fn check_http_privilege(
     let mut tx = crate::origin::begin_metadata(pool, origin)
         .await
         .map_err(|error| format!("HTTP origin validation failed: {error}"))?;
-    let signature = match (multipart, endpoint) {
-        (false, false) => "df.http(text,text,text,jsonb,integer)",
-        (false, true) => "df.http(df.http_endpoint,text,text,jsonb,integer)",
-        (true, false) => "df.http_multipart(text,text,jsonb,jsonb,integer)",
-        (true, true) => "df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)",
+    // Resolve a search_path-independent spelling, but report the conventional
+    // signature that users write in GRANT/REVOKE.
+    let (qualified_signature, signature) = match (multipart, endpoint) {
+        (false, false) => (
+            "df.http(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.int4)",
+            "df.http(text,text,text,jsonb,integer)",
+        ),
+        (false, true) => (
+            "df.http(df.http_endpoint,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.int4)",
+            "df.http(df.http_endpoint,text,text,jsonb,integer)",
+        ),
+        (true, false) => (
+            "df.http_multipart(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.int4)",
+            "df.http_multipart(text,text,jsonb,jsonb,integer)",
+        ),
+        (true, true) => (
+            "df.http_multipart(df.http_endpoint,pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.int4)",
+            "df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)",
+        ),
     };
     let function = if multipart {
         "df.http_multipart"
@@ -54,7 +68,7 @@ pub(crate) async fn check_http_privilege(
          FROM pg_catalog.pg_roles AS role WHERE role.rolname OPERATOR(pg_catalog.=) $1",
     )
     .bind(submitted_by)
-    .bind(signature)
+    .bind(qualified_signature)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| format!("HTTP privilege check failed for role '{submitted_by}': {e}"))?;

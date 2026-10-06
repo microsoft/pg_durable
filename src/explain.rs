@@ -75,7 +75,8 @@ pub fn explain(input: &str) -> String {
 fn explain_instance(instance_id: &str) -> String {
     // Get instance info from PostgreSQL
     let instance_info: Option<(String, Option<String>, String)> = Spi::connect(|client| {
-        let sql = "SELECT root_node, label, status FROM df.instances WHERE id = $1";
+        let sql =
+            "SELECT root_node, label, status FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1";
         if let Ok(table) = client.select(sql, None, &[instance_id.into()]) {
             for row in table {
                 let root_node: Option<String> = row.get(1).ok().flatten();
@@ -318,7 +319,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
         let (sql, args): (String, Vec<pgrx::datum::DatumWithOid>) = if let Some(id) = instance_id {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {} WHERE instance_id = $1",
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::pg_catalog.text, {status_details_expr} FROM {} WHERE instance_id OPERATOR(pg_catalog.=) $1",
                     table
                 ),
                 vec![id.into()],
@@ -326,7 +327,7 @@ fn load_nodes_from_table(table: &str, instance_id: Option<&str>) -> HashMap<Stri
         } else {
             (
                 format!(
-                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::text, {status_details_expr} FROM {table}"
+                    "SELECT id, node_type, query, result_name, left_node, right_node, status, result::pg_catalog.text, {status_details_expr} FROM {table}"
                 ),
                 vec![],
             )

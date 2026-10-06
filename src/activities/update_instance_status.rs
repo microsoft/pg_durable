@@ -36,16 +36,18 @@ pub async fn execute(
     let query = if status == "completed" {
         sqlx::query(
             "UPDATE df.instances
-             SET status = $1, completed_at = now(), updated_at = now()
-             WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled')",
+             SET status = $1, completed_at = pg_catalog.now(), updated_at = pg_catalog.now()
+             WHERE id OPERATOR(pg_catalog.=) $2
+               AND status OPERATOR(pg_catalog.<>) ALL (ARRAY['completed', 'failed', 'cancelled'])",
         )
         .bind(status)
         .bind(instance_id)
     } else {
         sqlx::query(
             "UPDATE df.instances
-             SET status = $1, updated_at = now()
-             WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled')",
+             SET status = $1, updated_at = pg_catalog.now()
+             WHERE id OPERATOR(pg_catalog.=) $2
+               AND status OPERATOR(pg_catalog.<>) ALL (ARRAY['completed', 'failed', 'cancelled'])",
         )
         .bind(status)
         .bind(instance_id)

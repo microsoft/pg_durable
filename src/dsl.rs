@@ -101,7 +101,7 @@ fn installed_extension_version() -> String {
         drop(cached);
 
         let version = Spi::get_one::<String>(
-            "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+            "SELECT extversion FROM pg_catalog.pg_extension WHERE extname OPERATOR(pg_catalog.=) 'pg_durable'",
         )
         .ok()
         .flatten()
@@ -160,9 +160,10 @@ pub fn setvar(name: &str, value: &str) -> String {
 #[pg_extern(schema = "df")]
 pub fn getvar(name: &str) -> Option<String> {
     let sql = if owner_scoped_vars_enabled() {
-        "SELECT value FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole"
+        "SELECT value FROM df.vars WHERE name OPERATOR(pg_catalog.=) $1
+         AND owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole"
     } else {
-        "SELECT value FROM df.vars WHERE name = $1"
+        "SELECT value FROM df.vars WHERE name OPERATOR(pg_catalog.=) $1"
     };
     Spi::get_one_with_args::<String>(sql, &[name.into()])
         .ok()
@@ -179,9 +180,10 @@ pub fn unsetvar(name: &str) -> String {
     }
 
     let sql = if owner_scoped_vars_enabled() {
-        "DELETE FROM df.vars WHERE name = $1 AND owner = quote_ident(current_user)::regrole"
+        "DELETE FROM df.vars WHERE name OPERATOR(pg_catalog.=) $1
+         AND owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole"
     } else {
-        "DELETE FROM df.vars WHERE name = $1"
+        "DELETE FROM df.vars WHERE name OPERATOR(pg_catalog.=) $1"
     };
     if let Err(e) = Spi::run_with_args(sql, &[name.into()]) {
         pgrx::error!("Failed to unset variable: {:?}", e);
@@ -199,7 +201,7 @@ pub fn clearvars() -> String {
     }
 
     let sql = if owner_scoped_vars_enabled() {
-        "DELETE FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
+        "DELETE FROM df.vars WHERE owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole"
     } else {
         "DELETE FROM df.vars"
     };
@@ -905,7 +907,7 @@ pub fn signal(instance_id: &str, signal_name: &str, signal_data: default!(&str, 
     // Ownership check: SPI goes through RLS, so this returns false for
     // non-owned instances (the row is invisible to the calling user).
     let exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1)",
         &[instance_id.into()],
     )
     .ok()
@@ -984,7 +986,7 @@ fn node_insert_sql(row_count: usize, legacy_login_role: bool) -> String {
         let first = row_index * parameters_per_row + 1;
         if legacy_login_role {
             sql.push_str(&format!(
-                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${}::oid::regrole, ${})",
+                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::pg_catalog.oid::pg_catalog.regrole, ${}::pg_catalog.oid::pg_catalog.regrole, ${})",
                 first + 1,
                 first + 2,
                 first + 3,
@@ -997,7 +999,7 @@ fn node_insert_sql(row_count: usize, legacy_login_role: bool) -> String {
             ));
         } else {
             sql.push_str(&format!(
-                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::oid::regrole, ${})",
+                "(${first}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::pg_catalog.oid::pg_catalog.regrole, ${})",
                 first + 1,
                 first + 2,
                 first + 3,
@@ -1034,7 +1036,7 @@ fn current_user_identity() -> (pgrx::pg_sys::Oid, String) {
 /// error instead of an opaque connection failure later.
 fn require_login_privilege(oid: pgrx::pg_sys::Oid, name: &str, caller: &str) {
     let has_login: bool = match Spi::get_one_with_args(
-        "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE oid = $1",
+        "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE oid OPERATOR(pg_catalog.=) $1",
         &[oid.into()],
     ) {
         Ok(Some(has_login)) => has_login,
@@ -1086,7 +1088,7 @@ struct NewTransactionStartAdmissionGuard {
 impl Drop for NewTransactionStartAdmissionGuard {
     fn drop(&mut self) {
         let _ = Spi::run_with_args(
-            "SELECT pg_catalog.pg_advisory_unlock($1::int4, $2::int4)",
+            "SELECT pg_catalog.pg_advisory_unlock($1::pg_catalog.int4, $2::pg_catalog.int4)",
             &[NEW_TRANSACTION_START_LOCK_CLASS_ID.into(), self.slot.into()],
         );
     }
@@ -1095,7 +1097,7 @@ impl Drop for NewTransactionStartAdmissionGuard {
 fn try_acquire_new_transaction_start_slot(limit: u32) -> Result<Option<i32>, String> {
     for slot in 0..limit {
         match Spi::get_one_with_args::<bool>(
-            "SELECT pg_catalog.pg_try_advisory_lock($1::int4, $2::int4)",
+            "SELECT pg_catalog.pg_try_advisory_lock($1::pg_catalog.int4, $2::pg_catalog.int4)",
             &[
                 NEW_TRANSACTION_START_LOCK_CLASS_ID.into(),
                 (slot as i32).into(),
@@ -1261,7 +1263,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     // Validate that the target database exists (if specified)
     if let Some(db) = database {
         let exists: bool = match Spi::get_one_with_args(
-            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1)",
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_database WHERE datname OPERATOR(pg_catalog.=) $1)",
             &[db.into()],
         ) {
             Ok(Some(v)) => v,
@@ -1420,7 +1422,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
             let (inst_sql, inst_args): (&str, Vec<DatumWithOid>) = if legacy_login_role {
                 (
                     "INSERT INTO df.instances (id, label, root_node, submitted_by, login_role, database)
-                     VALUES ($1, $2, $3, $4::oid::regrole, $5::oid::regrole, $6)
+                     VALUES ($1, $2, $3, $4::pg_catalog.oid::pg_catalog.regrole, $5::pg_catalog.oid::pg_catalog.regrole, $6)
                      ON CONFLICT (id) DO NOTHING
                      RETURNING id",
                     vec![
@@ -1435,7 +1437,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
             } else {
                 (
                     "INSERT INTO df.instances (id, label, root_node, submitted_by, database)
-                     VALUES ($1, $2, $3, $4::oid::regrole, $5)
+                     VALUES ($1, $2, $3, $4::pg_catalog.oid::pg_catalog.regrole, $5)
                      ON CONFLICT (id) DO NOTHING
                      RETURNING id",
                     vec![
@@ -1474,7 +1476,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     // compatibility boundary: pre-0.2.0 uses legacy global vars, 0.2.0+ uses
     // owner-scoped vars.
     let vars_query = if owner_scoped_vars_enabled() {
-        "SELECT name, value FROM df.vars WHERE owner = quote_ident(current_user)::regrole"
+        "SELECT name, value FROM df.vars WHERE owner OPERATOR(pg_catalog.=) pg_catalog.quote_ident(current_user)::pg_catalog.regrole"
     } else {
         "SELECT name, value FROM df.vars"
     };
@@ -1497,9 +1499,10 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     // connection before this caller transaction commits. Carry the owning
     // top-level xid so the worker can wait for its actual outcome instead of
     // guessing that a transaction lasting more than a fixed timeout rolled back.
-    let origin_xid = Spi::get_one::<String>("SELECT pg_catalog.pg_current_xact_id()::text")
-        .unwrap_or_else(|e| pgrx::error!("failed to capture df.start() transaction id: {e}"))
-        .unwrap_or_else(|| pgrx::error!("df.start() transaction id is unavailable"));
+    let origin_xid =
+        Spi::get_one::<String>("SELECT pg_catalog.pg_current_xact_id()::pg_catalog.text")
+            .unwrap_or_else(|e| pgrx::error!("failed to capture df.start() transaction id: {e}"))
+            .unwrap_or_else(|| pgrx::error!("df.start() transaction id is unavailable"));
 
     // Start the orchestration via duroxide
     let input = FunctionInput {
@@ -1548,7 +1551,7 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
     // Ownership check: SPI goes through RLS, so this returns false for
     // non-owned instances (the row is invisible to the calling user).
     let exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id = $1)",
+        "SELECT EXISTS(SELECT 1 FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1)",
         &[instance_id.into()],
     )
     .ok()
@@ -1570,7 +1573,8 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
     // User has column-level UPDATE on (status, updated_at) with RLS restricting to own rows.
     Spi::run_with_args(
         "UPDATE df.instances SET status = 'cancelled', updated_at = pg_catalog.now() \
-         WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+         WHERE id OPERATOR(pg_catalog.=) $1 \
+           AND status OPERATOR(pg_catalog.<>) ALL (ARRAY['completed', 'failed', 'cancelled'])",
         &[instance_id.into()],
     )
     .unwrap_or_else(|e| warning!("Failed to update instance status: {e}"));
@@ -1582,7 +1586,7 @@ pub fn cancel(instance_id: &str, reason: default!(&str, "'Cancelled by user'")) 
 #[pg_extern(schema = "df")]
 pub fn status(instance_id: &str) -> Option<String> {
     Spi::get_one_with_args::<String>(
-        "SELECT status FROM df.instances WHERE id = $1",
+        "SELECT status FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1",
         &[instance_id.into()],
     )
     .ok()
@@ -1603,10 +1607,10 @@ pub fn run(instance_id: default!(Option<&str>, "NULL")) -> String {
 #[pg_extern(schema = "df")]
 pub fn result(instance_id: &str) -> Option<String> {
     Spi::get_one_with_args::<String>(
-        r#"SELECT result::text FROM df.nodes
-           WHERE instance_id = $1
-             AND id = (SELECT root_node FROM df.instances WHERE id = $1)
-             AND status = 'completed'"#,
+        r#"SELECT result::pg_catalog.text FROM df.nodes
+           WHERE instance_id OPERATOR(pg_catalog.=) $1
+             AND id OPERATOR(pg_catalog.=) (SELECT root_node FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1)
+             AND status OPERATOR(pg_catalog.=) 'completed'"#,
         &[instance_id.into()],
     )
     .ok()
@@ -1668,7 +1672,7 @@ pub fn await_instance(
     loop {
         // Query instance status
         let status: Option<String> = Spi::get_one_with_args(
-            "SELECT status FROM df.instances WHERE id = $1",
+            "SELECT status FROM df.instances WHERE id OPERATOR(pg_catalog.=) $1",
             &[instance_id.into()],
         )
         .map_err(|e| format!("Failed to query status: {:?}", e))?;
@@ -1730,8 +1734,11 @@ mod tests {
         assert!(sql.starts_with(
             "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, database) VALUES "
         ));
-        assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9)"));
-        assert!(sql.contains("($10, $11, $12, $13, $14, $15, $16, $17::oid::regrole, $18)"));
+        assert!(sql
+            .contains("($1, $2, $3, $4, $5, $6, $7, $8::pg_catalog.oid::pg_catalog.regrole, $9)"));
+        assert!(sql.contains(
+            "($10, $11, $12, $13, $14, $15, $16, $17::pg_catalog.oid::pg_catalog.regrole, $18)"
+        ));
         assert!(!sql.contains("login_role"));
     }
 
@@ -1743,10 +1750,10 @@ mod tests {
             "INSERT INTO df.nodes (id, instance_id, node_type, query, result_name, left_node, right_node, submitted_by, login_role, database) VALUES "
         ));
         assert!(
-            sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::oid::regrole, $9::oid::regrole, $10)")
+            sql.contains("($1, $2, $3, $4, $5, $6, $7, $8::pg_catalog.oid::pg_catalog.regrole, $9::pg_catalog.oid::pg_catalog.regrole, $10)")
         );
         assert!(sql.contains(
-            "($11, $12, $13, $14, $15, $16, $17, $18::oid::regrole, $19::oid::regrole, $20)"
+            "($11, $12, $13, $14, $15, $16, $17, $18::pg_catalog.oid::pg_catalog.regrole, $19::pg_catalog.oid::pg_catalog.regrole, $20)"
         ));
     }
 

@@ -174,8 +174,8 @@ fn classified_load_graph_error(operation: &str, error: sqlx::Error) -> LoadGraph
 
 const INSTANCE_QUERY: &str = "SELECT root_node, r.rolname AS submitted_by
     FROM df.instances i
-    LEFT JOIN pg_catalog.pg_roles r ON r.oid = i.submitted_by::oid
-    WHERE i.id = $1";
+    LEFT JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) i.submitted_by::pg_catalog.oid
+    WHERE i.id OPERATOR(pg_catalog.=) $1";
 
 /// Begin a transaction with server-side `statement_timeout` / `lock_timeout`
 /// applied via `SET LOCAL`, so every cheap probe query is cancelled by
@@ -226,10 +226,12 @@ async fn probe_origin_transaction_status(
     origin_xid: &str,
 ) -> Result<Option<String>, sqlx::Error> {
     let mut tx = begin_probe_tx(pool, origin).await?;
-    let status = sqlx::query_scalar("SELECT pg_catalog.pg_xact_status($1::text::xid8)::text")
-        .bind(origin_xid)
-        .fetch_one(&mut *tx)
-        .await;
+    let status = sqlx::query_scalar(
+        "SELECT pg_catalog.pg_xact_status($1::pg_catalog.text::pg_catalog.xid8)::pg_catalog.text",
+    )
+    .bind(origin_xid)
+    .fetch_one(&mut *tx)
+    .await;
     let _ = tx.rollback().await;
     status
 }
@@ -243,7 +245,7 @@ async fn probe_snapshot_visible(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = begin_probe_tx(pool, origin).await?;
     let visible = sqlx::query_scalar::<_, bool>(
-        "SELECT pg_catalog.pg_visible_in_snapshot($1::text::xid8, pg_catalog.pg_current_snapshot())",
+        "SELECT pg_catalog.pg_visible_in_snapshot($1::pg_catalog.text::pg_catalog.xid8, pg_catalog.pg_current_snapshot())",
     )
     .bind(origin_xid)
     .fetch_one(&mut *tx)
@@ -271,8 +273,8 @@ async fn fetch_node_rows(
            r.rolname AS submitted_by,
            n.database
         FROM df.nodes n
-        LEFT JOIN pg_catalog.pg_roles r ON r.oid = n.submitted_by::oid
-        WHERE n.instance_id = $1"#;
+        LEFT JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) n.submitted_by::pg_catalog.oid
+        WHERE n.instance_id OPERATOR(pg_catalog.=) $1"#;
 
     let mut tx = crate::origin::begin_metadata(pool, origin).await?;
     sqlx::query(&format!(

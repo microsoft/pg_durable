@@ -284,15 +284,16 @@ pub(crate) fn engine_id_for_origin(origin: Option<&Origin>, local_id: &str) -> S
 }
 
 pub(crate) fn backend_origin() -> Result<Option<Origin>, String> {
-    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::pg_catalog.text")
         .map_err(|error| error.to_string())?
         .ok_or("Caller database is unavailable")?;
     if database == types::get_database() {
         return Ok(None);
     }
-    let installation_id = Spi::get_one::<String>("SELECT id::text FROM df._installation")
-        .map_err(|error| format!("Origin installation unavailable: {error}"))?
-        .ok_or("Origin installation identity is missing")?;
+    let installation_id =
+        Spi::get_one::<String>("SELECT id::pg_catalog.text FROM df._installation")
+            .map_err(|error| format!("Origin installation unavailable: {error}"))?
+            .ok_or("Origin installation identity is missing")?;
     let origin = Origin {
         database_oid: unsafe { pgrx::pg_sys::MyDatabaseId.to_u32() },
         installation_id: Uuid::parse_str(&installation_id).map_err(|error| error.to_string())?,
@@ -302,7 +303,7 @@ pub(crate) fn backend_origin() -> Result<Option<Origin>, String> {
 
 #[pg_extern(schema = "df")]
 pub fn validate_installation() -> bool {
-    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::pg_catalog.text")
         .unwrap_or_else(|error| pgrx::error!("Cannot identify installation database: {error}"));
     if database.as_deref() == Some(types::get_database().as_str()) {
         return true;

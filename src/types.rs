@@ -123,7 +123,7 @@ pub fn superuser_instances_enabled() -> bool {
 /// backend context (not the background worker).
 pub fn is_role_superuser_oid(role_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
     match pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE oid = $1",
+        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE oid OPERATOR(pg_catalog.=) $1",
         &[role_oid.into()],
     ) {
         Ok(Some(v)) => Ok(v),
@@ -156,7 +156,7 @@ pub async fn is_role_superuser_name(pool: &sqlx::PgPool, role_name: &str) -> Res
         .await
         .map_err(err)?;
     let result = sqlx::query_scalar::<_, bool>(
-        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = $1",
+        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $1",
     )
     .bind(role_name)
     .fetch_optional(&mut *tx)
@@ -378,8 +378,10 @@ pub const LEGACY_DUROXIDE_SCHEMA: &str = "duroxide";
 fn resolve_duroxide_schema_spi() -> String {
     let helper_exists = Spi::get_one::<bool>(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
-         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = 'df' AND p.proname = 'duroxide_schema' AND p.pronargs = 0)",
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace \
+         WHERE n.nspname OPERATOR(pg_catalog.=) 'df' \
+           AND p.proname OPERATOR(pg_catalog.=) 'duroxide_schema' \
+           AND p.pronargs OPERATOR(pg_catalog.=) 0)",
     )
     .ok()
     .flatten()
@@ -442,9 +444,10 @@ pub fn backend_duroxide_schema() -> &'static str {
 }
 
 pub(crate) fn try_backend_duroxide_schema() -> Result<&'static str, String> {
-    let current_database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
-        .map_err(|error| format!("Failed to resolve caller database: {error}"))?
-        .ok_or("Failed to resolve caller database")?;
+    let current_database =
+        Spi::get_one::<String>("SELECT pg_catalog.current_database()::pg_catalog.text")
+            .map_err(|error| format!("Failed to resolve caller database: {error}"))?
+            .ok_or("Failed to resolve caller database")?;
     if current_database == get_database() {
         backend_schema_name(&resolve_duroxide_schema_spi())
     } else {
@@ -460,27 +463,27 @@ pub(crate) struct BackendControlState {
 }
 
 pub(crate) fn backend_local_control_state() -> Result<Option<BackendControlState>, String> {
-    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::text")
+    let database = Spi::get_one::<String>("SELECT pg_catalog.current_database()::pg_catalog.text")
         .map_err(|error| error.to_string())?
         .ok_or("Caller database is unavailable")?;
     if database != get_database() {
         return Ok(None);
     }
     let extension_oid = Spi::get_one::<i64>(
-        "SELECT oid::bigint FROM pg_catalog.pg_extension WHERE extname = 'pg_durable'",
+        "SELECT oid::pg_catalog.int8 FROM pg_catalog.pg_extension WHERE extname OPERATOR(pg_catalog.=) 'pg_durable'",
     )
     .map_err(|error| error.to_string())?
     .ok_or("pg_durable control installation unavailable")?;
     let schema = backend_schema_name(&resolve_duroxide_schema_spi())?;
     let table_exists = Spi::get_one::<bool>(&format!(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables
-         WHERE schemaname = '{schema}' AND tablename = '_worker_ready')"
+         WHERE schemaname OPERATOR(pg_catalog.=) '{schema}' AND tablename OPERATOR(pg_catalog.=) '_worker_ready')"
     ))
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     let ready = table_exists
         && Spi::get_one::<bool>(&format!(
-            "SELECT EXISTS(SELECT 1 FROM {schema}._worker_ready WHERE schema_version >= {})",
+            "SELECT EXISTS(SELECT 1 FROM {schema}._worker_ready WHERE schema_version OPERATOR(pg_catalog.>=) {})",
             crate::WORKER_SCHEMA_VERSION
         ))
         .map_err(|error| error.to_string())?
@@ -510,15 +513,17 @@ pub(crate) async fn read_backend_control_state(
     let unavailable = |error| format!("pg_durable control installation unavailable: {error}");
     let (extension_oid, helper_exists, legacy_ready_exists, current_ready_exists) =
         sqlx::query_as::<_, (i64, bool, bool, bool)>(
-            "SELECT e.oid::bigint, \
+            "SELECT e.oid::pg_catalog.int8, \
          EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
-                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-                WHERE n.nspname = 'df' AND p.proname = 'duroxide_schema' AND p.pronargs = 0), \
+                JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace \
+                WHERE n.nspname OPERATOR(pg_catalog.=) 'df' \
+                  AND p.proname OPERATOR(pg_catalog.=) 'duroxide_schema' \
+                  AND p.pronargs OPERATOR(pg_catalog.=) 0), \
          EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
-                WHERE schemaname = 'duroxide' AND tablename = '_worker_ready'), \
+                WHERE schemaname OPERATOR(pg_catalog.=) 'duroxide' AND tablename OPERATOR(pg_catalog.=) '_worker_ready'), \
          EXISTS(SELECT 1 FROM pg_catalog.pg_tables \
-                WHERE schemaname = '_duroxide' AND tablename = '_worker_ready') \
-         FROM pg_catalog.pg_extension e WHERE e.extname = 'pg_durable'",
+                WHERE schemaname OPERATOR(pg_catalog.=) '_duroxide' AND tablename OPERATOR(pg_catalog.=) '_worker_ready') \
+         FROM pg_catalog.pg_extension e WHERE e.extname OPERATOR(pg_catalog.=) 'pg_durable'",
         )
         .fetch_optional(&mut *connection)
         .await
@@ -540,7 +545,7 @@ pub(crate) async fn read_backend_control_state(
     };
     let ready = if table_exists {
         sqlx::query_scalar(&format!(
-            "SELECT EXISTS(SELECT 1 FROM \"{schema}\"._worker_ready WHERE schema_version >= $1)"
+            "SELECT EXISTS(SELECT 1 FROM \"{schema}\"._worker_ready WHERE schema_version OPERATOR(pg_catalog.>=) $1)"
         ))
         .bind(crate::WORKER_SCHEMA_VERSION)
         .fetch_one(&mut *connection)
@@ -563,9 +568,11 @@ pub(crate) async fn read_backend_control_state(
 /// provider schema within a single worker lifetime.
 pub async fn resolve_duroxide_schema_pool(pool: &sqlx::PgPool) -> String {
     let helper_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_proc p \
-         JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = 'df' AND p.proname = 'duroxide_schema' AND p.pronargs = 0)",
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace \
+         WHERE n.nspname OPERATOR(pg_catalog.=) 'df' \
+           AND p.proname OPERATOR(pg_catalog.=) 'duroxide_schema' \
+           AND p.pronargs OPERATOR(pg_catalog.=) 0)",
     )
     .fetch_one(pool)
     .await
@@ -915,6 +922,9 @@ fn extract_column_value(
 }
 
 /// Expand `$name.*` into an inline `VALUES` subquery (SQL) or JSON array (raw).
+///
+/// Preserve the generated SQL spelling (including `::text`) for replay of recorded
+/// activity inputs. This SQL executes as the submitting user, not the worker role.
 fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, String> {
     /// Maximum number of rows allowed in `$name.*` expansion to prevent
     /// unbounded SQL string allocation from large result sets.

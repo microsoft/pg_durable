@@ -533,12 +533,12 @@ impl<'a> EndpointCatalog<'a> {
                 "SELECT EXISTS (
                     SELECT 1 FROM pg_catalog.pg_foreign_data_wrapper AS wrapper
                     JOIN pg_catalog.pg_depend AS dependency
-                      ON dependency.classid = 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass
-                     AND dependency.objid = wrapper.oid
-                     AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
-                     AND dependency.deptype = 'e'
-                    JOIN pg_catalog.pg_extension AS extension ON extension.oid = dependency.refobjid
-                    WHERE wrapper.fdwname = $1 AND extension.extname = 'pg_durable'
+                      ON dependency.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass
+                     AND dependency.objid OPERATOR(pg_catalog.=) wrapper.oid
+                     AND dependency.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+                     AND dependency.deptype OPERATOR(pg_catalog.=) 'e'
+                    JOIN pg_catalog.pg_extension AS extension ON extension.oid OPERATOR(pg_catalog.=) dependency.refobjid
+                    WHERE wrapper.fdwname OPERATOR(pg_catalog.=) $1 AND extension.extname OPERATOR(pg_catalog.=) 'pg_durable'
                 )",
             )
             .bind(FDW_NAME)
@@ -565,12 +565,12 @@ impl<'a> EndpointCatalog<'a> {
                 .map_err(|error| format!("Endpoint server {server:?}: {error}"))?;
             let endpoint: Option<(i64, bool, bool, Option<Vec<String>>)> = sqlx::query_as(
                 "SELECT server.oid::pg_catalog.int8,
-                        wrapper.fdwname = $2,
+                        wrapper.fdwname OPERATOR(pg_catalog.=) $2,
                         pg_catalog.has_server_privilege(server.oid, 'USAGE'),
                         server.srvoptions
                  FROM pg_catalog.pg_foreign_server AS server
-                 JOIN pg_catalog.pg_foreign_data_wrapper AS wrapper ON wrapper.oid = server.srvfdw
-                 WHERE server.srvname = $1",
+                 JOIN pg_catalog.pg_foreign_data_wrapper AS wrapper ON wrapper.oid OPERATOR(pg_catalog.=) server.srvfdw
+                 WHERE server.srvname OPERATOR(pg_catalog.=) $1",
             )
             .bind(server)
             .bind(FDW_NAME)
@@ -663,10 +663,10 @@ async fn load_user_mapping(
     let mapping: Option<Option<Vec<String>>> = sqlx::query_scalar(
         "SELECT mapping.umoptions
              FROM pg_catalog.pg_user_mappings AS mapping
-             WHERE mapping.srvid::pg_catalog.int8 = $1
-               AND mapping.umuser = (
+             WHERE mapping.srvid::pg_catalog.int8 OPERATOR(pg_catalog.=) $1
+               AND mapping.umuser OPERATOR(pg_catalog.=) (
                    SELECT role.oid FROM pg_catalog.pg_roles AS role
-                   WHERE role.rolname = CURRENT_USER
+                   WHERE role.rolname OPERATOR(pg_catalog.=) CURRENT_USER
                )",
     )
     .bind(server_oid)
