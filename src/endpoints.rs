@@ -962,11 +962,15 @@ mod tests {
         let admin = Spi::get_one::<String>("SELECT current_user::text")
             .unwrap()
             .unwrap();
-        let database = Spi::get_one::<String>("SELECT current_database()::text")
+        let shared_database = Spi::get_one::<String>("SELECT current_database()::text")
             .unwrap()
             .unwrap();
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            let mut connection = crate::origin::metadata_test_connection(&admin, &database).await;
+            let test_admin = admin.clone();
+            let test_shared_database = shared_database.clone();
+            crate::origin::with_metadata_test_database(&admin, &shared_database, move |database| async move {
+            let admin = test_admin;
+            let mut connection = crate::types::connect_as_user(&admin, Some(&database)).await.unwrap();
             let (database_oid, installation_id): (i64, uuid::Uuid) = sqlx::query_as(
                 "SELECT d.oid::bigint, i.id FROM pg_catalog.pg_database d CROSS JOIN df._installation i
                  WHERE d.datname = pg_catalog.current_database()",
@@ -1009,6 +1013,7 @@ mod tests {
                 assert!(error.contains("Endpoint origin fence unavailable"), "{error}");
                 assert!(!error.contains("ENDPOINT_ORIGIN_CANARY"));
             }
+            crate::origin::assert_shared_metadata_usable(&admin, &test_shared_database).await;
             catalog.close().await.unwrap();
             sqlx::raw_sql(
                 "DROP VIEW df._installation;
@@ -1022,6 +1027,7 @@ mod tests {
             assert_eq!((isolation.as_str(), read_only.as_str()), ("repeatable read", "on"));
             catalog.close().await.unwrap();
             connection.close().await.unwrap();
+            }).await;
         });
     }
 

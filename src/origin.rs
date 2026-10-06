@@ -467,9 +467,146 @@ pub(crate) async fn metadata_test_connection(admin: &str, database: &str) -> PgC
 }
 
 #[cfg(any(test, feature = "pg_test"))]
+pub(crate) async fn with_metadata_test_database<F, Fut>(admin: &str, shared_database: &str, test: F)
+where
+    F: FnOnce(String) -> Fut + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut connection = types::connect_as_user(admin, Some(shared_database))
+        .await
+        .unwrap();
+    let database = format!("pgdf_metadata_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {database} TEMPLATE template0"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let private_database = database.clone();
+    let admin = admin.to_owned();
+    // A task catches assertion panics so committed counterfeit objects and open
+    // connections cannot leave the private database behind on test failure.
+    let result = tokio::task::LocalSet::new()
+        .run_until(async move {
+            tokio::task::spawn_local(async move {
+                let mut setup = types::connect_as_user(&admin, Some(&private_database))
+                    .await
+                    .unwrap();
+                sqlx::query("CREATE EXTENSION pg_durable")
+                    .execute(&mut setup)
+                    .await
+                    .unwrap();
+                setup.close().await.unwrap();
+                test(private_database).await;
+            })
+            .await
+        })
+        .await;
+    let cleanup = {
+        let statement = format!("DROP DATABASE {database} WITH (FORCE)");
+        let pending = sqlx::query(&statement).execute(&mut connection);
+        tokio::pin!(pending);
+        loop {
+            tokio::select! {
+                result = &mut pending => break result,
+                // DROP waits for all backends, including this pg_test backend,
+                // to acknowledge its storage-manager process-signal barrier.
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    pgrx::check_for_interrupts!();
+                }
+            }
+        }
+    };
+    let close = connection.close().await;
+    if let Err(error) = result {
+        if let Err(cleanup_error) = cleanup {
+            eprintln!("Cannot remove private metadata test database {database}: {cleanup_error}");
+        }
+        if let Err(close_error) = close {
+            eprintln!("Cannot close metadata test cleanup connection: {close_error}");
+        }
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        panic!("metadata test task failed: {error}");
+    }
+    cleanup.unwrap();
+    close.unwrap();
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) async fn assert_shared_metadata_usable(admin: &str, database: &str) {
+    let mut connection = types::connect_as_user(admin, Some(database)).await.unwrap();
+    let mut tx = connection.begin().await.unwrap();
+    let _: Uuid = sqlx::query_scalar("SELECT id FROM df._installation")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let instance: String = sqlx::query_scalar("SELECT df.start('SELECT 42')")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(instance.len(), 8);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM df.instances WHERE id = $1")
+        .bind(&instance)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    tx.rollback().await.unwrap();
+    connection.close().await.unwrap();
+}
+
+#[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
     use super::*;
+
+    #[pg_test]
+    fn metadata_test_database_cleanup_preserves_panics() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let shared_database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let database = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let created = database.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(with_metadata_test_database(
+                &admin,
+                &shared_database,
+                move |name| async move {
+                    *created.borrow_mut() = name;
+                    panic!("metadata fixture cleanup canary");
+                },
+            ));
+        }));
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"metadata fixture cleanup canary")
+        );
+        runtime.block_on(async {
+            let mut connection = types::connect_as_user(&admin, Some(&shared_database))
+                .await
+                .unwrap();
+            let name = database.borrow().clone();
+            assert!(name.starts_with("pgdf_metadata_test_"));
+            assert_ne!(name, shared_database);
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1)",
+            )
+            .bind(name)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            assert!(!exists, "private database survived the assertion panic");
+            connection.close().await.unwrap();
+            assert_shared_metadata_usable(&admin, &shared_database).await;
+        });
+    }
 
     async fn current_origin(connection: &mut PgConnection) -> Origin {
         let (database_oid, installation_id): (i64, Uuid) = sqlx::query_as(
@@ -557,11 +694,15 @@ mod tests {
         let admin = Spi::get_one::<String>("SELECT current_user::text")
             .unwrap()
             .unwrap();
-        let database = Spi::get_one::<String>("SELECT current_database()::text")
+        let shared_database = Spi::get_one::<String>("SELECT current_database()::text")
             .unwrap()
             .unwrap();
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            let mut admin_connection = metadata_test_connection(&admin, &database).await;
+            let test_admin = admin.clone();
+            let test_shared_database = shared_database.clone();
+            with_metadata_test_database(&admin, &shared_database, move |database| async move {
+            let admin = test_admin;
+            let mut admin_connection = types::connect_as_user(&admin, Some(&database)).await.unwrap();
             let mut reader = types::connect_as_user(&admin, Some(&database)).await.unwrap();
             let origin = current_origin(&mut admin_connection).await;
             let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -611,6 +752,7 @@ mod tests {
                 let error = waiting.await.unwrap_err();
                 assert!(matches!(error, sqlx::Error::Protocol(ref message) if message == REPLACED), "{error}");
                 }
+                assert_shared_metadata_usable(&admin, &test_shared_database).await;
                 sqlx::query("ROLLBACK").execute(&mut reader).await.unwrap();
                 if replacement == "TABLE" {
                     sqlx::query("ALTER EXTENSION pg_durable DROP TABLE df._installation")
@@ -625,6 +767,7 @@ mod tests {
             sqlx::query("DROP FUNCTION public.origin_wait_canary()").execute(&mut admin_connection).await.unwrap();
             reader.close().await.unwrap();
             admin_connection.close().await.unwrap();
+            }).await;
         });
     }
 
