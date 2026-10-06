@@ -355,7 +355,7 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
 development cycle, not the published v0.2.8 release. Multi-database installation
-identity and HTTP endpoint/secret DDL also belong in this unreleased migration;
+identity and HTTP endpoint/secret DDL also belong in this migration;
 the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
 
 #### Multi-database installation
@@ -446,7 +446,7 @@ for the separate runtime shutdown and server-side cancellation limitations.
   gain binding/form fields and trusted target-database metadata. Existing HTTP
   signatures, grants and legacy raw-URL activity inputs remain unchanged.
 - Named credential lookup uses native catalogs, checks server `USAGE` and reads
-  the authenticated caller's mapping in the control database, independently of
+  the authenticated caller's mapping in the origin database, independently of
   the SQL target. Endpoint and named-binding reads share one read-only consistent
   snapshot and the existing user-connection budget, released before HTTP I/O.
   No additional DDL, grant changes or replay-visible activity inputs are needed
@@ -470,7 +470,8 @@ for the separate runtime shutdown and server-side cancellation limitations.
 
 - **Upgrade & Migration:** No additional extension DDL or schema detection is
   needed. Body policies use `df.with_http_options`; destination tables are
-  caller-provisioned in the workflow's target database. Existing HTTP defaults,
+  caller-provisioned in the workflow's origin database unless an explicit
+  workflow database target is supplied. Existing HTTP defaults,
   signatures, grants, and previously persisted response bodies are unchanged.
 - **Binary compatibility:** The new `.so` continues to work with supported older
   extension schemas. Sink writes use native PostgreSQL functionality through a
@@ -507,7 +508,9 @@ for the separate runtime shutdown and server-side cancellation limitations.
 
 #### Other post-tag changes
 
-- **Dependencies (#390):** `uuid` 1.26.1 and `reqwest` 0.13.5 are binary updates, not v0.2.8 dependencies. `reqwest` uses `base64` 0.23.1, while pg_durable's direct dependency remains on 0.22.1. The `duroxide`/`duroxide-pg` pair is unchanged.
+- **Dependencies (#390, #406):** `uuid` 1.26.1, `reqwest` 0.13.5 and the direct
+  `base64` dependency 0.23.1 are binary updates, not v0.2.8 dependencies.
+  The pinned `duroxide` 0.1.30 / `duroxide-pg` 0.1.34 pair is unchanged.
 - **Test and release tooling (#388, #389):** shared E2E HTTP grants are restored
   after lifecycle tests, and release-triggered Docker publication waits for
   package assets. Neither change modifies the installed extension schema.

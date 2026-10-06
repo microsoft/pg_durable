@@ -1,6 +1,6 @@
 # Multi-Database Extension Installation
 
-**Status:** Unreleased 0.2.9 integration with admission-based source fencing.
+**Status:** Available in 0.2.9 with admission-based source fencing.
 See [Deferred Lifetime Guarantees](#release-blockers) before destructive removal.
 **Date:** 2026-09-10
 

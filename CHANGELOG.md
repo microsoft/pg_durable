@@ -4,120 +4,77 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.9] - Unreleased
+## [0.2.9] - 2026-10-06
 
-The changes below landed after the v0.2.8 tag and are not part of that release.
+> **Upgrade:** Install/restart the new binary and wait for the control runtime
+> to become ready before creating satellites. Existing control schemas from
+> 0.2.2 onward remain supported; run `ALTER EXTENSION pg_durable UPDATE TO '0.2.9'`
+> to add the new SQL APIs. Reapply `df.grant_usage(role, include_http => true)`
+> to enable typed HTTP endpoints for existing HTTP users.
+> Installations previously built without HTTP support must set
+> `pg_durable.http_security = 'disabled'` before restarting to keep HTTP blocked.
+> See [upgrade guidance](docs/upgrade-testing.md#v028--v029).
 
-Runtime shutdown and server-side quiescence remain separate known limitations:
-see [deferred guarantees](docs/multi-database-installation.md#release-blockers).
+> **Known limitations:** DROP is not a cancellation or quiescence acknowledgment.
+> Already-admitted remote SQL and HTTP requests may finish after source removal;
+> the final admission check and send are not atomic with DROP. Runtime task
+> shutdown and confirmed PostgreSQL backend cancellation remain deferred.
+> See [deferred guarantees](docs/multi-database-installation.md#release-blockers).
 
 ### Added
 
-- **Multi-database installations:** install the shared control runtime first,
-  then satellites with local `df` metadata, grants, RLS, endpoint catalogs and
-  secret mappings. SQL defaults to its origin unless explicitly targeted.
-  Satellite engine IDs include database OID and installation UUID; legacy
-  control IDs and recorded payloads remain unchanged.
-- **Bounded origin connections:** `pg_durable.max_origin_connections` defaults
-  to `12`. Active routes reserve one metadata slot; idle satellites retain no pool.
-
-- **HTTP body policies (#376):** opt-in request and response byte caps,
+- **Multi-database installations (#401):** satellites share one control runtime
+  while keeping local `df` APIs, metadata, grants, RLS, endpoints and credentials.
+  SQL defaults to the submitting database unless explicitly targeted and retains
+  autocommit. `pg_durable.max_origin_connections` bounds origin connections
+  (default `12`); idle satellites retain no connection pool.
+- **HTTP body policies (#397):** opt-in request and response byte caps,
   `inline`/`metadata`/`discard`/`sink` response modes, and response-header selection
   through `df.with_http_options`, for ordinary and multipart requests.
   Response limits are enforced while reading, including after decompression.
   Metadata, discard, and sink modes keep response bodies out of durable results
   and 5xx error previews. Table sinks store raw bytes under the submitting role's
-  permissions and return a committed row reference with a fresh key per attempt.
-  Existing defaults and HTTP signatures are unchanged.
-
-- **`pg_durable.http_allowed_domains` (#375):** a restart-only GUC that replaces the HTTP and multipart domain allow-list with exact hostnames and `*.domain` patterns. Defaults to Azure service subdomains and `api.github.com`; an explicit empty list denies all domains in restricted mode. It cannot enable disabled HTTP or relax the other safeguards.
-
-- **Explicit secret bindings:** `df.secret(server, key)` returns a JSONB
-  descriptor for named header/query/form fields through `df.with_http_options`.
-  Individual `"secret.<key>"` user-mapping options support per-key addition,
-  rotation and removal. Literal form data
-  stays separate from references; activities encode fields and resolve credentials
-  under the submitting role without scanning payloads for markers. Named-secret-only
-  servers may omit `base_url` with `auth_scheme 'none'`.
-- **Endpoint HTTP requests:** `df.endpoint(server, path)` returns a typed
-  `df.http_endpoint` value accepted by `df.http` and `df.http_multipart`.
-  TEXT destinations remain URLs, never serialized endpoint references.
-  Activities resolve per-role credentials,
-  enforce server `USAGE`, preserve the configured base URL and reject routing or
-  credential overrides. Existing HTTP signatures and raw-URL workflow inputs
-  remain unchanged; the grant/revoke helpers cover URLs and endpoints together.
-  General body secret interpolation is deferred.
-- **Endpoint credential catalog:** handler-less `pg_durable_fdw`, a closed-set
-  option validator, and per-user catalog resolution for unauthenticated, bearer,
-  named-header and query-string endpoint authentication. FDW creation authority
-  is delegated with native grants. User mappings remain plaintext and may be
-  included in dumps; `DROP EXTENSION ... CASCADE` removes dependent endpoints
-  and mappings. Catalogs live in the origin database independently of SQL targets;
-  each request uses a consistent caller-authenticated snapshot and shares the SQL
-  connection budget, releasing its connection before HTTP I/O.
-- **HTTP options helper (#380):** adds `df.with_http_options(fut, options)` for
-  single HTTP and multipart nodes. `secret_bindings` and `form_fields` configure
-  references and literal form data. SQL `NULL` and an empty JSON object return
-  the original node unchanged; other values and unsupported keys raise an error.
-  Existing installations receive the helper through the 0.2.8 to 0.2.9 extension
-  upgrade.
+  permissions in the origin database or the workflow's explicit database target;
+  applications own sink-row retention.
+- **HTTP endpoints and secrets (#383):** `df.endpoint(server, path)` and
+  `df.secret(server, key)` use origin-local foreign servers and per-user mappings
+  for endpoint authentication and explicit header/query/form secret bindings.
+  Existing TEXT destinations remain URLs. General body secret interpolation is
+  not supported. User mappings are plaintext and may appear in database dumps;
+  `DROP EXTENSION ... CASCADE` removes dependent servers and mappings.
+- **HTTP options helper (#380):** `df.with_http_options(fut, options)` configures
+  a single HTTP or multipart node without changing existing HTTP signatures.
+- **Configurable HTTP domains (#382):** `pg_durable.http_allowed_domains`
+  replaces the restricted-mode allow-list with exact hosts and `*.domain`
+  patterns. Defaults include Azure service subdomains and `api.github.com`;
+  an explicit empty list denies all domains. Changes require a restart.
 
 ### Changed
 
-- **Satellite admission and DDL:** metadata validation/access share short
-  transactions, and SQL retains autocommit for all routes. Source identity is
-  refreshed after resource waits and before SQL/HTTP dispatch; HTTP authorization
-  is refreshed after credential preparation. Extension-managed DROP protection
-  covers short metadata operations, not arbitrary activities; normal PostgreSQL
-  locks still apply. DROP is not a cancellation
-  or quiescence acknowledgment.
-
-- **Independent-start scope:** `transaction_mode => 'new'` launches in the
-  caller's database, with `max_new_transaction_starts` enforced per database.
-- **Shared metrics:** satellite `df.metrics()` exposes all-engine totals.
+- **Independent-start scope (#401):** `transaction_mode => 'new'` launches in the
+  caller's database, with `max_new_transaction_starts` now enforced per database
+  rather than cluster-wide.
+- **Shared metrics (#401):** satellite `df.metrics()` exposes all-engine totals.
   Granting `with_grant => true` includes this access and local delegation.
-
-- **HTTP startup policy (#374):** replaces the three HTTP Cargo features with
+- **HTTP startup policy (#402):** replaces the three HTTP Cargo features with
   the superuser-only, restart-required `pg_durable.http_security` setting:
   `disabled`, `restricted` (default), or development-only `unrestricted`.
-  Installations previously built without HTTP support must explicitly select
-  `disabled` before restarting to keep HTTP blocked. Test domains are explicitly configured
-  through `pg_durable.http_allowed_domains`; restricted-mode SSRF defenses and
-  HTTP privileges remain unchanged. Invalid security-mode values prevent server
-  startup instead of falling back to the default. No extension SQL migration is required.
+  Restricted-mode SSRF defenses and HTTP privileges remain in effect.
+  Invalid configuration prevents server startup rather than silently falling back.
 - **HTTP connection reuse (#379):** HTTP and multipart activities share one
   process-wide client and connection pool, with timeouts applied per request.
   Client-construction errors are cached until the background worker restarts;
   ordinary request failures do not poison the shared client.
-- **PGXN documentation:** limits the PGXN documentation index to the user guide,
-  API reference, changelog, HTTP security guide, examples overview, and a compact
-  PGXN-specific README. Internal documents remain in the source distribution but
-  no longer appear as published documentation.
-- **Dependencies (#390):** updates `uuid` from 1.26.0 to 1.26.1 and `reqwest`
-  from 0.13.4 to 0.13.5. The latter uses `base64` 0.23.1; pg_durable's direct
-  `base64` dependency remains on 0.22.1, matching its existing manifest constraint.
+- **Dependencies (#390, #406):** updates `uuid` to 1.26.1, `reqwest` to
+  0.13.5 and the direct `base64` dependency to 0.23.1. The pinned
+  `duroxide` 0.1.30 / `duroxide-pg` 0.1.34 pair is unchanged.
 
-### Fixed
+### Documentation
 
-- **Satellite graph admission and maintenance:** transient routing contention
-  now uses the graph retry protocol. Retention continues bounded pages promptly
-  and rotates between origins; retained rows do not consume its candidate budget.
-  Legacy orphan IDs are filtered and paged in SQL. Removed registrations are
-  collected once all corresponding engine work is gone, without treating
-  connection failures as proof of removal.
-
-- **Satellite metadata trust:** worker-role satellite connections use catalog-first
-  startup name resolution. Catalog-only type, ownership and extension-membership
-  checks run before and after metadata locks, before any identity data is read.
-  Replacement views and changed object identities fail closed without evaluation;
-  user SQL and response-sink search paths remain unchanged.
-
-- **Release automation (#389):** release-triggered Docker publication retries
-  package downloads while the package workflow attaches release assets. Manual
-  dispatch remains fail-fast when assets are missing.
-- **E2E test isolation (#388):** extension lifecycle tests restore the shared
-  test user's HTTP and multipart privileges so later tests do not depend on
-  whether setup has run again. This is a test-only change.
+- **PGXN documentation (#395):** publishes a compact landing page and indexes
+  user-facing guides instead of internal development documents.
+- **Upgrade compatibility (#407, #413):** documents the schema guarantees,
+  real previous-binary replay coverage, and remaining coverage gaps.
 
 ## [0.2.8] - 2026-09-11
 
