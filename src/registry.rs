@@ -18,6 +18,7 @@ pub fn create_activity_registry(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
     http_policy: Arc<HttpPolicy>,
+    identity_client: Arc<crate::managed_identity::TokenClient>,
 ) -> ActivityRegistry {
     let sql_semaphore = semaphore.clone();
     let http_semaphore = semaphore.clone();
@@ -31,6 +32,7 @@ pub fn create_activity_registry(
     let node_status_pool = router.clone();
     let http_pool = router.clone();
     let multipart_pool = router;
+    let multipart_identity_client = identity_client.clone();
 
     ActivityRegistry::builder()
         .register(
@@ -149,6 +151,7 @@ pub fn create_activity_registry(
                 let pool = http_pool.clone();
                 let semaphore = http_semaphore.clone();
                 let policy = http_policy.clone();
+                let identity_client = identity_client.clone();
                 async move {
                     let mut route = pool.route(ctx.instance_id()).await?;
                     let result = activities::execute_http::execute(
@@ -156,6 +159,7 @@ pub fn create_activity_registry(
                         &mut route,
                         semaphore,
                         policy,
+                        identity_client,
                         config_json,
                     )
                     .await;
@@ -170,6 +174,7 @@ pub fn create_activity_registry(
                 let pool = multipart_pool.clone();
                 let semaphore = multipart_semaphore.clone();
                 let policy = multipart_policy.clone();
+                let identity_client = multipart_identity_client.clone();
                 async move {
                     let mut route = pool.route(ctx.instance_id()).await?;
                     let result = activities::execute_multipart::execute(
@@ -177,6 +182,7 @@ pub fn create_activity_registry(
                         &mut route,
                         semaphore,
                         policy,
+                        identity_client,
                         config_json,
                     )
                     .await;

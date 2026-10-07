@@ -28,6 +28,7 @@
 #   ./scripts/test-e2e-local.sh 00_requires_shared_preload
 #   ./scripts/test-e2e-local.sh 45_connection_limit_timeout
 #   ./scripts/test-e2e-local.sh http_allowed_domains
+#   ./scripts/test-e2e-local.sh managed_identity
 #   ./scripts/test-e2e-local.sh --http-disabled 47_http_dsl_disabled
 #   ./scripts/test-e2e-local.sh --http-allow-all
 #   ./scripts/test-e2e-local.sh --include-shapes gen-
@@ -57,6 +58,11 @@ SETUP_PLAYGROUND_APPLIED=false
 E2E_ROLE_ENSURED=false
 VERSION_SHOWN=false
 PHASE_LOG_MARK=0
+IDENTITY_MOCK_PROCESS=""
+IDENTITY_MOCK_DIR=""
+IDENTITY_TOKEN_ENDPOINT=""
+IDENTITY_PROXY=""
+IDENTITY_CERTIFICATE=""
 
 declare -a REQUESTED_PHASES=()
 declare -a MATCHED_TESTS=()
@@ -94,6 +100,7 @@ ALL_PHASES=(
     "http-empty-domains"
     "http-disabled"
     "http-allow-all"
+    "managed-identity"
 )
 
 PGRX_HOME="$HOME/.pgrx"
@@ -189,6 +196,9 @@ phase_label() {
         http-allow-all)
             echo "HTTP unrestricted startup policy"
             ;;
+        managed-identity)
+            echo "managed identity (local token and TLS mocks)"
+            ;;
         *)
             echo "$1"
             ;;
@@ -238,6 +248,9 @@ phase_for_test() {
             ;;
         48_http_allow_all|80_multi_database_http_origin|85_multi_database_http_admission)
             echo "http-allow-all"
+            ;;
+        75_managed_identity)
+            echo "managed-identity"
             ;;
         *)
             echo "standard"
@@ -355,9 +368,11 @@ cleanup() {
 
     if [ "$KEEP_RUNNING" = false ]; then
         stop_server
+        stop_identity_mock
         return
     fi
 
+    stop_identity_mock
     echo ""
     echo -e "${GREEN}PostgreSQL left running on port $PG_PORT${NC}"
     echo "Connect: $PSQL -h localhost -p $PG_PORT -d $PG_DB"
@@ -366,6 +381,33 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+stop_identity_mock() {
+    if [ -n "$IDENTITY_MOCK_PROCESS" ]; then
+        kill "$IDENTITY_MOCK_PROCESS" 2>/dev/null || true
+        wait "$IDENTITY_MOCK_PROCESS" 2>/dev/null || true
+        IDENTITY_MOCK_PROCESS=""
+    fi
+    if [ -n "$IDENTITY_MOCK_DIR" ]; then
+        rm -rf -- "$IDENTITY_MOCK_DIR"
+        IDENTITY_MOCK_DIR=""
+        remove_conf_key "pg_durable.managed_identity_endpoint"
+        remove_conf_key "pg_durable.managed_identity_client_id"
+    fi
+    IDENTITY_TOKEN_ENDPOINT=""
+    IDENTITY_PROXY=""
+    IDENTITY_CERTIFICATE=""
+}
+
+start_identity_mock() {
+    IDENTITY_MOCK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pg-durable-mi.XXXXXXXX")
+    coproc IDENTITY_MOCK { exec python3 "$PROJECT_DIR/tests/e2e/managed_identity_mock.py" "$IDENTITY_MOCK_DIR"; }
+    IDENTITY_MOCK_PROCESS=$IDENTITY_MOCK_PID
+    if ! IFS=$'\t' read -r -t 15 IDENTITY_TOKEN_ENDPOINT IDENTITY_PROXY IDENTITY_CERTIFICATE <&"${IDENTITY_MOCK[0]}"; then
+        echo "TEST FAILED: managed identity mock did not start"
+        exit 1
+    fi
+}
 
 remove_conf_key() {
     local key="$1"
@@ -405,7 +447,13 @@ wait_for_server() {
 restart_server() {
     stop_server
     echo -e "${YELLOW}Starting PostgreSQL...${NC}"
-    if [ -n "${SERVER_PGHOST:-}" ]; then
+    if [ -n "$IDENTITY_TOKEN_ENDPOINT" ]; then
+        HTTP_PROXY="$IDENTITY_PROXY" http_proxy="$IDENTITY_PROXY" \
+        HTTPS_PROXY="$IDENTITY_PROXY" https_proxy="$IDENTITY_PROXY" \
+        ALL_PROXY="" all_proxy="" NO_PROXY="" no_proxy="" \
+        SSL_CERT_FILE="$IDENTITY_CERTIFICATE" \
+            "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
+    elif [ -n "${SERVER_PGHOST:-}" ]; then
         PGHOST="$SERVER_PGHOST" "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
     else
         "$PG_CTL" -D "$DATA_DIR" -l "$LOG_FILE" start >/dev/null 2>&1
@@ -575,6 +623,8 @@ configure_phase() {
     remove_conf_key "pg_durable.http_allowed_domains"
     remove_conf_key "pg_durable.http_security"
     set_conf_line "pg_durable.http_allowed_domains" "'$PG_DURABLE_TEST_HTTP_DOMAINS'"
+    remove_conf_key "pg_durable.managed_identity_endpoint"
+    remove_conf_key "pg_durable.managed_identity_client_id"
     # Match scripts/pg-common.sh so the shared pgrx cluster keeps a usable socket
     # directory for `make installcheck` after an E2E run.
     set_conf_line "unix_socket_directories" "'$PGRX_HOME'"
@@ -673,13 +723,22 @@ configure_phase() {
                 set_conf_line "pg_durable.reconcile_interval" "0"
             fi
             ;;
+        managed-identity)
+            start_identity_mock
+            set_conf_line "shared_preload_libraries" "'pg_durable'"
+            set_conf_line "pg_durable.worker_role" "'postgres'"
+            set_conf_line "pg_durable.database" "'postgres'"
+            set_conf_line "pg_durable.enable_superuser_instances" "on"
+            set_conf_line "pg_durable.managed_identity_endpoint" "'$IDENTITY_TOKEN_ENDPOINT'"
+            set_conf_line "pg_durable.managed_identity_client_id" "'11111111-1111-1111-1111-111111111111'"
+            ;;
     esac
 
     case "$phase" in
         http-disabled)
             set_conf_line "pg_durable.http_security" "'disabled'"
             ;;
-        http-allow-all)
+        http-allow-all|managed-identity)
             set_conf_line "pg_durable.http_security" "'unrestricted'"
             ;;
     esac
@@ -687,6 +746,7 @@ configure_phase() {
 
 prepare_phase() {
     local phase="$1"
+    stop_identity_mock
 
     configure_phase "$phase"
 
@@ -707,6 +767,11 @@ prepare_phase() {
         echo "Checking invalid HTTP startup setting rejection..."
         assert_http_startup_rejected "pg_durable.http_allowed_domains" "example.com,https://api.github.com" || exit 1
         assert_http_startup_rejected "pg_durable.http_security" "disable" || exit 1
+    elif [ "$phase" = "managed-identity" ]; then
+        echo "Checking unsafe managed identity provider startup rejection..."
+        assert_http_startup_rejected "pg_durable.managed_identity_endpoint" "http://identity.example/token" || exit 1
+        assert_http_startup_rejected "pg_durable.managed_identity_client_id" "not-a-uuid" || exit 1
+        assert_http_startup_rejected "pg_durable.managed_identity_client_id" "00000000-0000-0000-0000-000000000000" || exit 1
     fi
 
     if [ -f "$LOG_FILE" ]; then
@@ -759,7 +824,7 @@ prepare_phase() {
         reconcile|maintenance-backlog)
             wait_for_worker_ready
             ;;
-        http-custom-domains|http-empty-domains|http-disabled|http-allow-all)
+        http-custom-domains|http-empty-domains|http-disabled|http-allow-all|managed-identity)
             ensure_e2e_role
             wait_for_worker_ready
             ;;
@@ -1050,6 +1115,17 @@ run_phase() {
             phase_failed=$((phase_failed + 1))
         fi
     done
+
+    if [ "$phase" = "managed-identity" ]; then
+        printf "  %-45s ... " "managed_identity_log_redaction"
+        if tail -n "+$((PHASE_LOG_MARK + 1))" "$LOG_FILE" | grep -E 'MI_PRIVATE_(SYSTEM_TOKEN|USER_TOKEN|PROVIDER_ERROR)' >/dev/null; then
+            echo -e "${RED}FAIL${NC}"
+            phase_failed=$((phase_failed + 1))
+        else
+            echo -e "${GREEN}PASS${NC}"
+            phase_passed=$((phase_passed + 1))
+        fi
+    fi
 
     if [ "$phase" = "standard" ] && [ -z "$TEST_FILTER" ]; then
         printf "  %-45s ... " "application_name_connection_logs"

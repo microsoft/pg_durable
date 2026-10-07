@@ -356,7 +356,8 @@ the FDW validator invoked by PostgreSQL on creation and alteration; it returns
 `void` or raises an error without echoing credential values.
 
 The server options are `base_url`, `auth_scheme`, and `header_name` (only for
-header authentication). `auth_scheme` is required; `base_url` may be omitted only
+header authentication). `client_id`, `resource` and `scope` are not accepted.
+`auth_scheme` is required; `base_url` may be omitted only
 with `auth_scheme 'none'` for named-secret storage. A supplied URL retains all
 validation requirements, and endpoint requests fail explicitly if it is absent.
 Mapping options are `token`, `header_value`,
@@ -364,6 +365,43 @@ Mapping options are `token`, `header_value`,
 native per-option `ADD`, `SET` and `DROP`. See
 [Endpoint Credential Catalog](../USER_GUIDE.md#endpoint-credential-catalog)
 for option combinations, grants, rotation and backup implications.
+
+Since v0.2.10, `auth_scheme 'managed-identity'` requires `EXECUTE` on
+`df.managed_identity_admin()` for configuration and for the endpoint owner at
+execution. It requires no user mapping for authentication and uses the single
+identity pinned by `pg_durable.managed_identity_client_id` at startup.
+The destination must be a supported public Azure hostname over HTTPS on port 443;
+the token resource is derived from that host, never supplied by the workflow.
+Server `USAGE`, HTTP function permissions and destination policy remain mandatory.
+See [Managed Identity](../USER_GUIDE.md#managed-identity) for supported hosts and
+deployment requirements.
+
+### df.managed_identity_admin()
+
+**Added in 0.2.10.** Update the extension in the database where the endpoint is
+defined before granting this capability.
+
+An extension-owned, no-op function returning `void`. Its `EXECUTE` privilege
+authorizes managed-identity endpoint configuration; calling it never acquires a
+token or changes configuration. There is no `PUBLIC` execution grant.
+
+```sql
+GRANT EXECUTE ON FUNCTION df.managed_identity_admin() TO endpoint_admin;
+REVOKE EXECUTE ON FUNCTION df.managed_identity_admin() FROM endpoint_admin;
+```
+
+Native FDW and ownership privileges remain required. The capability does not
+authorize changing provider settings, imply HTTP execution privileges, or permit
+selecting a different identity. It is not included in `df.grant_usage` or
+`df.revoke_usage`; manage it explicitly with `GRANT` and `REVOKE`.
+
+The endpoint owner's effective `EXECUTE` privilege is rechecked on every attempt,
+including token-cache hits. A direct or inherited grant counts; `NOINHERIT`
+memberships alone do not. Losing the capability or transferring ownership to an
+unauthorized role blocks subsequent attempts, not already-authorized requests.
+A missing or non-extension-owned capability function fails closed.
+The capability and endpoints are local to the workflow's origin installation;
+control-database grants do not authorize satellite endpoint administration.
 
 ### df.http_multipart(url [, method, parts, headers, timeout])
 
@@ -1010,6 +1048,74 @@ enforced through advisory locks before connecting. Default `2`, range `1` to
 `1000`, Postmaster context (restart required). Launches connect to the caller's
 database, not the explicit SQL target. Excess callers wait up to
 `pg_durable.new_transaction_start_timeout` seconds (default `5`).
+
+---
+
+### pg_durable.managed_identity_client_id
+
+The user-assigned identity used by all managed-identity endpoint requests.
+Available since v0.2.10. The shared worker uses this setting for control and
+satellite requests alike; it is not a per-database identity setting.
+
+| Property | Value |
+|----------|-------|
+| Type | `string`, containing a nonzero client UUID or empty |
+| Default | Empty (managed identity disabled) |
+| Context | `POSTMASTER` (requires a PostgreSQL restart) |
+| Visibility | Superusers and roles with `pg_read_all_settings` |
+
+```ini
+pg_durable.managed_identity_client_id = '11111111-1111-1111-1111-111111111111'
+```
+
+An unset or empty value makes MI requests fail before contacting a token provider.
+Other HTTP authentication is unaffected. Whitespace, malformed UUIDs and the nil
+UUID are rejected, including at server startup. Automatic system-assigned or
+provider-default identity selection is not supported.
+
+Configure this in `postgresql.conf` or through an authorized `ALTER SYSTEM SET`.
+Session, role and database overrides are rejected; reload alone does not apply a
+change. MI endpoint administration grants do not confer configuration privileges.
+Changing the value and restarting changes the identity for subsequent attempts,
+including pending workflows and retries, and clears the token cache. The configured
+identity is not added to workflow inputs; recorded results replay unchanged.
+
+---
+
+### pg_durable.managed_identity_endpoint
+
+The token-provider URL for endpoint managed-identity authentication. Available
+since v0.2.10; it is unused by other authentication schemes.
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | `http://169.254.169.254/metadata/identity/oauth2/token` |
+| Context | `POSTMASTER` (requires a PostgreSQL restart) |
+| Visibility | Superusers and roles with configuration-reading privileges |
+
+The provider must implement the public IMDS GET token protocol: `Metadata: true`,
+`api-version=2018-02-01`, a host-derived `resource`, and the configured `client_id`.
+The provider must honor that identity selection rather than silently substituting
+another identity.
+Success must include `access_token`, `token_type` (`Bearer`), the requested
+`resource`, and an `expires_on` Unix timestamp or `expires_in` seconds. Expiry
+values may be JSON numbers or strings. Tokens must have more than two minutes
+remaining and must already be valid.
+
+Only administrators configure this URL. It must be HTTPS, or HTTP with a literal
+loopback or IMDS IP address, without userinfo, query or fragment. Session, role and
+database overrides are rejected. An invalid startup setting prevents startup.
+An adapter for a different identity service must be provided separately; there is
+no provider auto-discovery or fallback on failure.
+
+Token requests use a separate client with no redirects or environment proxies,
+a two-second connection timeout, a ten-second total acquisition deadline
+(including cache waits), and a 64 KiB response limit. Failures expose only local
+diagnostics or HTTP status, not the provider's body. The worker holds one cache
+entry per supported token resource for its pinned identity and coalesces
+concurrent fetches for each entry.
+The cache is in memory only and is cleared by worker restart.
 
 ---
 
