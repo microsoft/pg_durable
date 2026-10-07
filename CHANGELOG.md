@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
-## [0.2.9] - 2026-10-06
+## [0.2.9] - 2026-10-07
 
 > **Upgrade:** Install/restart the new binary and wait for the control runtime
 > to become ready before creating satellites. Existing control schemas from
@@ -68,6 +68,13 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 - **Dependencies (#390, #406):** updates `uuid` to 1.26.1, `reqwest` to
   0.13.5 and the direct `base64` dependency to 0.23.1. The pinned
   `duroxide` 0.1.30 / `duroxide-pg` 0.1.34 pair is unchanged.
+
+### Security
+
+- **SQL name-resolution hardening (#418):** extension-owned runtime SQL
+  explicitly qualifies catalog objects, functions, types and operators to resist
+  shadowing through caller or database `search_path` settings. User-authored SQL
+  and its execution search path are unchanged; no schema migration is required.
 
 ### Documentation
 

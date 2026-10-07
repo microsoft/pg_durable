@@ -506,6 +506,23 @@ for the separate runtime shutdown and server-side cancellation limitations.
   migration is needed. Activity names, serialized inputs, and orchestration
   scheduling are unchanged; the client cache is confined to activity execution.
 
+#### SQL name-resolution hardening (#418)
+
+- **Binary compatibility:** extension-owned runtime SQL explicitly qualifies
+  catalog objects, functions, types and operators rather than relying on caller
+  or database `search_path`. This applies when the new binary is loaded,
+  including with supported old schemas; no new schema detection is required.
+- **Upgrade DDL:** none. Installed SQL definitions and shipped migrations are
+  unchanged, so no additional `ALTER EXTENSION` is needed for this hardening.
+- **Replay and execution:** user-authored SQL and execution connection search
+  paths are preserved. Orchestration-generated row-set expansion retains its
+  existing SQL spelling, including casts, to preserve recorded activity inputs.
+  Activity names and orchestration scheduling are unchanged.
+- **Coverage:** `89_schema_qualification` exercises starts, variables, monitoring
+  and workflow management with shadowing functions/operators and temporary types,
+  while checking that user SQL retains its own name resolution. The real N-1
+  lifecycle remains the separate replay gate.
+
 #### Other post-tag changes
 
 - **Dependencies (#390, #406):** `uuid` 1.26.1, `reqwest` 0.13.5 and the direct
