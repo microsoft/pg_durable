@@ -2552,8 +2552,10 @@ discovered by an all-database scan. After confirmed removal or replacement,
 bounded reconciliation cancels running roots without waiting for retention;
 terminal engine deletion still respects retention. Connection failures defer
 cleanup rather than establish absence. Control removal is destructive to every
-origin's engine state. Retention resumes from a bounded cursor so undeletable
-engine records do not permanently block later candidates.
+origin's engine state. Both control and satellite retention advance through
+bounded pages even when every candidate's engine record is still running.
+Those instances keep their engine records and `df` rows and are revisited on a
+later scan, without blocking cleanup of later eligible instances.
 Once a scan begins, unfinished pages continue after a 100 ms yield rather than
 waiting for another `reconcile_interval`. Each slice visits one registered origin
 for at most one 1,000-candidate page, then other origins get a turn before a busy
