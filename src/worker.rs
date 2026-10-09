@@ -956,6 +956,7 @@ async fn select_expired_instance_ids_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     retention_days: i32,
     max_keep: i64,
+    after_id: Option<&str>,
     limit: Option<i64>,
 ) -> Result<Vec<String>, sqlx::Error> {
     let ids: Option<Vec<String>> = sqlx::query_scalar(
@@ -986,19 +987,21 @@ async fn select_expired_instance_ids_tx(
         -- cap enforced regardless of age) OR older than the retention window ($2
         -- days). Retained rows are thus always within the newest $1 AND younger than
         -- the retention window, so the retained terminal count never exceeds $1.
-        SELECT pg_catalog.array_agg(id)
+        SELECT pg_catalog.array_agg(id ORDER BY id)
           FROM (
                 SELECT id FROM terminal_instances
-                WHERE terminal_rank OPERATOR(pg_catalog.>) $1
+                WHERE (terminal_rank OPERATOR(pg_catalog.>) $1
                     OR terminal_at OPERATOR(pg_catalog.<)
-                        (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::pg_catalog.int4))
-                ORDER BY terminal_rank DESC
-                LIMIT $3
+                        (pg_catalog.now() OPERATOR(pg_catalog.-) pg_catalog.make_interval(days => $2::pg_catalog.int4)))
+                  AND ($3::pg_catalog.text IS NULL OR id OPERATOR(pg_catalog.>) $3)
+                ORDER BY id
+                LIMIT $4
           ) expired
         "#,
     )
     .bind(max_keep)
     .bind(retention_days)
+    .bind(after_id)
     .bind(limit)
     .fetch_one(&mut **tx)
     .await?;
@@ -1058,6 +1061,7 @@ async fn select_expired_instance_ids(
     pool: &sqlx::PgPool,
     retention_days: i32,
     max_keep: i64,
+    after_id: &mut Option<String>,
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     crate::origin::configure_metadata_transaction(&mut tx).await?;
@@ -1065,10 +1069,17 @@ async fn select_expired_instance_ids(
         &mut tx,
         retention_days,
         max_keep,
+        after_id.as_deref(),
         Some(i64::from(RECLAIM_BATCH)),
     )
     .await?;
     tx.commit().await?;
+    // Progress depends on scanned rows, including roots the engine cannot retire.
+    *after_id = if ids.len() == RECLAIM_BATCH as usize {
+        ids.last().cloned()
+    } else {
+        None
+    };
     Ok(ids)
 }
 
@@ -1094,7 +1105,7 @@ pub(crate) async fn delete_expired_instances_transaction(
     retention_days: i32,
     max_keep: i64,
 ) -> Result<ExpiredDeletion, sqlx::Error> {
-    let ids = select_expired_instance_ids_tx(tx, retention_days, max_keep, None).await?;
+    let ids = select_expired_instance_ids_tx(tx, retention_days, max_keep, None, None).await?;
     delete_expired_instances_tx(tx, &ids).await
 }
 
@@ -1111,6 +1122,7 @@ async fn run_until_extension_dropped_or_shutdown(
 
     let client = Client::new(duroxide_store.clone());
     let router = Router::new(Arc::new(maintenance_pool.clone()));
+    let mut control_cursor = None;
     let mut origin_cursor = OriginRetentionCursor::default();
     let mut engine_cursor = String::new();
     let mut legacy_cursor = String::new();
@@ -1165,17 +1177,18 @@ async fn run_until_extension_dropped_or_shutdown(
                     maintenance_pool,
                     retention_days,
                     TERMINAL_INSTANCE_MAX_KEEP,
+                    &mut control_cursor,
                 )
                 .await
                 {
                     Ok(candidates) if !candidates.is_empty() => {
-                        pending.control = false;
+                        pending.control = control_cursor.is_some();
                         // Only delete the df rows once the engine records are gone;
                         // if that fails, leave both in place and retry next pass.
-                        if retire_engine_records(&client, &candidates).await {
-                            match delete_expired_instances(maintenance_pool, &candidates, None).await {
+                        let retired = retire_engine_records(&client, &candidates).await;
+                        if !retired.is_empty() {
+                            match delete_expired_instances(maintenance_pool, &retired, None).await {
                                 Ok(stats) => {
-                                    pending.control = candidates.len() == RECLAIM_BATCH as usize;
                                     if stats.instances_deleted > 0 || stats.nodes_deleted > 0 {
                                         log!(
                                             "pg_durable: removed {} expired instance(s) and {} node row(s)",
@@ -1191,7 +1204,7 @@ async fn run_until_extension_dropped_or_shutdown(
                         }
                     }
                     Ok(_) => pending.control = false,
-                    Err(e) => { pending.control = false; log!("pg_durable: selecting expired instances failed: {e}"); },
+                    Err(e) => { pending.control = false; control_cursor = None; log!("pg_durable: selecting expired instances failed: {e}"); },
                 } }
 
                 let retention = Duration::from_secs(retention_days as u64 * 86_400);
@@ -2058,43 +2071,26 @@ async fn cleanup_origin_registrations(
     Ok(true)
 }
 
-/// Best-effort deletion of duroxide engine records by id, ahead of deleting the
-/// matching df rows. Returns `true` when it is safe to delete those df rows —
-/// the engine delete succeeded, or there was nothing to delete. On failure it
-/// returns `false` so the caller leaves the df rows in place and retries the
-/// whole instance next pass rather than orphaning its engine record.
-async fn retire_engine_records(client: &Client, ids: &[String]) -> bool {
-    let ids: Vec<String> = ids
-        .iter()
-        .filter(|id| !is_sub_orchestration(id))
-        .cloned()
-        .collect();
-    if ids.is_empty() {
-        return true;
-    }
-    let limit = ids.len().min(u32::MAX as usize) as u32;
-    match client
-        .delete_instance_bulk(InstanceFilter {
-            instance_ids: Some(ids),
-            completed_before: None,
-            limit: Some(limit),
-        })
-        .await
-    {
-        Ok(result) => {
-            if result.instances_deleted > 0 {
+/// Return only roots whose engine state was deleted or is already absent.
+/// Bulk deletion cannot establish this: it silently skips running instances.
+async fn retire_engine_records(client: &Client, ids: &[String]) -> Vec<String> {
+    let mut retired = Vec::new();
+    for instance_id in ids.iter().filter(|id| !is_sub_orchestration(id)) {
+        match client.delete_instance(instance_id, false).await {
+            Ok(_) | Err(ClientError::InstanceNotFound { .. }) => {
+                retired.push(instance_id.clone());
+            }
+            Err(ClientError::InstanceStillRunning { .. }) => {}
+            Err(error) => {
                 log!(
-                    "pg_durable: retired {} engine record(s) ahead of removing the df rows",
-                    result.instances_deleted
+                    "pg_durable: failed to retire engine record {}; deferring df removal: {}",
+                    instance_id,
+                    error
                 );
             }
-            true
-        }
-        Err(e) => {
-            log!("pg_durable: failed to retire engine records; deferring df removal: {e:?}");
-            false
         }
     }
+    retired
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -2376,6 +2372,131 @@ mod tests {
             assert_eq!(aged[0].id,"00002af8");
             tx.rollback().await.unwrap();
             connection.close().await.unwrap();
+        });
+    }
+
+    #[pg_test]
+    fn control_retention_advances_past_running_instances() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let test_admin = admin.clone();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            crate::origin::with_metadata_test_database(&admin, &database, move |database| async move {
+                let options = sqlx::postgres::PgConnectOptions::from_str(&postgres_connection_string())
+                    .unwrap().username(&test_admin).database(&database);
+                let url = sqlx::ConnectOptions::to_url_lossy(&options);
+                let mut config = crate::types::backend_provider_config(url.as_str(), "retention_engine");
+                config.migration_policy = duroxide_pg::MigrationPolicy::ApplyAll;
+                let store = Arc::new(PostgresProvider::new_with_config(config).await.unwrap());
+                let client = Client::new(store.clone());
+                let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2)
+                    .connect_with(options.options([("search_path", "retention_path,pg_catalog,pg_temp")]))
+                    .await.unwrap();
+                sqlx::raw_sql(
+                    "CREATE SCHEMA retention_path;
+                     CREATE DOMAIN retention_path.text AS pg_catalog.text
+                         CONSTRAINT retention_text_trap CHECK (false);
+                     CREATE FUNCTION retention_path.greater(pg_catalog.text, pg_catalog.text)
+                     RETURNS boolean LANGUAGE plpgsql AS $$
+                     BEGIN RAISE EXCEPTION 'retention operator trap'; END $$;
+                     CREATE OPERATOR retention_path.> (FUNCTION = retention_path.greater,
+                         LEFTARG = pg_catalog.text, RIGHTARG = pg_catalog.text);",
+                ).execute(&pool).await.unwrap();
+                let error = sqlx::query("SELECT 'cursor'::text").execute(&pool).await.unwrap_err();
+                assert!(error.to_string().contains("retention_text_trap"));
+                let error = sqlx::query("SELECT 'b'::pg_catalog.text > 'a'::pg_catalog.text")
+                    .execute(&pool).await.unwrap_err();
+                assert!(error.to_string().contains("retention operator trap"));
+
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(
+                    "SET CONSTRAINTS ALL DEFERRED;
+                     INSERT INTO df.instances(id,root_node,submitted_by,status,created_at,completed_at)
+                     SELECT lpad(to_hex(n),8,'0'),lpad(to_hex(n),8,'0'),current_user::regrole,
+                         CASE WHEN n BETWEEN 1 AND 1000 THEN 'cancelled' ELSE 'completed' END,
+                         CASE WHEN n=0 THEN now() ELSE now()-interval '60 days' END,
+                         CASE WHEN n=0 THEN now() WHEN n>1000 THEN now()-interval '40 days' END
+                     FROM generate_series(0,1003) n;
+                     INSERT INTO df.instances(id,root_node,submitted_by,status,created_at)
+                     VALUES ('ffffffff','ffffffff',current_user::regrole,'running',now()-interval '90 days');
+                     INSERT INTO df.nodes(id,instance_id,node_type,query,status,submitted_by)
+                     SELECT id,id,'SQL','SELECT 1',
+                         CASE WHEN status='cancelled' THEN 'running' ELSE status END,submitted_by
+                     FROM df.instances;",
+                ).execute(&mut *tx).await.unwrap();
+                tx.commit().await.unwrap();
+                sqlx::raw_sql(
+                    "INSERT INTO retention_engine.instances(instance_id,orchestration_name,created_at,updated_at)
+                     SELECT id,'retention-test',created_at,created_at FROM df.instances;
+                     INSERT INTO retention_engine.executions(instance_id,execution_id,status,started_at,completed_at)
+                     SELECT id,1,CASE WHEN status='completed' THEN 'Completed' ELSE 'Running' END,
+                         created_at,completed_at FROM df.instances;",
+                ).execute(&pool).await.unwrap();
+
+                let mut tx = pool.begin().await.unwrap();
+                let excess = select_expired_instance_ids_tx(
+                    &mut tx,90,1000,Some("00000001"),Some(1000),
+                ).await.unwrap();
+                assert_eq!(excess,vec!["00000002","00000003","00000004"],
+                    "the cursor must not change global retention ranks");
+                tx.commit().await.unwrap();
+
+                let mut cursor = None;
+                let first = select_expired_instance_ids(&pool,30,10000,&mut cursor).await.unwrap();
+                assert_eq!(first.len(),1000);
+                assert_eq!(first.first().unwrap(),"00000001");
+                assert_eq!(cursor.as_deref(),Some("000003e8"));
+                assert!(retire_engine_records(&client,&first).await.is_empty());
+                assert!(cursor.is_some(),"a full blocked page must still schedule a continuation");
+
+                let second = select_expired_instance_ids(&pool,30,10000,&mut cursor).await.unwrap();
+                assert_eq!(second,vec!["000003e9","000003ea","000003eb"]);
+                assert!(cursor.is_none(),"a partial page must finish this round");
+                let retired = retire_engine_records(&client,&second).await;
+                assert_eq!(retired,second);
+                assert_eq!(retire_engine_records(&client,&second).await,second,
+                    "already absent engine records must still permit df cleanup");
+                let stats = delete_expired_instances(&pool,&retired,None).await.unwrap();
+                assert_eq!(stats.instances_deleted,3);
+                assert_eq!(stats.nodes_deleted,3);
+                let remaining: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM retention_engine.instances WHERE instance_id=ANY($1)",
+                ).bind(&second).fetch_one(&pool).await.unwrap();
+                assert_eq!(remaining,0,"later completed engine instances must be removed");
+                let running: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM df.instances d
+                     JOIN df.nodes n ON n.instance_id=d.id
+                     JOIN retention_engine.instances i ON i.instance_id=d.id
+                     JOIN retention_engine.executions e ON e.instance_id=d.id
+                         AND e.execution_id=i.current_execution_id
+                     WHERE d.status='cancelled' AND e.status='Running'",
+                ).fetch_one(&pool).await.unwrap();
+                assert_eq!(running,1000,"all blocked roots and their nodes must remain intact");
+
+                sqlx::query(
+                    "UPDATE retention_engine.executions SET status='Completed',completed_at=now()
+                     WHERE instance_id='00000001'",
+                ).execute(&pool).await.unwrap();
+                let revisited = select_expired_instance_ids(&pool,30,10000,&mut cursor).await.unwrap();
+                assert_eq!(revisited,first,"the next round must revisit skipped roots");
+                let retired = retire_engine_records(&client,&revisited).await;
+                assert_eq!(retired,vec!["00000001"]);
+                let stats = delete_expired_instances(&pool,&retired,None).await.unwrap();
+                assert_eq!(stats.instances_deleted,1);
+                assert_eq!(stats.nodes_deleted,1);
+                assert!(select_expired_instance_ids(&pool,30,10000,&mut cursor).await.unwrap().is_empty());
+                assert!(cursor.is_none(),"an empty page must reset the cursor");
+                let protected: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM df.instances WHERE id IN ('00000000','ffffffff')",
+                ).fetch_one(&pool).await.unwrap();
+                assert_eq!(protected,2,"young terminal and ordinary running rows must be retained");
+                store.cleanup_schema().await.unwrap();
+                pool.close().await;
+            }).await;
         });
     }
 
