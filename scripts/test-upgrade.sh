@@ -1081,9 +1081,28 @@ test_b1_mixed_version_multidb() (
         (SELECT oid::text FROM pg_database WHERE datname = current_database()) || '-' ||
         replace(id::text, '-', '') || '-${satellite_id}' FROM df._installation WHERE singleton;") || return 1
     [[ "$satellite_engine_id" =~ ^pgdf-[0-9]+-[0-9a-f]{32}-${satellite_id}$ ]] || return 1
-    assert_sql_equals "SELECT EXISTS (SELECT 1 FROM duroxide.get_instance_info('${control_id}') WHERE status = 'Completed')
-        AND EXISTS (SELECT 1 FROM duroxide.get_instance_info('${satellite_engine_id}') WHERE status = 'Completed')
-        AND (SELECT extversion FROM pg_extension WHERE extname = 'pg_durable') = '${B1_VERSION}';" "t" || return 1
+    # df.wait_for_completion() observes df.instances before the provider commits
+    # its terminal orchestration state.
+    "${sql_client[@]}" -d "$control_db" -c "DO \$\$
+        DECLARE
+            control_status TEXT;
+            satellite_status TEXT;
+            deadline TIMESTAMPTZ := clock_timestamp() + interval '5 seconds';
+        BEGIN
+            LOOP
+                SELECT status INTO control_status FROM duroxide.get_instance_info('${control_id}');
+                SELECT status INTO satellite_status FROM duroxide.get_instance_info('${satellite_engine_id}');
+                IF control_status = 'Completed' AND satellite_status = 'Completed' THEN
+                    RETURN;
+                END IF;
+                EXIT WHEN clock_timestamp() >= deadline;
+                PERFORM pg_sleep(0.01);
+            END LOOP;
+            RAISE EXCEPTION 'Timed out waiting for provider completion: control % (status %), satellite % (status %)',
+                '${control_id}', coalesce(control_status, 'missing'),
+                '${satellite_engine_id}', coalesce(satellite_status, 'missing');
+        END \$\$;" || return 1
+    assert_sql_equals "SELECT extversion FROM pg_extension WHERE extname = 'pg_durable';" "$B1_VERSION" || return 1
     case "$B1_VERSION" in
         0.2.[2-8])
             assert_sql_equals "SELECT to_regclass('df._installation') IS NULL;" "t" || return 1

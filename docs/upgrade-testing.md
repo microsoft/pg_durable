@@ -59,6 +59,11 @@ We never downgrade. Downgrade scripts are not needed.
 | Monitoring | `df.status()`, `df.result()`, `df.list_instances()`, `df.instance_info()` |
 | In-flight work | Orchestrations started before `.so` swap complete after swap (except across an activity-input change — see #129) |
 
+The current-satellite/legacy-control overlap check waits separately for local
+workflow completion and provider completion. `df.wait_for_completion()` (or
+`df.await_instance()`) observes `df.instances`; it can return before duroxide
+commits its terminal orchestration state.
+
 **What it catches:**
 - SQL queries in Rust code referencing columns/constraints that don't exist in the old schema
 - Changed function signatures that conflict with old SQL wrappers
