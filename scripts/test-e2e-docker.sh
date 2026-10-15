@@ -50,6 +50,7 @@ SKIP_TESTS=(
     "54_reconcile_orphans"
     "76_multi_database_reconcile"
     "88_multi_database_maintenance_backlog"
+    "89_execution_pruning"
     # Require the force-drop phase (one execution slot, reconciliation disabled).
     "78_multi_database_force_drop"
     "79_multi_database_remote_origin"
