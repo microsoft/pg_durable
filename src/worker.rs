@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::runtime;
-use duroxide::{Client, ClientError, InstanceFilter, PruneOptions, PruneResult};
+use duroxide::{Client, ClientError, InstanceFilter};
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
@@ -1126,7 +1126,7 @@ async fn run_until_extension_dropped_or_shutdown(
     let mut origin_cursor = OriginRetentionCursor::default();
     let mut engine_cursor = String::new();
     let mut legacy_cursor = String::new();
-    let mut execution_cursor = String::new();
+    let mut execution_cursor = (String::new(), 0);
     let mut registration_cursor = (0i64, uuid::Uuid::nil());
     let mut pending = MaintenanceProgress::new();
 
@@ -1211,24 +1211,17 @@ async fn run_until_extension_dropped_or_shutdown(
                 let retention = Duration::from_secs(retention_days as u64 * 86_400);
                 if pending.executions {
                     let previous_cursor = execution_cursor.clone();
-                    pending.executions = match tokio::time::timeout(
-                        ORIGIN_OPERATION_TIMEOUT,
-                        prune_old_executions(
-                            maintenance_pool, &client, &schema,
-                            retention_cutoff_ms(retention), &mut execution_cursor,
-                        ),
+                    pending.executions = match prune_old_executions(
+                        maintenance_pool, &schema,
+                        retention_cutoff_ms(retention), &mut execution_cursor,
                     ).await {
-                        Ok(Ok(more)) => more,
-                        Ok(Err(error)) => {
+                        Ok(more) => more,
+                        Err(error) => {
                             log!("pg_durable: execution pruning deferred: {error}");
                             execution_cursor != previous_cursor
                         },
-                        Err(_) => {
-                            log!("pg_durable: execution pruning timed out");
-                            execution_cursor != previous_cursor
-                        },
                     };
-                    if !pending.executions { execution_cursor.clear(); }
+                    if !pending.executions { execution_cursor = (String::new(), 0); }
                 }
                 if pending.legacy { match reclaim_orphaned_instances(maintenance_pool, &client, &schema, retention, &mut legacy_cursor).await {
                     Ok(reclaimed) if reclaimed > 0 => {
@@ -1868,11 +1861,8 @@ async fn teardown_runtime(
         const POOL_CLOSE_GRACE: Duration = Duration::from_millis(100);
         let _ = tokio::time::timeout(POOL_CLOSE_GRACE, duroxide_store.pool().close()).await;
 
-        // Some(0) is load-bearing on two duroxide internals: a non-zero timeout
-        // is an unconditional sleep rather than a deadline, and the zero branch
-        // returns without setting duroxide's cooperative shutdown_flag. Leaving
-        // that flag unset is only safe because proc_exit() follows immediately.
-        // Re-verify both when upgrading duroxide.
+        // In duroxide 0.1.32, zero signals cancellation, aborts owned tasks, and
+        // waits for their cancellation cleanup without a drain grace period.
         duroxide_runtime.shutdown(Some(0)).await;
     } else {
         // Live process: the runtime is being restarted after an extension drop
@@ -1915,67 +1905,82 @@ fn retention_cutoff_ms(retention: Duration) -> u64 {
     since_epoch.saturating_sub(retention).as_millis() as u64
 }
 
+#[derive(sqlx::FromRow)]
+struct ExecutionPruneBatch {
+    last_instance_id: Option<String>,
+    last_execution_id: Option<i64>,
+    executions_scanned: i64,
+    executions_deleted: i64,
+    events_deleted: i64,
+}
+
 async fn prune_old_executions(
     pool: &sqlx::PgPool,
-    client: &Client,
     schema: &str,
     completed_before: u64,
-    cursor: &mut String,
+    cursor: &mut (String, i64),
 ) -> Result<bool, String> {
+    let completed_before = i64::try_from(completed_before)
+        .map_err(|error| format!("invalid pruning cutoff: {error}"))?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
     crate::origin::configure_metadata_transaction(&mut tx)
         .await
         .map_err(|error| error.to_string())?;
-    // The bulk API has no cursor; its limit can repeatedly select the same
-    // instances. Page only eligible histories, including child orchestrations.
-    let candidates: Vec<String> = sqlx::query_scalar(&format!(
-        "SELECT i.instance_id FROM {schema}.instances i
-         WHERE i.instance_id OPERATOR(pg_catalog.>) $1
-           AND EXISTS (
-               SELECT 1 FROM {schema}.executions e
-               WHERE e.instance_id OPERATOR(pg_catalog.=) i.instance_id
-                 AND e.execution_id OPERATOR(pg_catalog.<>) i.current_execution_id
-                 AND e.status OPERATOR(pg_catalog.<>) 'Running'
-                 AND e.completed_at OPERATOR(pg_catalog.<)
-                     pg_catalog.to_timestamp($2::bigint OPERATOR(pg_catalog./) 1000.0)
-           )
-         ORDER BY i.instance_id LIMIT $3"
+    // Remember the scanned page before deletion, so a failed page cannot starve
+    // later keys. Neither eligibility nor the number of deletions drives progress.
+    let scanned_through: Option<(String, i64)> = sqlx::query_as(&format!(
+        "SELECT instance_id, execution_id FROM (
+             SELECT instance_id, execution_id FROM {schema}.executions
+             WHERE (instance_id, execution_id) OPERATOR(pg_catalog.>) ($1, $2)
+             ORDER BY instance_id, execution_id LIMIT $3
+         ) scanned
+         ORDER BY instance_id DESC, execution_id DESC LIMIT 1"
     ))
-    .bind(cursor.as_str())
-    .bind(completed_before as i64)
+    .bind(&cursor.0)
+    .bind(cursor.1)
     .bind(i64::from(RECLAIM_BATCH))
-    .fetch_all(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("select execution pruning candidates: {error}"))?;
+    .map_err(|error| format!("page execution pruning keys: {error}"))?;
+    let Some(scanned_through) = scanned_through else {
+        tx.commit().await.map_err(|error| error.to_string())?;
+        return Ok(false);
+    };
+    let after = std::mem::replace(cursor, scanned_through);
+    // Use the maintenance connection, not the runtime provider pool. PostgreSQL
+    // enforces the deadlines; await rollback instead of abandoning a live query.
+    let result = sqlx::query_as::<_, ExecutionPruneBatch>(&format!(
+        "SELECT * FROM {schema}.prune_executions_batch($1, $2, $3, $4)"
+    ))
+    .bind(&after.0)
+    .bind(after.1)
+    .bind(completed_before)
+    .bind(RECLAIM_BATCH as i32)
+    .fetch_one(&mut *tx)
+    .await;
+    let batch = match result {
+        Ok(result) => result,
+        Err(error) => {
+            tx.rollback().await.map_err(|rollback| {
+                format!("execution pruning failed: {error}; rollback failed: {rollback}")
+            })?;
+            return Err(format!("prune execution batch: {error}"));
+        }
+    };
     tx.commit().await.map_err(|error| error.to_string())?;
-    let more = candidates.len() == RECLAIM_BATCH as usize;
-    let mut total = PruneResult::default();
-    for id in candidates {
-        // Advance before I/O so an error or timeout cannot starve later IDs.
-        *cursor = id;
-        let result = client
-            .prune_executions(
-                cursor,
-                PruneOptions {
-                    completed_before: Some(completed_before),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|error| format!("prune executions for {cursor}: {error}"))?;
-        total.instances_processed += result.instances_processed;
-        total.executions_deleted += result.executions_deleted;
-        total.events_deleted += result.events_deleted;
+    match (batch.last_instance_id, batch.last_execution_id) {
+        (Some(id), Some(execution)) => *cursor = (id, execution),
+        (None, None) if batch.executions_scanned == 0 => {}
+        _ => return Err("execution pruning returned an inconsistent cursor".to_string()),
     }
-    if total.executions_deleted > 0 {
+    if batch.executions_deleted > 0 {
         log!(
-            "pg_durable: pruned {} old execution(s) and {} history event(s) across {} instance(s)",
-            total.executions_deleted,
-            total.events_deleted,
-            total.instances_processed
+            "pg_durable: pruned {} old execution(s) and {} history event(s)",
+            batch.executions_deleted,
+            batch.events_deleted,
         );
     }
-    Ok(more)
+    Ok(batch.executions_scanned == i64::from(RECLAIM_BATCH))
 }
 
 /// From the engine's `Failed` instance ids and the set that still have a
@@ -2356,6 +2361,56 @@ mod tests {
     }
 
     #[pg_test]
+    fn worker_readiness_requires_pruning_migrations() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut connection =
+                    crate::origin::metadata_test_connection(&admin, &database).await;
+                let mut tx = connection.begin().await.unwrap();
+                sqlx::raw_sql(
+                    "CREATE SCHEMA IF NOT EXISTS _duroxide;
+                     CREATE TABLE IF NOT EXISTS _duroxide._worker_ready(
+                     singleton boolean PRIMARY KEY DEFAULT true, schema_version int NOT NULL,
+                     initialized_at timestamptz NOT NULL DEFAULT now());
+                 INSERT INTO _duroxide._worker_ready(singleton,schema_version) VALUES (true,2)
+                     ON CONFLICT(singleton) DO UPDATE SET schema_version=2;",
+                )
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+                assert!(
+                    !crate::types::read_backend_control_state(&mut tx)
+                        .await
+                        .unwrap()
+                        .ready,
+                    "a marker from before the pruning migrations must not admit backends"
+                );
+                sqlx::query("UPDATE _duroxide._worker_ready SET schema_version=$1")
+                    .bind(crate::WORKER_SCHEMA_VERSION)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                assert!(
+                    crate::types::read_backend_control_state(&mut tx)
+                        .await
+                        .unwrap()
+                        .ready
+                );
+                tx.rollback().await.unwrap();
+                connection.close().await.unwrap();
+            });
+    }
+
+    #[pg_test]
     fn execution_pruning_retention_and_failure_progress() {
         let admin = Spi::get_one::<String>("SELECT current_user::text")
             .unwrap()
@@ -2380,7 +2435,6 @@ mod tests {
                     .unwrap(),
                 );
                 let pool = store.pool();
-                let client = Client::new(store.clone());
                 sqlx::raw_sql(
                     "INSERT INTO execution_pruning_test.instances
                          (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
@@ -2434,38 +2488,47 @@ mod tests {
                 .unwrap();
 
                 let cutoff = 1_704_067_200_000;
-                let mut cursor = String::new();
+                let mut cursor = (String::new(), 0);
+                assert!(prune_old_executions(
+                    pool, "execution_pruning_test", cutoff, &mut cursor,
+                )
+                .await
+                .unwrap());
+                assert_eq!(cursor, ("a00001000".to_string(), 1),
+                    "protected executions must consume and advance the scanned page");
                 let error = prune_old_executions(
-                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
+                    pool, "execution_pruning_test", cutoff, &mut cursor,
                 )
                 .await
                 .unwrap_err();
                 assert!(error.contains("intentional pruning failure"), "{error}");
-                assert_eq!(cursor, "b00000001");
-                assert!(prune_old_executions(
-                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
-                )
-                .await
-                .unwrap());
-                assert_eq!(cursor, "b00001001");
-                assert!(!prune_old_executions(
-                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
-                )
-                .await
-                .unwrap());
-                assert_eq!(cursor, "zterminal");
+                assert_eq!(cursor, ("b00000150".to_string(), 6));
+                let mut pages = 0;
+                while prune_old_executions(pool, "execution_pruning_test", cutoff, &mut cursor)
+                    .await.unwrap()
+                {
+                    pages += 1;
+                    assert!(pages < 20, "a failed page must not prevent scan exhaustion");
+                }
+                assert_eq!(cursor, ("zterminal".to_string(), 6));
+                let retained_failed_page: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM execution_pruning_test.executions
+                     WHERE instance_id LIKE 'b%' AND execution_id=1",
+                ).fetch_one(pool).await.unwrap();
+                assert_eq!(retained_failed_page, 150, "a failed batch is atomic");
 
                 sqlx::query("DROP TRIGGER reject_prune ON execution_pruning_test.executions")
                     .execute(pool)
                     .await
                     .unwrap();
-                cursor.clear();
-                assert!(!prune_old_executions(
-                    pool, &client, "execution_pruning_test", cutoff, &mut cursor,
-                )
-                .await
-                .unwrap());
-                assert_eq!(cursor, "b00000001", "retry the failed instance next cycle");
+                cursor = (String::new(), 0);
+                pages = 0;
+                while prune_old_executions(pool, "execution_pruning_test", cutoff, &mut cursor)
+                    .await.unwrap()
+                {
+                    pages += 1;
+                    assert!(pages < 20, "retry failed pages on the next cycle");
+                }
                 let counts: (i64, i64, i64) = sqlx::query_as(
                     "SELECT
                          (SELECT count(*) FROM execution_pruning_test.instances),
@@ -2486,16 +2549,106 @@ mod tests {
                 .unwrap();
                 assert_eq!(survivors, [2, 3, 4, 5, 6]);
                 assert!(!prune_old_executions(
-                    pool, &client, "execution_pruning_test", cutoff, &mut String::new(),
+                    pool, "execution_pruning_test", cutoff, &mut cursor,
                 )
                 .await
-                .unwrap(), "an exhausted scan must not select protected histories");
+                .unwrap(), "an exhausted scan must not restart from protected histories");
                 sqlx::query("DROP SCHEMA execution_pruning_test CASCADE")
                     .execute(pool)
                     .await
                     .unwrap();
                 pool.close().await;
             });
+    }
+
+    #[pg_test]
+    fn execution_pruning_deadlines_release_connections() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let mut url = url::Url::parse(&postgres_connection_string()).unwrap();
+        url.set_username(&admin).unwrap();
+        url.set_path(&database);
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let store = PostgresProvider::new_with_config(worker_provider_config(
+                url.as_str(), "pruning_deadlines",
+            )).await.unwrap();
+            let maintenance = sqlx::postgres::PgPoolOptions::new().max_connections(1)
+                .connect_with(sqlx::postgres::PgConnectOptions::from_str(url.as_str()).unwrap()
+                    .application_name("pgd_pruning_deadline_test")).await.unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO pruning_deadlines.instances
+                     (instance_id,orchestration_name,current_execution_id,created_at,updated_at)
+                 VALUES ('a','test',2,now(),now()),('b','test',2,now(),now());
+                 INSERT INTO pruning_deadlines.executions(instance_id,execution_id,status,started_at,completed_at)
+                 SELECT id,n,CASE WHEN n=1 THEN 'ContinuedAsNew' ELSE 'Running' END,
+                     to_timestamp(0),CASE WHEN n=1 THEN to_timestamp(1) END
+                 FROM (VALUES ('a'),('b')) ids(id),generate_series(1,2) n;
+                 INSERT INTO pruning_deadlines.history(instance_id,execution_id,event_id,event_type,event_data,created_at)
+                 SELECT instance_id,execution_id,1,'Event','{}',now() FROM pruning_deadlines.executions;"
+            ).execute(store.pool()).await.unwrap();
+            for id in ["a", "b"] {
+                let mut blocker = store.pool().begin().await.unwrap();
+                sqlx::query("SELECT 1 FROM pruning_deadlines.history WHERE instance_id=$1 AND execution_id=1 FOR UPDATE")
+                    .bind(id).fetch_one(&mut *blocker).await.unwrap();
+                let mut cursor = (id.to_string(), 0);
+                let pruning = prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor);
+                tokio::pin!(pruning);
+                let deadline = tokio::time::sleep(Duration::from_secs(3));
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        result = &mut pruning => panic!("prune must encounter the held history lock: {result:?}"),
+                        _ = &mut deadline => panic!("pruning lock wait was not observed"),
+                        _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                            let waiting: bool = sqlx::query_scalar(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                                 WHERE application_name='pgd_pruning_deadline_test' AND wait_event_type='Lock')"
+                            ).fetch_one(store.pool()).await.unwrap();
+                            if waiting { break; }
+                        }
+                    }
+                }
+                let one: i32 = tokio::time::timeout(Duration::from_millis(500),
+                    sqlx::query_scalar("SELECT 1").fetch_one(store.pool())).await.unwrap().unwrap();
+                assert_eq!(one, 1, "maintenance must not occupy runtime connections");
+                let error = tokio::time::timeout(Duration::from_secs(3), &mut pruning).await.unwrap().unwrap_err();
+                assert!(error.contains("lock timeout"), "{error}");
+                tokio::time::timeout(Duration::from_millis(500),
+                    sqlx::query("SELECT 1").execute(&maintenance)).await.unwrap().unwrap();
+                blocker.rollback().await.unwrap();
+            }
+            sqlx::raw_sql(
+                "CREATE FUNCTION pruning_deadlines.slow_prune() RETURNS trigger LANGUAGE plpgsql AS $fn$
+                 BEGIN PERFORM pg_sleep(10); RETURN OLD; END $fn$;
+                 CREATE TRIGGER slow_prune BEFORE DELETE ON pruning_deadlines.history
+                 FOR EACH ROW EXECUTE FUNCTION pruning_deadlines.slow_prune();"
+            ).execute(store.pool()).await.unwrap();
+            let mut cursor = (String::new(), 0);
+            let error = tokio::time::timeout(Duration::from_secs(7),
+                prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor))
+                .await.unwrap().unwrap_err();
+            assert!(error.contains("statement timeout"), "{error}");
+            tokio::time::timeout(Duration::from_millis(500),
+                sqlx::query("SELECT 1").execute(&maintenance)).await.unwrap().unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pruning_deadlines.history")
+                .fetch_one(store.pool()).await.unwrap();
+            assert_eq!(count, 4, "timeout must roll back the whole batch");
+            sqlx::query("DROP TRIGGER slow_prune ON pruning_deadlines.history")
+                .execute(store.pool()).await.unwrap();
+            cursor = (String::new(), 0);
+            assert!(!prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor)
+                .await.unwrap());
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pruning_deadlines.history")
+                .fetch_one(store.pool()).await.unwrap();
+            assert_eq!(count, 2, "only current history survives successful retry");
+            maintenance.close().await;
+            sqlx::query("DROP SCHEMA pruning_deadlines CASCADE").execute(store.pool()).await.unwrap();
+            store.pool().close().await;
+        });
     }
 
     #[test]

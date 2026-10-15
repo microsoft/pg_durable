@@ -2568,11 +2568,15 @@ for at most one 1,000-candidate page, then other origins get a turn before a bus
 origin resumes. Only age-expired or excess-over-10,000 rows consume the retention
 candidate budget. Legacy orphan candidates exclude satellite roots and children
 in SQL before their bounded page is loaded into memory.
-Execution pruning likewise pages through at most 1,000 eligible engine instances
-per slice; an instance that fails pruning does not block later candidates and is
-retried on the next scan. Each pruning slice has a 15-second overall deadline.
-The page limit bounds instance candidates, not the number of old generations or
-history events an individual provider pruning call may delete.
+Execution pruning scans at most 1,000 execution keys per slice, including young
+and protected generations. Each batch deletes at most those 1,000 generations;
+this is a work limit, not a generation-count retention policy. Failed pages are
+logged, skipped for the rest of the scan, and retried on the next scan so they
+cannot block later pages. Pruning uses the maintenance connection, not the
+workflow runtime's connection pool, with server-side five-second statement and
+1.5-second lock deadlines. A timeout rolls back the batch. The number of history
+events in one generation is not capped; a batch that cannot finish within the
+deadline is deferred.
 
 Metadata queries have server-side deadlines and satellite operations have a
 15-second overall deadline. The candidate limit bounds materialized rows, not
@@ -2612,12 +2616,19 @@ Historical execution generations use only the age window, not a count cap.
 Pruning bounds how long completed history is retained, not its byte size: a
 busy workflow can still retain many generations within the window. An execution
 that has not continued into a new generation retains its current history.
+Completed child instances created by earlier loop iterations retain their current
+execution until the owning workflow is removed.
 Setting `reconcile_interval = 0` also disables execution pruning.
 
 On binary upgrade, the worker recovers missing completion timestamps for older
 continued generations from their recorded terminal history events. If an event
 is missing, it logs a migration warning and leaves that generation ineligible for
-age-based pruning rather than guessing its age.
+age-based pruning rather than guessing its age. This one-time backfill runs
+before the worker becomes ready and can delay workflow processing on a large
+history store. Allow sufficient time for it during upgrade; a role or database
+`statement_timeout` shorter than the backfill will cause startup to retry rather
+than finish. Adjust the worker's migration-session timeout for the upgrade if
+necessary.
 
 Notes:
 

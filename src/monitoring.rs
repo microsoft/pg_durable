@@ -719,8 +719,8 @@ pub fn instance_info(
 ///
 /// Distinguishes "this instance genuinely has no execution history yet" (empty
 /// rowset) from "the execution-history lookup failed" (explicit error). The
-/// latter — failing to build the runtime, connect to the duroxide store, list
-/// executions, or fetch a specific execution's info — now raises an error
+/// latter — failing to build the runtime, connect to the duroxide store, or read
+/// execution details — raises an error
 /// instead of being silently swallowed into an empty rowset. A completed
 /// instance always has at least one execution row, so an empty result for one
 /// previously masked a real lookup failure. See issue #168.
@@ -779,43 +779,155 @@ pub fn instance_executions(
         rt.block_on(async {
             let store = new_backend_provider(&pg_conn_str, provider_schema).await?;
 
-            let client = Client::new(store);
-
-            let execution_ids = client
-                .list_executions(&engine_id)
+            read_execution_snapshot(store.pool(), provider_schema, &engine_id, limit_count)
                 .await
-                .map_err(|e| format!("failed to list executions: {e:?}"))?;
-
-            let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
-            sorted_ids.sort_by(|a, b| b.cmp(a));
-            let limited: Vec<_> = sorted_ids.into_iter().take(limit_count as usize).collect();
-
-            let mut rows = Vec::new();
-            for exec_id in limited {
-                let info = client
-                    .get_execution_info(&engine_id, exec_id)
-                    .await
-                    .map_err(|e| format!("failed to fetch info for execution {exec_id}: {e:?}"))?;
-
-                let duration_ms = info
-                    .completed_at
-                    .map(|end| end.saturating_sub(info.started_at))
-                    .unwrap_or(0);
-
-                rows.push((
-                    info.execution_id as i64,
-                    info.status,
-                    info.event_count as i64,
-                    duration_ms as i64,
-                    info.output,
-                ));
-            }
-            Ok(rows)
+                .map_err(|error| format!("failed to read executions: {error}"))
         });
 
     match results {
         Ok(rows) => TableIterator::new(rows),
         Err(e) => pgrx::error!("df.instance_executions: execution history lookup failed: {e}"),
+    }
+}
+
+async fn read_execution_snapshot(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    instance_id: &str,
+    limit: i32,
+) -> Result<Vec<(i64, String, i64, i64, Option<String>)>, sqlx::Error> {
+    let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    // One statement gives details and event counts the same MVCC snapshot,
+    // including when maintenance removes older generations during this read.
+    let rows: Vec<(
+        i64,
+        String,
+        i64,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = sqlx::query_as(&format!(
+        "SELECT e.execution_id, e.status,
+             (SELECT pg_catalog.count(*) FROM {schema}.history h
+              WHERE h.instance_id OPERATOR(pg_catalog.=) e.instance_id
+                AND h.execution_id OPERATOR(pg_catalog.=) e.execution_id),
+             e.started_at, e.completed_at, e.output
+         FROM (
+             SELECT instance_id, execution_id, status, started_at, completed_at, output
+             FROM {schema}.executions
+             WHERE instance_id OPERATOR(pg_catalog.=) $1
+             ORDER BY execution_id DESC LIMIT $2
+         ) e ORDER BY e.execution_id DESC"
+    ))
+    .bind(instance_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, status, events, started, completed, output)| {
+            let duration = completed
+                .map(|end| {
+                    end.timestamp_millis()
+                        .saturating_sub(started.timestamp_millis())
+                        .max(0)
+                })
+                .unwrap_or(0);
+            (id, status, events, duration, output)
+        })
+        .collect())
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use super::*;
+    use sqlx::Connection;
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    #[pg_test]
+    fn execution_snapshot_survives_concurrent_pruning() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut control = crate::origin::metadata_test_connection(&admin, &database).await;
+            let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(
+                sqlx::postgres::PgConnectOptions::from_str(&postgres_connection_string()).unwrap()
+                    .username(&admin).database(&database),
+            ).await.unwrap();
+            sqlx::raw_sql(
+                "CREATE SCHEMA execution_snapshot;
+                 CREATE TABLE execution_snapshot.rows(instance_id text,execution_id bigint,status text,
+                     started_at timestamptz,completed_at timestamptz,output text);
+                 CREATE TABLE execution_snapshot.history(instance_id text,execution_id bigint);
+                 INSERT INTO execution_snapshot.rows VALUES
+                     ('live',1,'ContinuedAsNew',to_timestamp(1),to_timestamp(2.25),'old'),
+                     ('live',2,'Running',to_timestamp(3),NULL,NULL);
+                 INSERT INTO execution_snapshot.history VALUES ('live',1),('live',1),('live',2);
+                 CREATE FUNCTION execution_snapshot.gate(status text) RETURNS text LANGUAGE plpgsql AS $fn$
+                 BEGIN PERFORM pg_advisory_xact_lock(477832); RETURN status; END $fn$;
+                 CREATE VIEW execution_snapshot.executions AS
+                     SELECT instance_id,execution_id,execution_snapshot.gate(status) AS status,
+                         started_at,completed_at,output FROM execution_snapshot.rows;
+                 CREATE FUNCTION execution_snapshot.unexpected(text,text) RETURNS boolean
+                     LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'snapshot operator trap'; END $fn$;
+                 CREATE OPERATOR execution_snapshot.= (LEFTARG=text,RIGHTARG=text,
+                     FUNCTION=execution_snapshot.unexpected);
+                 SELECT pg_advisory_lock(477832);"
+            ).execute(&mut control).await.unwrap();
+            sqlx::raw_sql(
+                "SET search_path=execution_snapshot,pg_catalog;
+                 CREATE TEMP TABLE history(instance_id text,execution_id bigint);
+                 CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (false);"
+            ).execute(&pool).await.unwrap();
+            let trap = sqlx::query("SELECT 'x'::pg_catalog.text = 'x'::pg_catalog.text")
+                .execute(&pool).await.unwrap_err();
+            assert!(trap.to_string().contains("snapshot operator trap"));
+            let blocked_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&pool).await.unwrap();
+            let read = read_execution_snapshot(&pool, "execution_snapshot", "live", 5);
+            tokio::pin!(read);
+            let deadline = tokio::time::sleep(Duration::from_secs(3));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    result = &mut read => panic!("snapshot must wait at test barrier: {result:?}"),
+                    _ = &mut deadline => panic!("snapshot barrier was not reached"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        let waiting: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                            .bind(blocked_pid).fetch_one(&mut control).await.unwrap();
+                        if waiting { break; }
+                    }
+                }
+            }
+            sqlx::raw_sql(
+                "BEGIN;
+                 DELETE FROM execution_snapshot.history WHERE execution_id=1;
+                 DELETE FROM execution_snapshot.rows WHERE execution_id=1;
+                 COMMIT;
+                 SELECT pg_advisory_unlock(477832);"
+            ).execute(&mut control).await.unwrap();
+            let rows = tokio::time::timeout(Duration::from_secs(3), &mut read).await.unwrap().unwrap();
+            assert_eq!(rows, [
+                (2, "Running".into(), 1, 0, None),
+                (1, "ContinuedAsNew".into(), 2, 1250, Some("old".into())),
+            ], "details and history counts must use one snapshot");
+            assert_eq!(read_execution_snapshot(&pool, "execution_snapshot", "live", 1).await.unwrap(),
+                [(2, "Running".into(), 1, 0, None)]);
+            sqlx::query("ALTER TABLE execution_snapshot.history RENAME TO missing_history")
+                .execute(&mut control).await.unwrap();
+            let error = read_execution_snapshot(&pool, "execution_snapshot", "live", 1).await.unwrap_err();
+            assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("42P01"),
+                "real lookup failures must not become empty history");
+            pool.close().await;
+            sqlx::query("DROP SCHEMA execution_snapshot CASCADE").execute(&mut control).await.unwrap();
+            control.close().await.unwrap();
+        });
     }
 }
 

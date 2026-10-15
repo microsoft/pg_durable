@@ -418,17 +418,34 @@ for the separate runtime shutdown and server-side cancellation limitations.
   generations using `pg_durable.retention_days`, including running workflows and
   nested loops in every origin. The query uses existing provider tables, so no
   extension upgrade DDL or new `df` schema detection is needed.
-- **Provider migration:** the worker's startup `ApplyAll` applies migration `0024`
+- **Provider migrations:** the worker's startup `ApplyAll` applies migration `0024`
   before starting the runtime. It timestamps `ContinuedAsNew` executions and
   backfills older NULL timestamps from terminal history events. Unrecoverable
   timestamps remain NULL with a warning; those generations are not age-pruned.
   Stop any other runtimes sharing the provider schema during this one-time
-  backfill. Existing histories may make startup slower.
+  backfill. Existing histories may make startup slower; any worker-role/database
+  statement timeout must permit that backfill to finish, or startup retries it.
+  This dependency pair also includes `0023` (partial indexes), `0025` (fetch
+  leases), and `0026` (cursor-based batch pruning). Readiness schema version `3`
+  prevents backends from treating a pre-migration worker marker as ready.
+- **Bounded maintenance:** each slice scans at most 1,000 execution keys, including
+  protected rows. The provider owns deletion predicates and atomically prunes
+  that page on the maintenance connection under server-side deadlines. Failed
+  pages are revisited next scan; runtime provider connections are not borrowed.
+- **Inspection:** `df.instance_executions()` reads execution details and event
+  counts in one MVCC snapshot, so concurrent pruning does not produce spurious
+  per-generation not-found errors. Genuine query failures still raise errors.
 - **Replay:** no orchestration code, durable-operation inputs, or continuation
   payloads change. Pruning preserves the current and running executions.
+- **Dependency pair:** duroxide `0.1.32` is required by the provider's current
+  branch. Its shutdown operation now cancels and joins owned tasks; zero means
+  immediate cancellation rather than a drain grace period. Validate the real
+  previous-binary lifecycle and worker shutdown when updating this pair.
 - **Release blocker:** the provider is temporarily pinned to the timestamp-fix
-  git revision in `Cargo.toml`. Replace the `DONOTLAND` pin with a released
-  compatible version before landing.
+  git branch in `Cargo.toml`. The local review fixes add migration `0026`; until
+  they are pushed, validation requires a local Cargo patch override. Refresh the
+  git lockfile after publishing those fixes and replace the `DONOTLAND` pin with
+  a compatible release before landing.
 
 #### Typed HTTP endpoints
 
