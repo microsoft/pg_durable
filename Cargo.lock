@@ -712,9 +712,9 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "duroxide"
-version = "0.1.30"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92b17ebe10f702644ad65a9c624b4060023955b4cd145c23ed4c6942b17fdac9"
+checksum = "75573b31ca6fd3918acbe9af7c0ed32d3b181675cd9b01d9e09f2b8436c3d192"
 dependencies = [
  "async-trait",
  "futures",
@@ -731,8 +731,8 @@ dependencies = [
 
 [[package]]
 name = "duroxide-pg"
-version = "0.1.35"
-source = "git+https://github.com/microsoft/duroxide-pg?branch=thomcc%2Fcontinue_as_new_completed_at#e7773b34bee0127efafd796cdf8c732cd537cd2d"
+version = "0.1.36"
+source = "git+https://github.com/microsoft/duroxide-pg?branch=thomcc%2Fcontinue_as_new_completed_at#c89f75484c3da68599d2de3381b1cbca7f901c57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3319,6 +3319,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
