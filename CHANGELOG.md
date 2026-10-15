@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- **Managed identity HTTP authentication:** normal and multipart endpoints can
+  use a single user-assigned identity configured at startup with
+  `pg_durable.managed_identity_client_id`. An empty setting disables MI without
+  affecting other HTTP authentication. Tokens are acquired and cached inside
+  activities, with audiences derived from supported destination hosts.
+- **Delegated MI administration:** `EXECUTE` on `df.managed_identity_admin()`
+  permits endpoint configuration without PostgreSQL superuser. The endpoint
+  owner's capability and the caller's endpoint/HTTP privileges are checked for
+  each attempt. Upgrade each installation using MI to 0.2.10 and grant the
+  capability explicitly; existing general administration grants do not include it.
+
 ## [0.2.9] - 2026-10-07
 
 > **Upgrade:** Install/restart the new binary and wait for the control runtime

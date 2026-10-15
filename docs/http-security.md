@@ -274,7 +274,7 @@ destination policy.
 HTTP constructors are not decoded as endpoint references. An endpoint value does
 not grant authority. Normal and multipart activities
 first check their existing HTTP function grant, then resolve the foreign server
-and the submitting role's user mapping on a connection authenticated as that role.
+and, when needed, the submitting role's user mapping on a connection authenticated as that role.
 Server `USAGE` is mandatory. Catalogs are in the trusted origin installation
 (control for legacy control-origin work), regardless of the SQL target. Caller-supplied
 database/identity fields in node JSON cannot select another credential catalog or
@@ -348,6 +348,66 @@ query insertion; response credentials remain outside this guarantee.
 
 See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings) for API
 examples and deferred general-composition cases.
+
+---
+
+### 3.8 Managed identity
+
+Managed identity is available with the 0.2.10 binary and extension schema.
+Capability and endpoint checks use the trusted origin installation, including
+satellite-local grants. The identity and token-provider startup settings apply
+to the shared worker, not separately to each database.
+
+Managed-identity endpoints delegate a deployment-selected identity, not a per-role
+catalog credential. Creation and alteration require `EXECUTE` on the
+extension-owned `df.managed_identity_admin()` permission function, alongside
+native FDW and ownership privileges. The function is a no-op, not a token API,
+and its ACL has no `PUBLIC` grant. General pg_durable administration does not
+implicitly grant this capability.
+
+Activities independently check that the current endpoint owner retains effective
+`EXECUTE` on that same extension-owned function. A missing or detached function
+fails closed; a same-named user function does not establish authority. Native
+privilege inheritance applies. Losing the capability or transferring ownership
+to an unauthorized role disables subsequent use, including cache hits. Server
+`USAGE` and HTTP function grants are also checked before consulting the token
+cache. Revocation does not retract a request already authorized and in flight.
+
+Only explicitly mapped public Azure hosts over HTTPS on port 443 are accepted.
+The resource is fixed by the destination host; neither server options nor workflow
+data can supply a free-form resource or scope. The user-assigned client UUID is
+pinned at startup by `pg_durable.managed_identity_client_id`; an unset or empty
+value disables MI without contacting a provider. Endpoint-level `client_id` is
+rejected. There is no implicit system-assigned or provider-default identity.
+Ordinary headers and
+secret bindings cannot override the endpoint's authorization, including before
+its token has been fetched. See [Managed Identity](../USER_GUIDE.md#managed-identity)
+for the exact host/resource mapping.
+
+After privilege, catalog, destination and binding checks, and after releasing the
+catalog connection, the HTTP activity obtains a token from its configured provider.
+The dedicated client may reach IMDS without weakening the request client's IP or
+domain controls. Both the provider URL and the pinned identity are protected
+startup settings, not workflow data; endpoint administration does not grant
+configuration authority. The client uses the public IMDS protocol, disables redirects and proxies,
+and bounds response size and acquisition time. There is no provider fallback.
+The provider must honor the configured identity and be trusted to supply its
+tokens. The selected identity must be approved for customer-configured requests;
+pinning it does not itself isolate customer identities from service identities
+available elsewhere on the host. These controls protect against SQL-level
+redirection, not code already able to access host credentials or the PostgreSQL
+process's memory.
+
+Tokens are validated, marked sensitive and cached only inside the worker, by
+resource for its pinned identity. Concurrent misses for the same key share one fetch;
+tokens within two minutes of expiry are not reused, and refresh failures never
+serve an old token. Provider responses, parse details and credential headers are
+not included in activity errors, logs or results. No separate durable token-fetch
+activity is scheduled. Responses from the destination retain the existing
+response policy, including its limitations around echoed secrets.
+Changing the client ID and restarting clears cached tokens and changes subsequent
+requests, including pending workflows and retries, without changing recorded
+activity results.
 
 ---
 

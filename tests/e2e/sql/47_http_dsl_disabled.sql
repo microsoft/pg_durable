@@ -138,6 +138,38 @@ BEGIN
 END $$;
 
 DROP TABLE _test_http_bypass;
+
 RESET SESSION AUTHORIZATION;
+CREATE SERVER mi_http_disabled FOREIGN DATA WRAPPER pg_durable_fdw
+    OPTIONS (base_url 'https://pg-durable-mi.blob.core.windows.net', auth_scheme 'managed-identity');
+GRANT USAGE ON FOREIGN SERVER mi_http_disabled TO df_e2e_user;
+SET SESSION AUTHORIZATION df_e2e_user;
+CREATE TEMP TABLE _test_mi_disabled AS
+SELECT df.start(jsonb_build_object(
+    'node_type', node_type,
+    'query', jsonb_build_object('endpoint', 'mi_http_disabled', 'url', '/data', 'method', 'POST',
+        'parts', '[{"name":"file","data_b64":"aGVsbG8="}]'::jsonb)::text
+)::text, 'mi-disabled-' || node_type) AS instance_id
+FROM (VALUES ('HTTP'), ('HTTP_MULTIPART')) AS node_types(node_type);
+
+DO $$
+DECLARE
+    test_case record;
+    actual_status text;
+    node_result text;
+BEGIN
+    FOR test_case IN SELECT * FROM _test_mi_disabled LOOP
+        actual_status := df.await_instance(test_case.instance_id, 30);
+        SELECT result::text INTO node_result FROM df.nodes
+        WHERE instance_id = test_case.instance_id AND node_type IN ('HTTP', 'HTTP_MULTIPART');
+        IF actual_status IS DISTINCT FROM 'failed' OR node_result IS NULL
+           OR node_result NOT ILIKE '%outbound HTTP requests are disabled%' THEN
+            RAISE EXCEPTION 'TEST FAILED: managed identity bypassed the HTTP kill switch: %, %', actual_status, node_result;
+        END IF;
+    END LOOP;
+END $$;
+DROP TABLE _test_mi_disabled;
+RESET SESSION AUTHORIZATION;
+DROP SERVER mi_http_disabled;
 
 SELECT 'TEST PASSED' AS result;
