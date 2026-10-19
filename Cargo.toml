@@ -41,11 +41,11 @@ duroxide-pg = "=0.1.34"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # For ExecuteSQL activity (connecting back to PostgreSQL)
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "bigdecimal", "uuid", "chrono"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "json", "bigdecimal", "uuid", "chrono"] }
 bigdecimal = "0.4"
 
 # For cron expression parsing (wait_for_schedule)
-cron = "0.13"
+cron = "0.17"
 chrono = "0.4"
 
 # For HTTP requests (df.http). We set default-features = false and select
@@ -57,7 +57,7 @@ chrono = "0.4"
 # stays on native-tls with no rustls/ring/aws-lc in the tree.
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart", "gzip", "deflate"] }
 http = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Canonical URL parsing for SSRF validation. Semver-compatible with reqwest's own
 # url dependency, so Cargo unifies them and `url::Url` is `reqwest::Url` — the
