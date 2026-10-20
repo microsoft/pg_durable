@@ -71,6 +71,13 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Security
 
+- **Start admission quotas (#139):** `df.max_concurrent_per_user` (default
+  `100`) and `df.max_instances_per_user` (default `10000`) limit active and
+  retained instances per submitting role and origin database. Both are
+  superuser-settable; `0` disables a quota and superuser identities are exempt.
+  Starts serialize per role until the submitting transaction ends and reject
+  over-quota work before insert/enqueue, including on older installed schemas.
+  See [Instance Limits](USER_GUIDE.md#instance-limits) before upgrading.
 - **SQL name-resolution hardening (#418):** extension-owned runtime SQL
   explicitly qualifies catalog objects, functions, types and operators to resist
   shadowing through caller or database `search_path` settings. User-authored SQL

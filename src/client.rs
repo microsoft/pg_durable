@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use duroxide::Client;
+use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use sqlx::Connection;
 use tokio::runtime::Runtime;
@@ -278,12 +279,34 @@ fn format_new_transaction_start_error(sqlstate: Option<&str>, message: &str) -> 
     }
 }
 
-fn classify_new_transaction_start_error(err: sqlx::Error) -> String {
+fn new_transaction_start_error(message: String) -> Box<ErrorReport> {
+    Box::new(ErrorReport::new(
+        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        message,
+        function_name!(),
+    ))
+}
+
+fn classify_new_transaction_start_error(err: sqlx::Error) -> Box<ErrorReport> {
     let message = err.to_string();
-    let sqlstate = err
+    let database_error = err
         .as_database_error()
-        .and_then(|db_err| db_err.code().map(|code| code.to_string()));
-    format_new_transaction_start_error(sqlstate.as_deref(), &message)
+        .and_then(|e| e.try_downcast_ref::<sqlx::postgres::PgDatabaseError>());
+    let sqlstate = database_error.map(|e| e.code());
+    let code = if sqlstate == Some("53400") {
+        PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
+    } else {
+        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+    };
+    let mut report = ErrorReport::new(
+        code,
+        format_new_transaction_start_error(sqlstate, &message),
+        function_name!(),
+    );
+    if let Some(hint) = database_error.and_then(|e| e.hint()) {
+        report = report.set_hint(hint);
+    }
+    Box::new(report)
 }
 
 /// Run `df.start()` on an already-established separate session.
@@ -292,7 +315,7 @@ async fn start_on_new_session(
     fut: &str,
     label: &Option<String>,
     database: &Option<String>,
-) -> Result<String, String> {
+) -> Result<String, Box<ErrorReport>> {
     use sqlx::Row;
 
     // `connect_as_user` marks its connections as workflow-execution sessions
@@ -303,7 +326,11 @@ async fn start_on_new_session(
     sqlx::query("SET df.in_workflow = 'false'")
         .execute(&mut *conn)
         .await
-        .map_err(|e| format!("failed to clear df.in_workflow on new-transaction session: {e}"))?;
+        .map_err(|e| {
+            new_transaction_start_error(format!(
+                "failed to clear df.in_workflow on new-transaction session: {e}"
+            ))
+        })?;
 
     // Bound both the lock wait and the statement itself. See
     // NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS for why this is not optional. Two
@@ -313,10 +340,11 @@ async fn start_on_new_session(
         format!("SET lock_timeout = {NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS}"),
         format!("SET statement_timeout = {NEW_TRANSACTION_START_STATEMENT_TIMEOUT_MS}"),
     ] {
-        sqlx::query(&stmt)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| format!("failed to set timeouts on new-transaction session: {e}"))?;
+        sqlx::query(&stmt).execute(&mut *conn).await.map_err(|e| {
+            new_transaction_start_error(format!(
+                "failed to set timeouts on new-transaction session: {e}"
+            ))
+        })?;
     }
 
     // Three positional arguments on purpose: this must also resolve on schemas
@@ -332,8 +360,11 @@ async fn start_on_new_session(
         .await
         .map_err(classify_new_transaction_start_error)?;
 
-    row.try_get("id")
-        .map_err(|e| format!("df.start() on new transaction returned no instance id: {e}"))
+    row.try_get("id").map_err(|e| {
+        new_transaction_start_error(format!(
+            "df.start() on new transaction returned no instance id: {e}"
+        ))
+    })
 }
 
 /// Start a durable function **in its own transaction**.
@@ -359,7 +390,7 @@ pub fn start_in_new_transaction(
     label: Option<&str>,
     database: Option<&str>,
     user: &str,
-) -> Result<String, String> {
+) -> Result<String, Box<ErrorReport>> {
     use sqlx::Connection;
 
     let rt = get_client_runtime();
@@ -370,11 +401,17 @@ pub fn start_in_new_transaction(
     let user = user.to_string();
     let origin_database =
         Spi::get_one::<String>("SELECT pg_catalog.current_database()::pg_catalog.text")
-            .map_err(|e| format!("Failed to resolve caller database: {e}"))?
-            .ok_or_else(|| "Failed to resolve caller database".to_string())?;
+            .map_err(|e| {
+                new_transaction_start_error(format!("Failed to resolve caller database: {e}"))
+            })?
+            .ok_or_else(|| {
+                new_transaction_start_error("Failed to resolve caller database".into())
+            })?;
 
     rt.block_on(async {
-        let mut conn = connect_as_user_for_new_transaction(&user, &origin_database).await?;
+        let mut conn = connect_as_user_for_new_transaction(&user, &origin_database)
+            .await
+            .map_err(new_transaction_start_error)?;
 
         let result = start_on_new_session(&mut conn, &fut, &label, &database).await;
 

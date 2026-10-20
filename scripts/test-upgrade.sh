@@ -952,6 +952,30 @@ test_b1_status_instance() {
     assert_sql_equals "SELECT df.status('${B1_INSTANCE_ID}');" "completed"
 }
 
+test_b1_start_limits() {
+    run_sql_capture "
+        BEGIN;
+        CREATE ROLE upgrade_start_limits LOGIN;
+        SELECT df.grant_usage('upgrade_start_limits');
+        SET LOCAL df.max_concurrent_per_user = 1;
+        SET LOCAL df.max_instances_per_user = 0;
+        SET LOCAL ROLE upgrade_start_limits;
+        DO \$\$
+        BEGIN
+            PERFORM df.start('SELECT 1');
+            BEGIN
+                PERFORM df.start('SELECT 1');
+                RAISE EXCEPTION 'legacy df.start bypassed concurrency quota';
+            EXCEPTION WHEN configuration_limit_exceeded THEN
+                IF SQLERRM NOT LIKE '%has 1 active instances (limit 1)%' THEN
+                    RAISE;
+                END IF;
+            END;
+        END \$\$;
+        ROLLBACK;
+    " >/dev/null
+}
+
 test_b1_result() {
     assert_sql_contains "SELECT df.result('${B1_INSTANCE_ID}');" "test_value"
 }
@@ -1146,6 +1170,7 @@ else
         run_test "B1 [v${B1_VERSION}]: DSL chain (~>)" test_b1_dsl_chain
         run_test "B1 [v${B1_VERSION}]: conditional operators (?>/!>)" test_b1_conditional_operators
         run_test "B1 [v${B1_VERSION}]: df.start()/wait_for_completion()" test_b1_start_and_complete
+        run_test "B1 [v${B1_VERSION}]: df.start() admission limits" test_b1_start_limits
         run_test "B1 [v${B1_VERSION}]: df.status() on real instance" test_b1_status_instance
         run_test "B1 [v${B1_VERSION}]: df.result()" test_b1_result
         run_test "B1 [v${B1_VERSION}]: df.list_instances()" test_b1_list_instances

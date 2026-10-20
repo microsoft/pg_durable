@@ -363,6 +363,27 @@ development cycle, not the published v0.2.8 release. Multi-database installation
 identity and HTTP endpoint/secret DDL also belong in this migration;
 the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
 
+#### `df.start()` admission quotas (#139)
+
+- **DDL/B1:** No new schema objects, grants, or migration DDL. Both start
+  wrapper symbols use the same admission check against existing `df.instances`
+  columns, including on 0.2.2+ schemas without `ALTER EXTENSION UPDATE`.
+  B1 exercises a non-superuser reaching its quota on each supported schema.
+- **Behavior change:** New superuser-settable GUCs
+  `df.max_concurrent_per_user` (default `100`) and `df.max_instances_per_user`
+  (default `10000`) apply immediately after loading the new binary.
+  Existing work remains intact; starts at or above either quota fail with
+  SQLSTATE `53400`. Set a quota to `0` to disable it.
+- **Concurrency:** Admission uses a database-local, per-role transaction
+  advisory lock and a current snapshot, including under repeatable-read and
+  serializable isolation. E2E tests cover concurrent commit, rollback,
+  savepoint rollback, and lock timeout.
+- **B2/replay:** No data migration, runtime schema detection, durable payload,
+  or orchestration changes. Workflows that call `df.start()` from SQL are
+  subject to the new quotas when that SQL activity executes. The separate
+  `'new'` session uses its own configuration defaults, not caller session
+  overrides. See [Instance Limits](../USER_GUIDE.md#instance-limits).
+
 #### Multi-database installation
 
 - **Local DDL:** [0.2.8 to 0.2.9](../sql/pg_durable--0.2.8--0.2.9.sql)

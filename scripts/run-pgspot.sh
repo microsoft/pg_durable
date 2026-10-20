@@ -41,6 +41,7 @@ PGSPOT_ALLOW=(
   # pg_durable's DSL intentionally exposes unqualified custom operators (for
   # example, `df.sql(...) ~> df.sql(...)`) so users do not need df in search_path.
   # pgspot reports the generated CREATE OPERATOR name as an unqualified object.
+  # Match all seven DSL operators explicitly; other unqualified objects still fail.
   '^PS017: Unqualified object reference: ~> at line [0-9]+$'
   '^PS017: Unqualified object reference: \|=> at line [0-9]+$'
   '^PS017: Unqualified object reference: & at line [0-9]+$'
