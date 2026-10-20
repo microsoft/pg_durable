@@ -26,10 +26,11 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 16. [Connection Host](#connection-host)
 17. [HTTP Security](#http-security)
 18. [HTTP Allowed Domains](#http-allowed-domains)
-19. [Connection Limits](#connection-limits)
-20. [Troubleshooting](#troubleshooting)
-21. [Quick Reference Card](#quick-reference-card)
-22. [Appendix: Test Data Setup](#appendix-test-data-setup)
+19. [Instance Limits](#instance-limits)
+20. [Connection Limits](#connection-limits)
+21. [Troubleshooting](#troubleshooting)
+22. [Quick Reference Card](#quick-reference-card)
+23. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -3000,6 +3001,64 @@ requirement, IP blocklist, proxy and redirect restrictions, and HTTP function
 privileges are unchanged. After restart, pending requests and retries use the
 new list. See [HTTP security](docs/http-security.md#5-layer-2-endpoint-allow-list)
 for the full syntax and default domain list.
+
+---
+
+## Instance Limits
+
+`df.start()` checks two quotas before creating an instance or enqueueing work:
+
+| Setting | Default | Counts |
+|---------|---------|--------|
+| `df.max_concurrent_per_user` | `100` | Instances with status `pending` or `running`, including sleeping, looping, and signal-waiting workflows |
+| `df.max_instances_per_user` | `10000` | All retained instances, including completed, failed, and cancelled workflows |
+
+Each quota applies to the **submitting role (`current_user`) in the origin
+database**. `SET ROLE` and `SECURITY DEFINER` affect that identity just as they
+affect workflow execution. An explicit SQL target database does not move the
+quota to that database. Superuser submission identities bypass both quotas,
+but still require `pg_durable.enable_superuser_instances = on`.
+
+Both settings accept integers from `0` to `2147483647`; `0` disables that
+individual quota. They are superuser-settable (`SUSET`) and can be changed
+without a restart. For example, an administrator can set defaults for new
+connections by an application role:
+
+```sql
+ALTER ROLE app_user IN DATABASE appdb SET df.max_concurrent_per_user = 200;
+ALTER ROLE app_user IN DATABASE appdb SET df.max_instances_per_user = 25000;
+```
+
+Server settings in `postgresql.conf` or `ALTER SYSTEM` take effect on reload.
+Session `SET` overrides affect `'caller'` starts. **`transaction_mode => 'new'`
+uses the separate session's role/database/server defaults**, not the caller's
+session overrides. Configure those defaults to apply the same policy to both
+modes; `SET ROLE` alone does not load a role's connection defaults.
+
+At a quota, the call fails with SQLSTATE `53400` (`configuration_limit_exceeded`)
+and a `HINT` identifying the relevant setting. Finishing or cancelling work
+frees concurrent capacity, but not retained-instance capacity. Retained capacity
+is freed when [automatic reconciliation](#automatic-reconciliation) removes
+terminal instances. If reconciliation is disabled, or retained work has not
+aged out, an administrator must adjust retention or raise the quota.
+
+Concurrent starts by the same role in the same database wait for the preceding
+**submitting transaction** to commit or roll back before checking capacity.
+They do not wait for workflows to finish. Keep submitting transactions short
+and use PostgreSQL `lock_timeout` to bound admission waits. Counts include
+current committed rows and the caller's own changes even under `REPEATABLE READ`
+or `SERIALIZABLE`. Rollback, including rollback to a savepoint, releases the
+corresponding reservations.
+
+Do not follow a `'caller'` start with a `'new'` start for the same role and
+database while the caller transaction remains open: the separate session waits
+on the caller's admission lock and eventually hits its 30-second timeout.
+Commit or roll back the caller transaction first.
+
+These are instance quotas, not calls-per-second or byte limits. They do not
+bound an individual graph's size or history. Changing a quota does not cancel
+or delete existing work; it only controls admission of new instances. The
+defaults also apply after a binary-only upgrade, without `ALTER EXTENSION UPDATE`.
 
 ---
 

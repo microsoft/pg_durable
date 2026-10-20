@@ -13,13 +13,13 @@
 # Usage: scripts/run-pgspot.sh FILE [FILE ...]   (globs expanded by caller)
 #
 # Env:
-#   PGSPOT_VERSION       pgspot version to pin (default: 0.9.2)
+#   PGSPOT_VERSION       pgspot version to pin (default: 0.9.4)
 #   PGSPOT_VENV          venv dir to install/reuse (default: a cache dir)
 #   PGSPOT_BIN           existing pgspot executable (skips venv setup)
 
 set -euo pipefail
 
-PGSPOT_VERSION="${PGSPOT_VERSION:-0.9.2}"
+PGSPOT_VERSION="${PGSPOT_VERSION:-0.9.4}"
 PGSPOT_VENV="${PGSPOT_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/pg_durable/pgspot-venv}"
 
 # --- Finding allowlist -----------------------------------------------------
@@ -41,7 +41,14 @@ PGSPOT_ALLOW=(
   # pg_durable's DSL intentionally exposes unqualified custom operators (for
   # example, `df.sql(...) ~> df.sql(...)`) so users do not need df in search_path.
   # pgspot reports the generated CREATE OPERATOR name as an unqualified object.
+  # Match all seven DSL operators explicitly; other unqualified objects still fail.
   '^PS017: Unqualified object reference: ~> at line [0-9]+$'
+  '^PS017: Unqualified object reference: \|=> at line [0-9]+$'
+  '^PS017: Unqualified object reference: & at line [0-9]+$'
+  '^PS017: Unqualified object reference: \| at line [0-9]+$'
+  '^PS017: Unqualified object reference: \?> at line [0-9]+$'
+  '^PS017: Unqualified object reference: !> at line [0-9]+$'
+  '^PS017: Unqualified object reference: @> at line [0-9]+$'
   # Upgrade scripts CREATE OR REPLACE selected df helpers to migrate
   # pre-existing installs. pgspot flags PS002
   # because a standalone upgrade script has no `CREATE SCHEMA df` to prove df is

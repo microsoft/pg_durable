@@ -527,6 +527,13 @@ database privileges. Install in `pg_durable.database` first and wait for control
 readiness before creating satellites; see
 [Multi-Database Support](../USER_GUIDE.md#multi-database-support).
 
+Non-superuser starts are subject to `df.max_concurrent_per_user` (default `100`)
+and `df.max_instances_per_user` (default `10000`) in their origin database.
+Rejection raises SQLSTATE `53400` with a tuning hint before any insert or enqueue.
+Concurrent starts by the same role wait until the earlier submitting transaction
+ends. See [Instance Limits](../USER_GUIDE.md#instance-limits) for quota scope,
+retention, transaction interactions, and configuration.
+
 #### transaction_mode
 
 Selects which transaction the *start itself* runs in. It changes nothing about
@@ -890,6 +897,25 @@ access requires a direct administrator grant or
 ## Server Configuration (GUCs)
 
 These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See each setting for reload or restart requirements.
+
+---
+
+### df.max_concurrent_per_user / df.max_instances_per_user
+
+Admission quotas for `df.start()`, per submitting role and origin database.
+
+| Property | Concurrent quota | Retained-instance quota |
+|----------|------------------|-------------------------|
+| Default | `100` | `10000` |
+| Counts | `pending` and `running` instances | All `df.instances` rows owned by the role |
+| Range | `0` to `2147483647`; `0` disables | `0` to `2147483647`; `0` disables |
+| Context | `SUSET` | `SUSET` |
+
+Superuser submission identities are exempt. Administrators can change either
+setting at runtime, including per-role/database connection defaults.
+`transaction_mode => 'new'` uses its separate session's defaults and does not
+inherit the caller's session `SET` overrides. See
+[Instance Limits](../USER_GUIDE.md#instance-limits) for tuning and admission waits.
 
 ---
 

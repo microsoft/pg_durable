@@ -33,6 +33,8 @@ pub static MAX_ORIGIN_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(12);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_NEW_TRANSACTION_STARTS: GucSetting<i32> = GucSetting::<i32>::new(2);
+pub static MAX_CONCURRENT_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(100);
+pub static MAX_INSTANCES_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
 pub static NEW_TRANSACTION_START_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(5);
 /// When `false` (default), pg_durable rejects any instance whose `submitted_by`
@@ -284,6 +286,28 @@ pub extern "C-unwind" fn _PG_init() {
         &LIST_INSTANCES_MAX_LIMIT,
         1,
         1_000_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"df.max_concurrent_per_user",
+        c"Maximum pending and running instances per submitting role in each database",
+        c"df.start() rejects new instances at this limit. 0 disables the limit. Superuser submission identities are exempt.",
+        &MAX_CONCURRENT_PER_USER,
+        0,
+        i32::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"df.max_instances_per_user",
+        c"Maximum retained instances per submitting role in each database",
+        c"Includes terminal instances until reconciliation removes them. df.start() rejects new instances at this limit. 0 disables the limit. Superuser submission identities are exempt.",
+        &MAX_INSTANCES_PER_USER,
+        0,
+        i32::MAX,
         GucContext::Suset,
         GucFlags::default(),
     );
