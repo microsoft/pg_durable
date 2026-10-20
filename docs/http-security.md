@@ -466,6 +466,8 @@ With no override, the following subdomain patterns are allowed. Apex domains
 | `*.table.core.windows.net` | Azure Table Storage |
 | `*.file.core.windows.net` | Azure Files |
 | `*.azurewebsites.net` | Azure App Service |
+| `*.azurecontainerapps.io` | Azure Container Apps |
+| `*.azurecontainer.io` | Azure Container Instances |
 | `*.azure-api.net` | Azure API Management |
 | `*.documents.azure.com` | Azure Cosmos DB |
 | `*.servicebus.windows.net` | Azure Service Bus |

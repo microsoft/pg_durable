@@ -50,6 +50,8 @@ pub(crate) const DEFAULT_HTTP_ALLOWED_DOMAINS: &CStr = match CStr::from_bytes_wi
         "*.table.core.windows.net,",
         "*.file.core.windows.net,",
         "*.azurewebsites.net,",
+        "*.azurecontainerapps.io,",
+        "*.azurecontainer.io,",
         "*.azure-api.net,",
         "*.documents.azure.com,",
         "*.servicebus.windows.net,",
@@ -933,6 +935,8 @@ mod tests {
         // Apex domains (exact suffix without subdomain) must be rejected
         assert!(validate_url_allowlist("https://blob.core.windows.net/test").is_err());
         assert!(validate_url_allowlist("https://azurewebsites.net/app").is_err());
+        assert!(validate_url_allowlist("https://azurecontainerapps.io/app").is_err());
+        assert!(validate_url_allowlist("https://azurecontainer.io/app").is_err());
         assert!(validate_url_allowlist("https://vault.azure.net/secrets").is_err());
         assert!(validate_url_allowlist("https://openai.azure.com/api").is_err());
     }
@@ -952,6 +956,11 @@ mod tests {
         assert!(validate_url_allowlist("https://mytable.table.core.windows.net/t").is_ok());
         assert!(validate_url_allowlist("https://myshare.file.core.windows.net/s").is_ok());
         assert!(validate_url_allowlist("https://myapp.azurewebsites.net/api").is_ok());
+        assert!(validate_url_allowlist(
+            "https://myapp.environment.eastus.azurecontainerapps.io/api"
+        )
+        .is_ok());
+        assert!(validate_url_allowlist("https://mycontainer.eastus.azurecontainer.io/api").is_ok());
         assert!(validate_url_allowlist("https://myapi.azure-api.net/v1").is_ok());
         assert!(validate_url_allowlist("https://mydb.documents.azure.com/dbs").is_ok());
         assert!(validate_url_allowlist("https://mybus.servicebus.windows.net/topic").is_ok());
@@ -988,6 +997,10 @@ mod tests {
         assert!(
             validate_url_allowlist("https://evil-blob.core.windows.net.attacker.io/x").is_err()
         );
+        assert!(validate_url_allowlist("https://evil-azurecontainerapps.io/x").is_err());
+        assert!(validate_url_allowlist("https://evil-azurecontainer.io/x").is_err());
+        assert!(validate_url_allowlist("https://app.azurecontainerapps.io.evil.com/x").is_err());
+        assert!(validate_url_allowlist("https://app.azurecontainer.io.evil.com/x").is_err());
     }
 
     #[test]

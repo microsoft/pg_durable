@@ -1166,6 +1166,8 @@ FROM unnest(ARRAY[
     '.table.core.windows.net',
     '.file.core.windows.net',
     '.azurewebsites.net',
+    '.azurecontainerapps.io',
+    '.azurecontainer.io',
     '.azure-api.net',
     '.documents.azure.com',
     '.servicebus.windows.net',
