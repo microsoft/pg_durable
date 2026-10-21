@@ -473,6 +473,7 @@ With no override, the following subdomain patterns are allowed. Apex domains
 | `*.servicebus.windows.net` | Azure Service Bus |
 | `*.openai.azure.com` | Azure OpenAI |
 | `*.cognitiveservices.azure.com` | Azure Cognitive Services |
+| `*.services.ai.azure.com` | Azure AI Services |
 | `*.vault.azure.net` | Azure Key Vault |
 | `*.redis.cache.windows.net` | Azure Cache for Redis |
 | `*.database.windows.net` | Azure SQL Database |

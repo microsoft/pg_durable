@@ -7,7 +7,7 @@ verifies a successful HTTP response.
 
 ## Domain Coverage
 
-The default restricted-mode allowlist permits 22 domain suffixes. This
+The default restricted-mode allowlist permits 23 domain suffixes. This
 test suite covers them as follows:
 
 | Status | Service | Domain Suffix | Test |
@@ -23,6 +23,7 @@ test suite covers them as follows:
 | ✅ Impl | Key Vault | `.vault.azure.net` | GET a secret |
 | ✅ Impl | Service Bus | `.servicebus.windows.net` | Send a message |
 | ✅ Impl | Cognitive Services | `.cognitiveservices.azure.com` | Detect language |
+| ⬜ No example | AI Services | `.services.ai.azure.com` | Not yet implemented |
 | ✅ Impl | Cosmos DB | `.documents.azure.com` | List databases |
 | 🔲 Stub | OpenAI | `.openai.azure.com` | Needs model deployment + quota |
 | 🔲 Stub | API Management | `.azure-api.net` | 30–60 min provision time |

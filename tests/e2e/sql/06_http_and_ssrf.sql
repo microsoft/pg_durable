@@ -1173,6 +1173,7 @@ FROM unnest(ARRAY[
     '.servicebus.windows.net',
     '.openai.azure.com',
     '.cognitiveservices.azure.com',
+    '.services.ai.azure.com',
     '.vault.azure.net',
     '.redis.cache.windows.net',
     '.database.windows.net',

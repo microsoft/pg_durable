@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the PostgreSQL License.
 
-PG_DURABLE_TEST_HTTP_DOMAINS='*.blob.core.windows.net,*.blob.storage.azure.net,*.queue.core.windows.net,*.table.core.windows.net,*.file.core.windows.net,*.azurewebsites.net,*.azurecontainerapps.io,*.azurecontainer.io,*.azure-api.net,*.documents.azure.com,*.servicebus.windows.net,*.openai.azure.com,*.cognitiveservices.azure.com,*.vault.azure.net,*.redis.cache.windows.net,*.database.windows.net,*.kusto.windows.net,*.azurefd.net,*.azureedge.net,*.azure-devices.net,*.trafficmanager.net,*.cloudapp.azure.com,api.github.com,httpbingo.org'
+PG_DURABLE_TEST_HTTP_DOMAINS='*.blob.core.windows.net,*.blob.storage.azure.net,*.queue.core.windows.net,*.table.core.windows.net,*.file.core.windows.net,*.azurewebsites.net,*.azurecontainerapps.io,*.azurecontainer.io,*.azure-api.net,*.documents.azure.com,*.servicebus.windows.net,*.openai.azure.com,*.cognitiveservices.azure.com,*.services.ai.azure.com,*.vault.azure.net,*.redis.cache.windows.net,*.database.windows.net,*.kusto.windows.net,*.azurefd.net,*.azureedge.net,*.azure-devices.net,*.trafficmanager.net,*.cloudapp.azure.com,api.github.com,httpbingo.org'
 
 resolve_pgrx_environment() {
     local pg_major="$1"

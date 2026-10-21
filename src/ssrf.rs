@@ -57,6 +57,7 @@ pub(crate) const DEFAULT_HTTP_ALLOWED_DOMAINS: &CStr = match CStr::from_bytes_wi
         "*.servicebus.windows.net,",
         "*.openai.azure.com,",
         "*.cognitiveservices.azure.com,",
+        "*.services.ai.azure.com,",
         "*.vault.azure.net,",
         "*.redis.cache.windows.net,",
         "*.database.windows.net,",
@@ -939,6 +940,7 @@ mod tests {
         assert!(validate_url_allowlist("https://azurecontainer.io/app").is_err());
         assert!(validate_url_allowlist("https://vault.azure.net/secrets").is_err());
         assert!(validate_url_allowlist("https://openai.azure.com/api").is_err());
+        assert!(validate_url_allowlist("https://services.ai.azure.com/api").is_err());
     }
 
     #[test]
@@ -966,6 +968,7 @@ mod tests {
         assert!(validate_url_allowlist("https://mybus.servicebus.windows.net/topic").is_ok());
         assert!(validate_url_allowlist("https://myoai.openai.azure.com/v1/chat").is_ok());
         assert!(validate_url_allowlist("https://mycog.cognitiveservices.azure.com/v1").is_ok());
+        assert!(validate_url_allowlist("https://myai.services.ai.azure.com/api").is_ok());
         assert!(validate_url_allowlist("https://myvault.vault.azure.net/secrets/s").is_ok());
         assert!(validate_url_allowlist("https://myredis.redis.cache.windows.net/").is_ok());
         assert!(validate_url_allowlist("https://mydb.database.windows.net/db").is_ok());
@@ -982,6 +985,7 @@ mod tests {
         // Multiple subdomain labels should still match
         assert!(validate_url_allowlist("https://a.b.c.blob.core.windows.net/x").is_ok());
         assert!(validate_url_allowlist("https://my.app.region.azurewebsites.net/").is_ok());
+        assert!(validate_url_allowlist("https://a.b.services.ai.azure.com/x").is_ok());
     }
 
     #[test]
@@ -1001,6 +1005,8 @@ mod tests {
         assert!(validate_url_allowlist("https://evil-azurecontainer.io/x").is_err());
         assert!(validate_url_allowlist("https://app.azurecontainerapps.io.evil.com/x").is_err());
         assert!(validate_url_allowlist("https://app.azurecontainer.io.evil.com/x").is_err());
+        assert!(validate_url_allowlist("https://evil-services.ai.azure.com/x").is_err());
+        assert!(validate_url_allowlist("https://app.services.ai.azure.com.evil.com/x").is_err());
     }
 
     #[test]
