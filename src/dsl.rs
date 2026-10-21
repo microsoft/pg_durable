@@ -5,6 +5,7 @@
 
 use cron::Schedule as CronSchedule;
 use pgrx::datum::DatumWithOid;
+use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use std::str::FromStr;
 
@@ -1062,6 +1063,107 @@ fn require_login_privilege(oid: pgrx::pg_sys::Oid, name: &str, caller: &str) {
     }
 }
 
+// "PGDQ": separate from the loopback-launch slots. Advisory locks are
+// database-local; the second key preserves all bits of the submitting role OID.
+const INSTANCE_QUOTA_LOCK_CLASS_ID: i32 = 0x5047_4451;
+
+fn current_instance_counts(user_oid: pg_sys::Oid) -> (i64, i64) {
+    Spi::connect(|_| unsafe {
+        let mut argtypes = [pg_sys::OIDOID];
+        let plan = pg_sys::SPI_prepare(
+            c"SELECT pg_catalog.count(*) FILTER (
+                  WHERE pg_catalog.lower(status) OPERATOR(pg_catalog.=)
+                        ANY (ARRAY['pending', 'running']::pg_catalog.text[])),
+                     pg_catalog.count(*)
+              FROM df.instances
+              WHERE submitted_by OPERATOR(pg_catalog.=) $1::pg_catalog.regrole"
+                .as_ptr(),
+            1,
+            argtypes.as_mut_ptr(),
+        );
+        if plan.is_null() {
+            let status = pg_sys::SPI_result;
+            pgrx::error!("failed to prepare df.start() quota query: SPI result {status}");
+        }
+
+        // Even REPEATABLE READ must see starts committed before we acquired the
+        // admission lock, plus this transaction's own earlier starts. Ordinary
+        // SPI would reuse the transaction snapshot and allow quota bypasses.
+        pg_sys::CommandCounterIncrement();
+        let mut values = [pg_sys::Datum::from(user_oid)];
+        let status = pg_sys::SPI_execute_snapshot(
+            plan,
+            values.as_mut_ptr(),
+            std::ptr::null(),
+            pg_sys::GetLatestSnapshot(),
+            std::ptr::null_mut(),
+            true,
+            false,
+            1,
+        );
+        if status != pg_sys::SPI_OK_SELECT as i32 || pg_sys::SPI_processed != 1 {
+            pgrx::error!("failed to count df.start() instances: SPI result {status}");
+        }
+        let table = pg_sys::SPI_tuptable
+            .as_ref()
+            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned no tuple table"));
+        let count = |column| {
+            let mut is_null = false;
+            let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, column, &mut is_null);
+            i64::from_datum(datum, is_null)
+                .unwrap_or_else(|| pgrx::error!("df.start() quota query returned a NULL count"))
+        };
+        (count(1), count(2))
+    })
+}
+
+fn enforce_instance_limits(user_oid: pg_sys::Oid, user_name: &str) {
+    let concurrent_limit = crate::MAX_CONCURRENT_PER_USER.get();
+    let instance_limit = crate::MAX_INSTANCES_PER_USER.get();
+    if concurrent_limit == 0 && instance_limit == 0 {
+        return;
+    }
+
+    // Keep the lock until commit/rollback: another backend cannot count our
+    // uncommitted instances. A function-scoped lock would leave a race window.
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1::pg_catalog.int4, $2::pg_catalog.int4)",
+        &[
+            INSTANCE_QUOTA_LOCK_CLASS_ID.into(),
+            (u32::from(user_oid) as i32).into(),
+        ],
+    )
+    .unwrap_or_else(|e| pgrx::error!("failed to acquire df.start() admission lock: {e}"));
+
+    let (active, total) = current_instance_counts(user_oid);
+    for (limit, count, kind, hint) in [
+        (
+            concurrent_limit,
+            active,
+            "active",
+            "Wait for in-flight instances to finish or cancel them, or ask an administrator to raise df.max_concurrent_per_user.",
+        ),
+        (
+            instance_limit,
+            total,
+            "retained",
+            "Wait for automatic reconciliation to remove terminal instances, or ask an administrator to adjust retention or raise df.max_instances_per_user.",
+        ),
+    ] {
+        if limit > 0 && count >= i64::from(limit) {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
+                format!(
+                    "df.start rejected: user \"{user_name}\" has {count} {kind} instances (limit {limit})"
+                ),
+                function_name!(),
+            )
+            .set_hint(hint)
+            .report(PgLogLevel::ERROR);
+        }
+    }
+}
+
 /// `transaction_mode`: the start participates in the caller's transaction and
 /// is rolled back with it. This is the default and the historical behaviour.
 const TXN_MODE_CALLER: &str = "caller";
@@ -1243,7 +1345,10 @@ fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&st
 
     match crate::client::start_in_new_transaction(fut, label, database, &user_name) {
         Ok(id) => id,
-        Err(e) => pgrx::error!("{}", e),
+        Err(e) => {
+            e.report(PgLogLevel::ERROR);
+            unreachable!()
+        }
     }
 }
 
@@ -1281,20 +1386,21 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     require_login_privilege(current_user_oid, &current_user_name, "df.start()");
 
     // Reject superuser submission identities unless explicitly enabled.
-    if !crate::types::superuser_instances_enabled() {
-        let is_super = match crate::types::is_role_superuser_oid(current_user_oid) {
-            Ok(v) => v,
-            Err(e) => pgrx::error!("pg_durable: superuser check failed: {}", e),
-        };
-        if is_super {
-            pgrx::error!(
-                "pg_durable: superuser instances are disabled. \
-                 current_user \"{}\" is a superuser, but \
-                 pg_durable.enable_superuser_instances is off. \
-                 Set pg_durable.enable_superuser_instances = on to allow this.",
-                current_user_name
-            );
-        }
+    let is_super = match crate::types::is_role_superuser_oid(current_user_oid) {
+        Ok(v) => v,
+        Err(e) => pgrx::error!("pg_durable: superuser check failed: {}", e),
+    };
+    if is_super && !crate::types::superuser_instances_enabled() {
+        pgrx::error!(
+            "pg_durable: superuser instances are disabled. \
+             current_user \"{}\" is a superuser, but \
+             pg_durable.enable_superuser_instances is off. \
+             Set pg_durable.enable_superuser_instances = on to allow this.",
+            current_user_name
+        );
+    }
+    if !is_super {
+        enforce_instance_limits(current_user_oid, &current_user_name);
     }
 
     fn insert_nodes(
