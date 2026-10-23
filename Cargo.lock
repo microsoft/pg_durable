@@ -713,8 +713,6 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 [[package]]
 name = "duroxide"
 version = "0.1.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92b17ebe10f702644ad65a9c624b4060023955b4cd145c23ed4c6942b17fdac9"
 dependencies = [
  "async-trait",
  "futures",

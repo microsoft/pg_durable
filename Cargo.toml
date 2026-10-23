@@ -73,6 +73,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 
+# Development-only: replace with a released dependency before shipping.
+[patch.crates-io]
+duroxide = { path = "/home/thom/dur-wt/http-admission" }
+
 [profile.dev]
 panic = "unwind"
 

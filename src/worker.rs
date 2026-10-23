@@ -148,6 +148,11 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
     // initialization (migrations, provider construction, dispatcher startup).
     const STALE_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+    // Keep one budget across runtime replacement within this worker process.
+    let http_capacity = Arc::new(tokio::sync::Semaphore::new(
+        crate::MAX_HTTP_CONCURRENCY.get() as usize,
+    ));
+
     let pg_conn_str = postgres_connection_string();
     let management_conn_str =
         postgres_connection_string_with_application_name(WORKER_MANAGEMENT_APPLICATION_NAME);
@@ -305,6 +310,7 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
             &duroxide_schema,
             epoch_oid,
             &http_policy,
+            &http_capacity,
         )
         .await
         else {
@@ -683,6 +689,7 @@ async fn initialize_duroxide_runtime(
     schema_name: &str,
     epoch_oid: i64,
     http_policy: &Arc<HttpPolicy>,
+    http_capacity: &Arc<tokio::sync::Semaphore>,
 ) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
 
@@ -787,13 +794,22 @@ async fn initialize_duroxide_runtime(
             Arc::new(mgmt_pool.clone()),
             user_semaphore.clone(),
             http_policy.clone(),
+            http_capacity.clone(),
         );
         let orchestrations = create_orchestration_registry();
 
         let store_for_client = store.clone();
 
-        let duroxide_runtime =
-            runtime::Runtime::start_with_store(store, activities, orchestrations).await;
+        let duroxide_runtime = runtime::Runtime::start_with_options(
+            store,
+            activities,
+            orchestrations,
+            runtime::RuntimeOptions {
+                worker_concurrency: crate::MAX_ACTIVITY_CONCURRENCY.get() as usize,
+                ..Default::default()
+            },
+        )
+        .await;
 
         log!("pg_durable: duroxide runtime started");
         return Some((duroxide_runtime, store_for_client));

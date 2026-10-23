@@ -89,6 +89,7 @@ restart with the phase's configuration, not a rebuild.
 | `48_http_allow_all.sql` | `http-allow-all` | Unrestricted mode admits plaintext HTTP, unlisted domains, and private destinations for both HTTP activities |
 | `69_http_allowed_domains.sql` | `http-custom-domains` | Custom allow-list enforcement, malformed startup rejection, protected mode settings, and restart-only policy changes |
 | `70_http_allowed_domains_empty.sql` | `http-empty-domains` | Empty restricted-mode allow-list denies all domains |
+| `90_http_concurrency.sql` | `http-concurrency` | Measures HTTP ceilings of one and two with four activity slots using slow response bodies; covers both HTTP functions, satellite origins, SQL headroom, queued cancellation, queue-independent request timeouts, and permit release after failure |
 
 ## Test Structure
 
