@@ -23,6 +23,11 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
+- **HTTP execution limits:** `pg_durable.max_http_concurrency` bounds ordinary
+  and multipart HTTP executions together across all origin databases, while
+  `pg_durable.max_activity_concurrency` controls total activity capacity.
+  Both default to two and require a server restart. Capacity-blocked HTTP work
+  stays durably queued without occupying execution or origin-connection slots.
 - **Multi-database installations (#401):** satellites share one control runtime
   while keeping local `df` APIs, metadata, grants, RLS, endpoints and credentials.
   SQL defaults to the submitting database unless explicitly targeted and retains

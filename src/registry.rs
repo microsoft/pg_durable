@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use duroxide::{runtime::registry::ActivityRegistry, ActivityContext, OrchestrationRegistry};
+use duroxide::{
+    runtime::{registry::ActivityRegistry, ActivityAdmission},
+    ActivityContext, OrchestrationRegistry,
+};
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
@@ -13,16 +16,30 @@ use crate::activities;
 use crate::orchestrations;
 use crate::ssrf::HttpPolicy;
 
+fn admit_http(semaphore: &Arc<Semaphore>) -> Result<ActivityAdmission, String> {
+    match semaphore.clone().try_acquire_owned() {
+        Ok(permit) => Ok(ActivityAdmission::admit(permit)),
+        Err(tokio::sync::TryAcquireError::NoPermits) => Ok(ActivityAdmission::Defer(
+            std::time::Duration::from_millis(100),
+        )),
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            Err("HTTP admission semaphore closed unexpectedly".to_string())
+        }
+    }
+}
+
 /// Create the activity registry with all registered activities
 pub fn create_activity_registry(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
     http_policy: Arc<HttpPolicy>,
+    http_capacity: Arc<Semaphore>,
 ) -> ActivityRegistry {
     let sql_semaphore = semaphore.clone();
     let http_semaphore = semaphore.clone();
     let multipart_semaphore = semaphore;
     let multipart_policy = http_policy.clone();
+    let multipart_capacity = http_capacity.clone();
     let router = Arc::new(crate::origin::Router::new(pool));
     let sql_pool = router.clone();
     let graph_pool = router.clone();
@@ -143,8 +160,9 @@ pub fn create_activity_registry(
                 }
             },
         )
-        .register(
+        .register_with_admission(
             activities::execute_http::NAME,
+            move |_ctx, _input| admit_http(&http_capacity),
             move |ctx: ActivityContext, config_json: String| {
                 let pool = http_pool.clone();
                 let semaphore = http_semaphore.clone();
@@ -164,8 +182,9 @@ pub fn create_activity_registry(
                 }
             },
         )
-        .register(
+        .register_with_admission(
             activities::execute_multipart::NAME,
+            move |_ctx, _input| admit_http(&multipart_capacity),
             move |ctx: ActivityContext, config_json: String| {
                 let pool = multipart_pool.clone();
                 let semaphore = multipart_semaphore.clone();

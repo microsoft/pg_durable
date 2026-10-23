@@ -893,6 +893,27 @@ These settings are configured via `ALTER SYSTEM SET` or `postgresql.conf`. See e
 
 ---
 
+### pg_durable.max_activity_concurrency / pg_durable.max_http_concurrency
+
+| Setting | Meaning | Default | Range |
+|---------|---------|---------|-------|
+| `pg_durable.max_activity_concurrency` | Concurrent activities in the shared runtime, including SQL, HTTP, and metadata | `2` | `1` to `1000` |
+| `pg_durable.max_http_concurrency` | Concurrent HTTP and multipart HTTP activities combined, across all origin databases | `2` | `1` to `1000` |
+
+Both are `POSTMASTER` settings and require a PostgreSQL restart. An HTTP slot is
+held through preparation, response-body handling, and optional sink storage.
+Requests awaiting capacity remain queued without occupying activity slots or
+origin connections; admission waiting does not consume the request timeout.
+Contention does not fail the request or count as an execution retry.
+
+HTTP concurrency cannot exceed total activity capacity. Set the HTTP ceiling
+lower than activity capacity to leave headroom for non-HTTP work. These settings
+do not raise connection budgets or impose request-rate limits. No extension SQL
+update is required for existing installations to use these settings with the
+new binary. See [Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency).
+
+---
+
 ### pg_durable.http_security
 
 Server-wide outbound HTTP policy for `df.http()` and `df.http_multipart()`.

@@ -566,6 +566,20 @@ retrying an activity alone does not clear the error. Ordinary DNS, connection,
 and request-timeout failures happen after construction and are not cached this
 way, so they do not require a worker restart.
 
+### 6.4 HTTP execution capacity
+
+`pg_durable.max_http_concurrency` limits ordinary and multipart HTTP executions
+together across all origin databases. Capacity is reserved before routing,
+privilege checks, or credential lookup and retained through response processing
+and sink storage. Queued requests hold no HTTP or origin-connection reservation.
+Admission does not replace any execution-time authorization or destination check.
+
+The limit defaults to two and requires a server restart to change. It is
+separate from connection-pool size and from the total activity capacity set by
+`pg_durable.max_activity_concurrency`. See
+[Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency)
+for headroom, timeout, cancellation, and crash semantics.
+
 ---
 
 ## 7. Audit Logging

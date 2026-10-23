@@ -3008,6 +3008,43 @@ for the full syntax and default domain list.
 pg_durable uses separate limits for control management, provider, origin metadata,
 SQL execution, and independent-start connections.
 
+### Activity and HTTP Concurrency
+
+Connection budgets are separate from execution capacity:
+
+| Setting | Default | Scope |
+|---------|---------|-------|
+| `pg_durable.max_activity_concurrency` | 2 | All concurrently executing activities, including SQL, HTTP, and metadata work |
+| `pg_durable.max_http_concurrency` | 2 | HTTP and multipart HTTP activities combined |
+
+Both settings accept integers from 1 to 1000 and require a PostgreSQL restart.
+The HTTP ceiling is shared across users, workflows, and databases served by the
+cluster's single runtime. It counts an HTTP execution from request preparation
+through response-body processing and optional sink storage, not idle pooled
+connections. It is not a requests-per-second limit.
+
+Requests waiting for HTTP capacity stay in the durable queue. They do not hold
+an execution slot or an origin-database connection, fail due to capacity
+contention, or consume their request timeout while waiting. Cancellation still
+applies. Actual request failures retain their usual behavior.
+
+For non-HTTP headroom, set the HTTP ceiling below total activity capacity:
+
+```ini
+pg_durable.max_activity_concurrency = 8
+pg_durable.max_http_concurrency = 4
+```
+
+Increasing activity capacity does not increase database connection budgets.
+If both settings are equal, active HTTP requests can occupy all activity slots;
+the unchanged defaults preserve the previous two-activity execution capacity.
+There is no strict fairness guarantee between workflows.
+
+Pending requests use the configured limits after restart; recorded results
+replay unchanged. A crash or cancellation cannot guarantee that a remote server
+stops processing an already-sent request. Limits bound local executions, not
+remote effects, and do not provide exactly-once HTTP delivery.
+
 ### Connection Architecture
 
 The main connection categories are:
