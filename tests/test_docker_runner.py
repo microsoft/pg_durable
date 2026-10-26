@@ -7,6 +7,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -83,11 +84,20 @@ class DockerRunnerTests(unittest.TestCase):
         return result, calls, tests
 
     def test_image_http_allowlist_matches_local_runner(self):
-        common = (ROOT / "scripts" / "pg-common.sh").read_text()
-        dockerfile = (ROOT / "Dockerfile").read_text()
-        local_domains = common.split("PG_DURABLE_TEST_HTTP_DOMAINS='", 1)[1].split("'", 1)[0]
-        docker_domains = dockerfile.split("pg_durable.http_allowed_domains = '", 1)[1].split("'", 1)[0]
-        self.assertCountEqual(docker_domains.split(","), local_domains.split(","))
+        common = (ROOT / "scripts" / "pg-common.sh").read_text(encoding="utf-8")
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        local_match = re.search(r"PG_DURABLE_TEST_HTTP_DOMAINS='([^']*)'", common)
+        docker_match = re.search(r"pg_durable\.http_allowed_domains\s*=\s*'([^']*)'", dockerfile)
+        self.assertIsNotNone(
+            local_match, "Missing quoted PG_DURABLE_TEST_HTTP_DOMAINS in scripts/pg-common.sh"
+        )
+        self.assertIsNotNone(
+            docker_match, "Missing quoted pg_durable.http_allowed_domains in Dockerfile"
+        )
+        self.assertCountEqual(
+            [domain.strip() for domain in docker_match.group(1).split(",")],
+            [domain.strip() for domain in local_match.group(1).split(",")],
+        )
 
     def test_fixed_image_skips_every_local_special_phase(self):
         local = (ROOT / "scripts" / "test-e2e-local.sh").read_text()
