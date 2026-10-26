@@ -82,6 +82,13 @@ class DockerRunnerTests(unittest.TestCase):
         tests = [args[args.index("-f") + 1] for args in calls if args[0] == "exec" and "-f" in args]
         return result, calls, tests
 
+    def test_image_http_allowlist_matches_local_runner(self):
+        common = (ROOT / "scripts" / "pg-common.sh").read_text()
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        local_domains = common.split("PG_DURABLE_TEST_HTTP_DOMAINS='", 1)[1].split("'", 1)[0]
+        docker_domains = dockerfile.split("pg_durable.http_allowed_domains = '", 1)[1].split("'", 1)[0]
+        self.assertCountEqual(docker_domains.split(","), local_domains.split(","))
+
     def test_fixed_image_skips_every_local_special_phase(self):
         local = (ROOT / "scripts" / "test-e2e-local.sh").read_text()
         # Read only the phase classifier without running its server-management code.
