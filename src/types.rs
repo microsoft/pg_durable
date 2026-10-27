@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 pub(crate) use crate::client::backend_control_state;
 
+// Do not change the "pg_durable:worker:" prefix; internal code
+// in the service relies on it.
 pub(crate) const WORKER_MANAGEMENT_APPLICATION_NAME: &str = "pg_durable:worker:management";
 pub(crate) const WORKER_POLL_APPLICATION_NAME: &str = "pg_durable:worker:poll";
 pub(crate) const WORKER_DUROXIDE_APPLICATION_NAME: &str = "pg_durable:worker:duroxide";
