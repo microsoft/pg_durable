@@ -56,7 +56,8 @@ can still run in parallel.
 `--keep` leaves the server running but releases the lock when the command exits;
 a queued run may then stop or reset it. See
 [concurrent local runs](docs/TESTING.md#concurrent-local-runs) for wrapping
-low-level commands or reserving PostgreSQL throughout a debugging session.
+non-interactive commands and diagnostics. Interactive investigations require
+coordination with other worktrees.
 
 ### Full pre-PR checks
 

@@ -16,7 +16,8 @@ This guide covers all testing scenarios for pg_durable.
 
 ## Concurrent local runs
 
-Local test runners require Python 3 (standard library only). They automatically
+Local test runners require Python 3 (standard library only) and the system `ps`
+command, available on Linux and macOS. They automatically
 take an exclusive file lock at `~/.pgrx/pg_durable-test.lock` before using the
 shared PostgreSQL installation. You can start tests from several worktrees at
 once: competing commands print a waiting message and queue instead of replacing
@@ -24,7 +25,7 @@ each other's extension binaries or resetting each other's databases.
 
 The lock covers installation, tests, and cleanup. Unit, local E2E, upgrade,
 coverage, worker lifecycle, and aggregate runners use it, as do `make test-unit`,
-`make test-regress`, `make pg-install`, `make run`, and the local start/stop/reset
+`make test-regress`, `make pg-install`, and the local start/stop/reset
 scripts. Nested runners share the outer command's lock. All PostgreSQL versions
 share one lock because some diagnostic files are also shared across versions.
 Build/check-only commands and Docker tests do not take this local lock.
@@ -38,23 +39,35 @@ use the shared local installation:
 python3 scripts/with-pg-lock.py cargo pgrx test pg17
 ```
 
-`--keep` still exits after the tests and leaves PostgreSQL running, but it does
-**not** reserve that server. A queued command may immediately stop or reset it.
-To keep exclusive access while debugging, open a locked shell and perform both
-the test run and investigation inside it:
+The wrapper supports **non-interactive commands only**, including `bash -c`.
+Group checks and non-interactive diagnostics into one command to keep the lock
+between them:
 
 ```bash
-python3 scripts/with-pg-lock.py bash
-./scripts/test-e2e-local.sh --keep --verbose 05_monitoring_and_explain
-# Inspect the database or logs here.
-./scripts/pg-stop.sh
-exit
+python3 scripts/with-pg-lock.py bash -e -c \
+  './scripts/test-unit.sh; ./scripts/test-e2e-local.sh'
 ```
 
-The operating system releases the lock when the owning command exits, including
-on failure. A server left running does not retain it. The empty lock file stays
-on disk; do not delete it to unblock a waiter, since that would let two commands
-lock different files at the same path.
+`--keep` still exits after the tests and leaves PostgreSQL running, but it does
+**not** reserve that server. A queued command may immediately stop or reset it.
+Coordinate with other worktrees before investigating interactively. `make run`
+starts an unprotected interactive session; interactive shells and database
+clients are not supported inside the wrapper.
+
+The supervisor forwards SIGHUP, SIGINT, and SIGTERM to the command's process
+group and holds the lock until every live process in that group exits, including
+cleanup after the command itself exits. Work that ignores cancellation keeps the
+lock until it finishes; there is no automatic forced-kill timeout. Use these
+signals rather than killing only the supervisor with SIGKILL, which bypasses
+cleanup.
+
+PostgreSQL started by `pg_ctl` creates a separate session, so a kept server does
+not retain the lock. Other work that deliberately leaves the supervised process
+group is outside this protection: do not detach tasks that use the shared
+installation. If process monitoring fails, the supervisor reports the error and
+keeps the lock until monitoring recovers and confirms that the work has stopped.
+The empty lock file stays on disk; do not delete it to unblock a waiter, since
+that would let two commands lock different files at the same path.
 
 ## Test Suites Overview
 
@@ -192,8 +205,9 @@ cover all families without any generator or new CI job.
 **Investigation mode (`--keep`):**
 
 The lock is released when the runner exits. When sharing PostgreSQL with other
-worktrees, use the [locked debugging shell](#concurrent-local-runs) to prevent a
-queued run from replacing the server during investigation.
+worktrees, coordinate any interactive investigation before starting another run.
+Non-interactive diagnostics can be included in the
+[same locked command](#concurrent-local-runs) as the tests.
 
 ```bash
 # Run tests, keep server running

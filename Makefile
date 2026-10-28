@@ -70,7 +70,8 @@ docker-push: docker-build
 
 # Run local development server
 run:
-	python3 ./scripts/with-pg-lock.py cargo pgrx run pg17
+	@echo "Warning: interactive development is not protected by the test lock; coordinate with other worktrees." >&2
+	cargo pgrx run pg17
 
 # Clean build artifacts (renamed to avoid PGXS conflict)
 pg-clean:
@@ -110,7 +111,7 @@ help:
 	@echo "  installcheck  - Run pg_regress tests (requires PostgreSQL running, via PGXS)"
 	@echo "  docker-build  - Build Docker image"
 	@echo "  docker-push   - Build and push to ACR"
-	@echo "  run           - Start local pgrx dev server"
+	@echo "  run           - Start an interactive pgrx dev session (not locked)"
 	@echo "  pg-clean      - Clean build artifacts"
 	@echo "  install       - Install prebuilt artifacts for the selected PostgreSQL"
 	@echo "  uninstall     - Remove installed artifacts for the selected PostgreSQL"

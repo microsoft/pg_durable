@@ -85,8 +85,13 @@ class PostgresLockTests(unittest.TestCase):
         self.bin.mkdir()
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
         self.write_program(self.bin / "cargo", """
-import json, os, sys
+import json, os, signal, sys
 from pathlib import Path
+if os.environ.get("CARGO_CANCEL_FILE"):
+    def cancelled(signum, _frame):
+        Path(os.environ["CARGO_CANCEL_FILE"]).write_text(str(signum))
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, cancelled)
 if os.environ.get("CARGO_RECORD"):
     Path(os.environ["CARGO_RECORD"]).write_text(json.dumps({
         "args": sys.argv[1:], "cwd": os.getcwd(),
@@ -118,7 +123,15 @@ sys.exit(int(os.environ.get("CARGO_EXIT", "0")))
             text=True, start_new_session=True,
         )
 
-        self.addCleanup(cleanup_process, process)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                cleanup_process(process)
+
+        self.addCleanup(cleanup)
         return process
 
     def read_line(self, stream):
@@ -210,13 +223,25 @@ sys.stdin.readline()
         holder = self.start([sys.executable, "-c", """
 import subprocess, sys
 from pathlib import Path
+# pg_ctl starts the postmaster in a separate session.
 child = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(60)"],
-    close_fds=False, stdin=subprocess.DEVNULL,
+    close_fds=False, start_new_session=True, stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
 Path(sys.argv[1]).write_text(str(child.pid))
 """, str(pid_file)])
+
+        def stop_server():
+            if pid_file.exists():
+                server_pid = int(pid_file.read_text())
+                self.assertGreater(server_pid, 0)
+                try:
+                    os.kill(server_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(stop_server)
         self.assert_finished(holder)
         server_pid = int(pid_file.read_text())
         os.kill(server_pid, 0)
@@ -237,15 +262,14 @@ exit 7
         self.assertEqual(self.assert_finished(waiter)[0].strip(), "next")
 
     def test_signals_release_the_owner_lock(self):
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGKILL):
+        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
             with self.subTest(signal=sig):
                 holder = self.start([sys.executable, "-c", HOLD])
                 self.assertEqual(self.read_line(holder.stdout), "entered")
                 waiter = self.start([sys.executable, "-c", "print('next')"])
                 self.assert_waiting(waiter)
                 holder.send_signal(sig)
-                holder.communicate(timeout=10)
-                self.assertNotEqual(holder.returncode, 0)
+                self.assert_finished(holder, 128 + sig)
                 self.assertEqual(self.assert_finished(waiter)[0].strip(), "next")
 
     def test_signalled_runner_keeps_lock_until_foreground_child_finishes(self):
@@ -253,16 +277,115 @@ exit 7
         for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             with self.subTest(signal=sig):
                 record = self.root / f"cargo-{sig}.json"
+                cancelled = self.root / f"cancelled-{sig}"
                 holder = self.start(
                     ["bash", "scripts/test-unit.sh"], cwd=worktree, wrapped=False,
-                    env={"CARGO_RECORD": str(record), "HOLD_CARGO": "1"},
+                    env={"CARGO_RECORD": str(record), "HOLD_CARGO": "1",
+                         "CARGO_CANCEL_FILE": str(cancelled)},
                 )
                 self.wait_for_file(record)
                 holder.send_signal(sig)
+                self.wait_for_file(cancelled)
                 waiter = self.start([sys.executable, "-c", "print('next')"])
                 self.assert_waiting(waiter)
                 self.assert_finished(holder, 128 + sig, input="\n")
+                self.assertEqual(int(cancelled.read_text()), sig)
                 self.assertEqual(self.assert_finished(waiter)[0].strip(), "next")
+
+    def test_cancelled_wrapped_shell_waits_for_descendant_cleanup(self):
+        worktree = self.worktree("cancelled shell")
+        for close_stderr in (False, True):
+            with self.subTest(close_stderr=close_stderr):
+                record = self.root / f"cargo-{close_stderr}.json"
+                cancelled = self.root / f"cancelled-{close_stderr}"
+                holder = self.start(
+                    ["bash", "-c", "bash scripts/test-unit.sh; :"], cwd=worktree,
+                    env={"CARGO_RECORD": str(record), "HOLD_CARGO": "1",
+                         "CARGO_CANCEL_FILE": str(cancelled)},
+                )
+                self.wait_for_file(record)
+                waiter = self.start([sys.executable, "-c", "print('next')"])
+                self.assert_waiting(waiter)
+                if close_stderr:
+                    holder.stderr.close()
+                    holder.stderr = None
+                holder.send_signal(signal.SIGTERM)
+                self.wait_for_file(cancelled)
+                self.assertIsNone(holder.poll())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    waiter.wait(timeout=0.2)
+                if close_stderr:
+                    holder.communicate(input="\n", timeout=10)
+                    self.assertNotEqual(holder.returncode, 0)
+                else:
+                    self.assert_finished(holder, 143, input="\n")
+                self.assertEqual(int(cancelled.read_text()), signal.SIGTERM)
+                self.assertEqual(self.assert_finished(waiter)[0].strip(), "next")
+
+    def test_terminated_command_does_not_release_surviving_descendants(self):
+        worktree = self.worktree("terminated shell")
+        record = self.root / "cargo.json"
+        shell_pid_file = self.root / "shell.pid"
+        holder = self.start(
+            ["bash", "-c", 'echo "$$" > "$SHELL_PID_FILE"; bash scripts/test-unit.sh; :'],
+            cwd=worktree,
+            env={"CARGO_RECORD": str(record), "HOLD_CARGO": "1",
+                 "SHELL_PID_FILE": str(shell_pid_file)},
+        )
+        self.wait_for_file(record)
+        shell_pid = int(shell_pid_file.read_text())
+        self.assertNotEqual(shell_pid, holder.pid)
+        os.kill(shell_pid, signal.SIGTERM)
+        self.assertIn("waiting for remaining work", self.read_line(holder.stderr))
+        state = subprocess.check_output(
+            ["ps", "-p", str(shell_pid), "-o", "stat="], text=True,
+        ).strip()
+        self.assertTrue(state.startswith("Z"), state)
+        waiter = self.start([sys.executable, "-c", "print('next')"])
+        self.assert_waiting(waiter)
+        self.assert_finished(holder, 143, input="\n")
+        self.assertEqual(self.assert_finished(waiter)[0].strip(), "next")
+
+    def test_invalid_process_listing_fails_before_command(self):
+        for output in ("", "not-a-pid Z\n"):
+            with self.subTest(output=output):
+                self.write_program(self.bin / "ps", f"print({output!r}, end='')")
+                process = self.start([sys.executable, "-c", "print('unexpected')"])
+                actual, error = self.assert_finished(process, 1)
+                self.assertEqual(actual, "")
+                self.assertIn("process listing", error)
+
+    def test_monitor_failure_retains_lock_until_observation_recovers(self):
+        fail = self.root / "fail-monitor"
+        observed = self.root / "monitor-failed"
+        recovered = self.root / "monitor-recovered"
+        real_ps = shutil.which("ps")
+        self.assertIsNotNone(real_ps)
+        self.write_program(self.bin / "ps", f"""
+import os, sys
+from pathlib import Path
+if Path({str(fail)!r}).exists() and not Path({str(recovered)!r}).exists():
+    Path({str(observed)!r}).touch()
+    sys.exit("simulated ps failure")
+os.execv({real_ps!r}, [{real_ps!r}, *sys.argv[1:]])
+""")
+        holder = self.start([sys.executable, "-c", HOLD + """
+from pathlib import Path
+Path(sys.argv[1]).touch()
+""", str(fail)])
+        self.assertEqual(self.read_line(holder.stdout), "entered")
+        waiter = self.start([sys.executable, "-c", "print('next')"])
+        self.addCleanup(recovered.touch)
+        self.assert_waiting(waiter)
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        self.wait_for_file(observed)
+        self.assertIsNone(holder.poll())
+        with self.assertRaises(subprocess.TimeoutExpired):
+            waiter.wait(timeout=0.2)
+        recovered.touch()
+        self.assertIn("retaining the PostgreSQL test lock", self.assert_finished(holder, 1)[1])
+        self.assertEqual(self.assert_finished(waiter)[0].strip(), "next")
 
     def test_interrupted_waiter_never_executes_command(self):
         lock = self.hold_lock()
@@ -322,7 +445,7 @@ exit 7
                 process.send_signal(signal.SIGTERM)
                 process.communicate(timeout=10)
                 self.assertEqual(process.returncode, -signal.SIGTERM)
-        for target in ("test-unit", "test-regress", "pg-install", "run"):
+        for target in ("test-unit", "test-regress", "pg-install"):
             with self.subTest(target=target):
                 process = self.start(["make", "--no-print-directory", target],
                                      cwd=worktree, wrapped=False)
@@ -330,6 +453,19 @@ exit 7
                 os.killpg(process.pid, signal.SIGTERM)
                 process.communicate(timeout=10)
                 self.assertNotEqual(process.returncode, 0)
+
+    def test_interactive_make_run_is_explicitly_unprotected(self):
+        worktree = self.worktree("interactive run")
+        record = self.root / "cargo.json"
+        self.hold_lock()
+        process = self.start(
+            ["make", "--no-print-directory", "run"], cwd=worktree, wrapped=False,
+            env={"CARGO_RECORD": str(record)},
+        )
+        _, error = self.assert_finished(process)
+        self.assertIn("not protected by the test lock", error)
+        self.assertNotIn("waiting for", error)
+        self.assertEqual(json.loads(record.read_text())["args"], ["pgrx", "run", "pg17"])
 
     def test_help_does_not_wait(self):
         worktree = self.worktree("help")

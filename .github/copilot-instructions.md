@@ -61,9 +61,10 @@ Local runners require Python 3 and automatically coordinate across worktrees
 using a shared PostgreSQL file lock. Use the scripts above rather than raw
 `cargo pgrx test`; a waiting message is normal when another run owns the lock.
 For low-level commands, use `python3 scripts/with-pg-lock.py <command> [args...]`.
+The wrapper supports non-interactive commands only, including `bash -c`.
 Never delete the lock file to bypass a waiter. `--keep` does not reserve the
-server after the outer command exits; use a
-[locked debugging shell](../docs/TESTING.md#concurrent-local-runs) when needed.
+server after the outer command exits; group non-interactive diagnostics into the
+[same locked command](../docs/TESTING.md#concurrent-local-runs) when needed.
 Build/check-only commands do not need the lock.
 
 ## Critical Patterns

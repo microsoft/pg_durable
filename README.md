@@ -316,7 +316,7 @@ The CI workflow is defined in [.github/workflows/ci.yml](.github/workflows/ci.ym
 
 Local test runners require Python 3 and automatically queue across worktrees
 sharing PostgreSQL. See [concurrent local runs](docs/TESTING.md#concurrent-local-runs)
-for details, including how to reserve the server while debugging with `--keep`.
+for queueing behavior, cancellation, and `--keep` limitations.
 
 pg_durable has two test suites:
 
