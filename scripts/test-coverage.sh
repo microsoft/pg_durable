@@ -35,6 +35,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/pg-common.sh"
+
 # Defaults
 HTML=false
 WITH_UNIT=false
@@ -69,6 +71,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+lock_local_postgres "$SCRIPT_DIR/test-coverage.sh"
 
 # Colors
 RED='\033[0;31m'

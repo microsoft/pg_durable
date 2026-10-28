@@ -34,6 +34,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/pg-common.sh"
+
 PG_VERSION="${PG_VERSION:-17}"
 PAUSE_MS=4000
 VERBOSE=false
@@ -53,6 +55,8 @@ while [[ $# -gt 0 ]]; do
             echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+lock_local_postgres "$SCRIPT_DIR/test-epoch-race.sh"
 
 PG_PORT="$((28800 + PG_VERSION))"
 PGRX_HOME="$HOME/.pgrx"

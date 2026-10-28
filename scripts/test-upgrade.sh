@@ -28,6 +28,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/pg-common.sh"
+
 # Defaults
 PG_VERSION="17"
 KEEP_RUNNING=false
@@ -58,6 +60,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+lock_local_postgres "$SCRIPT_DIR/test-upgrade.sh"
 
 # pgrx settings
 PGRX_HOME="$HOME/.pgrx"
@@ -257,6 +261,7 @@ cleanup() {
         echo -e "${GREEN}PostgreSQL left running on port $PG_PORT${NC}"
         echo "Connect: $PSQL -h localhost -p $PG_PORT -d $PG_DB"
         echo "Stop:    ./scripts/pg-stop.sh"
+        warn_unreserved_postgres
     fi
 }
 trap cleanup EXIT

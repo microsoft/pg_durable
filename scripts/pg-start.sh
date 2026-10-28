@@ -12,6 +12,12 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=./pg-common.sh
+. "$SCRIPT_DIR/pg-common.sh"
+
 PG_MAJOR="${PG_MAJOR:-17}"
 BUILD_MODE="auto"
 
@@ -52,12 +58,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-# shellcheck source=./pg-common.sh
-. "$SCRIPT_DIR/pg-common.sh"
-
+lock_local_postgres "$SCRIPT_DIR/pg-start.sh"
 resolve_pgrx_environment "$PG_MAJOR"
 
 cd "$PROJECT_DIR"
@@ -76,7 +77,7 @@ fi
 
 if [ "$BUILD_MODE" != "skip" ]; then
     echo -e "\033[0;33mBuilding and installing extension...\033[0m"
-    cargo pgrx install --pg-config "$PG_CONFIG" 2>&1 | grep -v "^warning:" || true
+    cargo pgrx install --pg-config "$PG_CONFIG"
 fi
 
 echo -e "\033[0;33mPreparing PostgreSQL data directory...\033[0m"
@@ -99,4 +100,4 @@ echo "  tail -f ~/.pgrx/${PG_MAJOR}.log"
 echo ""
 echo -e "\033[0;36mStop:\033[0m"
 echo "  ./scripts/pg-stop.sh"
-
+warn_unreserved_postgres

@@ -16,7 +16,10 @@
 
 set -e
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/pg-common.sh"
+
+cd "$SCRIPT_DIR/.."
 
 PG_VERSION="17"
 TEST_FILTER=""
@@ -40,6 +43,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+lock_local_postgres "$SCRIPT_DIR/test-unit.sh"
+
 echo "================================================"
 echo "pg_durable Unit Tests (pgrx) — PG${PG_VERSION}"
 if [ -n "$FEATURES" ]; then
@@ -59,4 +64,3 @@ if [ -n "$TEST_FILTER" ]; then
 else
     cargo pgrx test "pg${PG_VERSION}" $FEATURES_ARG
 fi
-

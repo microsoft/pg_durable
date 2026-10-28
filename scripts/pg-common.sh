@@ -4,6 +4,28 @@
 
 PG_DURABLE_TEST_HTTP_DOMAINS='*.blob.core.windows.net,*.blob.storage.azure.net,*.queue.core.windows.net,*.table.core.windows.net,*.file.core.windows.net,*.azurewebsites.net,*.azurecontainerapps.io,*.azurecontainer.io,*.azure-api.net,*.documents.azure.com,*.servicebus.windows.net,*.openai.azure.com,*.cognitiveservices.azure.com,*.services.ai.azure.com,*.vault.azure.net,*.redis.cache.windows.net,*.database.windows.net,*.kusto.windows.net,*.azurefd.net,*.azureedge.net,*.azure-devices.net,*.trafficmanager.net,*.cloudapp.azure.com,api.github.com,httpbingo.org'
 
+# Save arguments before parsing so lock acquisition can re-exec the same runner.
+PG_DURABLE_LOCK_ARGS=("$@")
+
+lock_local_postgres() {
+    if [ "${_PG_DURABLE_LOCK_EXEC_PID:-}" = "$$" ]; then
+        unset _PG_DURABLE_LOCK_EXEC_PID
+        # Bash defers these traps until the foreground command finishes. Keep
+        # the lock while a build/test child is still using the installation.
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        return
+    fi
+
+    exec python3 "$(dirname "${BASH_SOURCE[0]}")/with-pg-lock.py" \
+        bash "$1" "${PG_DURABLE_LOCK_ARGS[@]}"
+}
+
+warn_unreserved_postgres() {
+    echo "Warning: PostgreSQL is not reserved after the outer command exits; a queued run may stop or reset it." >&2
+}
+
 resolve_pgrx_environment() {
     local pg_major="$1"
 
