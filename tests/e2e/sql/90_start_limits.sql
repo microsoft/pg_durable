@@ -92,11 +92,12 @@ INSERT INTO start_limits_test.ids
 SELECT 'initial', df.start(df.sleep(300), 'start-limits-initial') FROM generate_series(1, 2);
 RESET ROLE;
 
-CREATE TEMP TABLE _quota_engine_count (n BIGINT);
+-- Enqueue remains possible, but acknowledgment cannot create an engine instance
+-- and consume its queue item while this lock is held.
+BEGIN;
 DO $$
 BEGIN
-    EXECUTE format('INSERT INTO _quota_engine_count SELECT count(*) FROM %I.instances',
-                   df.duroxide_schema());
+    EXECUTE format('LOCK TABLE %I.instances IN SHARE MODE', df.duroxide_schema());
 END $$;
 SET ROLE start_limits_user;
 SELECT start_limits_test.expect_rejected('active', 2);
@@ -105,16 +106,22 @@ DO $$
 DECLARE
     actual BIGINT;
 BEGIN
-    EXECUTE format('SELECT count(*) FROM %I.instances', df.duroxide_schema()) INTO actual;
-    IF actual <> (SELECT n FROM _quota_engine_count) THEN
-        RAISE EXCEPTION 'TEST FAILED: rejected start created engine work';
+    EXECUTE format(
+        'SELECT count(*) FROM %I.orchestrator_queue WHERE work_item LIKE $1',
+        df.duroxide_schema()
+    ) INTO actual USING '%start-limits-rejected%';
+    IF actual <> 0 THEN
+        RAISE EXCEPTION 'TEST FAILED: rejected start enqueued engine work';
     END IF;
 END $$;
+COMMIT;
 
 SET ROLE start_limits_user;
 DO $$
 BEGIN
     PERFORM df.cancel((SELECT id FROM start_limits_test.ids WHERE kind = 'initial' LIMIT 1));
+    PERFORM public._e2e_wait_for_engine_terminal(
+        (SELECT id FROM start_limits_test.ids WHERE kind = 'initial' LIMIT 1));
     INSERT INTO start_limits_test.ids
     SELECT 'completed', df.start('SELECT 1', 'start-limits-replacement');
 END $$;
@@ -125,6 +132,7 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: replacement did not complete';
     END IF;
 END $$;
+SELECT public._e2e_wait_for_engine_terminal(id) FROM start_limits_test.ids WHERE kind = 'completed';
 INSERT INTO start_limits_test.ids SELECT 'after-completion', df.start(df.sleep(300));
 SELECT start_limits_test.expect_rejected('active', 2);
 SELECT df.cancel(id) FROM df.instances WHERE status IN ('pending', 'running');
@@ -167,6 +175,7 @@ INSERT INTO start_limits_test.ids
 SELECT 'new-sleep', df.start(df.sleep(300), transaction_mode => 'new');
 SELECT start_limits_test.expect_rejected('active', 1, 'new');
 SELECT df.cancel(id) FROM start_limits_test.ids WHERE kind = 'new-sleep';
+SELECT public._e2e_wait_for_engine_terminal(id) FROM start_limits_test.ids WHERE kind = 'new-sleep';
 INSERT INTO start_limits_test.ids
 SELECT 'new-completed', df.start('SELECT 1', transaction_mode => 'new');
 DO $$
@@ -176,6 +185,7 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: new-transaction instance did not complete';
     END IF;
 END $$;
+SELECT public._e2e_wait_for_engine_terminal(id) FROM start_limits_test.ids WHERE kind = 'new-completed';
 SELECT start_limits_test.expect_rejected('retained', 2, 'new');
 RESET ROLE;
 
@@ -187,7 +197,7 @@ SELECT 'unlimited', df.start(df.sleep(300)) FROM generate_series(1, 3);
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_locks WHERE pid = pg_backend_pid()
-               AND locktype = 'advisory' AND classid = x'50474451'::int AND objsubid = 2) THEN
+               AND locktype = 'advisory' AND classid = x'50474451'::int AND objsubid = 3) THEN
         RAISE EXCEPTION 'TEST FAILED: unlimited starts acquired a quota lock';
     END IF;
 END $$;
@@ -200,7 +210,6 @@ INSERT INTO start_limits_test.ids
 SELECT 'superuser', df.start(df.sleep(300)) FROM generate_series(1, 3);
 
 SELECT df.cancel(id) FROM start_limits_test.ids;
-DROP TABLE _quota_engine_count;
 DROP SCHEMA start_limits_test CASCADE;
 DROP OWNED BY start_limits_user, start_limits_new_user;
 DROP ROLE start_limits_user, start_limits_new_user;

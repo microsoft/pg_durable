@@ -292,8 +292,8 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"df.max_concurrent_per_user",
-        c"Maximum pending and running instances per submitting role in each database",
-        c"df.start() rejects new instances at this limit. 0 disables the limit. Superuser submission identities are exempt.",
+        c"Maximum nonterminal durable instances per submitting role in each database",
+        c"df.start() checks protected engine state, including queued starts. Cancellation frees capacity after the engine processes it. 0 disables the limit. Superuser submission identities are exempt.",
         &MAX_CONCURRENT_PER_USER,
         0,
         i32::MAX,
@@ -472,6 +472,9 @@ CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
 -- (sql/pg_durable--0.2.3--0.2.4.sql) until 0.2.4 is released -- Scenario A compares
 -- pg_get_indexdef() across the fresh-install and upgrade paths.
 CREATE INDEX idx_instances_label ON df.instances(label, created_at DESC, id) WHERE label IS NOT NULL;
+
+-- Admission reads each role's retained IDs, independently of display status.
+CREATE INDEX idx_instances_submitted_by ON df.instances(submitted_by, id);
 
 -- Index for finding nodes by instance
 CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);

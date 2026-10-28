@@ -10,7 +10,7 @@
 //! recover from connection failures by re-creating the pool on next call.
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use duroxide::Client;
@@ -27,12 +27,19 @@ use crate::types::{
 /// Cached tokio runtime for client operations.
 static CLIENT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
+struct BackendClient {
+    connection_string: String,
+    control: BackendControlState,
+    provider: Arc<duroxide_pg::PostgresProvider>,
+    client: Client,
+}
+
 // Per-backend cached Duroxide client. Uses thread_local + RefCell because
 // PostgreSQL backends are single-threaded forked processes. This allows
 // the client to be reset on connection failures (unlike OnceLock which
 // is permanent).
 thread_local! {
-    static DUROXIDE_CLIENT: RefCell<Option<(String, BackendControlState, Client)>> = const { RefCell::new(None) };
+    static DUROXIDE_CLIENT: RefCell<Option<BackendClient>> = const { RefCell::new(None) };
     static CONTROL_CONNECTION: RefCell<Option<(String, sqlx::PgConnection)>> = const { RefCell::new(None) };
 }
 
@@ -99,9 +106,9 @@ fn get_client_runtime() -> &'static Runtime {
 /// If the client doesn't exist yet, creates it. If `f` returns an error
 /// that looks like a connection failure, resets the client so the next
 /// call will re-initialize.
-fn with_duroxide_client<T, F>(f: F) -> Result<T, String>
+fn with_backend_client<T, F>(f: F) -> Result<T, String>
 where
-    F: FnOnce(&Client, &Runtime) -> Result<T, String>,
+    F: FnOnce(&BackendClient, &Runtime) -> Result<T, String>,
 {
     let pg_conn_str = postgres_connection_string();
     let control = match backend_control_state(&pg_conn_str) {
@@ -116,10 +123,9 @@ where
     };
     DUROXIDE_CLIENT.with(|cell| {
         let mut cached = cell.borrow_mut();
-        if cached
-            .as_ref()
-            .is_some_and(|(url, previous, _)| url != &pg_conn_str || previous != &control)
-        {
+        if cached.as_ref().is_some_and(|cached| {
+            cached.connection_string != pg_conn_str || cached.control != control
+        }) {
             *cached = None;
         }
     });
@@ -131,9 +137,9 @@ where
     if !has_client {
         // Need to create a new client
         let schema = control.schema;
-        let client = rt.block_on(async {
+        let provider = rt.block_on(async {
             // Limit backend provider to 1 connection — backends need minimal
-            // duroxide access (start/cancel/signal only).
+            // duroxide access (start/cancel/signal and quota checks).
             //
             // SAFETY: Each PostgreSQL backend is a separate process (fork model).
             // This code runs in a single-threaded tokio runtime with no worker
@@ -142,19 +148,23 @@ where
                 std::env::set_var("DUROXIDE_PG_POOL_MAX", "1");
             }
 
-            let store = new_backend_provider(&pg_conn_str, schema).await?;
-            Ok::<Client, String>(Client::new(store))
+            new_backend_provider(&pg_conn_str, schema).await
         })?;
 
         DUROXIDE_CLIENT.with(|cell| {
-            *cell.borrow_mut() = Some((pg_conn_str, control, client));
+            *cell.borrow_mut() = Some(BackendClient {
+                connection_string: pg_conn_str,
+                control,
+                client: Client::new(provider.clone()),
+                provider,
+            });
         });
     }
 
     // Execute the operation with the client
     let result = DUROXIDE_CLIENT.with(|cell| {
         let borrow = cell.borrow();
-        let (_, _, client) = borrow
+        let client = borrow
             .as_ref()
             .ok_or_else(|| "Client unexpectedly missing".to_string())?;
         f(client, rt)
@@ -170,6 +180,69 @@ where
     }
 
     result
+}
+
+pub(crate) fn count_active_instances(ids: &[String]) -> Result<i64, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let origin = crate::origin::backend_origin()?;
+    let engine_ids: Vec<String> = ids
+        .iter()
+        .map(|id| crate::origin::engine_id_for_origin(origin.as_ref(), id))
+        .collect();
+
+    with_backend_client(|backend, rt| {
+        rt.block_on(async {
+            let mut tx = backend
+                .provider
+                .pool()
+                .begin()
+                .await
+                .map_err(|e| format!("Failed to begin df.start() quota lookup: {e}"))?;
+            let result = async {
+                crate::origin::configure_metadata_transaction(&mut tx)
+                    .await
+                    .map_err(|e| format!("Failed to configure df.start() quota lookup: {e}"))?;
+
+                // Missing engine rows include queued starts and uncommitted graphs.
+                // Only the engine's protected terminal state can release capacity.
+                sqlx::query_scalar(&format!(
+                    "SELECT pg_catalog.count(*)
+                     FROM pg_catalog.unnest($1::pg_catalog.text[]) AS requested(id)
+                     LEFT JOIN {schema}.instances AS i
+                       ON i.instance_id OPERATOR(pg_catalog.=) requested.id
+                     LEFT JOIN {schema}.executions AS e
+                       ON e.instance_id OPERATOR(pg_catalog.=) i.instance_id
+                      AND e.execution_id OPERATOR(pg_catalog.=) i.current_execution_id
+                     WHERE e.status IS NULL OR e.status OPERATOR(pg_catalog.<>) ALL (
+                         ARRAY['Completed', 'Failed']::pg_catalog.text[])",
+                    schema = backend.control.schema,
+                ))
+                .bind(&engine_ids)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to read df.start() active instances: {e}"))
+            }
+            .await;
+            match result {
+                Ok(active) => {
+                    tx.commit()
+                        .await
+                        .map_err(|e| format!("Failed to finish df.start() quota lookup: {e}"))?;
+                    Ok(active)
+                }
+                Err(error) => {
+                    // This backend's runtime stops polling when block_on returns.
+                    // Finish rollback now instead of leaving it to async Drop.
+                    tx.rollback()
+                        .await
+                        .map_err(|e| format!("{error}; quota lookup rollback failed: {e}"))?;
+                    Err(error)
+                }
+            }
+        })
+    })
 }
 
 /// Heuristic to detect connection-level errors that warrant client reset.
@@ -239,9 +312,10 @@ pub fn start_durable_function(
     let inst_id = crate::origin::backend_engine_id(instance_id)?;
     let inp = input.to_string();
 
-    with_duroxide_client(|client, rt| {
+    with_backend_client(|backend, rt| {
         rt.block_on(async {
-            client
+            backend
+                .client
                 .start_orchestration(&inst_id, &fn_name, &inp)
                 .await
                 .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
@@ -438,9 +512,10 @@ pub fn cancel_durable_function(instance_id: &str, reason: &str) -> Result<(), St
     let inst_id = crate::origin::backend_engine_id(instance_id)?;
     let rsn = reason.to_string();
 
-    with_duroxide_client(|client, rt| {
+    with_backend_client(|backend, rt| {
         rt.block_on(async {
-            client
+            backend
+                .client
                 .cancel_instance(&inst_id, &rsn)
                 .await
                 .map_err(|e| format!("Failed to cancel durable function: {e:?}"))?;
@@ -455,8 +530,9 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
     let evt_name = event_name.to_string();
     let evt_data = data.to_string();
 
-    with_duroxide_client(|client, rt| {
+    with_backend_client(|backend, rt| {
         rt.block_on(async {
+            let client = &backend.client;
             client
                 .raise_event(&inst_id, &evt_name, &evt_data)
                 .await

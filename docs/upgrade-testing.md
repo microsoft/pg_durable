@@ -356,33 +356,52 @@ gate, so they never need to be added to the exclude list.
 Each schema-changing PR should add a section here documenting what changed,
 what the upgrade script handles, and any backward compatibility considerations.
 
-### v0.2.8 → v0.2.9
-
-The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
-development cycle, not the published v0.2.8 release. Multi-database installation
-identity and HTTP endpoint/secret DDL also belong in this migration;
-the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
+### v0.2.9 → v0.2.10 (unreleased)
 
 #### `df.start()` admission quotas (#139)
 
-- **DDL/B1:** No new schema objects, grants, or migration DDL. Both start
-  wrapper symbols use the same admission check against existing `df.instances`
-  columns, including on 0.2.2+ schemas without `ALTER EXTENSION UPDATE`.
+- **DDL/B1:** The upgrade adds `idx_instances_submitted_by` on
+  `df.instances(submitted_by, id)`, matching fresh installation. No new tables
+  or grants are needed. Both start wrapper symbols use the same admission
+  check against existing `df.instances` columns and protected engine state,
+  including on 0.2.2+ schemas without
+  `ALTER EXTENSION UPDATE`. No status grants are revoked or used as an
+  accounting authority; queued or not-yet-materialized engine instances count
+  as active. Cancellation releases capacity only after the engine processes it.
   B1 exercises a non-superuser reaching its quota on each supported schema.
+  Old schemas remain correct without the index but can scan other roles'
+  history. The normal index build blocks concurrent writes; set `lock_timeout`
+  and schedule the upgrade appropriately on large installations.
 - **Behavior change:** New superuser-settable GUCs
   `df.max_concurrent_per_user` (default `100`) and `df.max_instances_per_user`
   (default `10000`) apply immediately after loading the new binary.
   Existing work remains intact; starts at or above either quota fail with
   SQLSTATE `53400`. Set a quota to `0` to disable it.
 - **Concurrency:** Admission uses a database-local, per-role transaction
-  advisory lock and a current snapshot, including under repeatable-read and
-  serializable isolation. E2E tests cover concurrent commit, rollback,
-  savepoint rollback, and lock timeout.
+  lock with a tag that SQL advisory-lock functions cannot construct, and a
+  current snapshot, including under repeatable-read and serializable isolation.
+  E2E tests cover concurrent commit, rollback, savepoint rollback, lock timeout,
+  caller-writable status, and attempts to squat on public advisory-lock keys.
 - **B2/replay:** No data migration, runtime schema detection, durable payload,
   or orchestration changes. Workflows that call `df.start()` from SQL are
   subject to the new quotas when that SQL activity executes. The separate
   `'new'` session uses its own configuration defaults, not caller session
   overrides. See [Instance Limits](../USER_GUIDE.md#instance-limits).
+- **Scale validation:** Warm-cache PG17 measurements on a development server,
+  with 500,000 synthetic retained instances distributed across 100 roles,
+  reduced the median local ID/count query from about 35 ms to 19 ms with the
+  owner-leading index; retained-only counting fell from about 30 ms to 11 ms.
+  The protected-engine batch for 5,000 owned IDs took about 244 ms in that run.
+  These are query measurements, not throughput guarantees. The index reduces
+  local cross-role scanning, not the per-owner engine-lookup cost. Only retained
+  counting runs when the active quota is disabled; both disabled skips admission.
+
+### v0.2.8 → v0.2.9
+
+The post-tag changes in #379, #388, #389, #390, and #380 belong to the 0.2.9
+development cycle, not the published v0.2.8 release. Multi-database installation
+identity and HTTP endpoint/secret DDL also belong in this migration;
+the shipped 0.2.7 to 0.2.8 script must remain byte-identical.
 
 #### Multi-database installation
 

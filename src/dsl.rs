@@ -1063,22 +1063,37 @@ fn require_login_privilege(oid: pgrx::pg_sys::Oid, name: &str, caller: &str) {
     }
 }
 
-// "PGDQ": separate from the loopback-launch slots. Advisory locks are
-// database-local; the second key preserves all bits of the submitting role OID.
-const INSTANCE_QUOTA_LOCK_CLASS_ID: i32 = 0x5047_4451;
+const INSTANCE_QUOTA_LOCK_CLASS_ID: u32 = 0x5047_4451;
 
-fn current_instance_counts(user_oid: pg_sys::Oid) -> (i64, i64) {
+fn acquire_instance_quota_lock(user_oid: pg_sys::Oid) {
+    // SQL advisory-lock functions can only construct sub-IDs 1 and 2. Using 3
+    // keeps other roles from locking a victim's admission key directly.
+    let tag = pg_sys::LOCKTAG {
+        locktag_field1: unsafe { pg_sys::MyDatabaseId.to_u32() },
+        locktag_field2: INSTANCE_QUOTA_LOCK_CLASS_ID,
+        locktag_field3: user_oid.to_u32(),
+        locktag_field4: 3,
+        locktag_type: pg_sys::LockTagType::LOCKTAG_ADVISORY as u8,
+        locktag_lockmethodid: pg_sys::USER_LOCKMETHOD as u8,
+    };
+    let result = unsafe { pg_sys::LockAcquire(&tag, pg_sys::ExclusiveLock as i32, false, false) };
+    if result == pg_sys::LockAcquireResult::LOCKACQUIRE_NOT_AVAIL {
+        pgrx::error!("failed to acquire df.start() admission lock");
+    }
+}
+
+fn current_instance_quota_rows(user_oid: pg_sys::Oid, include_ids: bool) -> (i64, Vec<String>) {
     Spi::connect(|_| unsafe {
-        let mut argtypes = [pg_sys::OIDOID];
+        let mut argtypes = [pg_sys::OIDOID, pg_sys::BOOLOID];
         let plan = pg_sys::SPI_prepare(
-            c"SELECT pg_catalog.count(*) FILTER (
-                  WHERE pg_catalog.lower(status) OPERATOR(pg_catalog.=)
-                        ANY (ARRAY['pending', 'running']::pg_catalog.text[])),
-                     pg_catalog.count(*)
+            c"SELECT pg_catalog.count(*),
+                     CASE WHEN $2 THEN COALESCE(pg_catalog.array_agg(id::pg_catalog.text),
+                                               ARRAY[]::pg_catalog.text[])
+                          ELSE ARRAY[]::pg_catalog.text[] END
               FROM df.instances
               WHERE submitted_by OPERATOR(pg_catalog.=) $1::pg_catalog.regrole"
                 .as_ptr(),
-            1,
+            2,
             argtypes.as_mut_ptr(),
         );
         if plan.is_null() {
@@ -1090,7 +1105,10 @@ fn current_instance_counts(user_oid: pg_sys::Oid) -> (i64, i64) {
         // admission lock, plus this transaction's own earlier starts. Ordinary
         // SPI would reuse the transaction snapshot and allow quota bypasses.
         pg_sys::CommandCounterIncrement();
-        let mut values = [pg_sys::Datum::from(user_oid)];
+        let mut values = [
+            pg_sys::Datum::from(user_oid),
+            pg_sys::Datum::from(include_ids),
+        ];
         let status = pg_sys::SPI_execute_snapshot(
             plan,
             values.as_mut_ptr(),
@@ -1107,13 +1125,14 @@ fn current_instance_counts(user_oid: pg_sys::Oid) -> (i64, i64) {
         let table = pg_sys::SPI_tuptable
             .as_ref()
             .unwrap_or_else(|| pgrx::error!("df.start() quota query returned no tuple table"));
-        let count = |column| {
-            let mut is_null = false;
-            let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, column, &mut is_null);
-            i64::from_datum(datum, is_null)
-                .unwrap_or_else(|| pgrx::error!("df.start() quota query returned a NULL count"))
-        };
-        (count(1), count(2))
+        let mut is_null = false;
+        let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, 1, &mut is_null);
+        let total = i64::from_datum(datum, is_null)
+            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned a NULL count"));
+        let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, 2, &mut is_null);
+        let ids = Vec::<String>::from_datum(datum, is_null)
+            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned NULL instance IDs"));
+        (total, ids)
     })
 }
 
@@ -1126,32 +1145,11 @@ fn enforce_instance_limits(user_oid: pg_sys::Oid, user_name: &str) {
 
     // Keep the lock until commit/rollback: another backend cannot count our
     // uncommitted instances. A function-scoped lock would leave a race window.
-    Spi::run_with_args(
-        "SELECT pg_catalog.pg_advisory_xact_lock($1::pg_catalog.int4, $2::pg_catalog.int4)",
-        &[
-            INSTANCE_QUOTA_LOCK_CLASS_ID.into(),
-            (u32::from(user_oid) as i32).into(),
-        ],
-    )
-    .unwrap_or_else(|e| pgrx::error!("failed to acquire df.start() admission lock: {e}"));
+    acquire_instance_quota_lock(user_oid);
 
-    let (active, total) = current_instance_counts(user_oid);
-    for (limit, count, kind, hint) in [
-        (
-            concurrent_limit,
-            active,
-            "active",
-            "Wait for in-flight instances to finish or cancel them, or ask an administrator to raise df.max_concurrent_per_user.",
-        ),
-        (
-            instance_limit,
-            total,
-            "retained",
-            "Wait for automatic reconciliation to remove terminal instances, or ask an administrator to adjust retention or raise df.max_instances_per_user.",
-        ),
-    ] {
-        if limit > 0 && count >= i64::from(limit) {
-            ErrorReport::new(
+    let (total, ids) = current_instance_quota_rows(user_oid, concurrent_limit > 0);
+    let reject = |count, kind, limit, hint| {
+        ErrorReport::new(
                 PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
                 format!(
                     "df.start rejected: user \"{user_name}\" has {count} {kind} instances (limit {limit})"
@@ -1160,6 +1158,25 @@ fn enforce_instance_limits(user_oid: pg_sys::Oid, user_name: &str) {
             )
             .set_hint(hint)
             .report(PgLogLevel::ERROR);
+    };
+    if instance_limit > 0 && total >= i64::from(instance_limit) {
+        reject(
+            total,
+            "retained",
+            instance_limit,
+            "Wait for terminal history to age out and be reconciled, or ask an administrator to adjust retention or raise df.max_instances_per_user. Completion or cancellation alone does not free retained capacity.",
+        );
+    }
+    if concurrent_limit > 0 {
+        let active = crate::client::count_active_instances(&ids)
+            .unwrap_or_else(|e| pgrx::error!("df.start() quota check failed: {e}"));
+        if active >= i64::from(concurrent_limit) {
+            reject(
+                active,
+                "active",
+                concurrent_limit,
+                "Wait for in-flight instances to finish or for cancellation to be processed, or ask an administrator to raise df.max_concurrent_per_user.",
+            );
         }
     }
 }

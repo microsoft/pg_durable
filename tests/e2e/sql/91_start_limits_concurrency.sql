@@ -25,7 +25,7 @@ CREATE FUNCTION pg_temp.quota_wait_for_lock(waiter INTEGER) RETURNS VOID LANGUAG
 BEGIN
     FOR attempt IN 1..300 LOOP
         IF EXISTS (SELECT 1 FROM pg_locks WHERE pid = waiter AND locktype = 'advisory'
-                   AND classid = x'50474451'::int AND objsubid = 2 AND NOT granted) THEN
+                   AND classid = x'50474451'::int AND objsubid = 3 AND NOT granted) THEN
             RETURN;
         END IF;
         PERFORM pg_sleep(0.1);
@@ -78,6 +78,7 @@ BEGIN
         PERFORM dblink_exec('quota_holder', $sql$
             DO $cancel$ BEGIN
                 PERFORM df.cancel(id) FROM df.instances WHERE status IN ('pending', 'running');
+                PERFORM public._e2e_wait_for_engine_terminal(id) FROM df.instances;
             END $cancel$;
         $sql$);
         PERFORM dblink_exec('quota_waiter', 'BEGIN ISOLATION LEVEL ' || isolation);
@@ -115,6 +116,7 @@ BEGIN
         PERFORM dblink_exec('quota_holder', $sql$
             DO $cancel$ BEGIN
                 PERFORM df.cancel(id) FROM df.instances WHERE status IN ('pending', 'running');
+                PERFORM public._e2e_wait_for_engine_terminal(id) FROM df.instances;
             END $cancel$;
         $sql$);
         PERFORM dblink_exec('quota_holder', 'BEGIN');
@@ -139,6 +141,7 @@ BEGIN
     PERFORM dblink_exec('quota_holder', $sql$
         DO $cancel$ BEGIN
             PERFORM df.cancel(id) FROM df.instances WHERE status IN ('pending', 'running');
+            PERFORM public._e2e_wait_for_engine_terminal(id) FROM df.instances;
         END $cancel$;
     $sql$);
     PERFORM dblink_exec('quota_holder', 'BEGIN');

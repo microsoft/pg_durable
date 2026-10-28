@@ -963,6 +963,7 @@ test_b1_start_limits() {
         DO \$\$
         BEGIN
             PERFORM df.start('SELECT 1');
+            UPDATE df.instances SET status = 'completed';
             BEGIN
                 PERFORM df.start('SELECT 1');
                 RAISE EXCEPTION 'legacy df.start bypassed concurrency quota';

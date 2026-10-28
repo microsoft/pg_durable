@@ -3010,7 +3010,7 @@ for the full syntax and default domain list.
 
 | Setting | Default | Counts |
 |---------|---------|--------|
-| `df.max_concurrent_per_user` | `100` | Instances with status `pending` or `running`, including sleeping, looping, and signal-waiting workflows |
+| `df.max_concurrent_per_user` | `100` | Instances not yet terminal in the durable engine, including queued, sleeping, looping, and signal-waiting workflows |
 | `df.max_instances_per_user` | `10000` | All retained instances, including completed, failed, and cancelled workflows |
 
 Each quota applies to the **submitting role (`current_user`) in the origin
@@ -3036,11 +3036,21 @@ session overrides. Configure those defaults to apply the same policy to both
 modes; `SET ROLE` alone does not load a role's connection defaults.
 
 At a quota, the call fails with SQLSTATE `53400` (`configuration_limit_exceeded`)
-and a `HINT` identifying the relevant setting. Finishing or cancelling work
-frees concurrent capacity, but not retained-instance capacity. Retained capacity
-is freed when [automatic reconciliation](#automatic-reconciliation) removes
+and a `HINT` identifying the relevant setting. Finishing work frees concurrent
+capacity once the engine records the terminal state. Cancellation releases it
+after the engine processes the request, not immediately when `df.cancel()`
+returns. Changing the displayed instance status does not release capacity.
+Neither completion nor cancellation frees retained-instance capacity. Retained
+capacity is freed when [automatic reconciliation](#automatic-reconciliation) removes
 terminal instances. If reconciliation is disabled, or retained work has not
 aged out, an administrator must adjust retention or raise the quota.
+
+The default retained quota equals reconciliation's 10,000-terminal-instance
+retention cap. A role with 10,000 recent instances can therefore remain blocked
+until its history ages out under `pg_durable.retention_days` (30 days by default);
+running reconciliation alone need not free a slot. Tune the quota for the
+expected submission volume and retention window before deploying. Retention
+settings require a restart; the quota itself can be changed at runtime.
 
 Concurrent starts by the same role in the same database wait for the preceding
 **submitting transaction** to commit or roll back before checking capacity.
@@ -3049,6 +3059,13 @@ and use PostgreSQL `lock_timeout` to bound admission waits. Counts include
 current committed rows and the caller's own changes even under `REPEATABLE READ`
 or `SERIALIZABLE`. Rollback, including rollback to a savepoint, releases the
 corresponding reservations.
+
+Perform business-table updates before starting workflows when possible, and
+avoid leaving submitting transactions idle. Consider PostgreSQL
+`idle_in_transaction_session_timeout` as well as `lock_timeout`. Applications
+must retry entire transactions on deadlock or serialization failures; admission
+adds another lock/read to transactions, including workflow SQL that starts
+other workflows. Both quotas must be `0` to disable admission locking.
 
 Do not follow a `'caller'` start with a `'new'` start for the same role and
 database while the caller transaction remains open: the separate session waits
@@ -3059,6 +3076,17 @@ These are instance quotas, not calls-per-second or byte limits. They do not
 bound an individual graph's size or history. Changing a quota does not cancel
 or delete existing work; it only controls admission of new instances. The
 defaults also apply after a binary-only upgrade, without `ALTER EXTENSION UPDATE`.
+Existing workflows whose SQL calls `df.start()` also encounter the new limits;
+an over-quota SQL step can fail its enclosing workflow.
+
+Fresh 0.2.10 installations include an owner-leading index for quota checks.
+Run `ALTER EXTENSION pg_durable UPDATE TO '0.2.10'` to add it on an existing
+installation. Binary-only upgrades still enforce quotas, but the local count
+can scan other roles' history until the index is installed. Active accounting
+also checks the role's retained IDs against the engine, so larger histories
+increase admission cost even with the index. Measure representative workloads
+before substantially raising retention or quotas. Disabling the active quota
+skips the engine lookup; disabling both quotas skips admission entirely.
 
 ---
 
