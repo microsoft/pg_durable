@@ -2547,9 +2547,11 @@ worker runs a **best-effort reconciliation pass** that does two things:
   age past `retention_days`. Anything the engine is still tracking with a live
   `df` row is left untouched.
 
-After the corresponding engine work and history are gone, reconciliation removes
-the protected submission record and frees its retained quota capacity. This
-includes submissions whose caller transaction or savepoint rolled back.
+After the corresponding engine work, history, and origin metadata are gone,
+reconciliation removes the protected submission record and frees its retained
+quota capacity. This includes submissions whose caller transaction or savepoint
+rolled back. Failed metadata cleanup delays retained-capacity release, but does
+not make retired work consume active capacity again.
 
 Satellite maintenance visits `_origins` registrations made by activity routing for
 submitted work, in bounded batches under the shared origin connection budget.

@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use crate::client::start_durable_function;
+use crate::client::reserve_submission_id;
 use crate::types::{
     flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
@@ -950,7 +950,7 @@ const NODE_INSERT_BATCH_SIZE: usize = 1_000;
 /// The claim — not the generation — is the loop tail, so this only ever returns
 /// an ID that `try_claim` confirmed was inserted. On exhaustion it returns an
 /// `Err` rather than a last, unverified candidate (review finding C1).
-fn pick_id_with_retry(
+pub(crate) fn pick_id_with_retry(
     mut generate: impl FnMut() -> String,
     mut try_claim: impl FnMut(&str) -> Result<bool, String>,
     max_attempts: usize,
@@ -1508,8 +1508,14 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         }
     }
 
-    // Reserve the instance ID before inserting nodes so node rows can reference
-    // it. Collisions on the 8-hex ID space are rare, but we reserve via
+    // Take local relation locks before opening the independent reservation
+    // transaction, so extension DROP cannot hold them while waiting on our ledger.
+    Spi::run("LOCK TABLE ONLY df.instances, ONLY df.nodes IN ACCESS SHARE MODE")
+        .unwrap_or_else(|error| pgrx::error!("Failed to lock instance metadata: {error}"));
+
+    // Reserve the protected ledger ID first, retaining its transaction through
+    // enqueue. Then reserve the local ID before nodes can reference it.
+    // Collisions on the 8-hex ID space are rare, but we reserve via
     // INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id and re-roll on
     // collision so a raw primary-key error never reaches the caller (issue
     // #129). ON CONFLICT arbitration runs against the global id index *below*
@@ -1520,9 +1526,27 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     // referenced root node row is inserted (with that ID) before commit — no
     // post-insert UPDATE is needed (df callers aren't granted UPDATE on
     // root_node).
+    let mut submission = None;
+    #[cfg(any(test, feature = "pg_test"))]
+    let mut reservation_error = None;
     let instance_id = match pick_id_with_retry(
         short_id,
         |candidate| {
+            let reserved = match reserve_submission_id(candidate, current_user_oid) {
+                Ok(Some(reservation)) => Some(reservation),
+                Ok(None) => return Ok(false),
+                Err(error) => {
+                    #[cfg(not(any(test, feature = "pg_test")))]
+                    return Err(error);
+                    // The unit-test server has no worker; preserve the existing
+                    // graph-construction tests and report the enqueue error below.
+                    #[cfg(any(test, feature = "pg_test"))]
+                    {
+                        reservation_error = Some(error);
+                        None
+                    }
+                }
+            };
             let label_arg: DatumWithOid = match label {
                 Some(l) => l.into(),
                 None => DatumWithOid::null::<String>(),
@@ -1561,12 +1585,19 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                     ],
                 )
             };
-            Spi::connect_mut(
-                |client| match client.update(inst_sql, Some(1), &inst_args) {
-                    Ok(table) => Ok(!table.is_empty()),
-                    Err(e) => Err(format!("{e:?}")),
-                },
-            )
+            let claimed =
+                Spi::connect_mut(
+                    |client| match client.update(inst_sql, Some(1), &inst_args) {
+                        Ok(table) => Ok(!table.is_empty()),
+                        Err(e) => Err(format!("{e:?}")),
+                    },
+                )?;
+            if claimed {
+                submission = reserved;
+            } else if let Some(reserved) = reserved {
+                reserved.rollback()?;
+            }
+            Ok(claimed)
         },
         MAX_ID_ATTEMPTS,
     ) {
@@ -1631,12 +1662,23 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 
-    if let Err(e) = start_durable_function(
-        crate::orchestrations::execute_function_graph::NAME,
-        &instance_id,
-        &input_json,
-        current_user_oid,
-    ) {
+    let start_result = match submission {
+        Some(submission) => submission.enqueue(
+            crate::orchestrations::execute_function_graph::NAME,
+            &input_json,
+        ),
+        None => {
+            #[cfg(not(any(test, feature = "pg_test")))]
+            {
+                Err("Missing protected submission reservation".into())
+            }
+            #[cfg(any(test, feature = "pg_test"))]
+            {
+                Err(reservation_error.unwrap_or_else(|| "Missing submission reservation".into()))
+            }
+        }
+    };
+    if let Err(e) = start_result {
         // Fail fast: the durable engine could not accept the start, so abort the
         // whole df.start() transaction rather than committing an instance row
         // that would never run (a stuck instance nothing recovers). The df rows

@@ -143,6 +143,23 @@ BEGIN
     IF count_rows <> 0 OR EXISTS (SELECT 1 FROM df.instances WHERE label = 'quota-rollback-enqueue-failed') THEN
         RAISE EXCEPTION 'TEST FAILED: failed enqueue retained accounting or metadata';
     END IF;
+    PERFORM dblink_exec('quota_rollback_fence', 'REVOKE INSERT (id) ON df.nodes FROM quota_rollback_atomic');
+    PERFORM dblink_exec('quota_rollback_atomic', $remote$
+        DO $failure$
+        BEGIN
+            BEGIN
+                PERFORM df.start('SELECT 1', 'quota-reservation-persist-failed');
+                RAISE EXCEPTION 'TEST FAILED: node persistence unexpectedly succeeded';
+            EXCEPTION WHEN insufficient_privilege THEN NULL;
+            END;
+        END $failure$;
+    $remote$);
+    PERFORM dblink_exec('quota_rollback_fence', 'GRANT INSERT (id) ON df.nodes TO quota_rollback_atomic');
+    EXECUTE format('SELECT count(*) FROM %I._submissions WHERE submitted_by = $1', df.duroxide_schema())
+        INTO count_rows USING 'quota_rollback_atomic'::regrole::oid;
+    IF count_rows <> 0 OR EXISTS (SELECT 1 FROM df.instances WHERE label = 'quota-reservation-persist-failed') THEN
+        RAISE EXCEPTION 'TEST FAILED: SPI error retained a submission reservation or metadata';
+    END IF;
     SELECT id INTO inst FROM dblink('quota_rollback_atomic', 'SELECT df.start(''SELECT 1'')') AS started(id TEXT);
     PERFORM public._e2e_wait_for_engine_terminal(inst);
     PERFORM dblink_disconnect('quota_rollback_atomic');

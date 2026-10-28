@@ -380,7 +380,14 @@ what the upgrade script handles, and any backward compatibility considerations.
   Admission unions these records with visible legacy instance IDs, avoiding
   double counting. Bounded reconciliation removes ledger entries only after
   no corresponding engine instance, execution, history, queue item, or lock
-  remains. The enqueue WorkItem and orchestration input are unchanged.
+  remains and origin metadata is confirmed absent. If metadata deletion fails
+  or the origin cannot be inspected, the ledger preserves trusted retirement
+  evidence rather than reclassifying stale metadata as active legacy work.
+  The enqueue WorkItem and orchestration input are unchanged.
+  ID allocation reserves the ledger key before the local instance row and retries
+  collisions in either store, including IDs retained after caller rollback.
+  The ledger transaction stays uncommitted until enqueue; local persistence
+  failures release the reservation without leaving a charge or queue item.
   Pre-upgrade orphans that already lost their `df` identity cannot be attributed
   retroactively; existing orphan cleanup remains responsible for them.
 - **Behavior change:** New superuser-settable GUCs

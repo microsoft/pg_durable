@@ -327,74 +327,48 @@ async fn list_running_descendants(client: &Client, root_instance_id: &str) -> Ve
     descendants
 }
 
-/// Start a durable function via the shared PostgreSQL store.
-pub fn start_durable_function(
-    function_name: &str,
-    instance_id: &str,
-    input: &str,
-    submitted_by: pg_sys::Oid,
-) -> Result<(), String> {
-    log!(
-        "pg_durable: start_durable_function for instance {}",
-        instance_id
-    );
+pub(crate) struct PendingSubmission {
+    transaction: Option<sqlx::Transaction<'static, sqlx::Postgres>>,
+    schema: &'static str,
+    instance_id: String,
+}
 
-    let origin = crate::origin::backend_origin()?;
-    let origin_key = crate::origin::engine_id_for_origin(origin.as_ref(), "");
-    let inst_id = crate::origin::engine_id_for_origin(origin.as_ref(), instance_id);
-    let work_item = serde_json::to_string(&WorkItem::StartOrchestration {
-        instance: inst_id.clone(),
-        orchestration: function_name.to_string(),
-        input: input.to_string(),
-        version: None,
-        parent_instance: None,
-        parent_id: None,
-        parent_execution_id: None,
-        execution_id: duroxide::INITIAL_EXECUTION_ID,
-    })
-    .map_err(|e| format!("Failed to serialize durable start: {e}"))?;
+impl PendingSubmission {
+    pub(crate) fn rollback(mut self) -> Result<(), String> {
+        let tx = self.transaction.take().expect("submission transaction");
+        get_client_runtime()
+            .block_on(tx.rollback())
+            .map_err(|error| format!("Failed to release submission reservation: {error}"))
+    }
 
-    with_backend_client(|backend, rt| {
-        rt.block_on(async {
-            let mut tx = backend
-                .provider
-                .pool()
-                .begin()
-                .await
-                .map_err(|e| format!("Failed to begin durable submission: {e}"))?;
-            let result = async {
-                crate::origin::configure_metadata_transaction(&mut tx)
-                    .await
-                    .map_err(|e| format!("Failed to configure durable submission: {e}"))?;
-                sqlx::query(&format!(
-                    "INSERT INTO {schema}._submissions (instance_id, origin, submitted_by)
-                     VALUES ($1, $2, $3::pg_catalog.int8::pg_catalog.oid)",
-                    schema = backend.control.schema,
-                ))
-                .bind(&inst_id)
-                .bind(&origin_key)
-                .bind(i64::from(submitted_by.to_u32()))
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to record durable submission: {e}"))?;
-
-                // This is the same WorkItem and provider function used by
-                // Client::start_orchestration, but shares the ledger transaction.
-                sqlx::query(&format!(
-                    "SELECT {schema}.enqueue_orchestrator_work(
-                         $1, $2, pg_catalog.clock_timestamp(), NULL, NULL, NULL)",
-                    schema = backend.control.schema,
-                ))
-                .bind(&inst_id)
-                .bind(&work_item)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to enqueue durable submission: {e}"))?;
-                Ok(())
-            }
-            .await;
+    pub(crate) fn enqueue(mut self, function_name: &str, input: &str) -> Result<(), String> {
+        let work_item = serde_json::to_string(&WorkItem::StartOrchestration {
+            instance: self.instance_id.clone(),
+            orchestration: function_name.to_string(),
+            input: input.to_string(),
+            version: None,
+            parent_instance: None,
+            parent_id: None,
+            parent_execution_id: None,
+            execution_id: duroxide::INITIAL_EXECUTION_ID,
+        })
+        .map_err(|e| format!("Failed to serialize durable start: {e}"))?;
+        let mut tx = self.transaction.take().expect("submission transaction");
+        get_client_runtime().block_on(async {
+            // This is the same WorkItem and provider function used by
+            // Client::start_orchestration, but shares the reservation transaction.
+            let result = sqlx::query(&format!(
+                "SELECT {schema}.enqueue_orchestrator_work(
+                     $1, $2, pg_catalog.clock_timestamp(), NULL, NULL, NULL)",
+                schema = self.schema,
+            ))
+            .bind(&self.instance_id)
+            .bind(&work_item)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to enqueue durable submission: {e}"));
             match result {
-                Ok(()) => tx
+                Ok(_) => tx
                     .commit()
                     .await
                     .map_err(|e| format!("Failed to commit durable submission: {e}")),
@@ -406,7 +380,79 @@ pub fn start_durable_function(
                 }
             }
         })
+    }
+}
+
+impl Drop for PendingSubmission {
+    fn drop(&mut self) {
+        if let Some(tx) = self.transaction.take() {
+            // SPI errors unwind through this guard. Finish rollback while the
+            // backend runtime is polling, rather than leaving it to async Drop.
+            if let Err(error) = get_client_runtime().block_on(tx.rollback()) {
+                warning!("pg_durable: submission reservation rollback failed: {error}");
+            }
+        }
+    }
+}
+
+pub(crate) fn reserve_submission_id(
+    instance_id: &str,
+    submitted_by: pg_sys::Oid,
+) -> Result<Option<PendingSubmission>, String> {
+    let origin = crate::origin::backend_origin()?;
+    let origin_key = crate::origin::engine_id_for_origin(origin.as_ref(), "");
+    let instance_id = crate::origin::engine_id_for_origin(origin.as_ref(), instance_id);
+    with_backend_client(|backend, rt| {
+        let transaction = rt.block_on(reserve_submission_transaction(
+            backend.provider.pool(),
+            backend.control.schema,
+            &instance_id,
+            &origin_key,
+            submitted_by.to_u32(),
+        ))?;
+        Ok(transaction.map(|transaction| PendingSubmission {
+            transaction: Some(transaction),
+            schema: backend.control.schema,
+            instance_id,
+        }))
     })
+}
+
+async fn reserve_submission_transaction(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    instance_id: &str,
+    origin: &str,
+    submitted_by: u32,
+) -> Result<Option<sqlx::Transaction<'static, sqlx::Postgres>>, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin durable submission: {e}"))?;
+    let result = async {
+        crate::origin::configure_metadata_transaction(&mut tx)
+            .await
+            .map_err(|e| format!("Failed to configure durable submission: {e}"))?;
+        sqlx::query_scalar::<_, String>(&format!(
+            "INSERT INTO {schema}._submissions (instance_id, origin, submitted_by)
+             VALUES ($1, $2, $3::pg_catalog.int8::pg_catalog.oid)
+             ON CONFLICT (instance_id) DO NOTHING RETURNING instance_id"
+        ))
+        .bind(instance_id)
+        .bind(origin)
+        .bind(i64::from(submitted_by))
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to reserve durable submission: {e}"))
+    }
+    .await;
+    if matches!(&result, Ok(Some(_))) {
+        return Ok(Some(tx));
+    }
+    tx.rollback().await.map_err(|error| {
+        format!("Submission reservation rollback failed: {error}; reservation result: {result:?}")
+    })?;
+    result.map(|_| None)
 }
 
 /// Upper bound (milliseconds) on the `transaction_mode => 'new'` `df.start()`
@@ -642,8 +688,168 @@ pub fn raise_external_event(instance_id: &str, event_name: &str, data: &str) -> 
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
 mod tests {
+    use super::*;
+    use crate::types::worker_provider_config;
+
+    #[pg_test]
+    fn rolled_back_submission_id_is_retried() {
+        const SCHEMA: &str = "quota_reservation_test";
+        const ROLLED_BACK: &str = "c4270001";
+        const LOCAL_COLLISION: &str = "c4270002";
+        const AVAILABLE: &str = "c4270003";
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let owner = unsafe { pg_sys::GetUserId().to_u32() };
+        let rt = get_client_runtime();
+        let mut url = url::Url::parse(&postgres_connection_string()).unwrap();
+        url.set_username(&admin).unwrap();
+        url.set_path(&database);
+        let provider = rt
+            .block_on(duroxide_pg::PostgresProvider::new_with_config(
+                worker_provider_config(url.as_str(), SCHEMA),
+            ))
+            .unwrap();
+        let pool = provider.pool();
+        rt.block_on(
+            sqlx::query(
+                "CREATE TABLE quota_reservation_test._submissions (
+                instance_id text PRIMARY KEY, origin text NOT NULL, submitted_by oid NOT NULL)",
+            )
+            .execute(pool),
+        )
+        .unwrap();
+        let mut caller = rt.block_on(crate::origin::metadata_test_connection(&admin, &database));
+
+        let insert = "INSERT INTO df.instances (id,root_node,submitted_by)
+                      VALUES ($1,$1,$2::bigint::oid::regrole)
+                      ON CONFLICT (id) DO NOTHING RETURNING id";
+        let mut caller_tx = rt.block_on(caller.begin()).unwrap();
+        rt.block_on(
+            sqlx::query(insert)
+                .bind(ROLLED_BACK)
+                .bind(i64::from(owner))
+                .execute(&mut *caller_tx),
+        )
+        .unwrap();
+        let transaction = rt
+            .block_on(reserve_submission_transaction(
+                pool,
+                SCHEMA,
+                ROLLED_BACK,
+                "",
+                owner,
+            ))
+            .unwrap()
+            .unwrap();
+        PendingSubmission {
+            transaction: Some(transaction),
+            schema: SCHEMA,
+            instance_id: ROLLED_BACK.into(),
+        }
+        .enqueue("quota-test", "original")
+        .unwrap();
+        rt.block_on(caller_tx.rollback()).unwrap();
+        let original: String = rt.block_on(sqlx::query_scalar(
+            "SELECT work_item FROM quota_reservation_test.orchestrator_queue WHERE instance_id = $1",
+        ).bind(ROLLED_BACK).fetch_one(pool)).unwrap();
+
+        let mut caller_tx = rt.block_on(caller.begin()).unwrap();
+        rt.block_on(
+            sqlx::query(insert)
+                .bind(LOCAL_COLLISION)
+                .bind(i64::from(owner))
+                .execute(&mut *caller_tx),
+        )
+        .unwrap();
+        let mut candidates = [ROLLED_BACK, LOCAL_COLLISION, AVAILABLE].into_iter();
+        let mut reservation = None;
+        let mut attempted = Vec::new();
+        let id = crate::dsl::pick_id_with_retry(
+            || candidates.next().expect("bounded candidates").to_string(),
+            |candidate| {
+                attempted.push(candidate.to_string());
+                let Some(transaction) = rt.block_on(reserve_submission_transaction(
+                    pool, SCHEMA, candidate, "", owner,
+                ))?
+                else {
+                    return Ok(false);
+                };
+                let pending = PendingSubmission {
+                    transaction: Some(transaction),
+                    schema: SCHEMA,
+                    instance_id: candidate.into(),
+                };
+                let claimed: Option<String> = rt
+                    .block_on(
+                        sqlx::query_scalar(insert)
+                            .bind(candidate)
+                            .bind(i64::from(owner))
+                            .fetch_optional(&mut *caller_tx),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if claimed.is_some() {
+                    reservation = Some(pending);
+                    Ok(true)
+                } else {
+                    pending.rollback()?;
+                    Ok(false)
+                }
+            },
+            3,
+        )
+        .unwrap();
+        assert_eq!(id, AVAILABLE);
+        assert_eq!(attempted, [ROLLED_BACK, LOCAL_COLLISION, AVAILABLE]);
+        reservation
+            .unwrap()
+            .enqueue("quota-test", "replacement")
+            .unwrap();
+        rt.block_on(caller_tx.rollback()).unwrap();
+
+        let transaction = rt
+            .block_on(reserve_submission_transaction(
+                pool, SCHEMA, "c4270004", "", owner,
+            ))
+            .unwrap()
+            .unwrap();
+        drop(PendingSubmission {
+            transaction: Some(transaction),
+            schema: SCHEMA,
+            instance_id: "c4270004".into(),
+        });
+        rt.block_on(async {
+            let ids: Vec<String> = sqlx::query_scalar(
+                "SELECT instance_id FROM quota_reservation_test._submissions ORDER BY instance_id",
+            ).fetch_all(pool).await.unwrap();
+            assert_eq!(ids, [ROLLED_BACK, AVAILABLE]);
+            let unchanged: String = sqlx::query_scalar(
+                "SELECT work_item FROM quota_reservation_test.orchestrator_queue WHERE instance_id = $1",
+            ).bind(ROLLED_BACK).fetch_one(pool).await.unwrap();
+            assert_eq!(unchanged, original);
+            let queue_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM quota_reservation_test.orchestrator_queue",
+            ).fetch_one(pool).await.unwrap();
+            assert_eq!(queue_count, 2);
+            let local_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM df.instances WHERE id = ANY($1)",
+            ).bind(&[ROLLED_BACK, LOCAL_COLLISION, AVAILABLE]).fetch_one(&mut caller).await.unwrap();
+            assert_eq!(local_count, 0);
+            sqlx::query("DROP SCHEMA quota_reservation_test CASCADE").execute(&mut caller).await.unwrap();
+            pool.close().await;
+            caller.close().await.unwrap();
+        });
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
     use super::{
         backend_control_connection_options, format_new_transaction_start_error,
         is_connection_error, refresh_backend_control_state, CONTROL_LOOKUP_TIMEOUT,

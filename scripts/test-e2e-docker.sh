@@ -44,11 +44,13 @@ SKIP_TESTS=(
     "47_http_dsl_disabled"
     "48_http_allow_all"
     # Needs the "reconcile" phase GUCs (reconcile_interval=2, retention_days=0)
-    # so a pass acts within the 30s test window. The single fixed-config Docker
+    # so a pass acts within the test window. The single fixed-config Docker
     # container keeps the production defaults (reconcile_interval=3600,
     # retention_days=30), under which the orphan is never reclaimed in time.
     "54_reconcile_orphans"
     "76_multi_database_reconcile"
+    "95_start_limits_rollback_cleanup"
+    "96_start_limits_failed_metadata_cleanup"
     "88_multi_database_maintenance_backlog"
     # Require the force-drop phase (one execution slot, reconciliation disabled).
     "78_multi_database_force_drop"

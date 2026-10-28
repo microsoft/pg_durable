@@ -2114,9 +2114,11 @@ async fn cleanup_submissions(
     pool: &sqlx::PgPool,
     schema: &str,
     cursor: &mut String,
-) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    crate::origin::configure_metadata_transaction(&mut tx).await?;
+) -> Result<bool, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
     let ids: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT instance_id FROM {schema}._submissions
          WHERE instance_id OPERATOR(pg_catalog.>) $1
@@ -2125,37 +2127,96 @@ async fn cleanup_submissions(
     .bind(cursor.as_str())
     .bind(i64::from(RECLAIM_BATCH))
     .fetch_all(&mut *tx)
-    .await?;
-    if !ids.is_empty() {
-        // Enqueue and the ledger row commit together; acknowledgment atomically
-        // replaces queued work with engine state. Neither gap is a cleanup window.
-        let no_work = [
-            "instances",
-            "executions",
-            "history",
-            "orchestrator_queue",
-            "worker_queue",
-            "instance_locks",
-        ]
-        .iter()
-        .map(|table| {
-            format!(
-                "NOT EXISTS (SELECT 1 FROM {schema}.{table} AS work
-                 WHERE work.instance_id OPERATOR(pg_catalog.=) submission.instance_id)"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    .await
+    .map_err(|error| error.to_string())?;
+    // Enqueue and the ledger row commit together; acknowledgment atomically
+    // replaces queued work with engine state. Neither gap is a cleanup window.
+    let no_work = [
+        "instances",
+        "executions",
+        "history",
+        "orchestrator_queue",
+        "worker_queue",
+        "instance_locks",
+    ]
+    .iter()
+    .map(|table| {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM {schema}.{table} AS work
+             WHERE work.instance_id OPERATOR(pg_catalog.=) submission.instance_id)"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" AND ");
+    let retired: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT submission.instance_id FROM {schema}._submissions AS submission
+         WHERE submission.instance_id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])
+           AND {no_work}"
+    ))
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+
+    let mut by_origin = BTreeMap::<Option<(u32, uuid::Uuid)>, Vec<String>>::new();
+    for id in retired {
+        let origin = Origin::from_engine_id(&id)?
+            .map(|origin| (origin.database_oid, origin.installation_id));
+        by_origin.entry(origin).or_default().push(id);
+    }
+    let router = Router::new(Arc::new(pool.clone()));
+    let mut removable = Vec::new();
+    for (origin, candidates) in by_origin {
+        let result = if let Some((database_oid, installation_id)) = origin {
+            let origin = Origin {
+                database_oid,
+                installation_id,
+            };
+            tokio::time::timeout(ORIGIN_OPERATION_TIMEOUT, async {
+                match router.connect(&origin).await {
+                    Ok(route) => {
+                        let result =
+                            submissions_without_metadata(&route.pool, Some(&origin), &candidates)
+                                .await;
+                        route.close().await;
+                        result
+                    }
+                    Err(error) => {
+                        if origin_is_removed(pool, &origin).await? {
+                            Ok(candidates.clone())
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err("Submission metadata lookup timed out".into()))
+        } else {
+            submissions_without_metadata(pool, None, &candidates).await
+        };
+        match result {
+            Ok(ids) => removable.extend(ids),
+            Err(error) => log!("pg_durable: retaining submission accounting: {error}"),
+        }
+    }
+    if !removable.is_empty() {
+        let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+        crate::origin::configure_metadata_transaction(&mut tx)
+            .await
+            .map_err(|error| error.to_string())?;
         sqlx::query(&format!(
             "DELETE FROM {schema}._submissions AS submission
              WHERE submission.instance_id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])
                AND {no_work}"
         ))
-        .bind(&ids)
+        .bind(&removable)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
     }
-    tx.commit().await?;
     let more = ids.len() == RECLAIM_BATCH as usize;
     *cursor = if more {
         ids.last().cloned().expect("a full page has a last ID")
@@ -2163,6 +2224,45 @@ async fn cleanup_submissions(
         String::new()
     };
     Ok(more)
+}
+
+async fn submissions_without_metadata(
+    pool: &sqlx::PgPool,
+    origin: Option<&Origin>,
+    ids: &[String],
+) -> Result<Vec<String>, String> {
+    let local_ids: Vec<&str> = ids
+        .iter()
+        .map(|id| match origin {
+            Some(origin) => origin_local_id(origin, id)
+                .ok_or_else(|| format!("Invalid submission instance ID: {id}")),
+            None => Ok(id.as_str()),
+        })
+        .collect::<Result<_, _>>()?;
+    let mut tx = crate::origin::begin_metadata(pool, origin)
+        .await
+        .map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let present: HashSet<String> = sqlx::query_scalar(
+        "SELECT id::pg_catalog.text FROM df.instances
+         WHERE id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])",
+    )
+    .bind(&local_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .collect();
+    tx.commit().await.map_err(|error| error.to_string())?;
+    // A surviving df row still needs the ledger's trusted retirement evidence.
+    Ok(ids
+        .iter()
+        .zip(local_ids)
+        .filter(|(_, local_id)| !present.contains(*local_id))
+        .map(|(id, _)| id.clone())
+        .collect())
 }
 
 /// Return only roots whose engine state was deleted or is already absent.
