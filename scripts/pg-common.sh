@@ -18,8 +18,9 @@ lock_local_postgres() {
         return
     fi
 
+    # Bash 3.2 treats an empty array as unset under nounset.
     exec python3 "$(dirname "${BASH_SOURCE[0]}")/with-pg-lock.py" \
-        bash "$1" "${PG_DURABLE_LOCK_ARGS[@]}"
+        bash "$1" ${PG_DURABLE_LOCK_ARGS[@]+"${PG_DURABLE_LOCK_ARGS[@]}"}
 }
 
 warn_unreserved_postgres() {

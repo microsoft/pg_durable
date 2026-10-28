@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
         --verbose|-v)
             VERBOSE=true; shift ;;
         --help|-h)
-            sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/d; s/^# \{0,1\}//; p }' "$0"
+            sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/d; s/^# \{0,1\}//; p; }' "$0"
             exit 0 ;;
         *)
             echo "Unknown option: $1"; exit 1 ;;

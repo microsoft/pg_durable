@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,46 @@ RUNNERS = [
     "pg-start.sh", "pg-stop.sh", "pg-reset.sh",
 ]
 HOLD = "import sys; print('entered', flush=True); sys.stdin.readline()"
+
+
+def cleanup_process(process):
+    # Each fixture owns its process group, including any simulated server.
+    try:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except PermissionError:
+            # macOS rejects zombie-only groups. Reap our child before retrying.
+            if process.poll() is None:
+                raise
+            os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.communicate(timeout=10)
+
+
+class ProcessCleanupTests(unittest.TestCase):
+    def test_reaps_zombie_before_retrying_group_cleanup(self):
+        for result in (None, ProcessLookupError()):
+            with self.subTest(result=result):
+                process = Mock(pid=1234)
+                process.poll.return_value = 0
+                with patch("os.killpg", side_effect=[PermissionError(), result]) as kill_group:
+                    cleanup_process(process)
+                self.assertEqual(kill_group.call_args_list,
+                                 [call(1234, signal.SIGKILL), call(1234, signal.SIGKILL)])
+                process.poll.assert_called_once_with()
+                process.communicate.assert_called_once_with(timeout=10)
+
+    def test_group_permission_errors_are_not_suppressed(self):
+        for returncode in (None, 0):
+            with self.subTest(returncode=returncode):
+                process = Mock(pid=1234)
+                process.poll.return_value = returncode
+                with patch("os.killpg", side_effect=PermissionError) as kill_group:
+                    with self.assertRaises(PermissionError):
+                        cleanup_process(process)
+                self.assertEqual(kill_group.call_count, 1 if returncode is None else 2)
+                process.communicate.assert_not_called()
 
 
 class PostgresLockTests(unittest.TestCase):
@@ -77,15 +118,7 @@ sys.exit(int(os.environ.get("CARGO_EXIT", "0")))
             text=True, start_new_session=True,
         )
 
-        def cleanup():
-            # Each fixture owns its process group, including any simulated server.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate(timeout=10)
-
-        self.addCleanup(cleanup)
+        self.addCleanup(cleanup_process, process)
         return process
 
     def read_line(self, stream):
@@ -112,6 +145,22 @@ sys.exit(int(os.environ.get("CARGO_EXIT", "0")))
         self.addCleanup(lock.close)
         fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock
+
+    def test_strict_runner_preserves_empty_and_quoted_arguments(self):
+        worktree = self.worktree("arguments")
+        runner = worktree / "scripts" / "lock-args.sh"
+        runner.write_text("""
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/pg-common.sh"
+lock_local_postgres "$SCRIPT_DIR/lock-args.sh"
+python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@"
+""")
+        for args in ([], [""], ["two words", '"quoted"', "*", "$HOME", "\u03bb"]):
+            with self.subTest(args=args):
+                process = self.start(["bash", str(runner), *args], wrapped=False)
+                output, _ = self.assert_finished(process)
+                self.assertEqual(json.loads(output), args)
 
     def test_worktrees_queue_even_for_different_postgres_versions(self):
         first = self.worktree("first worktree")

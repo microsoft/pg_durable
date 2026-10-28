@@ -110,7 +110,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 print_usage() {
-    sed -n '/^# BEGIN_USAGE/,/^# END_USAGE/{ /^# BEGIN_USAGE/d; /^# END_USAGE/d; s/^# \{0,1\}//; p }' "$0"
+    sed -n '/^# BEGIN_USAGE/,/^# END_USAGE/{ /^# BEGIN_USAGE/d; /^# END_USAGE/d; s/^# \{0,1\}//; p; }' "$0"
 }
 
 contains_value() {
