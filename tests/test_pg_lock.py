@@ -31,7 +31,7 @@ class PostgresLockTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.home = self.root / "home"
         self.lock_path = self.home / ".pgrx" / "pg_durable-test.lock"
         self.lock_path.parent.mkdir(parents=True)
