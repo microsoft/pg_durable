@@ -857,6 +857,27 @@ async fn write_worker_ready(
         .await?;
 
     sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {schema_name}._submissions (
+            instance_id pg_catalog.text PRIMARY KEY,
+            origin pg_catalog.text NOT NULL,
+            submitted_by pg_catalog.oid NOT NULL
+        )"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(&format!(
+        "REVOKE ALL ON {schema_name}._submissions FROM PUBLIC"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(&format!(
+        "CREATE INDEX IF NOT EXISTS idx_submissions_owner
+         ON {schema_name}._submissions (origin, submitted_by, instance_id)"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
             sentinel        pg_catalog.bool PRIMARY KEY DEFAULT TRUE,
             CONSTRAINT      only_one_sentinel CHECK (sentinel),
@@ -1127,6 +1148,7 @@ async fn run_until_extension_dropped_or_shutdown(
     let mut engine_cursor = String::new();
     let mut legacy_cursor = String::new();
     let mut registration_cursor = (0i64, uuid::Uuid::nil());
+    let mut submission_cursor = String::new();
     let mut pending = MaintenanceProgress::new();
 
     let mut drop_check = tokio::time::interval(drop_poll_interval);
@@ -1237,6 +1259,16 @@ async fn run_until_extension_dropped_or_shutdown(
                         Ok(more) => pending.registrations = more,
                         Err(error) => { pending.registrations = registration_cursor.0 != 0; log!("pg_durable: registration cleanup deferred: {error}"); },
                     } }
+                    if pending.submissions { match cleanup_submissions(
+                        maintenance_pool, &schema, &mut submission_cursor,
+                    ).await {
+                        Ok(more) => pending.submissions = more,
+                        Err(error) => {
+                            pending.submissions = false;
+                            submission_cursor.clear();
+                            log!("pg_durable: submission accounting cleanup deferred: {error}");
+                        },
+                    } }
                     pending.finish_slice(&mut origin_cursor)
                 };
                 tokio::pin!(maintenance);
@@ -1278,6 +1310,7 @@ struct MaintenanceProgress {
     origins: bool,
     engine: bool,
     registrations: bool,
+    submissions: bool,
 }
 
 impl MaintenanceProgress {
@@ -1288,11 +1321,17 @@ impl MaintenanceProgress {
             origins: true,
             engine: true,
             registrations: true,
+            submissions: true,
         }
     }
 
     fn has_work(&self) -> bool {
-        self.control || self.legacy || self.origins || self.engine || self.registrations
+        self.control
+            || self.legacy
+            || self.origins
+            || self.engine
+            || self.registrations
+            || self.submissions
     }
 
     fn finish_slice(&mut self, origins: &mut OriginRetentionCursor) -> bool {
@@ -2071,6 +2110,61 @@ async fn cleanup_origin_registrations(
     Ok(true)
 }
 
+async fn cleanup_submissions(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    cursor: &mut String,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::origin::configure_metadata_transaction(&mut tx).await?;
+    let ids: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT instance_id FROM {schema}._submissions
+         WHERE instance_id OPERATOR(pg_catalog.>) $1
+         ORDER BY instance_id LIMIT $2"
+    ))
+    .bind(cursor.as_str())
+    .bind(i64::from(RECLAIM_BATCH))
+    .fetch_all(&mut *tx)
+    .await?;
+    if !ids.is_empty() {
+        // Enqueue and the ledger row commit together; acknowledgment atomically
+        // replaces queued work with engine state. Neither gap is a cleanup window.
+        let no_work = [
+            "instances",
+            "executions",
+            "history",
+            "orchestrator_queue",
+            "worker_queue",
+            "instance_locks",
+        ]
+        .iter()
+        .map(|table| {
+            format!(
+                "NOT EXISTS (SELECT 1 FROM {schema}.{table} AS work
+                 WHERE work.instance_id OPERATOR(pg_catalog.=) submission.instance_id)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+        sqlx::query(&format!(
+            "DELETE FROM {schema}._submissions AS submission
+             WHERE submission.instance_id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])
+               AND {no_work}"
+        ))
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    let more = ids.len() == RECLAIM_BATCH as usize;
+    *cursor = if more {
+        ids.last().cloned().expect("a full page has a last ID")
+    } else {
+        String::new()
+    };
+    Ok(more)
+}
+
 /// Return only roots whose engine state was deleted or is already absent.
 /// Bulk deletion cannot establish this: it silently skips running instances.
 async fn retire_engine_records(client: &Client, ids: &[String]) -> Vec<String> {
@@ -2285,6 +2379,7 @@ mod tests {
                  CREATE TABLE maintenance_candidate_test.worker_queue(instance_id text);
                  CREATE TABLE maintenance_candidate_test.orchestrator_queue(instance_id text);
                  CREATE TABLE maintenance_candidate_test.instance_locks(instance_id text);
+                 CREATE TABLE maintenance_candidate_test._submissions(instance_id text PRIMARY KEY);
                  INSERT INTO maintenance_candidate_test.instances
                  SELECT 'pgdf-42-00000000000000000000000000000001-' || lpad(to_hex(n),8,'0'),1,NULL FROM generate_series(1,3500) n;
                  INSERT INTO maintenance_candidate_test.instances
@@ -2301,6 +2396,34 @@ mod tests {
             assert!(first.last().unwrap() < second.first().unwrap());
             assert!(legacy_orphan_candidates(&pool, "maintenance_candidate_test", &mut cursor).await.unwrap().is_empty());
             assert!(cursor.is_empty());
+
+            sqlx::query("INSERT INTO maintenance_candidate_test._submissions
+                         SELECT 'quota-' || lpad(n::text, 8, '0') FROM generate_series(1,2500) n")
+                .execute(&mut connection).await.unwrap();
+            let mut submission_cursor = String::new();
+            let mut pages = 1;
+            while cleanup_submissions(&pool, "maintenance_candidate_test", &mut submission_cursor).await.unwrap() {
+                pages += 1;
+                assert!(pages <= 3);
+            }
+            assert_eq!(pages, 3);
+            assert!(submission_cursor.is_empty());
+            for table in ["instances","executions","history","orchestrator_queue","worker_queue","instance_locks"] {
+                sqlx::query("INSERT INTO maintenance_candidate_test._submissions VALUES ('quota-guard')")
+                    .execute(&mut connection).await.unwrap();
+                sqlx::query(&format!("INSERT INTO maintenance_candidate_test.{table}(instance_id) VALUES ('quota-guard')"))
+                    .execute(&mut connection).await.unwrap();
+                assert!(!cleanup_submissions(&pool, "maintenance_candidate_test", &mut submission_cursor).await.unwrap());
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._submissions")
+                    .fetch_one(&mut connection).await.unwrap();
+                assert_eq!(count, 1, "retain submission while {table} has work");
+                sqlx::query(&format!("DELETE FROM maintenance_candidate_test.{table} WHERE instance_id = 'quota-guard'"))
+                    .execute(&mut connection).await.unwrap();
+                assert!(!cleanup_submissions(&pool, "maintenance_candidate_test", &mut submission_cursor).await.unwrap());
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._submissions")
+                    .fetch_one(&mut connection).await.unwrap();
+                assert_eq!(count, 0);
+            }
 
             let removed = Origin { database_oid: u32::MAX, installation_id: uuid::Uuid::from_u128(9) };
             sqlx::query("INSERT INTO maintenance_candidate_test._origins VALUES ($1,$2)")
@@ -2744,6 +2867,7 @@ mod tests {
                     origins: false,
                     engine: false,
                     registrations: false,
+                    submissions: false,
                 };
                 assert!(!progress.finish_slice(&mut cursor));
                 assert!(cursor.enter(origin));
@@ -2889,6 +3013,7 @@ mod tests {
                         origins: false,
                         engine: true,
                         registrations: false,
+                        submissions: false,
                     };
                     assert!(progress.finish_slice(&mut cursor));
                     for origin in &origins {

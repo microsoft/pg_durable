@@ -14,6 +14,9 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   superuser-settable; `0` disables a quota and superuser identities are exempt.
   Active accounting uses protected engine state, not caller-writable display
   status. Cancellation frees active capacity after the engine processes it.
+  A protected ledger commits atomically with engine enqueue, so transaction
+  and savepoint rollbacks cannot bypass quotas. Rolled-back submissions remain
+  charged until the engine processes them and reconciliation removes their history.
   Starts serialize per role until the submitting transaction ends and reject
   over-quota work before insert/enqueue, including on older installed schemas.
 

@@ -973,6 +973,24 @@ test_b1_start_limits() {
                 END IF;
             END;
         END \$\$;
+        RESET ROLE;
+        SET LOCAL df.max_concurrent_per_user = 0;
+        SET LOCAL df.max_instances_per_user = 2;
+        SET LOCAL ROLE upgrade_start_limits;
+        SAVEPOINT quota_rollback;
+        SELECT df.start('SELECT 1');
+        ROLLBACK TO quota_rollback;
+        DO \$\$
+        BEGIN
+            BEGIN
+                PERFORM df.start('SELECT 1');
+                RAISE EXCEPTION 'legacy df.start bypassed retained quota after savepoint rollback';
+            EXCEPTION WHEN configuration_limit_exceeded THEN
+                IF SQLERRM NOT LIKE '%has 2 retained instances (limit 2)%' THEN
+                    RAISE;
+                END IF;
+            END;
+        END \$\$;
         ROLLBACK;
     " >/dev/null
 }

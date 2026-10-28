@@ -36,6 +36,7 @@ BEGIN
     PERFORM dblink_connect('quota_trust_user', base_conn || ' user=quota_trust_user');
     PERFORM dblink_connect('quota_trust_attacker', base_conn || ' user=quota_trust_attacker');
     PERFORM dblink_connect('quota_trust_fence', base_conn || ' user=postgres');
+    PERFORM dblink_exec('quota_trust_fence', 'SET lock_timeout = ''10s''');
     PERFORM dblink_exec('quota_trust_attacker', format($remote$
         DO $lock$
         BEGIN
@@ -54,8 +55,11 @@ BEGIN
         SELECT id INTO instance FROM dblink('quota_trust_user', format(
             'SELECT df.start(df.sleep(300), ''quota-trust-live'', NULL, %L)', mode
         )) AS started(id TEXT);
-        EXECUTE format('SELECT status FROM %I.get_instance_info($1)', df.duroxide_schema())
-            INTO engine_status USING instance;
+        -- Keep engine observations on the fence connection: the driver's DO
+        -- transaction must not retain AccessShareLock and block the later fence.
+        SELECT observed.status INTO engine_status FROM dblink('quota_trust_fence',
+            format('SELECT status FROM %I.get_instance_info(%L)', df.duroxide_schema(), instance)
+        ) AS observed(status TEXT);
         IF engine_status IS NOT NULL THEN
             RAISE EXCEPTION 'TEST FAILED: acknowledgment fence did not hold queued start';
         END IF;
@@ -71,8 +75,9 @@ BEGIN
         $remote$, mode));
         PERFORM dblink_exec('quota_trust_fence', 'COMMIT');
         FOR attempt IN 1..300 LOOP
-            EXECUTE format('SELECT status FROM %I.get_instance_info($1)', df.duroxide_schema())
-                INTO engine_status USING instance;
+            SELECT observed.status INTO engine_status FROM dblink('quota_trust_fence',
+                format('SELECT status FROM %I.get_instance_info(%L)', df.duroxide_schema(), instance)
+            ) AS observed(status TEXT);
             EXIT WHEN engine_status = 'Running';
             PERFORM pg_sleep(0.1);
         END LOOP;
@@ -97,8 +102,9 @@ BEGIN
                     END;
                 END $reject$;
             $remote$, mode));
-            EXECUTE format('SELECT status FROM %I.get_instance_info($1)', df.duroxide_schema())
-                INTO engine_status USING instance;
+            SELECT observed.status INTO engine_status FROM dblink('quota_trust_fence',
+                format('SELECT status FROM %I.get_instance_info(%L)', df.duroxide_schema(), instance)
+            ) AS observed(status TEXT);
             IF engine_status IS DISTINCT FROM 'Running' THEN
                 RAISE EXCEPTION 'TEST FAILED: forged display status changed live engine state';
             END IF;
@@ -123,7 +129,7 @@ BEGIN
         PERFORM pg_stat_clear_snapshot();
         IF EXISTS (
             SELECT 1 FROM pg_stat_activity
-            WHERE state = 'idle in transaction (aborted)' AND query LIKE '%AS requested(id)%'
+            WHERE state = 'idle in transaction (aborted)' AND query LIKE '%FROM requested%'
         ) THEN
             RAISE EXCEPTION 'TEST FAILED: failed quota lookup left an aborted provider transaction';
         END IF;
@@ -147,12 +153,15 @@ BEGIN
             END $reject$;
         $remote$, mode));
         PERFORM dblink_exec('quota_trust_fence', 'COMMIT');
-        PERFORM public._e2e_wait_for_engine_terminal(instance);
+        PERFORM * FROM dblink('quota_trust_fence',
+            format('SELECT public._e2e_wait_for_engine_terminal(%L)', instance)) AS terminal(status TEXT);
 
         SELECT id INTO replacement FROM dblink('quota_trust_user', format(
             'SELECT df.start(''SELECT 1'', ''quota-trust-replacement'', NULL, %L)', mode
         )) AS started(id TEXT);
-        IF public._e2e_wait_for_engine_terminal(replacement) <> 'Completed' THEN
+        SELECT terminal.status INTO engine_status FROM dblink('quota_trust_fence',
+            format('SELECT public._e2e_wait_for_engine_terminal(%L)', replacement)) AS terminal(status TEXT);
+        IF engine_status <> 'Completed' THEN
             RAISE EXCEPTION 'TEST FAILED: capacity did not recover after cancellation';
         END IF;
     END LOOP;

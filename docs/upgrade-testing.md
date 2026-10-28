@@ -361,17 +361,28 @@ what the upgrade script handles, and any backward compatibility considerations.
 #### `df.start()` admission quotas (#139)
 
 - **DDL/B1:** The upgrade adds `idx_instances_submitted_by` on
-  `df.instances(submitted_by, id)`, matching fresh installation. No new tables
-  or grants are needed. Both start wrapper symbols use the same admission
-  check against existing `df.instances` columns and protected engine state,
-  including on 0.2.2+ schemas without
-  `ALTER EXTENSION UPDATE`. No status grants are revoked or used as an
+  `df.instances(submitted_by, id)`, matching fresh installation. No new
+  extension tables or grants are needed. Both start wrapper symbols use the same
+  admission check against existing `df.instances` columns and protected engine
+  state, including on 0.2.2+ schemas without `ALTER EXTENSION UPDATE`.
+  No status grants are revoked or used as an
   accounting authority; queued or not-yet-materialized engine instances count
   as active. Cancellation releases capacity only after the engine processes it.
   B1 exercises a non-superuser reaching its quota on each supported schema.
   Old schemas remain correct without the index but can scan other roles'
   history. The normal index build blocks concurrent writes; set `lock_timeout`
   and schedule the upgrade appropriately on large installations.
+- **Worker-managed accounting:** Worker schema version `3` adds protected
+  `_submissions` in the control provider schema, indexed by origin and submitting
+  role. The worker creates it before publishing readiness, including against old
+  extension schemas. Each new root's ledger row and provider enqueue commit in
+  one transaction; neither caller nor savepoint rollback removes the charge.
+  Admission unions these records with visible legacy instance IDs, avoiding
+  double counting. Bounded reconciliation removes ledger entries only after
+  no corresponding engine instance, execution, history, queue item, or lock
+  remains. The enqueue WorkItem and orchestration input are unchanged.
+  Pre-upgrade orphans that already lost their `df` identity cannot be attributed
+  retroactively; existing orphan cleanup remains responsible for them.
 - **Behavior change:** New superuser-settable GUCs
   `df.max_concurrent_per_user` (default `100`) and `df.max_instances_per_user`
   (default `10000`) apply immediately after loading the new binary.
@@ -381,7 +392,8 @@ what the upgrade script handles, and any backward compatibility considerations.
   lock with a tag that SQL advisory-lock functions cannot construct, and a
   current snapshot, including under repeatable-read and serializable isolation.
   E2E tests cover concurrent commit, rollback, savepoint rollback, lock timeout,
-  caller-writable status, and attempts to squat on public advisory-lock keys.
+  caller-writable status, attempts to squat on public advisory-lock keys,
+  repeated transaction/savepoint rollbacks, and quota recovery after cleanup.
 - **B2/replay:** No data migration, runtime schema detection, durable payload,
   or orchestration changes. Workflows that call `df.start()` from SQL are
   subject to the new quotas when that SQL activity executes. The separate
@@ -395,6 +407,8 @@ what the upgrade script handles, and any backward compatibility considerations.
   These are query measurements, not throughput guarantees. The index reduces
   local cross-role scanning, not the per-owner engine-lookup cost. Only retained
   counting runs when the active quota is disabled; both disabled skips admission.
+  These pre-ledger measurements do not include the subsequent protected-ledger
+  union; ledger lookups use the origin/owner-leading index.
 
 ### v0.2.8 → v0.2.9
 

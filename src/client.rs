@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use duroxide::Client;
+use duroxide::{providers::WorkItem, Client};
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use sqlx::Connection;
@@ -182,11 +182,13 @@ where
     result
 }
 
-pub(crate) fn count_active_instances(ids: &[String]) -> Result<i64, String> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
+pub(crate) fn submission_counts(
+    ids: &[String],
+    submitted_by: pg_sys::Oid,
+    include_active: bool,
+) -> Result<(i64, i64), String> {
     let origin = crate::origin::backend_origin()?;
+    let origin_key = crate::origin::engine_id_for_origin(origin.as_ref(), "");
     let engine_ids: Vec<String> = ids
         .iter()
         .map(|id| crate::origin::engine_id_for_origin(origin.as_ref(), id))
@@ -205,32 +207,60 @@ pub(crate) fn count_active_instances(ids: &[String]) -> Result<i64, String> {
                     .await
                     .map_err(|e| format!("Failed to configure df.start() quota lookup: {e}"))?;
 
-                // Missing engine rows include queued starts and uncommitted graphs.
-                // Only the engine's protected terminal state can release capacity.
-                sqlx::query_scalar(&format!(
-                    "SELECT pg_catalog.count(*)
-                     FROM pg_catalog.unnest($1::pg_catalog.text[]) AS requested(id)
+                // Old binaries left no submission ledger. Their visible df rows
+                // still count; grouping charges new committed starts only once.
+                let owned = format!(
+                    "WITH requested AS (
+                         SELECT id, pg_catalog.bool_or(recorded) AS recorded
+                         FROM (
+                             SELECT pg_catalog.unnest($1::pg_catalog.text[]) AS id, false AS recorded
+                             UNION ALL
+                             SELECT instance_id, true FROM {schema}._submissions
+                             WHERE origin OPERATOR(pg_catalog.=) $2
+                               AND submitted_by OPERATOR(pg_catalog.=) $3::pg_catalog.int8::pg_catalog.oid
+                         ) AS owned GROUP BY id
+                     )",
+                    schema = backend.control.schema,
+                );
+                // A recorded start is queued before it materializes. Once both
+                // are gone, ledger cleanup must not make retired work active again.
+                let query = if include_active {
+                    format!(
+                        "{owned}
+                     SELECT pg_catalog.count(*),
+                            pg_catalog.count(*) FILTER (
+                                WHERE e.status OPERATOR(pg_catalog.<>) ALL (
+                                    ARRAY['Completed', 'Failed']::pg_catalog.text[])
+                                   OR (e.status IS NULL AND (
+                                       NOT requested.recorded OR i.instance_id IS NOT NULL OR EXISTS (
+                                           SELECT 1 FROM {schema}.orchestrator_queue AS queued
+                                           WHERE queued.instance_id OPERATOR(pg_catalog.=) requested.id))))
+                     FROM requested
                      LEFT JOIN {schema}.instances AS i
                        ON i.instance_id OPERATOR(pg_catalog.=) requested.id
                      LEFT JOIN {schema}.executions AS e
                        ON e.instance_id OPERATOR(pg_catalog.=) i.instance_id
-                      AND e.execution_id OPERATOR(pg_catalog.=) i.current_execution_id
-                     WHERE e.status IS NULL OR e.status OPERATOR(pg_catalog.<>) ALL (
-                         ARRAY['Completed', 'Failed']::pg_catalog.text[])",
-                    schema = backend.control.schema,
-                ))
+                      AND e.execution_id OPERATOR(pg_catalog.=) i.current_execution_id",
+                        schema = backend.control.schema,
+                    )
+                } else {
+                    format!("{owned} SELECT pg_catalog.count(*), 0::pg_catalog.int8 FROM requested")
+                };
+                sqlx::query_as(&query)
                 .bind(&engine_ids)
+                .bind(&origin_key)
+                .bind(i64::from(submitted_by.to_u32()))
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| format!("Failed to read df.start() active instances: {e}"))
             }
             .await;
             match result {
-                Ok(active) => {
+                Ok(counts) => {
                     tx.commit()
                         .await
                         .map_err(|e| format!("Failed to finish df.start() quota lookup: {e}"))?;
-                    Ok(active)
+                    Ok(counts)
                 }
                 Err(error) => {
                     // This backend's runtime stops polling when block_on returns.
@@ -302,24 +332,79 @@ pub fn start_durable_function(
     function_name: &str,
     instance_id: &str,
     input: &str,
+    submitted_by: pg_sys::Oid,
 ) -> Result<(), String> {
     log!(
         "pg_durable: start_durable_function for instance {}",
         instance_id
     );
 
-    let fn_name = function_name.to_string();
-    let inst_id = crate::origin::backend_engine_id(instance_id)?;
-    let inp = input.to_string();
+    let origin = crate::origin::backend_origin()?;
+    let origin_key = crate::origin::engine_id_for_origin(origin.as_ref(), "");
+    let inst_id = crate::origin::engine_id_for_origin(origin.as_ref(), instance_id);
+    let work_item = serde_json::to_string(&WorkItem::StartOrchestration {
+        instance: inst_id.clone(),
+        orchestration: function_name.to_string(),
+        input: input.to_string(),
+        version: None,
+        parent_instance: None,
+        parent_id: None,
+        parent_execution_id: None,
+        execution_id: duroxide::INITIAL_EXECUTION_ID,
+    })
+    .map_err(|e| format!("Failed to serialize durable start: {e}"))?;
 
     with_backend_client(|backend, rt| {
         rt.block_on(async {
-            backend
-                .client
-                .start_orchestration(&inst_id, &fn_name, &inp)
+            let mut tx = backend
+                .provider
+                .pool()
+                .begin()
                 .await
-                .map_err(|e| format!("Failed to start durable function: {e:?}"))?;
-            Ok(())
+                .map_err(|e| format!("Failed to begin durable submission: {e}"))?;
+            let result = async {
+                crate::origin::configure_metadata_transaction(&mut tx)
+                    .await
+                    .map_err(|e| format!("Failed to configure durable submission: {e}"))?;
+                sqlx::query(&format!(
+                    "INSERT INTO {schema}._submissions (instance_id, origin, submitted_by)
+                     VALUES ($1, $2, $3::pg_catalog.int8::pg_catalog.oid)",
+                    schema = backend.control.schema,
+                ))
+                .bind(&inst_id)
+                .bind(&origin_key)
+                .bind(i64::from(submitted_by.to_u32()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to record durable submission: {e}"))?;
+
+                // This is the same WorkItem and provider function used by
+                // Client::start_orchestration, but shares the ledger transaction.
+                sqlx::query(&format!(
+                    "SELECT {schema}.enqueue_orchestrator_work(
+                         $1, $2, pg_catalog.clock_timestamp(), NULL, NULL, NULL)",
+                    schema = backend.control.schema,
+                ))
+                .bind(&inst_id)
+                .bind(&work_item)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to enqueue durable submission: {e}"))?;
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => tx
+                    .commit()
+                    .await
+                    .map_err(|e| format!("Failed to commit durable submission: {e}")),
+                Err(error) => {
+                    tx.rollback()
+                        .await
+                        .map_err(|e| format!("{error}; submission rollback failed: {e}"))?;
+                    Err(error)
+                }
+            }
         })
     })
 }

@@ -907,7 +907,7 @@ Admission quotas for `df.start()`, per submitting role and origin database.
 | Property | Concurrent quota | Retained-instance quota |
 |----------|------------------|-------------------------|
 | Default | `100` | `10000` |
-| Counts | Queued instances and executions not terminal in the protected engine state | All `df.instances` rows owned by the role |
+| Counts | Queued instances and executions not terminal in the protected engine state | Retained submissions, including starts whose caller transaction or savepoint rolled back |
 | Range | `0` to `2147483647`; `0` disables | `0` to `2147483647`; `0` disables |
 | Context | `SUSET` | `SUSET` |
 
@@ -915,6 +915,9 @@ Superuser submission identities are exempt. Administrators can change either
 setting at runtime, including per-role/database connection defaults.
 Cancellation frees active capacity after the engine processes the request;
 changing display status alone does not release it.
+Rollback removes the graph, not the protected submission charge. It remains
+active until the engine records failure and retained until reconciliation removes
+the engine record and accounting.
 `transaction_mode => 'new'` uses its separate session's defaults and does not
 inherit the caller's session `SET` overrides. See
 [Instance Limits](../USER_GUIDE.md#instance-limits) for tuning and admission waits.

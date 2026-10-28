@@ -1082,18 +1082,16 @@ fn acquire_instance_quota_lock(user_oid: pg_sys::Oid) {
     }
 }
 
-fn current_instance_quota_rows(user_oid: pg_sys::Oid, include_ids: bool) -> (i64, Vec<String>) {
+fn current_instance_ids(user_oid: pg_sys::Oid) -> Vec<String> {
     Spi::connect(|_| unsafe {
-        let mut argtypes = [pg_sys::OIDOID, pg_sys::BOOLOID];
+        let mut argtypes = [pg_sys::OIDOID];
         let plan = pg_sys::SPI_prepare(
-            c"SELECT pg_catalog.count(*),
-                     CASE WHEN $2 THEN COALESCE(pg_catalog.array_agg(id::pg_catalog.text),
-                                               ARRAY[]::pg_catalog.text[])
-                          ELSE ARRAY[]::pg_catalog.text[] END
+            c"SELECT COALESCE(pg_catalog.array_agg(id::pg_catalog.text),
+                             ARRAY[]::pg_catalog.text[])
               FROM df.instances
               WHERE submitted_by OPERATOR(pg_catalog.=) $1::pg_catalog.regrole"
                 .as_ptr(),
-            2,
+            1,
             argtypes.as_mut_ptr(),
         );
         if plan.is_null() {
@@ -1105,10 +1103,7 @@ fn current_instance_quota_rows(user_oid: pg_sys::Oid, include_ids: bool) -> (i64
         // admission lock, plus this transaction's own earlier starts. Ordinary
         // SPI would reuse the transaction snapshot and allow quota bypasses.
         pg_sys::CommandCounterIncrement();
-        let mut values = [
-            pg_sys::Datum::from(user_oid),
-            pg_sys::Datum::from(include_ids),
-        ];
+        let mut values = [pg_sys::Datum::from(user_oid)];
         let status = pg_sys::SPI_execute_snapshot(
             plan,
             values.as_mut_ptr(),
@@ -1127,12 +1122,8 @@ fn current_instance_quota_rows(user_oid: pg_sys::Oid, include_ids: bool) -> (i64
             .unwrap_or_else(|| pgrx::error!("df.start() quota query returned no tuple table"));
         let mut is_null = false;
         let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, 1, &mut is_null);
-        let total = i64::from_datum(datum, is_null)
-            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned a NULL count"));
-        let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, 2, &mut is_null);
-        let ids = Vec::<String>::from_datum(datum, is_null)
-            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned NULL instance IDs"));
-        (total, ids)
+        Vec::<String>::from_datum(datum, is_null)
+            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned NULL instance IDs"))
     })
 }
 
@@ -1147,7 +1138,9 @@ fn enforce_instance_limits(user_oid: pg_sys::Oid, user_name: &str) {
     // uncommitted instances. A function-scoped lock would leave a race window.
     acquire_instance_quota_lock(user_oid);
 
-    let (total, ids) = current_instance_quota_rows(user_oid, concurrent_limit > 0);
+    let ids = current_instance_ids(user_oid);
+    let (total, active) = crate::client::submission_counts(&ids, user_oid, concurrent_limit > 0)
+        .unwrap_or_else(|e| pgrx::error!("df.start() quota check failed: {e}"));
     let reject = |count, kind, limit, hint| {
         ErrorReport::new(
                 PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
@@ -1164,20 +1157,16 @@ fn enforce_instance_limits(user_oid: pg_sys::Oid, user_name: &str) {
             total,
             "retained",
             instance_limit,
-            "Wait for terminal history to age out and be reconciled, or ask an administrator to adjust retention or raise df.max_instances_per_user. Completion or cancellation alone does not free retained capacity.",
+            "Wait for terminal history, including rolled-back submissions, to be reconciled, or ask an administrator to adjust retention or raise df.max_instances_per_user. Rollback, completion, or cancellation alone does not free retained capacity.",
         );
     }
-    if concurrent_limit > 0 {
-        let active = crate::client::count_active_instances(&ids)
-            .unwrap_or_else(|e| pgrx::error!("df.start() quota check failed: {e}"));
-        if active >= i64::from(concurrent_limit) {
-            reject(
-                active,
-                "active",
-                concurrent_limit,
-                "Wait for in-flight instances to finish or for cancellation to be processed, or ask an administrator to raise df.max_concurrent_per_user.",
-            );
-        }
+    if concurrent_limit > 0 && active >= i64::from(concurrent_limit) {
+        reject(
+            active,
+            "active",
+            concurrent_limit,
+            "Wait for in-flight instances to finish or for cancellation or rollback to be processed, or ask an administrator to raise df.max_concurrent_per_user.",
+        );
     }
 }
 
@@ -1646,6 +1635,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         crate::orchestrations::execute_function_graph::NAME,
         &instance_id,
         &input_json,
+        current_user_oid,
     ) {
         // Fail fast: the durable engine could not accept the start, so abort the
         // whole df.start() transaction rather than committing an instance row

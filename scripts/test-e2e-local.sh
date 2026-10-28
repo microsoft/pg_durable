@@ -221,7 +221,7 @@ phase_for_test() {
         46_connection_limit_startup_validation)
             echo "connlimit-startup"
             ;;
-        54_reconcile_orphans|76_multi_database_reconcile)
+        54_reconcile_orphans|76_multi_database_reconcile|95_start_limits_rollback_cleanup)
             echo "reconcile"
             ;;
         88_multi_database_maintenance_backlog)

@@ -2012,8 +2012,9 @@ runtime. Distinguish three roles:
     does not need the extension unless the SQL itself calls `df` APIs.
 
 Satellite installation requires a compatible control worker with readiness schema
-version `2` (including its `_origins` registry). Provider migrations run only in
-control through the worker's `ApplyAll`; satellite creation never creates control
+version `3` (including its origin registry and protected submission accounting).
+Provider migrations run only in control through the worker's `ApplyAll`;
+satellite creation never creates control
 automatically. The provider namespace is extension-owned, its contents are created
 by `pg_durable.worker_role`, and satellite objects belong to the local installer.
 
@@ -2546,6 +2547,10 @@ worker runs a **best-effort reconciliation pass** that does two things:
   age past `retention_days`. Anything the engine is still tracking with a live
   `df` row is left untouched.
 
+After the corresponding engine work and history are gone, reconciliation removes
+the protected submission record and frees its retained quota capacity. This
+includes submissions whose caller transaction or savepoint rolled back.
+
 Satellite maintenance visits `_origins` registrations made by activity routing for
 submitted work, in bounded batches under the shared origin connection budget.
 Registration is not synchronous with `df.start()`; unused installations are not
@@ -3011,7 +3016,7 @@ for the full syntax and default domain list.
 | Setting | Default | Counts |
 |---------|---------|--------|
 | `df.max_concurrent_per_user` | `100` | Instances not yet terminal in the durable engine, including queued, sleeping, looping, and signal-waiting workflows |
-| `df.max_instances_per_user` | `10000` | All retained instances, including completed, failed, and cancelled workflows |
+| `df.max_instances_per_user` | `10000` | Retained submissions, including rolled-back starts and completed, failed, and cancelled workflows |
 
 Each quota applies to the **submitting role (`current_user`) in the origin
 database**. `SET ROLE` and `SECURITY DEFINER` affect that identity just as they
@@ -3040,10 +3045,11 @@ and a `HINT` identifying the relevant setting. Finishing work frees concurrent
 capacity once the engine records the terminal state. Cancellation releases it
 after the engine processes the request, not immediately when `df.cancel()`
 returns. Changing the displayed instance status does not release capacity.
-Neither completion nor cancellation frees retained-instance capacity. Retained
-capacity is freed when [automatic reconciliation](#automatic-reconciliation) removes
-terminal instances. If reconciliation is disabled, or retained work has not
-aged out, an administrator must adjust retention or raise the quota.
+Neither rollback, completion, nor cancellation frees retained-instance capacity.
+Capacity is freed when [automatic reconciliation](#automatic-reconciliation)
+removes the engine state and protected submission accounting. If reconciliation
+is disabled, or retained work has not aged out, an administrator must adjust
+retention or raise the quota.
 
 The default retained quota equals reconciliation's 10,000-terminal-instance
 retention cap. A role with 10,000 recent instances can therefore remain blocked
@@ -3058,7 +3064,11 @@ They do not wait for workflows to finish. Keep submitting transactions short
 and use PostgreSQL `lock_timeout` to bound admission waits. Counts include
 current committed rows and the caller's own changes even under `REPEATABLE READ`
 or `SERIALIZABLE`. Rollback, including rollback to a savepoint, releases the
-corresponding reservations.
+transaction lock and discards the graph, but does not erase submission accounting:
+engine enqueue commits independently. Rolled-back starts consume active capacity
+until the engine records their failure and retained capacity until reconciliation
+removes their engine state and accounting. Quota counts can therefore exceed the
+number of visible `df.instances` rows.
 
 Perform business-table updates before starting workflows when possible, and
 avoid leaving submitting transactions idle. Consider PostgreSQL
@@ -3086,7 +3096,9 @@ can scan other roles' history until the index is installed. Active accounting
 also checks the role's retained IDs against the engine, so larger histories
 increase admission cost even with the index. Measure representative workloads
 before substantially raising retention or quotas. Disabling the active quota
-skips the engine lookup; disabling both quotas skips admission entirely.
+skips execution-status lookups, but retained accounting still reads the protected
+submission ledger. Disabling both quotas skips admission checks. Successful
+enqueues are recorded even while limits are disabled.
 
 ---
 

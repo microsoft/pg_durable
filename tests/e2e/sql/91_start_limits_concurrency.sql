@@ -70,6 +70,9 @@ DECLARE
 BEGIN
     PERFORM dblink_connect('quota_holder', connstr);
     PERFORM dblink_connect('quota_waiter', connstr);
+    PERFORM dblink_connect('quota_rollback_fence', format(
+        'host=localhost dbname=%L port=%s user=postgres',
+        current_database(), current_setting('port')));
     PERFORM dblink_exec('quota_holder', 'SET statement_timeout = ''15s''');
     PERFORM dblink_exec('quota_waiter', 'SET statement_timeout = ''15s''');
     SELECT pid INTO waiter FROM dblink('quota_waiter', 'SELECT pg_backend_pid()') AS r(pid INTEGER);
@@ -119,6 +122,8 @@ BEGIN
                 PERFORM public._e2e_wait_for_engine_terminal(id) FROM df.instances;
             END $cancel$;
         $sql$);
+        PERFORM dblink_exec('quota_rollback_fence', format(
+            'BEGIN; LOCK TABLE %I.instances IN SHARE MODE', df.duroxide_schema()));
         PERFORM dblink_exec('quota_holder', 'BEGIN');
         PERFORM dblink_exec('quota_holder', 'SAVEPOINT quota_start');
         SELECT id INTO instance FROM dblink('quota_holder',
@@ -128,10 +133,15 @@ BEGIN
         END IF;
         PERFORM pg_temp.quota_wait_for_lock(waiter);
         PERFORM dblink_exec('quota_holder', rollback_command);
-        PERFORM pg_temp.quota_finish('quota_waiter', false);
+        -- The transaction lock is released, but the rolled-back engine work
+        -- still consumes active capacity until its rollback is processed.
+        PERFORM pg_temp.quota_finish('quota_waiter', true);
         IF rollback_command <> 'ROLLBACK' THEN
             PERFORM dblink_exec('quota_holder', 'COMMIT');
         END IF;
+        PERFORM dblink_exec('quota_rollback_fence', 'COMMIT');
+        PERFORM public._e2e_wait_for_engine_terminal(instance);
+        PERFORM * FROM dblink('quota_waiter', 'SELECT df.start(df.sleep(300))') AS r(id TEXT);
         IF EXISTS (SELECT 1 FROM df.instances WHERE id = instance) OR
            EXISTS (SELECT 1 FROM df.nodes WHERE instance_id = instance) THEN
             RAISE EXCEPTION 'TEST FAILED: rolled-back start retained metadata';
@@ -155,6 +165,7 @@ BEGIN
     PERFORM dblink_exec('quota_holder', 'ROLLBACK');
     PERFORM dblink_disconnect('quota_holder');
     PERFORM dblink_disconnect('quota_waiter');
+    PERFORM dblink_disconnect('quota_rollback_fence');
 END $$;
 
 SELECT df.cancel(id) FROM df.instances

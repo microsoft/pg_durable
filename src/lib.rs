@@ -95,7 +95,7 @@ pub use types::Durofut;
 /// by the background worker after successful initialization. Increment whenever
 /// a new binary introduces new duroxide-pg migration scripts or any other
 /// BGW-applied duroxide schema change.
-pub const WORKER_SCHEMA_VERSION: i32 = 2;
+pub const WORKER_SCHEMA_VERSION: i32 = 3;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -303,8 +303,8 @@ pub extern "C-unwind" fn _PG_init() {
 
     GucRegistry::define_int_guc(
         c"df.max_instances_per_user",
-        c"Maximum retained instances per submitting role in each database",
-        c"Includes terminal instances until reconciliation removes them. df.start() rejects new instances at this limit. 0 disables the limit. Superuser submission identities are exempt.",
+        c"Maximum retained submissions per submitting role in each database",
+        c"Includes rolled-back submissions and terminal instances until reconciliation removes their engine state and accounting. df.start() rejects new instances at this limit. 0 disables the limit. Superuser submission identities are exempt.",
         &MAX_INSTANCES_PER_USER,
         0,
         i32::MAX,
