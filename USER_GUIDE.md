@@ -26,10 +26,11 @@ pg_durable is a PostgreSQL extension that brings durable, fault-tolerant functio
 16. [Connection Host](#connection-host)
 17. [HTTP Security](#http-security)
 18. [HTTP Allowed Domains](#http-allowed-domains)
-19. [Connection Limits](#connection-limits)
-20. [Troubleshooting](#troubleshooting)
-21. [Quick Reference Card](#quick-reference-card)
-22. [Appendix: Test Data Setup](#appendix-test-data-setup)
+19. [Instance Limits](#instance-limits)
+20. [Connection Limits](#connection-limits)
+21. [Troubleshooting](#troubleshooting)
+22. [Quick Reference Card](#quick-reference-card)
+23. [Appendix: Test Data Setup](#appendix-test-data-setup)
 
 ---
 
@@ -2011,8 +2012,9 @@ runtime. Distinguish three roles:
     does not need the extension unless the SQL itself calls `df` APIs.
 
 Satellite installation requires a compatible control worker with readiness schema
-version `2` (including its `_origins` registry). Provider migrations run only in
-control through the worker's `ApplyAll`; satellite creation never creates control
+version `3` (including its origin registry and protected submission accounting).
+Provider migrations run only in control through the worker's `ApplyAll`;
+satellite creation never creates control
 automatically. The provider namespace is extension-owned, its contents are created
 by `pg_durable.worker_role`, and satellite objects belong to the local installer.
 
@@ -2545,6 +2547,12 @@ worker runs a **best-effort reconciliation pass** that does two things:
   age past `retention_days`. Anything the engine is still tracking with a live
   `df` row is left untouched.
 
+After the corresponding engine work, history, and origin metadata are gone,
+reconciliation removes the protected submission record and frees its retained
+quota capacity. This includes submissions whose caller transaction or savepoint
+rolled back. Failed metadata cleanup delays retained-capacity release, but does
+not make retired work consume active capacity again.
+
 Satellite maintenance visits `_origins` registrations made by activity routing for
 submitted work, in bounded batches under the shared origin connection budget.
 Registration is not synchronous with `df.start()`; unused installations are not
@@ -3000,6 +3008,99 @@ requirement, IP blocklist, proxy and redirect restrictions, and HTTP function
 privileges are unchanged. After restart, pending requests and retries use the
 new list. See [HTTP security](docs/http-security.md#5-layer-2-endpoint-allow-list)
 for the full syntax and default domain list.
+
+---
+
+## Instance Limits
+
+`df.start()` checks two quotas before creating an instance or enqueueing work:
+
+| Setting | Default | Counts |
+|---------|---------|--------|
+| `df.max_concurrent_per_user` | `100` | Instances not yet terminal in the durable engine, including queued, sleeping, looping, and signal-waiting workflows |
+| `df.max_instances_per_user` | `10000` | Retained submissions, including rolled-back starts and completed, failed, and cancelled workflows |
+
+Each quota applies to the **submitting role (`current_user`) in the origin
+database**. `SET ROLE` and `SECURITY DEFINER` affect that identity just as they
+affect workflow execution. An explicit SQL target database does not move the
+quota to that database. Superuser submission identities bypass both quotas,
+but still require `pg_durable.enable_superuser_instances = on`.
+
+Both settings accept integers from `0` to `2147483647`; `0` disables that
+individual quota. They are superuser-settable (`SUSET`) and can be changed
+without a restart. For example, an administrator can set defaults for new
+connections by an application role:
+
+```sql
+ALTER ROLE app_user IN DATABASE appdb SET df.max_concurrent_per_user = 200;
+ALTER ROLE app_user IN DATABASE appdb SET df.max_instances_per_user = 25000;
+```
+
+Server settings in `postgresql.conf` or `ALTER SYSTEM` take effect on reload.
+Session `SET` overrides affect `'caller'` starts. **`transaction_mode => 'new'`
+uses the separate session's role/database/server defaults**, not the caller's
+session overrides. Configure those defaults to apply the same policy to both
+modes; `SET ROLE` alone does not load a role's connection defaults.
+
+At a quota, the call fails with SQLSTATE `53400` (`configuration_limit_exceeded`)
+and a `HINT` identifying the relevant setting. Finishing work frees concurrent
+capacity once the engine records the terminal state. Cancellation releases it
+after the engine processes the request, not immediately when `df.cancel()`
+returns. Changing the displayed instance status does not release capacity.
+Neither rollback, completion, nor cancellation frees retained-instance capacity.
+Capacity is freed when [automatic reconciliation](#automatic-reconciliation)
+removes the engine state and protected submission accounting. If reconciliation
+is disabled, or retained work has not aged out, an administrator must adjust
+retention or raise the quota.
+
+The default retained quota equals reconciliation's 10,000-terminal-instance
+retention cap. A role with 10,000 recent instances can therefore remain blocked
+until its history ages out under `pg_durable.retention_days` (30 days by default);
+running reconciliation alone need not free a slot. Tune the quota for the
+expected submission volume and retention window before deploying. Retention
+settings require a restart; the quota itself can be changed at runtime.
+
+Concurrent starts by the same role in the same database wait for the preceding
+**submitting transaction** to commit or roll back before checking capacity.
+They do not wait for workflows to finish. Keep submitting transactions short
+and use PostgreSQL `lock_timeout` to bound admission waits. Counts include
+current committed rows and the caller's own changes even under `REPEATABLE READ`
+or `SERIALIZABLE`. Rollback, including rollback to a savepoint, releases the
+transaction lock and discards the graph, but does not erase submission accounting:
+engine enqueue commits independently. Rolled-back starts consume active capacity
+until the engine records their failure and retained capacity until reconciliation
+removes their engine state and accounting. Quota counts can therefore exceed the
+number of visible `df.instances` rows.
+
+Perform business-table updates before starting workflows when possible, and
+avoid leaving submitting transactions idle. Consider PostgreSQL
+`idle_in_transaction_session_timeout` as well as `lock_timeout`. Applications
+must retry entire transactions on deadlock or serialization failures; admission
+adds another lock/read to transactions, including workflow SQL that starts
+other workflows. Both quotas must be `0` to disable admission locking.
+
+Do not follow a `'caller'` start with a `'new'` start for the same role and
+database while the caller transaction remains open: the separate session waits
+on the caller's admission lock and eventually hits its 30-second timeout.
+Commit or roll back the caller transaction first.
+
+These are instance quotas, not calls-per-second or byte limits. They do not
+bound an individual graph's size or history. Changing a quota does not cancel
+or delete existing work; it only controls admission of new instances. The
+defaults also apply after a binary-only upgrade, without `ALTER EXTENSION UPDATE`.
+Existing workflows whose SQL calls `df.start()` also encounter the new limits;
+an over-quota SQL step can fail its enclosing workflow.
+
+Fresh 0.2.10 installations include an owner-leading index for quota checks.
+Run `ALTER EXTENSION pg_durable UPDATE TO '0.2.10'` to add it on an existing
+installation. Binary-only upgrades still enforce quotas, but the local count
+can scan other roles' history until the index is installed. Active accounting
+also checks the role's retained IDs against the engine, so larger histories
+increase admission cost even with the index. Measure representative workloads
+before substantially raising retention or quotas. Disabling the active quota
+skips execution-status lookups, but retained accounting still reads the protected
+submission ledger. Disabling both quotas skips admission checks. Successful
+enqueues are recorded even while limits are disabled.
 
 ---
 

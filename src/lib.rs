@@ -33,6 +33,8 @@ pub static MAX_ORIGIN_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(12);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_NEW_TRANSACTION_STARTS: GucSetting<i32> = GucSetting::<i32>::new(2);
+pub static MAX_CONCURRENT_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(100);
+pub static MAX_INSTANCES_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 pub static EXECUTION_ACQUIRE_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
 pub static NEW_TRANSACTION_START_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(5);
 /// When `false` (default), pg_durable rejects any instance whose `submitted_by`
@@ -93,7 +95,7 @@ pub use types::Durofut;
 /// by the background worker after successful initialization. Increment whenever
 /// a new binary introduces new duroxide-pg migration scripts or any other
 /// BGW-applied duroxide schema change.
-pub const WORKER_SCHEMA_VERSION: i32 = 2;
+pub const WORKER_SCHEMA_VERSION: i32 = 3;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -289,6 +291,28 @@ pub extern "C-unwind" fn _PG_init() {
     );
 
     GucRegistry::define_int_guc(
+        c"df.max_concurrent_per_user",
+        c"Maximum nonterminal durable instances per submitting role in each database",
+        c"df.start() checks protected engine state, including queued starts. Cancellation frees capacity after the engine processes it. 0 disables the limit. Superuser submission identities are exempt.",
+        &MAX_CONCURRENT_PER_USER,
+        0,
+        i32::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"df.max_instances_per_user",
+        c"Maximum retained submissions per submitting role in each database",
+        c"Includes rolled-back submissions and terminal instances until reconciliation removes their engine state and accounting. df.start() rejects new instances at this limit. 0 disables the limit. Superuser submission identities are exempt.",
+        &MAX_INSTANCES_PER_USER,
+        0,
+        i32::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_durable.retention_days",
         c"Days a terminal instance is retained before reconciliation removes it",
         c"Background reconciliation removes 'completed'/'failed'/'cancelled' df.instances rows (and their engine records) once they are older than this many days, subject to a fixed hard cap on the number retained. The same age bound governs when orphaned engine records left by a rolled-back df.start() are reclaimed. 0 removes terminal instances as soon as the next pass runs.",
@@ -448,6 +472,9 @@ CREATE INDEX idx_instances_created_at ON df.instances(created_at DESC, id);
 -- (sql/pg_durable--0.2.3--0.2.4.sql) until 0.2.4 is released -- Scenario A compares
 -- pg_get_indexdef() across the fresh-install and upgrade paths.
 CREATE INDEX idx_instances_label ON df.instances(label, created_at DESC, id) WHERE label IS NOT NULL;
+
+-- Admission reads each role's retained IDs, independently of display status.
+CREATE INDEX idx_instances_submitted_by ON df.instances(submitted_by, id);
 
 -- Index for finding nodes by instance
 CREATE INDEX idx_nodes_instance ON df.nodes(instance_id);

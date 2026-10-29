@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file. The format is b
 
 Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may include breaking changes.
 
+## [Unreleased]
+
+### Security
+
+- **Start admission quotas (#139):** `df.max_concurrent_per_user` (default
+  `100`) and `df.max_instances_per_user` (default `10000`) limit active and
+  retained instances per submitting role and origin database. Both are
+  superuser-settable; `0` disables a quota and superuser identities are exempt.
+  Active accounting uses protected engine state, not caller-writable display
+  status. Cancellation frees active capacity after the engine processes it.
+  A protected ledger commits atomically with engine enqueue, so transaction
+  and savepoint rollbacks cannot bypass quotas. Rolled-back submissions remain
+  charged until the engine processes them and reconciliation removes their history.
+  Starts serialize per role until the submitting transaction ends and reject
+  over-quota work before insert/enqueue, including on older installed schemas.
+
+> **Upgrade:** These defaults apply after a binary-only upgrade. Existing
+> workflows whose SQL starts more workflows also encounter the quotas, and an
+> over-quota SQL step can fail its enclosing workflow. Completed and cancelled
+> instances still consume retained capacity. With the default 30-day retention,
+> a role holding 10,000 recent instances may remain blocked until history ages
+> out or an administrator changes policy; a reconciliation pass alone need not
+> free capacity. See [Instance Limits](USER_GUIDE.md#instance-limits).
+> Run `ALTER EXTENSION pg_durable UPDATE TO '0.2.10'` to add the owner-leading
+> index used by quota checks. The new binary still enforces quotas on older
+> schemas; without the update their local quota queries can scan other roles'
+> history.
+
 ## [0.2.9] - 2026-10-07
 
 > **Upgrade:** Install/restart the new binary and wait for the control runtime

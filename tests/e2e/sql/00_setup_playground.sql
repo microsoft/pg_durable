@@ -95,6 +95,23 @@ BEGIN
     END LOOP;
 END $$;
 
+CREATE OR REPLACE FUNCTION public._e2e_wait_for_engine_terminal(p_instance_id TEXT)
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    engine_status TEXT;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        EXECUTE format('SELECT status FROM %I.get_instance_info($1)', df.duroxide_schema())
+            INTO engine_status USING p_instance_id;
+        IF engine_status IN ('Completed', 'Failed') THEN
+            RETURN engine_status;
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    RAISE EXCEPTION 'Engine instance % did not terminate (status %)', p_instance_id, engine_status;
+END $$;
+
 -- Install extensions needed by tests (requires superuser)
 CREATE EXTENSION IF NOT EXISTS dblink;
 
@@ -220,4 +237,3 @@ SELECT 'Playground schema setup complete' AS status;
 SELECT public._e2e_wait_for_worker_ready(60);
 
 SELECT 'TEST PASSED' AS result;
-

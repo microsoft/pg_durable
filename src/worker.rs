@@ -303,40 +303,29 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
             INIT_RETRY_INTERVAL,
             &mgmt_pool,
             &duroxide_schema,
+            epoch_oid,
             &http_policy,
         )
         .await
         else {
-            // Shutdown requested or extension dropped while initializing.
+            // Shutdown or the installation changed while initializing.
             continue;
         };
 
         // Test-only pause that widens the window between runtime initialization
-        // and readiness publication so a regression test can drop/recreate the
+        // and epoch revalidation so a regression test can drop/recreate the
         // extension deterministically. Compiled out unless `test-hooks` is on.
         test_pause_before_ready().await;
 
-        // Revalidate the epoch AFTER initialization and BEFORE publishing
-        // readiness. If the extension was dropped/recreated during init, tear down
-        // this now-stale runtime and retry against the current epoch, so a runtime
-        // bound to provider objects that no longer exist is never certified.
+        // Revalidate the epoch AFTER initialization. If the extension was
+        // dropped/recreated during init, tear down this now-stale runtime and
+        // retry against the current epoch, so a runtime bound to provider
+        // objects that no longer exist is never certified.
         if extension_epoch_replaced(&poll_pool, epoch_oid).await {
             log!(
                 "pg_durable: extension replaced during initialization — \
                  tearing down stale runtime and retrying"
             );
-            teardown_runtime(duroxide_runtime, duroxide_store).await;
-            if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
-                break;
-            }
-            continue;
-        }
-
-        // Write the worker readiness record so backend sessions know the
-        // duroxide schema is fully initialized for this schema version.
-        // Skipped if the row already has the current WORKER_SCHEMA_VERSION.
-        if let Err(e) = write_worker_ready(&mgmt_pool, &duroxide_schema, epoch_oid).await {
-            log!("pg_durable: failed to write worker readiness record: {}", e);
             teardown_runtime(duroxide_runtime, duroxide_store).await;
             if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
                 break;
@@ -483,7 +472,7 @@ async fn sleep_or_shutdown(duration: Duration) -> bool {
 
 /// Test-only hook: when the `PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS` environment
 /// variable is set to a positive integer, sleep that many milliseconds between
-/// runtime initialization and readiness publication. This creates a deterministic
+/// runtime initialization and epoch revalidation. This creates a deterministic
 /// window for `scripts/test-epoch-race.sh` to DROP/CREATE the extension
 /// mid-initialization and exercise the stale-runtime detection path.
 ///
@@ -495,7 +484,7 @@ async fn test_pause_before_ready() {
         if let Ok(ms) = val.parse::<u64>() {
             if ms > 0 {
                 log!(
-                    "pg_durable: TEST hook — pausing {}ms before readiness publication",
+                    "pg_durable: TEST hook — pausing {}ms before epoch revalidation",
                     ms
                 );
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -692,6 +681,7 @@ async fn initialize_duroxide_runtime(
     retry_interval: Duration,
     mgmt_pool: &sqlx::PgPool,
     schema_name: &str,
+    epoch_oid: i64,
     http_policy: &Arc<HttpPolicy>,
 ) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
@@ -778,6 +768,18 @@ async fn initialize_duroxide_runtime(
             }
         };
 
+        // Resumed workflow SQL can call df.start(), which requires both the
+        // submission ledger and current readiness before dispatch begins.
+        if let Err(error) = write_worker_ready(mgmt_pool, schema_name, epoch_oid).await {
+            log!(
+                "pg_durable: failed to write worker readiness record: {}",
+                error
+            );
+            store.pool().close().await;
+            sleep_or_shutdown(retry_interval).await;
+            return None;
+        }
+
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
         // longer needed — connect_as_user() sets that flag independently.
@@ -812,8 +814,8 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
     Ok(epoch_id)
 }
 
-/// Write the worker readiness record to `duroxide._worker_ready` after
-/// successful BGW initialization.
+/// Write the worker readiness record to `duroxide._worker_ready` after provider
+/// initialization and before starting runtime dispatchers.
 ///
 /// Creates the table if it does not yet exist (first run after fresh install
 /// or extension re-create). Writes or updates the row only when the stored
@@ -855,6 +857,27 @@ async fn write_worker_ready(
     sqlx::query(&format!("REVOKE ALL ON {schema_name}._origins FROM PUBLIC"))
         .execute(&mut *transaction)
         .await?;
+
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {schema_name}._submissions (
+            instance_id pg_catalog.text PRIMARY KEY,
+            origin pg_catalog.text NOT NULL,
+            submitted_by pg_catalog.oid NOT NULL
+        )"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(&format!(
+        "REVOKE ALL ON {schema_name}._submissions FROM PUBLIC"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(&format!(
+        "CREATE INDEX IF NOT EXISTS idx_submissions_owner
+         ON {schema_name}._submissions (origin, submitted_by, instance_id)"
+    ))
+    .execute(&mut *transaction)
+    .await?;
 
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {schema}._worker_ready (
@@ -1127,6 +1150,7 @@ async fn run_until_extension_dropped_or_shutdown(
     let mut engine_cursor = String::new();
     let mut legacy_cursor = String::new();
     let mut registration_cursor = (0i64, uuid::Uuid::nil());
+    let mut submission_cursor = String::new();
     let mut pending = MaintenanceProgress::new();
 
     let mut drop_check = tokio::time::interval(drop_poll_interval);
@@ -1237,6 +1261,16 @@ async fn run_until_extension_dropped_or_shutdown(
                         Ok(more) => pending.registrations = more,
                         Err(error) => { pending.registrations = registration_cursor.0 != 0; log!("pg_durable: registration cleanup deferred: {error}"); },
                     } }
+                    if pending.submissions { match cleanup_submissions(
+                        maintenance_pool, &schema, &mut submission_cursor,
+                    ).await {
+                        Ok(more) => pending.submissions = more,
+                        Err(error) => {
+                            pending.submissions = false;
+                            submission_cursor.clear();
+                            log!("pg_durable: submission accounting cleanup deferred: {error}");
+                        },
+                    } }
                     pending.finish_slice(&mut origin_cursor)
                 };
                 tokio::pin!(maintenance);
@@ -1278,6 +1312,7 @@ struct MaintenanceProgress {
     origins: bool,
     engine: bool,
     registrations: bool,
+    submissions: bool,
 }
 
 impl MaintenanceProgress {
@@ -1288,11 +1323,17 @@ impl MaintenanceProgress {
             origins: true,
             engine: true,
             registrations: true,
+            submissions: true,
         }
     }
 
     fn has_work(&self) -> bool {
-        self.control || self.legacy || self.origins || self.engine || self.registrations
+        self.control
+            || self.legacy
+            || self.origins
+            || self.engine
+            || self.registrations
+            || self.submissions
     }
 
     fn finish_slice(&mut self, origins: &mut OriginRetentionCursor) -> bool {
@@ -2071,6 +2112,161 @@ async fn cleanup_origin_registrations(
     Ok(true)
 }
 
+async fn cleanup_submissions(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    cursor: &mut String,
+) -> Result<bool, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ids: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT instance_id FROM {schema}._submissions
+         WHERE instance_id OPERATOR(pg_catalog.>) $1
+         ORDER BY instance_id LIMIT $2"
+    ))
+    .bind(cursor.as_str())
+    .bind(i64::from(RECLAIM_BATCH))
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    // Enqueue and the ledger row commit together; acknowledgment atomically
+    // replaces queued work with engine state. Neither gap is a cleanup window.
+    let no_work = [
+        "instances",
+        "executions",
+        "history",
+        "orchestrator_queue",
+        "worker_queue",
+        "instance_locks",
+    ]
+    .iter()
+    .map(|table| {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM {schema}.{table} AS work
+             WHERE work.instance_id OPERATOR(pg_catalog.=) submission.instance_id)"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" AND ");
+    let retired: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT submission.instance_id FROM {schema}._submissions AS submission
+         WHERE submission.instance_id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])
+           AND {no_work}"
+    ))
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+
+    let mut by_origin = BTreeMap::<Option<(u32, uuid::Uuid)>, Vec<String>>::new();
+    for id in retired {
+        let origin = Origin::from_engine_id(&id)?
+            .map(|origin| (origin.database_oid, origin.installation_id));
+        by_origin.entry(origin).or_default().push(id);
+    }
+    let router = Router::new(Arc::new(pool.clone()));
+    let mut removable = Vec::new();
+    for (origin, candidates) in by_origin {
+        let result = if let Some((database_oid, installation_id)) = origin {
+            let origin = Origin {
+                database_oid,
+                installation_id,
+            };
+            tokio::time::timeout(ORIGIN_OPERATION_TIMEOUT, async {
+                match router.connect(&origin).await {
+                    Ok(route) => {
+                        let result =
+                            submissions_without_metadata(&route.pool, Some(&origin), &candidates)
+                                .await;
+                        route.close().await;
+                        result
+                    }
+                    Err(error) => {
+                        if origin_is_removed(pool, &origin).await? {
+                            Ok(candidates.clone())
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err("Submission metadata lookup timed out".into()))
+        } else {
+            submissions_without_metadata(pool, None, &candidates).await
+        };
+        match result {
+            Ok(ids) => removable.extend(ids),
+            Err(error) => log!("pg_durable: retaining submission accounting: {error}"),
+        }
+    }
+    if !removable.is_empty() {
+        let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+        crate::origin::configure_metadata_transaction(&mut tx)
+            .await
+            .map_err(|error| error.to_string())?;
+        sqlx::query(&format!(
+            "DELETE FROM {schema}._submissions AS submission
+             WHERE submission.instance_id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])
+               AND {no_work}"
+        ))
+        .bind(&removable)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+    }
+    let more = ids.len() == RECLAIM_BATCH as usize;
+    *cursor = if more {
+        ids.last().cloned().expect("a full page has a last ID")
+    } else {
+        String::new()
+    };
+    Ok(more)
+}
+
+async fn submissions_without_metadata(
+    pool: &sqlx::PgPool,
+    origin: Option<&Origin>,
+    ids: &[String],
+) -> Result<Vec<String>, String> {
+    let local_ids: Vec<&str> = ids
+        .iter()
+        .map(|id| match origin {
+            Some(origin) => origin_local_id(origin, id)
+                .ok_or_else(|| format!("Invalid submission instance ID: {id}")),
+            None => Ok(id.as_str()),
+        })
+        .collect::<Result<_, _>>()?;
+    let mut tx = crate::origin::begin_metadata(pool, origin)
+        .await
+        .map_err(|error| error.to_string())?;
+    crate::origin::configure_metadata_transaction(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let present: HashSet<String> = sqlx::query_scalar(
+        "SELECT id::pg_catalog.text FROM df.instances
+         WHERE id OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[])",
+    )
+    .bind(&local_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .collect();
+    tx.commit().await.map_err(|error| error.to_string())?;
+    // A surviving df row still needs the ledger's trusted retirement evidence.
+    Ok(ids
+        .iter()
+        .zip(local_ids)
+        .filter(|(_, local_id)| !present.contains(*local_id))
+        .map(|(id, _)| id.clone())
+        .collect())
+}
+
 /// Return only roots whose engine state was deleted or is already absent.
 /// Bulk deletion cannot establish this: it silently skips running instances.
 async fn retire_engine_records(client: &Client, ids: &[String]) -> Vec<String> {
@@ -2285,6 +2481,7 @@ mod tests {
                  CREATE TABLE maintenance_candidate_test.worker_queue(instance_id text);
                  CREATE TABLE maintenance_candidate_test.orchestrator_queue(instance_id text);
                  CREATE TABLE maintenance_candidate_test.instance_locks(instance_id text);
+                 CREATE TABLE maintenance_candidate_test._submissions(instance_id text PRIMARY KEY);
                  INSERT INTO maintenance_candidate_test.instances
                  SELECT 'pgdf-42-00000000000000000000000000000001-' || lpad(to_hex(n),8,'0'),1,NULL FROM generate_series(1,3500) n;
                  INSERT INTO maintenance_candidate_test.instances
@@ -2301,6 +2498,34 @@ mod tests {
             assert!(first.last().unwrap() < second.first().unwrap());
             assert!(legacy_orphan_candidates(&pool, "maintenance_candidate_test", &mut cursor).await.unwrap().is_empty());
             assert!(cursor.is_empty());
+
+            sqlx::query("INSERT INTO maintenance_candidate_test._submissions
+                         SELECT 'quota-' || lpad(n::text, 8, '0') FROM generate_series(1,2500) n")
+                .execute(&mut connection).await.unwrap();
+            let mut submission_cursor = String::new();
+            let mut pages = 1;
+            while cleanup_submissions(&pool, "maintenance_candidate_test", &mut submission_cursor).await.unwrap() {
+                pages += 1;
+                assert!(pages <= 3);
+            }
+            assert_eq!(pages, 3);
+            assert!(submission_cursor.is_empty());
+            for table in ["instances","executions","history","orchestrator_queue","worker_queue","instance_locks"] {
+                sqlx::query("INSERT INTO maintenance_candidate_test._submissions VALUES ('quota-guard')")
+                    .execute(&mut connection).await.unwrap();
+                sqlx::query(&format!("INSERT INTO maintenance_candidate_test.{table}(instance_id) VALUES ('quota-guard')"))
+                    .execute(&mut connection).await.unwrap();
+                assert!(!cleanup_submissions(&pool, "maintenance_candidate_test", &mut submission_cursor).await.unwrap());
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._submissions")
+                    .fetch_one(&mut connection).await.unwrap();
+                assert_eq!(count, 1, "retain submission while {table} has work");
+                sqlx::query(&format!("DELETE FROM maintenance_candidate_test.{table} WHERE instance_id = 'quota-guard'"))
+                    .execute(&mut connection).await.unwrap();
+                assert!(!cleanup_submissions(&pool, "maintenance_candidate_test", &mut submission_cursor).await.unwrap());
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_candidate_test._submissions")
+                    .fetch_one(&mut connection).await.unwrap();
+                assert_eq!(count, 0);
+            }
 
             let removed = Origin { database_oid: u32::MAX, installation_id: uuid::Uuid::from_u128(9) };
             sqlx::query("INSERT INTO maintenance_candidate_test._origins VALUES ($1,$2)")
@@ -2744,6 +2969,7 @@ mod tests {
                     origins: false,
                     engine: false,
                     registrations: false,
+                    submissions: false,
                 };
                 assert!(!progress.finish_slice(&mut cursor));
                 assert!(cursor.enter(origin));
@@ -2889,6 +3115,7 @@ mod tests {
                         origins: false,
                         engine: true,
                         registrations: false,
+                        submissions: false,
                     };
                     assert!(progress.finish_slice(&mut cursor));
                     for origin in &origins {

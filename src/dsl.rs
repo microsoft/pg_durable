@@ -5,13 +5,14 @@
 
 use cron::Schedule as CronSchedule;
 use pgrx::datum::DatumWithOid;
+use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use std::str::FromStr;
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use crate::client::start_durable_function;
+use crate::client::reserve_submission_id;
 use crate::types::{
     flatten_graph, get_max_new_transaction_starts, get_new_transaction_start_timeout,
     mark_non_future_helper_call, short_id, validate_result_name, Durofut, FunctionInput,
@@ -949,7 +950,7 @@ const NODE_INSERT_BATCH_SIZE: usize = 1_000;
 /// The claim — not the generation — is the loop tail, so this only ever returns
 /// an ID that `try_claim` confirmed was inserted. On exhaustion it returns an
 /// `Err` rather than a last, unverified candidate (review finding C1).
-fn pick_id_with_retry(
+pub(crate) fn pick_id_with_retry(
     mut generate: impl FnMut() -> String,
     mut try_claim: impl FnMut(&str) -> Result<bool, String>,
     max_attempts: usize,
@@ -1058,6 +1059,113 @@ fn require_login_privilege(oid: pgrx::pg_sys::Oid, name: &str, caller: &str) {
              Grant LOGIN to this role or call {} as a role with LOGIN.",
             name,
             caller
+        );
+    }
+}
+
+const INSTANCE_QUOTA_LOCK_CLASS_ID: u32 = 0x5047_4451;
+
+fn acquire_instance_quota_lock(user_oid: pg_sys::Oid) {
+    // SQL advisory-lock functions can only construct sub-IDs 1 and 2. Using 3
+    // keeps other roles from locking a victim's admission key directly.
+    let tag = pg_sys::LOCKTAG {
+        locktag_field1: unsafe { pg_sys::MyDatabaseId.to_u32() },
+        locktag_field2: INSTANCE_QUOTA_LOCK_CLASS_ID,
+        locktag_field3: user_oid.to_u32(),
+        locktag_field4: 3,
+        locktag_type: pg_sys::LockTagType::LOCKTAG_ADVISORY as u8,
+        locktag_lockmethodid: pg_sys::USER_LOCKMETHOD as u8,
+    };
+    let result = unsafe { pg_sys::LockAcquire(&tag, pg_sys::ExclusiveLock as i32, false, false) };
+    if result == pg_sys::LockAcquireResult::LOCKACQUIRE_NOT_AVAIL {
+        pgrx::error!("failed to acquire df.start() admission lock");
+    }
+}
+
+fn current_instance_ids(user_oid: pg_sys::Oid) -> Vec<String> {
+    Spi::connect(|_| unsafe {
+        let mut argtypes = [pg_sys::OIDOID];
+        let plan = pg_sys::SPI_prepare(
+            c"SELECT COALESCE(pg_catalog.array_agg(id::pg_catalog.text),
+                             ARRAY[]::pg_catalog.text[])
+              FROM df.instances
+              WHERE submitted_by OPERATOR(pg_catalog.=) $1::pg_catalog.regrole"
+                .as_ptr(),
+            1,
+            argtypes.as_mut_ptr(),
+        );
+        if plan.is_null() {
+            let status = pg_sys::SPI_result;
+            pgrx::error!("failed to prepare df.start() quota query: SPI result {status}");
+        }
+
+        // Even REPEATABLE READ must see starts committed before we acquired the
+        // admission lock, plus this transaction's own earlier starts. Ordinary
+        // SPI would reuse the transaction snapshot and allow quota bypasses.
+        pg_sys::CommandCounterIncrement();
+        let mut values = [pg_sys::Datum::from(user_oid)];
+        let status = pg_sys::SPI_execute_snapshot(
+            plan,
+            values.as_mut_ptr(),
+            std::ptr::null(),
+            pg_sys::GetLatestSnapshot(),
+            std::ptr::null_mut(),
+            true,
+            false,
+            1,
+        );
+        if status != pg_sys::SPI_OK_SELECT as i32 || pg_sys::SPI_processed != 1 {
+            pgrx::error!("failed to count df.start() instances: SPI result {status}");
+        }
+        let table = pg_sys::SPI_tuptable
+            .as_ref()
+            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned no tuple table"));
+        let mut is_null = false;
+        let datum = pg_sys::SPI_getbinval(*table.vals, table.tupdesc, 1, &mut is_null);
+        Vec::<String>::from_datum(datum, is_null)
+            .unwrap_or_else(|| pgrx::error!("df.start() quota query returned NULL instance IDs"))
+    })
+}
+
+fn enforce_instance_limits(user_oid: pg_sys::Oid, user_name: &str) {
+    let concurrent_limit = crate::MAX_CONCURRENT_PER_USER.get();
+    let instance_limit = crate::MAX_INSTANCES_PER_USER.get();
+    if concurrent_limit == 0 && instance_limit == 0 {
+        return;
+    }
+
+    // Keep the lock until commit/rollback: another backend cannot count our
+    // uncommitted instances. A function-scoped lock would leave a race window.
+    acquire_instance_quota_lock(user_oid);
+
+    let ids = current_instance_ids(user_oid);
+    let (total, active) = crate::client::submission_counts(&ids, user_oid, concurrent_limit > 0)
+        .unwrap_or_else(|e| pgrx::error!("df.start() quota check failed: {e}"));
+    let reject = |count, kind, limit, hint| {
+        ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
+                format!(
+                    "df.start rejected: user \"{user_name}\" has {count} {kind} instances (limit {limit})"
+                ),
+                function_name!(),
+            )
+            .set_hint(hint)
+            .report(PgLogLevel::ERROR);
+    };
+    if instance_limit > 0 && total >= i64::from(instance_limit) {
+        reject(
+            total,
+            "retained",
+            instance_limit,
+            "Wait for terminal history, including rolled-back submissions, to be reconciled, or ask an administrator to adjust retention or raise df.max_instances_per_user. Rollback, completion, or cancellation alone does not free retained capacity.",
+        );
+    }
+    if concurrent_limit > 0 && active >= i64::from(concurrent_limit) {
+        reject(
+            active,
+            "active",
+            concurrent_limit,
+            "Wait for in-flight instances to finish or for cancellation or rollback to be processed, or ask an administrator to raise df.max_concurrent_per_user.",
         );
     }
 }
@@ -1243,7 +1351,10 @@ fn start_in_new_transaction(fut: &str, label: Option<&str>, database: Option<&st
 
     match crate::client::start_in_new_transaction(fut, label, database, &user_name) {
         Ok(id) => id,
-        Err(e) => pgrx::error!("{}", e),
+        Err(e) => {
+            e.report(PgLogLevel::ERROR);
+            unreachable!()
+        }
     }
 }
 
@@ -1281,20 +1392,21 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     require_login_privilege(current_user_oid, &current_user_name, "df.start()");
 
     // Reject superuser submission identities unless explicitly enabled.
-    if !crate::types::superuser_instances_enabled() {
-        let is_super = match crate::types::is_role_superuser_oid(current_user_oid) {
-            Ok(v) => v,
-            Err(e) => pgrx::error!("pg_durable: superuser check failed: {}", e),
-        };
-        if is_super {
-            pgrx::error!(
-                "pg_durable: superuser instances are disabled. \
-                 current_user \"{}\" is a superuser, but \
-                 pg_durable.enable_superuser_instances is off. \
-                 Set pg_durable.enable_superuser_instances = on to allow this.",
-                current_user_name
-            );
-        }
+    let is_super = match crate::types::is_role_superuser_oid(current_user_oid) {
+        Ok(v) => v,
+        Err(e) => pgrx::error!("pg_durable: superuser check failed: {}", e),
+    };
+    if is_super && !crate::types::superuser_instances_enabled() {
+        pgrx::error!(
+            "pg_durable: superuser instances are disabled. \
+             current_user \"{}\" is a superuser, but \
+             pg_durable.enable_superuser_instances is off. \
+             Set pg_durable.enable_superuser_instances = on to allow this.",
+            current_user_name
+        );
+    }
+    if !is_super {
+        enforce_instance_limits(current_user_oid, &current_user_name);
     }
 
     fn insert_nodes(
@@ -1396,8 +1508,14 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         }
     }
 
-    // Reserve the instance ID before inserting nodes so node rows can reference
-    // it. Collisions on the 8-hex ID space are rare, but we reserve via
+    // Take local relation locks before opening the independent reservation
+    // transaction, so extension DROP cannot hold them while waiting on our ledger.
+    Spi::run("LOCK TABLE ONLY df.instances, ONLY df.nodes IN ACCESS SHARE MODE")
+        .unwrap_or_else(|error| pgrx::error!("Failed to lock instance metadata: {error}"));
+
+    // Reserve the protected ledger ID first, retaining its transaction through
+    // enqueue. Then reserve the local ID before nodes can reference it.
+    // Collisions on the 8-hex ID space are rare, but we reserve via
     // INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id and re-roll on
     // collision so a raw primary-key error never reaches the caller (issue
     // #129). ON CONFLICT arbitration runs against the global id index *below*
@@ -1408,9 +1526,27 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     // referenced root node row is inserted (with that ID) before commit — no
     // post-insert UPDATE is needed (df callers aren't granted UPDATE on
     // root_node).
+    let mut submission = None;
+    #[cfg(any(test, feature = "pg_test"))]
+    let mut reservation_error = None;
     let instance_id = match pick_id_with_retry(
         short_id,
         |candidate| {
+            let reserved = match reserve_submission_id(candidate, current_user_oid) {
+                Ok(Some(reservation)) => Some(reservation),
+                Ok(None) => return Ok(false),
+                Err(error) => {
+                    #[cfg(not(any(test, feature = "pg_test")))]
+                    return Err(error);
+                    // The unit-test server has no worker; preserve the existing
+                    // graph-construction tests and report the enqueue error below.
+                    #[cfg(any(test, feature = "pg_test"))]
+                    {
+                        reservation_error = Some(error);
+                        None
+                    }
+                }
+            };
             let label_arg: DatumWithOid = match label {
                 Some(l) => l.into(),
                 None => DatumWithOid::null::<String>(),
@@ -1449,12 +1585,19 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                     ],
                 )
             };
-            Spi::connect_mut(
-                |client| match client.update(inst_sql, Some(1), &inst_args) {
-                    Ok(table) => Ok(!table.is_empty()),
-                    Err(e) => Err(format!("{e:?}")),
-                },
-            )
+            let claimed =
+                Spi::connect_mut(
+                    |client| match client.update(inst_sql, Some(1), &inst_args) {
+                        Ok(table) => Ok(!table.is_empty()),
+                        Err(e) => Err(format!("{e:?}")),
+                    },
+                )?;
+            if claimed {
+                submission = reserved;
+            } else if let Some(reserved) = reserved {
+                reserved.rollback()?;
+            }
+            Ok(claimed)
         },
         MAX_ID_ATTEMPTS,
     ) {
@@ -1519,11 +1662,23 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
     };
     let input_json = serde_json::to_string(&input).unwrap_or(instance_id.clone());
 
-    if let Err(e) = start_durable_function(
-        crate::orchestrations::execute_function_graph::NAME,
-        &instance_id,
-        &input_json,
-    ) {
+    let start_result = match submission {
+        Some(submission) => submission.enqueue(
+            crate::orchestrations::execute_function_graph::NAME,
+            &input_json,
+        ),
+        None => {
+            #[cfg(not(any(test, feature = "pg_test")))]
+            {
+                Err("Missing protected submission reservation".into())
+            }
+            #[cfg(any(test, feature = "pg_test"))]
+            {
+                Err(reservation_error.unwrap_or_else(|| "Missing submission reservation".into()))
+            }
+        }
+    };
+    if let Err(e) = start_result {
         // Fail fast: the durable engine could not accept the start, so abort the
         // whole df.start() transaction rather than committing an instance row
         // that would never run (a stuck instance nothing recovers). The df rows

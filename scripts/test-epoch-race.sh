@@ -14,13 +14,14 @@
 # This test makes the race deterministic with a test hook
 # (PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS, compiled in only under the `test-hooks`
 # cargo feature) that pauses the worker between epoch capture / runtime
-# initialization and readiness publication. The test waits for the hook's own log
+# initialization and epoch revalidation. The test waits for the hook's own log
 # line before acting, so the DROP/CREATE is always issued inside the window, then
 # verifies:
 #   1. The worker tears down the stale runtime and reinitializes (log evidence).
 #   2. The worker eventually becomes ready.
 #   3. `_worker_ready` describes the CURRENT provider epoch (a durable function runs).
 #   4. No stale runtime keeps polling provider objects that were dropped.
+#   5. Resumed SQL can start a child before final epoch revalidation on upgrade.
 #
 # Usage: ./scripts/test-epoch-race.sh [options]
 #
@@ -263,7 +264,7 @@ fi
 ok "Baseline worker is ready"
 
 # 2. Restart with the pause enabled. On restart the worker captures the current
-#    epoch, initializes a runtime, then pauses before publishing readiness.
+#    epoch, initializes a runtime, then pauses before revalidating the epoch.
 info "Restarting server with a ${PAUSE_MS}ms init->ready pause..."
 stop_server
 # Record where the current log ends so we only inspect messages from this restart.
@@ -276,7 +277,7 @@ fi
 # 3. Replace the extension epoch while the worker sits in the pause. Waiting for
 #    the hook's own log line — rather than sleeping a guessed amount — is what
 #    makes the race deterministic: the DROP is issued only once the worker has
-#    provably initialized a runtime and not yet published readiness.
+#    provably initialized a runtime and not yet revalidated its epoch.
 if ! wait_for_log "TEST hook — pausing" "$LOG_MARK" 60; then
     fail "Worker never reached the init->ready pause (is the test-hooks feature enabled?)"
     stop_server
@@ -343,6 +344,98 @@ if [ "$VERBOSE" = true ]; then
     log_since "$LOG_MARK" | grep "pg_durable:" || true
 fi
 
+stop_server
+
+# ---------------------------------------------------------------------------
+# Scenario: persisted SQL starts a child while an upgraded worker initializes
+# ---------------------------------------------------------------------------
+
+info "=== Upgrade readiness: resume a workflow that starts a child ==="
+if ! start_server ""; then
+    fail "Could not start PostgreSQL to prepare the persisted parent"
+    exit 1
+fi
+
+DX_SCHEMA=$("$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
+    "SELECT df.duroxide_schema();")
+READY_VERSION=$("$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
+    "SELECT schema_version FROM ${DX_SCHEMA}._worker_ready;")
+NESTED_INSTANCE=$("$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres \
+    -v ON_ERROR_STOP=1 -qAt <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'epoch_race_nested_user') THEN
+        CREATE ROLE epoch_race_nested_user LOGIN;
+    END IF;
+END $$;
+SELECT df.grant_usage('epoch_race_nested_user');
+SET ROLE epoch_race_nested_user;
+SELECT df.start(
+    df.sleep(10) ~> 'SELECT df.start(''SELECT 42'')',
+    'epoch-race-nested-start'
+);
+SQL
+)
+NESTED_INSTANCE=$(printf '%s' "$NESTED_INSTANCE" | tr -d ' \n')
+if [ -z "$NESTED_INSTANCE" ]; then
+    fail "Could not persist the parent workflow"
+    exit 1
+fi
+TIMER_WAITING="f"
+for attempt in $(seq 1 50); do
+    TIMER_WAITING=$("$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
+        "SELECT EXISTS (SELECT 1 FROM ${DX_SCHEMA}.history
+         WHERE instance_id = '$NESTED_INSTANCE'
+           AND event_data::jsonb->>'type' = 'TimerCreated')
+         AND NOT EXISTS (SELECT 1 FROM ${DX_SCHEMA}.history
+         WHERE instance_id = '$NESTED_INSTANCE'
+           AND event_data::jsonb->>'type' = 'TimerFired');")
+    [ "$TIMER_WAITING" = "t" ] && break
+    sleep 0.1
+done
+if [ "$TIMER_WAITING" != "t" ]; then
+    fail "Parent did not persist its timer before shutdown"
+    exit 1
+fi
+
+# The next boot must replace the old readiness version before resuming SQL.
+"$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -qc "UPDATE ${DX_SCHEMA}._worker_ready SET schema_version = schema_version - 1;"
+stop_server
+sleep 10
+LOG_MARK=$(wc -l < "$LOG_FILE")
+if ! start_server "$PAUSE_MS"; then
+    fail "Could not restart PostgreSQL for the upgrade readiness scenario"
+    exit 1
+fi
+if ! wait_for_log "TEST hook — pausing" "$LOG_MARK" 60; then
+    fail "Upgraded worker never reached the post-dispatch test pause"
+    exit 1
+fi
+CURRENT_VERSION=$("$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
+    "SELECT schema_version FROM ${DX_SCHEMA}._worker_ready;")
+if [ "$CURRENT_VERSION" = "$READY_VERSION" ]; then
+    ok "Upgraded worker published compatible readiness before dispatch"
+else
+    fail "Expected readiness $READY_VERSION, found $CURRENT_VERSION"
+fi
+
+NESTED_STATUS=""
+for attempt in $(seq 1 300); do
+    NESTED_STATUS=$("$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -Atqc \
+        "SELECT lower(status) FROM df.instances WHERE id = '$NESTED_INSTANCE';")
+    case "$NESTED_STATUS" in
+        completed|failed|cancelled) break ;;
+    esac
+    sleep 0.1
+done
+if [ "$NESTED_STATUS" = "completed" ]; then
+    ok "Persisted parent started its child during upgraded worker initialization"
+else
+    fail "Persisted nested-start parent ended with status '$NESTED_STATUS'"
+fi
+"$PSQL" -h localhost -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -qc "DROP OWNED BY epoch_race_nested_user; DROP ROLE epoch_race_nested_user;"
 stop_server
 
 # ---------------------------------------------------------------------------

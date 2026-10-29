@@ -63,6 +63,21 @@ CREATE FUNCTION schema_qualification.to_char(timestamptz, text) RETURNS text LAN
 BEGIN
     RAISE EXCEPTION 'schema qualification function trap';
 END $$;
+CREATE FUNCTION schema_qualification.count_trap(bigint) RETURNS bigint LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'schema qualification aggregate trap';
+END $$;
+CREATE AGGREGATE schema_qualification.count(*) (
+    SFUNC = schema_qualification.count_trap, STYPE = bigint, INITCOND = '0'
+);
+CREATE FUNCTION schema_qualification.array_agg_trap(text[], text) RETURNS text[]
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'schema qualification array aggregate trap';
+END $$;
+CREATE AGGREGATE schema_qualification.array_agg(text) (
+    SFUNC = schema_qualification.array_agg_trap, STYPE = text[]
+);
 CREATE FUNCTION schema_qualification.user_value() RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$;
 
 -- These also shadow casts in the separate transaction_mode => 'new' backend.
