@@ -731,8 +731,8 @@ dependencies = [
 
 [[package]]
 name = "duroxide-pg"
-version = "0.1.36"
-source = "git+https://github.com/microsoft/duroxide-pg?branch=thomcc%2Fcontinue_as_new_completed_at#c89f75484c3da68599d2de3381b1cbca7f901c57"
+version = "0.1.38"
+source = "git+https://github.com/microsoft/duroxide-pg?rev=7e5472726c5dbbabf78a0eb08032b1fe605c6760#7e5472726c5dbbabf78a0eb08032b1fe605c6760"
 dependencies = [
  "anyhow",
  "async-trait",

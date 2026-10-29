@@ -2573,8 +2573,8 @@ mod tests {
                      CREATE TABLE IF NOT EXISTS _duroxide._worker_ready(
                      singleton boolean PRIMARY KEY DEFAULT true, schema_version int NOT NULL,
                      initialized_at timestamptz NOT NULL DEFAULT now());
-                 INSERT INTO _duroxide._worker_ready(singleton,schema_version) VALUES (true,2)
-                     ON CONFLICT(singleton) DO UPDATE SET schema_version=2;",
+                 INSERT INTO _duroxide._worker_ready(singleton,schema_version) VALUES (true,3)
+                     ON CONFLICT(singleton) DO UPDATE SET schema_version=3;",
                 )
                 .execute(&mut *tx)
                 .await
@@ -2782,9 +2782,14 @@ mod tests {
                  INSERT INTO pruning_deadlines.history(instance_id,execution_id,event_id,event_type,event_data,created_at)
                  SELECT instance_id,execution_id,1,'Event','{}',now() FROM pruning_deadlines.executions;"
             ).execute(store.pool()).await.unwrap();
-            for id in ["a", "b"] {
+            for (id, table) in [("a", "history"), ("b", "history"), ("a", "instances"), ("b", "instances")] {
                 let mut blocker = store.pool().begin().await.unwrap();
-                sqlx::query("SELECT 1 FROM pruning_deadlines.history WHERE instance_id=$1 AND execution_id=1 FOR UPDATE")
+                let lock_sql = if table == "history" {
+                    "SELECT 1 FROM pruning_deadlines.history WHERE instance_id=$1 AND execution_id=1 FOR UPDATE"
+                } else {
+                    "SELECT 1 FROM pruning_deadlines.instances WHERE instance_id=$1 FOR NO KEY UPDATE"
+                };
+                sqlx::query(lock_sql)
                     .bind(id).fetch_one(&mut *blocker).await.unwrap();
                 let mut cursor = (id.to_string(), 0);
                 let pruning = prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor);
