@@ -73,6 +73,13 @@ END $$;
 
 SET df.max_concurrent_per_user = 2;
 SET df.max_instances_per_user = 0;
+-- Older binaries could commit metadata after an enqueue failure.
+BEGIN;
+INSERT INTO df.instances (id, root_node, submitted_by)
+VALUES ('1e9ac001', '1e9ac001', 'start_limits_user'::regrole);
+INSERT INTO df.nodes (id, instance_id, node_type, query, submitted_by)
+VALUES ('1e9ac001', '1e9ac001', 'SQL', 'SELECT 1', 'start_limits_user'::regrole);
+COMMIT;
 SET ROLE start_limits_user;
 DO $$
 DECLARE
@@ -91,6 +98,20 @@ END $$;
 INSERT INTO start_limits_test.ids
 SELECT 'initial', df.start(df.sleep(300), 'start-limits-initial') FROM generate_series(1, 2);
 RESET ROLE;
+
+DO $$
+DECLARE
+    removed INTEGER;
+BEGIN
+    -- Simulate a live legacy start without protected accounting.
+    EXECUTE format('DELETE FROM %I._submissions WHERE instance_id = $1',
+                   df.duroxide_schema())
+    USING (SELECT id FROM start_limits_test.ids WHERE kind = 'initial' ORDER BY id LIMIT 1);
+    GET DIAGNOSTICS removed = ROW_COUNT;
+    IF removed <> 1 THEN
+        RAISE EXCEPTION 'TEST FAILED: could not prepare a live legacy instance';
+    END IF;
+END $$;
 
 -- Enqueue remains possible, but acknowledgment cannot create an engine instance
 -- and consume its queue item while this lock is held.
@@ -114,6 +135,16 @@ BEGIN
         RAISE EXCEPTION 'TEST FAILED: rejected start enqueued engine work';
     END IF;
 END $$;
+COMMIT;
+
+SET df.max_instances_per_user = 3;
+SET ROLE start_limits_user;
+SELECT start_limits_test.expect_rejected('retained', 3);
+RESET ROLE;
+SET df.max_instances_per_user = 0;
+BEGIN;
+DELETE FROM df.nodes WHERE instance_id = '1e9ac001';
+DELETE FROM df.instances WHERE id = '1e9ac001';
 COMMIT;
 
 SET ROLE start_limits_user;

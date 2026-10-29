@@ -303,40 +303,29 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
             INIT_RETRY_INTERVAL,
             &mgmt_pool,
             &duroxide_schema,
+            epoch_oid,
             &http_policy,
         )
         .await
         else {
-            // Shutdown requested or extension dropped while initializing.
+            // Shutdown or the installation changed while initializing.
             continue;
         };
 
         // Test-only pause that widens the window between runtime initialization
-        // and readiness publication so a regression test can drop/recreate the
+        // and epoch revalidation so a regression test can drop/recreate the
         // extension deterministically. Compiled out unless `test-hooks` is on.
         test_pause_before_ready().await;
 
-        // Revalidate the epoch AFTER initialization and BEFORE publishing
-        // readiness. If the extension was dropped/recreated during init, tear down
-        // this now-stale runtime and retry against the current epoch, so a runtime
-        // bound to provider objects that no longer exist is never certified.
+        // Revalidate the epoch AFTER initialization. If the extension was
+        // dropped/recreated during init, tear down this now-stale runtime and
+        // retry against the current epoch, so a runtime bound to provider
+        // objects that no longer exist is never certified.
         if extension_epoch_replaced(&poll_pool, epoch_oid).await {
             log!(
                 "pg_durable: extension replaced during initialization — \
                  tearing down stale runtime and retrying"
             );
-            teardown_runtime(duroxide_runtime, duroxide_store).await;
-            if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
-                break;
-            }
-            continue;
-        }
-
-        // Write the worker readiness record so backend sessions know the
-        // duroxide schema is fully initialized for this schema version.
-        // Skipped if the row already has the current WORKER_SCHEMA_VERSION.
-        if let Err(e) = write_worker_ready(&mgmt_pool, &duroxide_schema, epoch_oid).await {
-            log!("pg_durable: failed to write worker readiness record: {}", e);
             teardown_runtime(duroxide_runtime, duroxide_store).await;
             if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
                 break;
@@ -483,7 +472,7 @@ async fn sleep_or_shutdown(duration: Duration) -> bool {
 
 /// Test-only hook: when the `PG_DURABLE_TEST_PAUSE_BEFORE_READY_MS` environment
 /// variable is set to a positive integer, sleep that many milliseconds between
-/// runtime initialization and readiness publication. This creates a deterministic
+/// runtime initialization and epoch revalidation. This creates a deterministic
 /// window for `scripts/test-epoch-race.sh` to DROP/CREATE the extension
 /// mid-initialization and exercise the stale-runtime detection path.
 ///
@@ -495,7 +484,7 @@ async fn test_pause_before_ready() {
         if let Ok(ms) = val.parse::<u64>() {
             if ms > 0 {
                 log!(
-                    "pg_durable: TEST hook — pausing {}ms before readiness publication",
+                    "pg_durable: TEST hook — pausing {}ms before epoch revalidation",
                     ms
                 );
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -692,6 +681,7 @@ async fn initialize_duroxide_runtime(
     retry_interval: Duration,
     mgmt_pool: &sqlx::PgPool,
     schema_name: &str,
+    epoch_oid: i64,
     http_policy: &Arc<HttpPolicy>,
 ) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
@@ -778,6 +768,18 @@ async fn initialize_duroxide_runtime(
             }
         };
 
+        // Resumed workflow SQL can call df.start(), which requires both the
+        // submission ledger and current readiness before dispatch begins.
+        if let Err(error) = write_worker_ready(mgmt_pool, schema_name, epoch_oid).await {
+            log!(
+                "pg_durable: failed to write worker readiness record: {}",
+                error
+            );
+            store.pool().close().await;
+            sleep_or_shutdown(retry_interval).await;
+            return None;
+        }
+
         // Reuse the management pool for activities (graph loading, status updates).
         // The former dedicated activity pool with its df.in_workflow hook is no
         // longer needed — connect_as_user() sets that flag independently.
@@ -812,8 +814,8 @@ async fn write_epoch_sentinel(pool: &sqlx::PgPool) -> Result<String, sqlx::Error
     Ok(epoch_id)
 }
 
-/// Write the worker readiness record to `duroxide._worker_ready` after
-/// successful BGW initialization.
+/// Write the worker readiness record to `duroxide._worker_ready` after provider
+/// initialization and before starting runtime dispatchers.
 ///
 /// Creates the table if it does not yet exist (first run after fresh install
 /// or extension re-create). Writes or updates the row only when the stored

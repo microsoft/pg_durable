@@ -207,23 +207,20 @@ pub(crate) fn submission_counts(
                     .await
                     .map_err(|e| format!("Failed to configure df.start() quota lookup: {e}"))?;
 
-                // Old binaries left no submission ledger. Their visible df rows
-                // still count; grouping charges new committed starts only once.
+                // Legacy df rows still consume retained capacity; deduplicate
+                // starts present in both local metadata and protected accounting.
                 let owned = format!(
                     "WITH requested AS (
-                         SELECT id, pg_catalog.bool_or(recorded) AS recorded
-                         FROM (
-                             SELECT pg_catalog.unnest($1::pg_catalog.text[]) AS id, false AS recorded
-                             UNION ALL
-                             SELECT instance_id, true FROM {schema}._submissions
-                             WHERE origin OPERATOR(pg_catalog.=) $2
-                               AND submitted_by OPERATOR(pg_catalog.=) $3::pg_catalog.int8::pg_catalog.oid
-                         ) AS owned GROUP BY id
+                         SELECT pg_catalog.unnest($1::pg_catalog.text[]) AS id
+                         UNION
+                         SELECT instance_id FROM {schema}._submissions
+                         WHERE origin OPERATOR(pg_catalog.=) $2
+                           AND submitted_by OPERATOR(pg_catalog.=) $3::pg_catalog.int8::pg_catalog.oid
                      )",
                     schema = backend.control.schema,
                 );
-                // A recorded start is queued before it materializes. Once both
-                // are gone, ledger cleanup must not make retired work active again.
+                // Queued starts may not have an engine instance yet. Once both
+                // are gone, lingering metadata or accounting is retained-only.
                 let query = if include_active {
                     format!(
                         "{owned}
@@ -232,7 +229,7 @@ pub(crate) fn submission_counts(
                                 WHERE e.status OPERATOR(pg_catalog.<>) ALL (
                                     ARRAY['Completed', 'Failed']::pg_catalog.text[])
                                    OR (e.status IS NULL AND (
-                                       NOT requested.recorded OR i.instance_id IS NOT NULL OR EXISTS (
+                                       i.instance_id IS NOT NULL OR EXISTS (
                                            SELECT 1 FROM {schema}.orchestrator_queue AS queued
                                            WHERE queued.instance_id OPERATOR(pg_catalog.=) requested.id))))
                      FROM requested
