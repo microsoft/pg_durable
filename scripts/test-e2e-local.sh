@@ -110,7 +110,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 print_usage() {
-    sed -n '/^# BEGIN_USAGE/,/^# END_USAGE/{ /^# BEGIN_USAGE/d; /^# END_USAGE/d; s/^# \{0,1\}//; p }' "$0"
+    sed -n '/^# BEGIN_USAGE/,/^# END_USAGE/{ /^# BEGIN_USAGE/d; /^# END_USAGE/d; s/^# \{0,1\}//; p; }' "$0"
 }
 
 contains_value() {
@@ -313,6 +313,8 @@ if ! [[ "$REPEAT_COUNT" =~ ^[0-9]+$ ]] || [ "$REPEAT_COUNT" -lt 1 ]; then
     exit 1
 fi
 
+lock_local_postgres "$SCRIPT_DIR/test-e2e-local.sh"
+
 PG_PORT="$((28800 + PG_VERSION))"
 DATA_DIR="$PGRX_HOME/data-$PG_VERSION"
 LOG_FILE="$PGRX_HOME/$PG_VERSION.log"
@@ -363,6 +365,7 @@ cleanup() {
     echo "Connect: $PSQL -h localhost -p $PG_PORT -d $PG_DB"
     echo "Logs:    tail -f $LOG_FILE"
     echo "Stop:    ./scripts/pg-stop.sh"
+    warn_unreserved_postgres
 }
 
 trap cleanup EXIT

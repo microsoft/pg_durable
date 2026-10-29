@@ -14,6 +14,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/pg-common.sh"
+
 STOP_LOCAL=false
 STOP_DOCKER=false
 PG_MAJOR="${PG_MAJOR:-17}"
@@ -58,6 +61,8 @@ NC='\033[0m'
 
 # Stop local pgrx PostgreSQL
 if [ "$STOP_LOCAL" = true ]; then
+    lock_local_postgres "$SCRIPT_DIR/pg-stop.sh"
+
     PGRX_HOME="$HOME/.pgrx"
     PG_CTL=$(ls $PGRX_HOME/$PG_MAJOR.*/pgrx-install/bin/pg_ctl 2>/dev/null | head -1)
     DATA_DIR="$PGRX_HOME/data-$PG_MAJOR"
@@ -96,4 +101,3 @@ if [ "$STOP_DOCKER" = true ]; then
         echo "Docker container is not running"
     fi
 fi
-

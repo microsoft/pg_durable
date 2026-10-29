@@ -10,7 +10,7 @@ EXTRA_FEATURES ?=
 ACR_REGISTRY ?= myregistry.azurecr.io
 ACR_IMAGE ?= pg_durable
 
-.PHONY: all build package install uninstall test test-unit test-e2e test-regress pg-clean docker-build docker-push pg-install META.json pgxn-zip install-pgrx pgrx-init
+.PHONY: all build package install uninstall test test-unit test-e2e test-regress _test-regress pg-clean docker-build docker-push pg-install META.json pgxn-zip install-pgrx pgrx-init
 
 # Default target
 all: package
@@ -52,7 +52,7 @@ test:
 
 # Run only pgrx unit tests
 test-unit:
-	./scripts/test.sh --unit
+	./scripts/test-unit.sh --pg-version $(subst pg,,$(PG_VERSION))
 
 # Run only E2E tests (Docker-based)
 test-e2e:
@@ -70,6 +70,7 @@ docker-push: docker-build
 
 # Run local development server
 run:
+	@echo "Warning: interactive development is not protected by the test lock; coordinate with other worktrees." >&2
 	cargo pgrx run pg17
 
 # Clean build artifacts (renamed to avoid PGXS conflict)
@@ -80,15 +81,19 @@ pg-clean:
 
 # Install extension locally (renamed to avoid PGXS conflict)
 pg-install:
-	cargo pgrx install
+	python3 ./scripts/with-pg-lock.py cargo pgrx install
 
 # Run pg_regress tests (convenience target)
 # Override version: make test-regress PG_VERSION=pg18
 test-regress:
+	python3 ./scripts/with-pg-lock.py $(MAKE) _test-regress
+
+# Keep reset, installation, and installcheck in one critical section.
+_test-regress:
 	@echo "Resetting PostgreSQL..."
 	./scripts/pg-reset.sh $(subst pg,,$(PG_VERSION))
 	@echo "Starting PostgreSQL with PGDATABASE=contrib_regression..."
-	PGDATABASE=contrib_regression ./scripts/pg-start.sh --pg-version $(subst pg,,$(PG_VERSION))
+	PGDATABASE=contrib_regression ./scripts/pg-start.sh --build --pg-version $(subst pg,,$(PG_VERSION))
 	@echo "Running pg_regress tests..."
 	PGHOST=$(HOME)/.pgrx PGUSER=postgres PG_CONFIG=$$(cargo pgrx info pg-config $(PG_VERSION)) $(MAKE) -e installcheck
 
@@ -106,7 +111,7 @@ help:
 	@echo "  installcheck  - Run pg_regress tests (requires PostgreSQL running, via PGXS)"
 	@echo "  docker-build  - Build Docker image"
 	@echo "  docker-push   - Build and push to ACR"
-	@echo "  run           - Start local pgrx dev server"
+	@echo "  run           - Start an interactive pgrx dev session (not locked)"
 	@echo "  pg-clean      - Clean build artifacts"
 	@echo "  install       - Install prebuilt artifacts for the selected PostgreSQL"
 	@echo "  uninstall     - Remove installed artifacts for the selected PostgreSQL"

@@ -168,6 +168,12 @@ SELECT 'TEST PASSED: my_test_name' AS result;
 
 ## Debugging Failed Tests
 
+`--keep` leaves PostgreSQL running but does not reserve it after the runner exits.
+Another worktree's queued tests may stop or reset it. Use a
+[locked non-interactive command](TESTING.md#concurrent-local-runs) for checks and
+diagnostics that need exclusive access. Coordinate with other worktrees before
+investigating interactively.
+
 ### View PostgreSQL logs
 
 ```bash

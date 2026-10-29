@@ -15,6 +15,10 @@ PG_MAJOR="${1:-17}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+. "$SCRIPT_DIR/pg-common.sh"
+lock_local_postgres "$SCRIPT_DIR/pg-reset.sh"
+
 DATA_DIR="$HOME/.pgrx/data-$PG_MAJOR"
 
 cd "$PROJECT_DIR"
@@ -31,4 +35,3 @@ rm -f "$HOME/.pgrx/${PG_MAJOR}.log"
 echo -e "\033[0;32mPostgreSQL data and logs wiped.\033[0m"
 echo ""
 echo "Run ./scripts/pg-start.sh to start fresh."
-

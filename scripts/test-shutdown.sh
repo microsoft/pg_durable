@@ -27,6 +27,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/pg-common.sh"
+
 PG_VERSION="${PG_VERSION:-17}"
 STOP_TIMEOUT=20
 # A clean stop measures ~1.2s, dominated by SHUTDOWN_CHECK_INTERVAL. 3s leaves
@@ -48,12 +50,14 @@ while [[ $# -gt 0 ]]; do
         --verbose|-v)
             VERBOSE=true; shift ;;
         --help|-h)
-            sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/d; s/^# \{0,1\}//; p }' "$0"
+            sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/d; s/^# \{0,1\}//; p; }' "$0"
             exit 0 ;;
         *)
             echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+lock_local_postgres "$SCRIPT_DIR/test-shutdown.sh"
 
 PG_PORT="$((28800 + PG_VERSION))"
 PGRX_HOME="$HOME/.pgrx"

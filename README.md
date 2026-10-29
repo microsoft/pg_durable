@@ -308,11 +308,15 @@ GRANT pg_durable_user TO app_backend, etl_service;
 All pull requests must pass the following checks before merging:
 
 1. **Format Check** — `cargo fmt --check`
-2. **Clippy & Tests** — `cargo clippy`, unit tests (`cargo pgrx test pg17`), pg_regress tests, and E2E tests
+2. **Clippy & Tests** — `cargo clippy`, unit tests (`./scripts/test-unit.sh`), pg_regress tests, and E2E tests
 
 The CI workflow is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml). It uses pgrx to download and manage PostgreSQL.
 
 ## Testing
+
+Local test runners require Python 3 and automatically queue across worktrees
+sharing PostgreSQL. See [concurrent local runs](docs/TESTING.md#concurrent-local-runs)
+for queueing behavior, cancellation, and `--keep` limitations.
 
 pg_durable has two test suites:
 

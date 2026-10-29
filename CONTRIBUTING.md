@@ -46,6 +46,19 @@ tail -f ~/.pgrx/17.log
 
 If you cannot run the targeted check locally, say so in the PR and CI will still run the full suite.
 
+### Concurrent worktrees
+
+Local test scripts require Python 3 and automatically queue for exclusive access
+to the shared PostgreSQL installation. Use these scripts rather than invoking
+`cargo pgrx test` directly. Builds and checks that do not install the extension
+can still run in parallel.
+
+`--keep` leaves the server running but releases the lock when the command exits;
+a queued run may then stop or reset it. See
+[concurrent local runs](docs/TESTING.md#concurrent-local-runs) for wrapping
+non-interactive commands and diagnostics. Interactive investigations require
+coordination with other worktrees.
+
 ### Full pre-PR checks
 
 Before opening a pull request, run the checks relevant to your change:
