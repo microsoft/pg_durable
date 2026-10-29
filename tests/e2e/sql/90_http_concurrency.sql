@@ -2,9 +2,11 @@
 \getenv e90_port PGDURABLE_TEST_HTTP_PORT
 \getenv e90_counts PGDURABLE_TEST_HTTP_COUNTS
 \getenv e90_release PGDURABLE_TEST_HTTP_RELEASE
+\getenv e90_cancel_release PGDURABLE_TEST_HTTP_CANCEL_RELEASE
 SELECT set_config('test.e90_url', 'https://127.0.0.1:' || :'e90_port' || '/capacity?case=', false),
     set_config('test.e90_counts', :'e90_counts', false),
-    set_config('test.e90_release', :'e90_release', false);
+    set_config('test.e90_release', :'e90_release', false),
+    set_config('test.e90_cancel_release', :'e90_cancel_release', false);
 CREATE EXTENSION IF NOT EXISTS dblink;
 DROP DATABASE IF EXISTS _e90_origin WITH (FORCE);
 CREATE DATABASE _e90_origin;
@@ -153,7 +155,80 @@ DO $$ BEGIN
     END IF;
 END $$;
 
+DROP TABLE IF EXISTS public._e90_sink;
+CREATE TABLE public._e90_sink(sink_key uuid PRIMARY KEY, body bytea NOT NULL);
+CREATE FUNCTION public._e90_sink_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(900090, 1);
+    RETURN NEW;
+END $$;
+CREATE TRIGGER e90_sink_gate BEFORE INSERT ON public._e90_sink
+    FOR EACH ROW EXECUTE FUNCTION public._e90_sink_gate();
+SELECT dblink_connect('e90gate', format(
+    'host=localhost port=%s dbname=%L user=postgres', current_setting('port'), current_database()));
+SELECT dblink_exec('e90gate',
+    'BEGIN; DO $gate$ BEGIN PERFORM pg_advisory_xact_lock(900090, 1); END $gate$');
+CREATE TEMP TABLE _e90_sinks AS SELECT df.start(df.with_http_options(
+    df.http(current_setting('test.e90_url') || 'sink-' || n, 'GET', timeout_seconds => 60),
+    '{"response":"sink","into":"public._e90_sink"}'), 'e90-sink-' || n) AS id
+    FROM generate_series(1, current_setting('pg_durable.max_http_concurrency')::int) n;
+SELECT pg_temp.e90_wait(
+    'SELECT count(*) = current_setting(''pg_durable.max_http_concurrency'')::int
+     FROM pg_locks WHERE locktype = ''advisory'' AND classid = 900090 AND objid = 1 AND NOT granted',
+    'all HTTP slots retained by blocked sink writes');
+CREATE TEMP TABLE _e90_after_sink AS SELECT df.start(
+    df.http(current_setting('test.e90_url') || 'after-sink', 'GET'), 'e90-after-sink') AS id;
+SELECT pg_temp.e90_wait(format($check$
+    SELECT EXISTS (SELECT 1 FROM %I.history WHERE instance_id = (SELECT id FROM _e90_after_sink)
+        AND event_data::jsonb->>'type' = 'ActivityScheduled'
+        AND event_data::jsonb->>'name' = 'pg_durable::activity::execute-http')
+$check$, df.duroxide_schema()), 'follower scheduled while sinks are blocked');
+SELECT pg_sleep(0.5);
+DO $$ BEGIN
+    IF pg_read_file(current_setting('test.e90_counts'))::jsonb ? 'after-sink' THEN
+        RAISE EXCEPTION 'TEST FAILED: HTTP permit released before sink storage completed';
+    END IF;
+END $$;
+SELECT dblink_exec('e90gate', 'COMMIT');
+DO $$
+DECLARE item record;
+BEGIN
+    FOR item IN SELECT id FROM _e90_sinks UNION ALL SELECT id FROM _e90_after_sink LOOP
+        IF df.await_instance(item.id, 15) IS DISTINCT FROM 'completed' THEN
+            RAISE EXCEPTION 'TEST FAILED: HTTP sink or its queued follower did not complete';
+        END IF;
+    END LOOP;
+    IF (SELECT count(*) FROM public._e90_sink) <> current_setting('pg_durable.max_http_concurrency')::int THEN
+        RAISE EXCEPTION 'TEST FAILED: missing HTTP sink rows';
+    END IF;
+END $$;
+SELECT dblink_disconnect('e90gate');
+DROP TABLE public._e90_sink;
+DROP FUNCTION public._e90_sink_gate();
+
+CREATE TEMP TABLE _e90_active_cancel AS SELECT df.start(
+    df.http(current_setting('test.e90_url') || 'active-cancel-' || n || '&gate=cancel',
+        'GET', timeout_seconds => 120), 'e90-active-cancel-' || n) AS id
+    FROM generate_series(1, current_setting('pg_durable.max_http_concurrency')::int) n;
+SELECT pg_temp.e90_wait(
+    'SELECT pg_read_file(current_setting(''test.e90_counts''))::jsonb #>> ''{_capacity,active}''
+        = current_setting(''pg_durable.max_http_concurrency'')',
+    'HTTP requests active before cancellation');
+SELECT df.cancel(id) FROM _e90_active_cancel;
+CREATE TEMP TABLE _e90_after_cancel AS SELECT df.start(
+    df.http(current_setting('test.e90_url') || 'after-cancel', 'GET'), 'e90-after-cancel') AS id;
+DO $$ BEGIN
+    IF df.await_instance((SELECT id FROM _e90_after_cancel), 45) IS DISTINCT FROM 'completed' THEN
+        RAISE EXCEPTION 'TEST FAILED: cancelling active HTTP work leaked capacity';
+    END IF;
+    EXECUTE format('COPY (SELECT ''release'') TO %L', current_setting('test.e90_cancel_release'));
+END $$;
+SELECT pg_temp.e90_wait(
+    'SELECT pg_read_file(current_setting(''test.e90_counts''))::jsonb #>> ''{_capacity,active}'' = ''0''',
+    'cancelled requests released by the remote fixture');
+
 SELECT dblink_disconnect('e90origin');
 DROP DATABASE _e90_origin WITH (FORCE);
-DROP TABLE _e90_cases, _e90_sql, _e90_error, _e90_after_error;
+DROP TABLE _e90_cases, _e90_sql, _e90_error, _e90_after_error, _e90_sinks,
+    _e90_after_sink, _e90_active_cancel, _e90_after_cancel;
 SELECT 'TEST PASSED' AS result;

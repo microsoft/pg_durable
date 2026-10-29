@@ -433,6 +433,31 @@ df.secret('partner_api', 'token') || '{"prefix":"Bearer "}'::jsonb
 
 See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings).
 
+### df.with_policy(fut, policy)
+
+**Added in 0.2.10.**
+
+Returns a graph with a lexical HTTP concurrency constraint; does not execute it.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `fut` | TEXT | Yes | Any workflow graph or SQL node |
+| `policy` | JSONB | No | An object such as `{"http":{"max_concurrency":2}}` |
+
+`http.max_concurrency` must be a positive 32-bit unsigned integer. `{}` adds no
+constraint. Unknown keys, JSON `null`, malformed objects, arrays, and invalid
+limits raise an error; SQL `NULL` for either argument returns SQL `NULL`.
+
+Every HTTP or multipart execution reserves capacity against all enclosing
+scopes and the server-wide HTTP ceiling. Nested policies only constrain, never
+override. Reapplying a policy to the same root keeps the smaller limit. Scopes
+are shared by that subtree's parallel branches and loop generations, but not by
+separately started workflows or different occurrences of a reused fragment.
+Policies survive restart and are shown by `df.explain()`.
+
+See [Workflow HTTP Policies](../USER_GUIDE.md#workflow-http-policies) for examples
+and the distinction from administrator limits and request timeouts.
+
 ### df.with_http_options(fut, options)
 
 **Added in 0.2.9.**

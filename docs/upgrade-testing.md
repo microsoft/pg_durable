@@ -358,6 +358,32 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.9 → v0.2.10 (unreleased)
 
+#### HTTP concurrency policies
+
+- **DDL:** Adds `df.with_policy(fut text, policy jsonb) RETURNS text`, with
+  `STRICT` null handling and the `with_policy_wrapper` C symbol, matching fresh
+  installation. Existing function signatures and privileges do not change.
+  No node types, columns, or policy tables are added.
+- **B1:** The new binary enforces the global HTTP ceiling on every supported
+  schema. The SQL helper requires the extension update; scope descriptors use
+  the existing HTTP node configuration text, so execution needs no schema
+  detection or new columns.
+- **Replay:** Unconfigured graphs retain byte-identical HTTP configurations.
+  Scopes are assigned at graph materialization, carried in the immutable graph,
+  and enforced outside orchestration replay. There are no new durable operations,
+  timer events, or permit records. Child instances and loop generations retain
+  their root engine namespace and lexical scope IDs.
+- **Runtime:** Duroxide moves to the 0.1.32-based admission revision while
+  duroxide-pg stays at 0.1.34. No provider migrations are added. The runtime also
+  brings versioned race/signal fixes and task-owned shutdown cleanup; startup
+  publication is interruptible so PostgreSQL shutdown does not wait on its
+  own terminating connections.
+- **Validation:** Run the N-1 lifecycle and schema suite, shutdown and epoch-race
+  tests, and HTTP tests 90-92. The HTTP restart test covers an interrupted request
+  and persisted policy metadata; the N-1 lifecycle covers historical graph
+  control-flow families, not historical scoped HTTP configurations (the previous
+  release had no policy helper).
+
 #### `df.start()` admission quotas (#139)
 
 - **DDL/B1:** The upgrade adds `idx_instances_submitted_by` on

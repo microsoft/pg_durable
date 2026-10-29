@@ -3146,6 +3146,49 @@ replay unchanged. A crash or cancellation cannot guarantee that a remote server
 stops processing an already-sent request. Limits bound local executions, not
 remote effects, and do not provide exactly-once HTTP delivery.
 
+### Workflow HTTP Policies
+
+Use `df.with_policy(fut TEXT, policy JSONB) RETURNS TEXT` to add a local HTTP
+concurrency constraint to a whole workflow or any subtree. Like other DSL
+functions, it builds a graph; only `df.start()` executes it.
+
+```sql
+SELECT df.start(
+    df.with_policy(
+        df.join3(
+            df.http('https://api.github.com/repos/microsoft/pg_durable', 'GET'),
+            df.http('https://api.github.com/repos/microsoft/duroxide', 'GET'),
+            df.http('https://api.github.com/repos/microsoft/duroxide-pg', 'GET')
+        ),
+        '{"http": {"max_concurrency": 2}}'::jsonb
+    ),
+    'repository-metadata'
+);
+```
+
+All enclosing limits apply together. If an outer policy allows two HTTP
+executions and each of three inner branches allows one, at most two run across
+the outer scope and at most one runs in each branch. Inner policies cannot
+raise an outer limit or the server-wide ceiling. Applying another policy to the
+same subtree root keeps the smaller limit.
+
+Ordinary and multipart requests share the scope. Parallel branches, internal
+child workflows, and loop iterations use the same enclosing allowance, including
+after restart. Separately started workflows have independent local budgets, and
+reusing a graph fragment in two positions creates separate scopes. A workflow
+started by another workflow's SQL does not implicitly inherit its caller's policy.
+
+The policy must be a JSON object. The supported option is
+`http.max_concurrency`, an integer from 1 to 4294967295; omission of `http` adds
+no constraint. Unknown keys, JSON `null`, arrays, zero, and negative or noninteger
+limits are errors. SQL `NULL` for either argument returns SQL `NULL`. Limits are
+captured with the graph, not read from session settings at execution time.
+`df.explain()` shows the enclosing scope IDs and limits on each HTTP node.
+
+Available after `ALTER EXTENSION pg_durable UPDATE TO '0.2.10'`.
+HTTP privileges and destination restrictions are unchanged. Request timeout caps,
+admission timeouts, workflow deadlines, and rate limits are not policy options.
+
 ### Connection Architecture
 
 The main connection categories are:

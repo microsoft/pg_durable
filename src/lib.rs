@@ -83,6 +83,7 @@ pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
 pub(crate) mod origin;
+pub mod policies;
 pub mod redact;
 pub mod registry;
 pub mod secrets;
@@ -3229,6 +3230,28 @@ mod tests {
             )
             .unwrap(),
             Some(2)
+        );
+    }
+
+    #[pg_test]
+    fn test_workflow_policy_dsl_and_explain() {
+        let graph = Spi::get_one::<String>(
+            "SELECT df.with_http_options(
+                df.as(df.with_policy(df.with_policy(df.http('https://api.github.com', 'GET'),
+                    '{\"http\":{\"max_concurrency\":2}}'),
+                    '{\"http\":{\"max_concurrency\":5}}'), 'response'),
+                '{\"response\":\"metadata\"}')",
+        )
+        .unwrap()
+        .unwrap();
+        let node = Durofut::from_json(&graph);
+        assert_eq!(node.policy.unwrap().http.unwrap().max_concurrency.get(), 2);
+        assert_eq!(node.result_name.as_deref(), Some("response"));
+        let explain = crate::explain::explain(&graph);
+        assert!(explain.contains("HTTP limits: N1=2"), "{explain}");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT df.with_policy('SELECT 1', NULL) IS NULL").unwrap(),
+            Some(true)
         );
     }
 

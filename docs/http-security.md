@@ -574,6 +574,10 @@ privilege checks, or credential lookup and retained through response processing
 and sink storage. Queued requests hold no HTTP or origin-connection reservation.
 Admission does not replace any execution-time authorization or destination check.
 
+`df.with_policy()` can further limit HTTP concurrency within a workflow subtree.
+These are voluntary local constraints, not privilege grants: they cannot raise
+the server-wide ceiling or authorize an otherwise blocked destination.
+
 The limit defaults to two and requires a server restart to change. It is
 separate from connection-pool size and from the total activity capacity set by
 `pg_durable.max_activity_concurrency`. See

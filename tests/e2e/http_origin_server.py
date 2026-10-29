@@ -30,16 +30,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def handle_request(self):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.strip("/")
-        case = urllib.parse.parse_qs(parsed.query).get("case", ["default"])[0]
+        params = urllib.parse.parse_qs(parsed.query)
+        case = params.get("case", ["default"])[0]
+        groups = params.get("group", [])
         with counts_lock:
             counts[case] = counts.get(case, 0) + 1
             if path == "capacity":
                 capacity = counts.setdefault("_capacity", {"active": 0, "peak": 0})
                 capacity["active"] += 1
                 capacity["peak"] = max(capacity["peak"], capacity["active"])
+                for group in groups:
+                    counter = counts.setdefault("_groups", {}).setdefault(group, {"active": 0, "peak": 0})
+                    counter["active"] += 1
+                    counter["peak"] = max(counter["peak"], counter["active"])
             write_counts()
         if path == "capacity":
-            self.handle_capacity(case)
+            self.handle_capacity(case, params, groups)
             return
         expected = {
             "control": "E80_CONTROL",
@@ -54,7 +60,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def handle_capacity(self, case):
+    def handle_capacity(self, case, params, groups):
+        gate = params.get("gate", ["default"])[0]
+        release = {
+            "default": capacity_release,
+            "cancel": capacity_release.with_name("cancel-release"),
+        }[gate]
         try:
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.send_response(500 if case == "error" else 200)
@@ -64,16 +75,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"o")
             self.wfile.flush()
             deadline = time.monotonic() + 60
-            while not capacity_release.exists():
+            while not release.exists():
                 if time.monotonic() >= deadline:
                     raise TimeoutError("HTTP capacity fixture was not released")
                 time.sleep(0.01)
+            time.sleep(int(params.get("delay_ms", ["0"])[0]) / 1000)
         finally:
             # Count down before the last byte lets the client dispatch its successor.
             with counts_lock:
                 counts["_capacity"]["active"] -= 1
+                for group in groups:
+                    counts["_groups"][group]["active"] -= 1
                 write_counts()
-        self.wfile.write(b"k")
+        try:
+            self.wfile.write(b"k")
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+            print(f"HTTP fixture peer disconnected: {case}", file=sys.stderr)
 
     do_GET = handle_request
     do_POST = handle_request

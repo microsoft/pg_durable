@@ -243,7 +243,7 @@ phase_for_test() {
         48_http_allow_all|80_multi_database_http_origin|85_multi_database_http_admission)
             echo "http-allow-all"
             ;;
-        90_http_concurrency)
+        90_http_concurrency|91_http_policies|92_http_restart)
             echo "http-concurrency"
             ;;
         *)
@@ -946,7 +946,7 @@ run_http_origin_test() (
         stop_server
         kill "$mock_pid" 2>/dev/null || true
         wait "$mock_pid" 2>/dev/null || true
-        rm -f -- "$work_dir/port" "$work_dir/server.log" "$work_dir/key.pem" "$work_dir/cert.pem" "$work_dir/cert.log" "$work_dir/requests.json" "$work_dir/requests.tmp" "$work_dir/capacity-release"
+        rm -f -- "$work_dir/port" "$work_dir/server.log" "$work_dir/key.pem" "$work_dir/cert.pem" "$work_dir/cert.log" "$work_dir/requests.json" "$work_dir/requests.tmp" "$work_dir/capacity-release" "$work_dir/cancel-release"
         rmdir -- "$work_dir"
         if [ -n "$previous_ssl_cert_file" ]; then
             export SSL_CERT_FILE="$previous_ssl_cert_file"
@@ -965,11 +965,21 @@ run_http_origin_test() (
             export PGDURABLE_TEST_SERVER_LOG="$LOG_FILE"
             export PGDURABLE_TEST_HTTP_COUNTS="$work_dir/requests.json"
             export PGDURABLE_TEST_HTTP_RELEASE="$work_dir/capacity-release"
+            export PGDURABLE_TEST_HTTP_CANCEL_RELEASE="$work_dir/cancel-release"
+            export PGDURABLE_TEST_HTTP_RESTARTED=false
             export SSL_CERT_FILE="$work_dir/cert.pem"
             restart_server
             wait_for_worker_ready
-            run_test_file "$1"
-            return $?
+            run_test_file "$1" || return $?
+            if [ "$(basename "$1" .sql)" = "92_http_restart" ]; then
+                stop_server
+                printf 'release\n' > "$work_dir/capacity-release"
+                restart_server
+                wait_for_worker_ready
+                export PGDURABLE_TEST_HTTP_RESTARTED=true
+                run_test_file "$1" || return $?
+            fi
+            return 0
         fi
         if ! kill -0 "$mock_pid" 2>/dev/null; then
             cat "$work_dir/server.log"
@@ -988,6 +998,17 @@ run_test_file() {
     local output
 
     test_name=$(basename "$test_file" .sql)
+
+    if [[ "$test_name" = "91_http_policies" || "$test_name" = "92_http_restart" ]] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
+        set_conf_line "pg_durable.max_activity_concurrency" "6"
+        if [ "$test_name" = "91_http_policies" ]; then
+            set_conf_line "pg_durable.max_http_concurrency" "4"
+        else
+            set_conf_line "pg_durable.max_http_concurrency" "1"
+        fi
+        run_http_origin_test "$test_file"
+        return $?
+    fi
 
     if [ "$test_name" = "90_http_concurrency" ] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
         local http_limit

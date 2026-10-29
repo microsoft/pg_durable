@@ -6,6 +6,22 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP execution limits:** `pg_durable.max_http_concurrency` bounds ordinary
+  and multipart HTTP executions together across all origin databases, while
+  `pg_durable.max_activity_concurrency` controls total activity capacity.
+  Both default to two and require a server restart. Capacity-blocked HTTP work
+  stays durably queued without occupying execution or origin-connection slots.
+- **Workflow HTTP policies:** `df.with_policy()` adds lexical concurrency
+  constraints that compose with enclosing scopes and the global ceiling.
+  Policies are shared by branches and loop generations and survive restart.
+
+### Fixed
+
+- PostgreSQL shutdown interrupts runtime startup and readiness-publication I/O
+  rather than waiting on connections to the stopping server.
+
 ### Security
 
 - **Start admission quotas (#139):** `df.max_concurrent_per_user` (default
@@ -51,11 +67,6 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Added
 
-- **HTTP execution limits:** `pg_durable.max_http_concurrency` bounds ordinary
-  and multipart HTTP executions together across all origin databases, while
-  `pg_durable.max_activity_concurrency` controls total activity capacity.
-  Both default to two and require a server restart. Capacity-blocked HTTP work
-  stays durably queued without occupying execution or origin-connection slots.
 - **Multi-database installations (#401):** satellites share one control runtime
   while keeping local `df` APIs, metadata, grants, RLS, endpoints and credentials.
   SQL defaults to the submitting database unless explicitly targeted and retains
