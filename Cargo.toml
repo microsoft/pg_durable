@@ -73,9 +73,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 
-# Development-only: replace with a released dependency before shipping.
+# Temporary: pin the admission hook until it is available in a released version.
 [patch.crates-io]
-duroxide = { path = "/home/thom/dur-wt/http-admission" }
+duroxide = { git = "https://github.com/microsoft/duroxide", rev = "a4cc556ce01dc5beca48e9a4cca424b6877153de" }
 
 [profile.dev]
 panic = "unwind"

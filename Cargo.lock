@@ -713,6 +713,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 [[package]]
 name = "duroxide"
 version = "0.1.30"
+source = "git+https://github.com/microsoft/duroxide?rev=a4cc556ce01dc5beca48e9a4cca424b6877153de#a4cc556ce01dc5beca48e9a4cca424b6877153de"
 dependencies = [
  "async-trait",
  "futures",
