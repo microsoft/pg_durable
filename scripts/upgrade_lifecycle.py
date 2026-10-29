@@ -67,7 +67,8 @@ def require_equal(actual, expected):
 
 
 def literal(value):
-    return "'" + value.replace("'", "''") + "'"
+    escaped = value.replace("\\", "\\\\").replace("'", "''")
+    return ("E" if "\\" in value else "") + "'" + escaped + "'"
 
 
 def build(source, output, pg_config, pg_major):

@@ -8,6 +8,7 @@ use pgrx::{pg_extern, Spi};
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use postgres_protocol::escape::escape_literal as quote_literal;
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
 use std::str::FromStr;
@@ -775,8 +776,7 @@ fn format_value(val: &serde_json::Value, for_sql: bool) -> String {
     match val {
         serde_json::Value::String(s) => {
             if for_sql {
-                let escaped = s.replace('\'', "''");
-                format!("'{escaped}'")
+                quote_literal(s)
             } else {
                 s.clone()
             }
@@ -785,9 +785,7 @@ fn format_value(val: &serde_json::Value, for_sql: bool) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         _ => {
             if for_sql {
-                let s = val.to_string();
-                let escaped = s.replace('\'', "''");
-                format!("'{escaped}'")
+                quote_literal(&val.to_string())
             } else {
                 val.to_string()
             }
@@ -807,8 +805,7 @@ fn extract_first_column_value(
         Err(_) => {
             // Not JSON — return raw value (backward compat for HTTP responses etc.)
             return Ok(if for_sql {
-                let escaped = json_str.replace('\'', "''");
-                format!("'{escaped}'")
+                quote_literal(json_str)
             } else {
                 json_str.to_string()
             });
@@ -844,8 +841,7 @@ fn extract_first_column_value(
 
         Ok(format_value(val, for_sql))
     } else if for_sql {
-        let escaped = json_str.replace('\'', "''");
-        Ok(format!("'{escaped}'"))
+        Ok(quote_literal(json_str))
     } else {
         Ok(json_str.to_string())
     }
@@ -923,7 +919,7 @@ fn extract_column_value(
 
 /// Expand `$name.*` into an inline `VALUES` subquery (SQL) or JSON array (raw).
 ///
-/// Preserve the generated SQL spelling (including `::text`) for replay of recorded
+/// Preserve the generated casts (including `::text`) for replay of unaffected
 /// activity inputs. This SQL executes as the submitting user, not the worker role.
 fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, String> {
     /// Maximum number of rows allowed in `$name.*` expansion to prevent
@@ -971,15 +967,13 @@ fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, S
             .iter()
             .map(|&col| match obj.get(col) {
                 Some(serde_json::Value::String(s)) => {
-                    let escaped = s.replace('\'', "''");
-                    format!("'{escaped}'::text")
+                    format!("{}::text", quote_literal(s))
                 }
                 Some(serde_json::Value::Number(n)) => n.to_string(),
                 Some(serde_json::Value::Bool(b)) => b.to_string(),
                 Some(serde_json::Value::Null) | None => "NULL".to_string(),
                 Some(other) => {
-                    let escaped = other.to_string().replace('\'', "''");
-                    format!("'{escaped}'::text")
+                    format!("{}::text", quote_literal(&other.to_string()))
                 }
             })
             .collect();
@@ -3154,6 +3148,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "SELECT 1, 'Bob'");
+    }
+
+    #[test]
+    fn literal_quoting_preserves_unaffected_sql() {
+        let results = make_results(&[(
+            "row",
+            r#"{"rows":[{"empty":"","name":"O'Reilly","doc":{"key":"value"}}]}"#,
+        )]);
+        assert_eq!(
+            substitute_all(
+                "SELECT $row, $row.name, $row.doc FROM $row.*",
+                &results,
+                &empty_vars(),
+                &sys_vars()
+            )
+            .unwrap(),
+            r#"SELECT '', 'O''Reilly', '{"key":"value"}' FROM (VALUES (''::text,'O''Reilly'::text,'{"key":"value"}'::text)) AS "row"("empty", "name", "doc")"#
+        );
+    }
+
+    #[test]
+    fn literal_quoting_is_deterministic_and_does_not_rescan() {
+        let value = serde_json::json!({"rows": [{"field": "\\' $b {var} \u{1f642}"}]}).to_string();
+        let other = r#"{"rows":[{"field":"replacement"}]}"#;
+        let forward = make_results(&[("a", &value), ("b", other)]);
+        let reverse = make_results(&[("b", other), ("a", &value)]);
+        let vars = make_results(&[("var", "replacement")]);
+        for template in [
+            "SELECT $a, $b",
+            "SELECT $a.field, $b.field",
+            "SELECT * FROM $a.*",
+        ] {
+            let sql = substitute_all(template, &forward, &vars, &sys_vars()).unwrap();
+            assert_eq!(
+                sql,
+                substitute_all(template, &reverse, &vars, &sys_vars()).unwrap()
+            );
+            assert!(sql.contains("$b {var}"));
+        }
     }
 
     #[test]

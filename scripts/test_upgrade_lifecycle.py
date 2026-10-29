@@ -44,6 +44,22 @@ def case(shape="seq", waiting=False):
     }
 
 
+class LiteralQuotingTests(unittest.TestCase):
+    def test_quotes_apostrophes_and_backslashes(self):
+        for value, expected in [
+            ("", "''"),
+            ("plain", "'plain'"),
+            ("O'Reilly", "'O''Reilly'"),
+            ("\\", "E'\\\\'"),
+            ("\\' OR TRUE --", "E'\\\\'' OR TRUE --'"),
+            (r"\n\x41\u0041", r"E'\\n\\x41\\u0041'"),
+            ("line one\nline two", "'line one\nline two'"),
+            ("\u00e9\u4e2d\\'", "E'\u00e9\u4e2d\\\\'''"),
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(lifecycle.literal(value), expected)
+
+
 class ValidationTests(unittest.TestCase):
     def test_every_shape_passes_before_and_after(self):
         for shape in lifecycle.FAMILIES:
