@@ -76,6 +76,8 @@ DECLARE
     gate text := df.wait_for_signal('resume');
     graph text;
     instance text;
+    quoted_value text := $value$C:\path\O'Reilly$value$;
+    quoted_check text;
 BEGIN
     CASE shape
         WHEN 'seq' THEN
@@ -87,6 +89,30 @@ BEGIN
             END IF;
             graph := df.seq(graph, public.upgrade_lifecycle_mark_sql(
                 '{sys_label}', 'r.1', '$seed::integer + {lifecycle_increment}'));
+
+        WHEN 'quoting' THEN
+            graph := df.as(format(
+                'SELECT %L::text AS value, %L::jsonb AS object_value, %L::jsonb AS array_value',
+                quoted_value, jsonb_build_object('value', quoted_value)::text,
+                jsonb_build_array(quoted_value)::text), 'quoted');
+            quoted_check := format($check$(
+                SELECT CASE WHEN quoted.value = %L
+                    AND quoted.value = $quoted AND quoted.value = $quoted?
+                    AND quoted.value = $quoted.value AND quoted.value = $quoted.value?
+                    AND quoted.object_value::jsonb = $quoted.object_value::jsonb
+                    AND quoted.array_value::jsonb = $quoted.array_value::jsonb
+                    THEN 1 ELSE 0 END FROM $quoted.*
+            )$check$, quoted_value);
+            -- The child records backslash-bearing inputs before suspension,
+            -- then must retain its quoting version across continue_as_new.
+            graph := df.seq(graph, df.loop(
+                df.seq(
+                    public.upgrade_lifecycle_mark_sql(label, 'r.0', quoted_check),
+                    df.seq(
+                        df.if(public.upgrade_lifecycle_count_sql(label, 'r.0', '= 1'),
+                              CASE WHEN waiting THEN gate ELSE 'SELECT 1' END, 'SELECT 1'),
+                        public.upgrade_lifecycle_mark_sql(label, 'r.1', quoted_check))),
+                public.upgrade_lifecycle_count_sql(label, 'r.0', '< 2')));
 
         WHEN 'if-then' THEN
             -- Then branch suspends mid-branch; the else branch must stay unrun.

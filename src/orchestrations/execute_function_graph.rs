@@ -19,8 +19,8 @@ use duroxide::OrchestrationContext;
 use crate::activities;
 use crate::activities::load_function_graph::{TransactionAwareLoadInput, TransactionGraphProbe};
 use crate::types::{
-    evaluate_condition, string_map_to_json, substitute_all, substitute_all_raw, FunctionGraph,
-    FunctionInput, FunctionNode, LoopConfig, SystemVars,
+    evaluate_condition, string_map_to_json, substitute_all_raw, substitute_all_with_options,
+    FunctionGraph, FunctionInput, FunctionNode, LoopConfig, SqlQuotingVersion, SystemVars,
 };
 
 /// Orchestration name for ExecuteFunctionGraph
@@ -886,7 +886,18 @@ async fn execute_node_inner(
     };
 
     match node.node_type.to_lowercase().as_str() {
-        "sql" => execute_sql_node(ctx, node, node_id, results, exec_ctx, &sys_vars).await,
+        "sql" => {
+            execute_sql_node(
+                ctx,
+                node,
+                node_id,
+                results,
+                exec_ctx,
+                &sys_vars,
+                graph.sql_quoting_version,
+            )
+            .await
+        }
         "then" => execute_then_node(ctx, graph, node, node_id, results, exec_ctx).await,
         "sleep" => execute_sleep_node(ctx, node, node_id).await,
         "wait_schedule" => execute_wait_schedule_node(ctx, node, node_id).await,
@@ -915,26 +926,35 @@ async fn execute_sql_node(
     results: &mut HashMap<String, String>,
     exec_ctx: &ExecutionContext,
     sys_vars: &SystemVars,
+    sql_quoting_version: SqlQuotingVersion,
 ) -> NodeResult {
     let query = node
         .query
         .as_ref()
         .ok_or_else(|| format!("SQL node {node_id} has no query"))?;
 
-    let final_query = substitute_all(query, results, &exec_ctx.vars, sys_vars)?;
+    let final_query = substitute_all_with_options(
+        query,
+        results,
+        &exec_ctx.vars,
+        sys_vars,
+        Some(sql_quoting_version),
+    )?;
     // The substituted text is not traced here: the execute_sql activity logs it
     // under pg_durable.log_workflow_sql, and an orchestration must not read a
     // GUC to decide what to emit.
     ctx.trace_info(format!("Executing SQL node {node_id}"));
 
-    let input = serde_json::json!({
-        "query": final_query,
-        "submitted_by": node.submitted_by,
-        "database": node.database,
-    });
+    let input = serde_json::to_string(&activities::execute_sql::ExecuteSqlInput {
+        query: final_query,
+        submitted_by: node.submitted_by.clone(),
+        database: node.database.clone(),
+        sql_quoting_version,
+    })
+    .map_err(|e| format!("Failed to serialize execute_sql input: {e}"))?;
 
     let result = ctx
-        .schedule_activity(activities::execute_sql::NAME, input.to_string())
+        .schedule_activity(activities::execute_sql::NAME, input)
         .await
         .map_err(NodeError::Application)?;
 
@@ -2460,11 +2480,12 @@ mod tests {
     }
 
     #[test]
-    fn subtree_input_is_byte_stable_across_result_insertion_order() {
-        let graph = FunctionGraph {
+    fn subtree_input_preserves_quoting_version_and_result_order() {
+        let mut graph = FunctionGraph {
             instance_id: "deadbeef".to_string(),
             root_node_id: "cafebabe".to_string(),
             nodes: std::collections::BTreeMap::new(),
+            sql_quoting_version: SqlQuotingVersion::Legacy,
         };
         let exec_ctx = ExecutionContext {
             vars: HashMap::new(),
@@ -2489,6 +2510,16 @@ mod tests {
 
         assert_eq!(first_input, expected);
         assert_eq!(second_input, expected);
+
+        graph.sql_quoting_version = SqlQuotingVersion::V1;
+        let current_input = build_subtree_input(&graph, "deadbeef", &first, &exec_ctx).unwrap();
+        assert_eq!(
+            current_input,
+            build_subtree_input(&graph, "deadbeef", &second, &exec_ctx).unwrap()
+        );
+        let subtree: SubtreeInput = serde_json::from_str(&current_input).unwrap();
+        let inherited: FunctionGraph = serde_json::from_str(&subtree.graph).unwrap();
+        assert_eq!(inherited.sql_quoting_version, SqlQuotingVersion::V1);
     }
 
     #[test]

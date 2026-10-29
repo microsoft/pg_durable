@@ -51,7 +51,9 @@ use sqlx::{Column, Row, TypeInfo};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use crate::types::{connect_as_user, get_execution_acquire_timeout, get_max_user_connections};
+use crate::types::{
+    connect_as_user, get_execution_acquire_timeout, get_max_user_connections, SqlQuotingVersion,
+};
 
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-sql";
@@ -61,9 +63,36 @@ pub const NAME: &str = "pg_durable::activity::execute-sql";
 pub struct ExecuteSqlInput {
     pub query: String,
     pub submitted_by: String,
-    /// Target database (None = extension database)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Target database (None = extension database). Historical inputs include the null.
     pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "SqlQuotingVersion::is_legacy")]
+    pub sql_quoting_version: SqlQuotingVersion,
+}
+
+pub(crate) async fn prepare_sql_quoting(
+    conn: &mut sqlx::PgConnection,
+    version: SqlQuotingVersion,
+) -> Result<(), String> {
+    if version.is_legacy() {
+        // Pin an already-enabled setting so a configuration reload cannot make
+        // historical literals unsafe between this check and query parsing.
+        let setting = sqlx::query_scalar::<_, String>(
+            "SELECT pg_catalog.set_config('standard_conforming_strings', 'on', false)
+             WHERE pg_catalog.current_setting('standard_conforming_strings')
+                   OPERATOR(pg_catalog.=) 'on'",
+        )
+        .fetch_optional(conn)
+        .await
+        .map_err(|e| format!("Failed to enforce legacy SQL quoting: {e}"))?;
+        if setting.is_none() {
+            return Err(
+                "Legacy workflow SQL requires standard_conforming_strings=on; \
+                 replay-compatible literals are unsafe when it is off"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Decode a single column value from a PostgreSQL row into a `serde_json::Value`.
@@ -237,6 +266,7 @@ pub(crate) async fn execute_in_origin(
     if let Some(origin) = origin {
         crate::origin::validate_execution_connection(&mut conn, &origin).await?;
     }
+    prepare_sql_quoting(&mut conn, input.sql_quoting_version).await?;
     if let Some(source) = source {
         source.validate().await?;
     }
@@ -281,5 +311,34 @@ async fn execute_query(
             ctx.trace_info(&err_msg);
             Err(err_msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_quoting_version_preserves_legacy_activity_bytes() {
+        for legacy in [
+            r#"{"query":"SELECT '\\path'","submitted_by":"reader","database":null}"#,
+            r#"{"query":"SELECT '\\path'","submitted_by":"reader","database":"other"}"#,
+        ] {
+            let input: ExecuteSqlInput = serde_json::from_str(legacy).unwrap();
+            assert_eq!(input.sql_quoting_version, SqlQuotingVersion::Legacy);
+            assert_eq!(serde_json::to_string(&input).unwrap(), legacy);
+        }
+    }
+
+    #[test]
+    fn sql_quoting_version_is_explicit_for_new_activities() {
+        let current = r#"{"query":"SELECT 1","submitted_by":"reader","database":null,"sql_quoting_version":"v1"}"#;
+        let input: ExecuteSqlInput = serde_json::from_str(current).unwrap();
+        assert_eq!(input.sql_quoting_version, SqlQuotingVersion::V1);
+        assert_eq!(serde_json::to_string(&input).unwrap(), current);
+        assert!(serde_json::from_str::<ExecuteSqlInput>(
+            r#"{"query":"SELECT 1","submitted_by":"reader","database":null,"sql_quoting_version":"v2"}"#
+        )
+        .is_err());
     }
 }

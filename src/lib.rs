@@ -2667,6 +2667,67 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_legacy_sql_quoting_rejects_unsafe_connection_settings() {
+        use crate::activities::execute_sql::prepare_sql_quoting;
+        use crate::types::SqlQuotingVersion;
+        use sqlx::Connection;
+
+        let connection_string = test_database_connection_string();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = sqlx::PgConnection::connect(&connection_string)
+                .await
+                .unwrap();
+            let mut tx = conn.begin().await.unwrap();
+            sqlx::raw_sql(
+                "CREATE SCHEMA quoting_guard_shadow;
+                 CREATE FUNCTION quoting_guard_shadow.current_setting(text)
+                 RETURNS text LANGUAGE sql AS $$ SELECT 'on'::text $$;
+                 CREATE FUNCTION quoting_guard_shadow.set_config(text, text, boolean)
+                 RETURNS text LANGUAGE sql AS $$ SELECT 'on'::text $$;
+                 CREATE FUNCTION quoting_guard_shadow.equal(text, text)
+                 RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+                 CREATE OPERATOR quoting_guard_shadow.= (
+                     FUNCTION = quoting_guard_shadow.equal,
+                     LEFTARG = text, RIGHTARG = text);
+                 SET LOCAL search_path = quoting_guard_shadow, pg_catalog, pg_temp",
+            )
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+            for version in [SqlQuotingVersion::Legacy, SqlQuotingVersion::V1] {
+                for setting in ["on", "off"] {
+                    sqlx::query(&format!(
+                        "SET LOCAL standard_conforming_strings = {setting}"
+                    ))
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                    let result = prepare_sql_quoting(&mut tx, version).await;
+                    if version.is_legacy() && setting == "off" {
+                        assert!(result
+                            .unwrap_err()
+                            .contains("requires standard_conforming_strings=on"));
+                    } else {
+                        result.unwrap();
+                    }
+                    let actual: String = sqlx::query_scalar("SHOW standard_conforming_strings")
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap();
+                    assert_eq!(actual, setting, "must not silently change string semantics");
+                }
+            }
+            tx.rollback().await.unwrap();
+            conn.close().await.unwrap();
+        });
+    }
+
+    #[pg_test]
     fn test_literal_quoting_round_trips_all_result_forms() {
         use crate::types::{substitute_all, substitute_all_raw, SystemVars};
         use std::collections::HashMap;

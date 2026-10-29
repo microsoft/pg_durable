@@ -69,7 +69,17 @@ SELECT df.start(
                     ('nullable-column', $rows.id, $rows.value?, $rows.object_value?::jsonb, $rows.array_value?::jsonb,
                      current_setting('standard_conforming_strings'))
                 $query$,
-                'SELECT $guard.matched AS matched'
+                df.seq(
+                    df.loop(
+                        $query$
+                            INSERT INTO test_literal_quoting.copied VALUES
+                            ('loop', $rows.id, $rows.value, $rows.object_value::jsonb,
+                             $rows.array_value::jsonb, current_setting('standard_conforming_strings'))
+                        $query$,
+                        'SELECT count(*) < 2 FROM test_literal_quoting.copied WHERE variant = ''loop'''
+                    ),
+                    'SELECT $guard.matched AS matched'
+                )
             )
         )
     ),
@@ -90,8 +100,8 @@ BEGIN
     IF (df.result(inst_id)::jsonb->'rows'->0->>'matched')::integer IS DISTINCT FROM 0 THEN
         RAISE EXCEPTION 'TEST FAILED: literal escaped into SQL expression';
     END IF;
-    IF (SELECT count(*) FROM test_literal_quoting.copied) <> 9 THEN
-        RAISE EXCEPTION 'TEST FAILED: expected five row-set rows and four scalar rows';
+    IF (SELECT count(*) FROM test_literal_quoting.copied) <> 11 THEN
+        RAISE EXCEPTION 'TEST FAILED: expected five row-set, four scalar, and two loop rows';
     END IF;
     IF EXISTS (
         SELECT FROM test_literal_quoting.copied c

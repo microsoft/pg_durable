@@ -8,7 +8,7 @@ use pgrx::{pg_extern, Spi};
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use postgres_protocol::escape::escape_literal as quote_literal;
+use postgres_protocol::escape::escape_literal;
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
 use std::str::FromStr;
@@ -721,6 +721,29 @@ pub fn is_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlQuotingVersion {
+    #[default]
+    Legacy,
+    V1,
+}
+
+impl SqlQuotingVersion {
+    pub(crate) fn is_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+
+    fn quote_literal(self, value: &str) -> String {
+        match self {
+            // Historical activity inputs must remain byte-identical. The SQL
+            // activity permits this version only with standard strings enabled.
+            Self::Legacy => format!("'{}'", value.replace('\'', "''")),
+            Self::V1 => escape_literal(value),
+        }
+    }
+}
+
 /// System variables available during workflow execution
 pub struct SystemVars {
     pub instance_id: String,
@@ -772,11 +795,11 @@ fn quote_identifier(name: &str) -> String {
 }
 
 /// Format a JSON value for use in a SQL or raw context.
-fn format_value(val: &serde_json::Value, for_sql: bool) -> String {
+fn format_value(val: &serde_json::Value, sql_quoting: Option<SqlQuotingVersion>) -> String {
     match val {
         serde_json::Value::String(s) => {
-            if for_sql {
-                quote_literal(s)
+            if let Some(quoting) = sql_quoting {
+                quoting.quote_literal(s)
             } else {
                 s.clone()
             }
@@ -784,8 +807,8 @@ fn format_value(val: &serde_json::Value, for_sql: bool) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         _ => {
-            if for_sql {
-                quote_literal(&val.to_string())
+            if let Some(quoting) = sql_quoting {
+                quoting.quote_literal(&val.to_string())
             } else {
                 val.to_string()
             }
@@ -798,14 +821,14 @@ fn extract_first_column_value(
     name: &str,
     json_str: &str,
     null_safe: bool,
-    for_sql: bool,
+    sql_quoting: Option<SqlQuotingVersion>,
 ) -> Result<String, String> {
     let json: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(_) => {
             // Not JSON — return raw value (backward compat for HTTP responses etc.)
-            return Ok(if for_sql {
-                quote_literal(json_str)
+            return Ok(if let Some(quoting) = sql_quoting {
+                quoting.quote_literal(json_str)
             } else {
                 json_str.to_string()
             });
@@ -839,9 +862,9 @@ fn extract_first_column_value(
             };
         }
 
-        Ok(format_value(val, for_sql))
-    } else if for_sql {
-        Ok(quote_literal(json_str))
+        Ok(format_value(val, sql_quoting))
+    } else if let Some(quoting) = sql_quoting {
+        Ok(quoting.quote_literal(json_str))
     } else {
         Ok(json_str.to_string())
     }
@@ -860,7 +883,7 @@ fn extract_column_value(
     json_str: &str,
     col: &str,
     null_safe: bool,
-    for_sql: bool,
+    sql_quoting: Option<SqlQuotingVersion>,
 ) -> Result<String, String> {
     let json: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|_| format!("${name}.{col}: result is not valid JSON"))?;
@@ -893,7 +916,7 @@ fn extract_column_value(
             // header, a multipart field — has no such parser, so a leftover
             // `$name.col` would be sent over the wire verbatim and the request
             // would fail somewhere far less obvious. Fail loudly instead.
-            if !for_sql && !null_safe {
+            if sql_quoting.is_none() && !null_safe {
                 let mut available: Vec<&str> = fields.keys().map(String::as_str).collect();
                 available.sort_unstable();
                 return Err(format!(
@@ -914,14 +937,18 @@ fn extract_column_value(
         };
     }
 
-    Ok(format_value(val, for_sql))
+    Ok(format_value(val, sql_quoting))
 }
 
 /// Expand `$name.*` into an inline `VALUES` subquery (SQL) or JSON array (raw).
 ///
 /// Preserve the generated casts (including `::text`) for replay of unaffected
 /// activity inputs. This SQL executes as the submitting user, not the worker role.
-fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, String> {
+fn expand_row_set(
+    name: &str,
+    json_str: &str,
+    sql_quoting: Option<SqlQuotingVersion>,
+) -> Result<String, String> {
     /// Maximum number of rows allowed in `$name.*` expansion to prevent
     /// unbounded SQL string allocation from large result sets.
     const MAX_ROWSET_EXPANSION: usize = 10_000;
@@ -943,9 +970,9 @@ fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, S
         ));
     }
 
-    if !for_sql {
+    let Some(quoting) = sql_quoting else {
         return Ok(serde_json::to_string(rows).unwrap());
-    }
+    };
 
     let quoted_name = quote_identifier(name);
 
@@ -967,13 +994,13 @@ fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, S
             .iter()
             .map(|&col| match obj.get(col) {
                 Some(serde_json::Value::String(s)) => {
-                    format!("{}::text", quote_literal(s))
+                    format!("{}::text", quoting.quote_literal(s))
                 }
                 Some(serde_json::Value::Number(n)) => n.to_string(),
                 Some(serde_json::Value::Bool(b)) => b.to_string(),
                 Some(serde_json::Value::Null) | None => "NULL".to_string(),
                 Some(other) => {
-                    format!("{}::text", quote_literal(&other.to_string()))
+                    format!("{}::text", quoting.quote_literal(&other.to_string()))
                 }
             })
             .collect();
@@ -1000,7 +1027,7 @@ fn expand_row_set(name: &str, json_str: &str, for_sql: bool) -> Result<String, S
 fn substitute_results(
     input: &str,
     results: &std::collections::HashMap<String, String>,
-    for_sql: bool,
+    sql_quoting: Option<SqlQuotingVersion>,
 ) -> Result<String, String> {
     if results.is_empty() {
         return Ok(input.to_string());
@@ -1035,7 +1062,7 @@ fn substitute_results(
 
             // 1. $name.* — row-set expansion
             if after_name.starts_with(".*") {
-                let replacement = expand_row_set(name, json_str, for_sql)?;
+                let replacement = expand_row_set(name, json_str, sql_quoting)?;
                 out.push_str(&replacement);
                 i += 1 + name.len() + 2; // $ + name + .*
                 matched = true;
@@ -1049,7 +1076,7 @@ fn substitute_results(
                     let after_col = &after_dot[col.len()..];
                     let null_safe = after_col.starts_with('?');
                     let replacement =
-                        extract_column_value(name, json_str, col, null_safe, for_sql)?;
+                        extract_column_value(name, json_str, col, null_safe, sql_quoting)?;
                     out.push_str(&replacement);
                     i += 1 + name.len() + 1 + col.len() + if null_safe { 1 } else { 0 };
                     matched = true;
@@ -1060,7 +1087,7 @@ fn substitute_results(
 
             // 4. $name? — null-safe scalar
             if after_name.starts_with('?') {
-                let replacement = extract_first_column_value(name, json_str, true, for_sql)?;
+                let replacement = extract_first_column_value(name, json_str, true, sql_quoting)?;
                 out.push_str(&replacement);
                 i += 1 + name.len() + 1; // $ + name + ?
                 matched = true;
@@ -1069,7 +1096,7 @@ fn substitute_results(
 
             // 5. $name — strict scalar (with word-boundary check)
             if after_name.is_empty() || !is_ident_continue(after_name.as_bytes()[0]) {
-                let replacement = extract_first_column_value(name, json_str, false, for_sql)?;
+                let replacement = extract_first_column_value(name, json_str, false, sql_quoting)?;
                 out.push_str(&replacement);
                 i += 1 + name.len();
                 matched = true;
@@ -1133,6 +1160,7 @@ fn substitute_braced_variables(
 ///
 /// User vars and system vars are substituted without quoting - the user should
 /// handle SQL escaping in the original query if needed.
+/// `sql_quoting` selects the recorded SQL format; `None` leaves results unquoted.
 ///
 /// Returns `Err` if a strict (non-`?`) pattern references a result with no rows
 /// or a NULL value.
@@ -1141,7 +1169,7 @@ pub fn substitute_all_with_options(
     results: &std::collections::HashMap<String, String>,
     vars: &std::collections::HashMap<String, String>,
     sys_vars: &SystemVars,
-    quote_results_for_sql: bool,
+    sql_quoting: Option<SqlQuotingVersion>,
 ) -> Result<String, String> {
     // SECURITY: Raw substitution of user vars is by design — variables are
     // intended for SQL fragments (table names, expressions), not just values.
@@ -1152,7 +1180,7 @@ pub fn substitute_all_with_options(
     let result = substitute_braced_variables(query, vars, sys_vars);
 
     // 3. Substitute results: $name with dot-notation, null-safe, and row-set support
-    substitute_results(&result, results, quote_results_for_sql)
+    substitute_results(&result, results, sql_quoting)
 }
 
 /// Substitute all variables with SQL quoting (default for SQL contexts)
@@ -1162,7 +1190,7 @@ pub fn substitute_all(
     vars: &std::collections::HashMap<String, String>,
     sys_vars: &SystemVars,
 ) -> Result<String, String> {
-    substitute_all_with_options(query, results, vars, sys_vars, true)
+    substitute_all_with_options(query, results, vars, sys_vars, Some(SqlQuotingVersion::V1))
 }
 
 /// Substitute all variables without SQL quoting (for URLs, headers, etc.)
@@ -1172,7 +1200,7 @@ pub fn substitute_all_raw(
     vars: &std::collections::HashMap<String, String>,
     sys_vars: &SystemVars,
 ) -> Result<String, String> {
-    substitute_all_with_options(query, results, vars, sys_vars, false)
+    substitute_all_with_options(query, results, vars, sys_vars, None)
 }
 
 /// Report whether `value` consists of exactly one variable reference and nothing
@@ -1459,6 +1487,8 @@ pub struct FunctionGraph {
     pub instance_id: String,
     pub root_node_id: String,
     pub nodes: std::collections::BTreeMap<String, FunctionNode>,
+    #[serde(default, skip_serializing_if = "SqlQuotingVersion::is_legacy")]
+    pub sql_quoting_version: SqlQuotingVersion,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -3151,6 +3181,84 @@ mod tests {
     }
 
     #[test]
+    fn sql_quoting_version_preserves_legacy_graph_bytes() {
+        let legacy = r#"{"instance_id":"instance","root_node_id":"root","nodes":{}}"#;
+        let mut graph: FunctionGraph = serde_json::from_str(legacy).unwrap();
+        assert_eq!(graph.sql_quoting_version, SqlQuotingVersion::Legacy);
+        assert_eq!(serde_json::to_string(&graph).unwrap(), legacy);
+
+        graph.sql_quoting_version = SqlQuotingVersion::V1;
+        let current = serde_json::to_string(&graph).unwrap();
+        assert_eq!(
+            current,
+            r#"{"instance_id":"instance","root_node_id":"root","nodes":{},"sql_quoting_version":"v1"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<FunctionGraph>(&current)
+                .unwrap()
+                .sql_quoting_version,
+            SqlQuotingVersion::V1
+        );
+        assert!(serde_json::from_str::<FunctionGraph>(
+            r#"{"instance_id":"instance","root_node_id":"root","nodes":{},"sql_quoting_version":"v2"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn legacy_sql_quoting_preserves_recorded_substitutions() {
+        for (result, query, expected) in [
+            (
+                r#"{"rows":[{"value":"\\' OR true --"}]}"#,
+                "SELECT $payload",
+                r"SELECT '\'' OR true --'",
+            ),
+            (
+                r#"{"rows":[{"value":"\\' OR true --"}]}"#,
+                "SELECT $payload.value?",
+                r"SELECT '\'' OR true --'",
+            ),
+            (
+                r"\' OR true --",
+                "SELECT $payload",
+                r"SELECT '\'' OR true --'",
+            ),
+            (
+                r#"{"body":"\\' OR true --"}"#,
+                "SELECT $payload",
+                r#"SELECT '{"body":"\\'' OR true --"}'"#,
+            ),
+            (
+                r#"{"rows":[{"value":{"text":"\\"}}]}"#,
+                "SELECT $payload.value",
+                r#"SELECT '{"text":"\\"}'"#,
+            ),
+            (
+                r#"{"rows":[{"text":"\\'","doc":{"text":"\\"},"arr":["\\'"]}]}"#,
+                "SELECT * FROM $payload.*",
+                r#"SELECT * FROM (VALUES ('\'''::text,'{"text":"\\"}'::text,'["\\''"]'::text)) AS "payload"("text", "doc", "arr")"#,
+            ),
+        ] {
+            let results = make_results(&[("payload", result)]);
+            assert_eq!(
+                substitute_all_with_options(
+                    query,
+                    &results,
+                    &empty_vars(),
+                    &sys_vars(),
+                    Some(SqlQuotingVersion::Legacy),
+                )
+                .unwrap(),
+                expected
+            );
+            assert_ne!(
+                substitute_all(query, &results, &empty_vars(), &sys_vars()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn literal_quoting_preserves_unaffected_sql() {
         let results = make_results(&[(
             "row",
@@ -3249,7 +3357,7 @@ mod tests {
     fn test_expand_row_set_quoted_columns() {
         // Column names from PostgreSQL can contain special characters
         let json = r#"{"rows":[{"normal":1,"has space":2}],"row_count":1}"#;
-        let result = expand_row_set("tbl", json, true).unwrap();
+        let result = expand_row_set("tbl", json, Some(SqlQuotingVersion::V1)).unwrap();
         assert!(result.contains(r#""normal""#));
         assert!(result.contains(r#""has space""#));
         assert!(result.contains(r#"AS "tbl"("#));
@@ -3258,7 +3366,7 @@ mod tests {
     #[test]
     fn test_expand_row_set_empty_quoted_name() {
         let json = r#"{"rows":[],"row_count":0}"#;
-        let result = expand_row_set("batch", json, true).unwrap();
+        let result = expand_row_set("batch", json, Some(SqlQuotingVersion::V1)).unwrap();
         assert_eq!(result, r#"(SELECT NULL WHERE false) AS "batch""#);
     }
     #[test]
