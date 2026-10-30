@@ -62,6 +62,9 @@ SKIP_TESTS=(
     # Require http-allow-all and the local runner's TLS mock and environment.
     "80_multi_database_http_origin"
     "85_multi_database_http_admission"
+    "90_http_concurrency"
+    "91_http_policies"
+    "92_http_restart"
 )
 
 # Defaults

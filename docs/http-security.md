@@ -566,6 +566,36 @@ retrying an activity alone does not clear the error. Ordinary DNS, connection,
 and request-timeout failures happen after construction and are not cached this
 way, so they do not require a worker restart.
 
+### 6.4 HTTP execution capacity
+
+`pg_durable.max_http_concurrency` limits ordinary and multipart HTTP executions
+together across all origin databases. Capacity is reserved before routing,
+privilege checks, or credential lookup and retained through response processing
+and sink storage. Queued requests hold no HTTP or origin-connection reservation.
+Admission does not replace any execution-time authorization or destination check.
+
+Admission ends when the handler returns or is dropped. Asynchronous metadata
+connection cleanup may outlive that handler while retaining its separate
+origin-connection reservation. Neither release proves that an already-sent HTTP
+request or SQL statement stopped remotely.
+
+These are concurrency bounds, not tenant-isolation guarantees. A role with HTTP
+privilege can occupy the shared ceiling for the duration of its requests.
+Capacity checks precede privilege checks, so even ungranted, handcrafted HTTP
+nodes can contribute to admission load while capacity is saturated. Large
+deferred backlogs can delay SQL and metadata work, and repeated history/input
+processing can be expensive. HTTP grants alone do not eliminate that load.
+
+`df.with_policy()` can further limit HTTP concurrency within a workflow subtree.
+These are voluntary local constraints, not privilege grants: they cannot raise
+the server-wide ceiling or authorize an otherwise blocked destination.
+
+The limit defaults to two and requires a server restart to change. It is
+separate from connection-pool size and from the total activity capacity set by
+`pg_durable.max_activity_concurrency`. See
+[Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency)
+for headroom, timeout, cancellation, and crash semantics.
+
 ---
 
 ## 7. Audit Logging

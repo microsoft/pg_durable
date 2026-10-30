@@ -32,6 +32,8 @@ pub static MAX_MANAGEMENT_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(
 pub static MAX_ORIGIN_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(12);
 pub static MAX_DUROXIDE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static MAX_USER_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(10);
+pub static MAX_ACTIVITY_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(2);
+pub static MAX_HTTP_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(2);
 pub static MAX_NEW_TRANSACTION_STARTS: GucSetting<i32> = GucSetting::<i32>::new(2);
 pub static MAX_CONCURRENT_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(100);
 pub static MAX_INSTANCES_PER_USER: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -81,6 +83,7 @@ pub mod monitoring;
 pub mod node_status;
 pub mod orchestrations;
 pub(crate) mod origin;
+pub mod policies;
 pub mod redact;
 pub mod registry;
 pub mod secrets;
@@ -225,6 +228,28 @@ pub extern "C-unwind" fn _PG_init() {
         c"Maximum number of concurrent user connections for SQL execution and HTTP credential catalogs",
         c"",
         &MAX_USER_CONNECTIONS,
+        1,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.max_activity_concurrency",
+        c"Maximum number of concurrent activities in the shared background worker runtime",
+        c"Includes SQL, HTTP, and metadata activities. Requires a server restart.",
+        &MAX_ACTIVITY_CONCURRENCY,
+        1,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_durable.max_http_concurrency",
+        c"Maximum number of concurrent HTTP and multipart HTTP activities across all databases",
+        c"Includes request preparation, response handling, and sink storage. Requires a server restart.",
+        &MAX_HTTP_CONCURRENCY,
         1,
         1000,
         GucContext::Postmaster,
@@ -3188,6 +3213,45 @@ mod tests {
         assert_eq!(
             get_new_transaction_start_timeout(),
             std::time::Duration::from_secs(5)
+        );
+    }
+
+    #[pg_test]
+    fn test_activity_concurrency_gucs() {
+        assert_eq!(crate::MAX_ACTIVITY_CONCURRENCY.get(), 2);
+        assert_eq!(crate::MAX_HTTP_CONCURRENCY.get(), 2);
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM pg_settings
+                 WHERE name IN ('pg_durable.max_activity_concurrency',
+                                'pg_durable.max_http_concurrency')
+                   AND context = 'postmaster'
+                   AND min_val = '1' AND max_val = '1000' AND boot_val = '2'"
+            )
+            .unwrap(),
+            Some(2)
+        );
+    }
+
+    #[pg_test]
+    fn test_workflow_policy_dsl_and_explain() {
+        let graph = Spi::get_one::<String>(
+            "SELECT df.with_http_options(
+                df.as(df.with_policy(df.with_policy(df.http('https://api.github.com', 'GET'),
+                    '{\"http\":{\"max_concurrency\":2}}'),
+                    '{\"http\":{\"max_concurrency\":5}}'), 'response'),
+                '{\"response\":\"metadata\"}')",
+        )
+        .unwrap()
+        .unwrap();
+        let node = Durofut::from_json(&graph);
+        assert_eq!(node.policy.unwrap().http.unwrap().max_concurrency.get(), 2);
+        assert_eq!(node.result_name.as_deref(), Some("response"));
+        let explain = crate::explain::explain(&graph);
+        assert!(explain.contains("HTTP limits: N1=2"), "{explain}");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT df.with_policy('SELECT 1', NULL) IS NULL").unwrap(),
+            Some(true)
         );
     }
 

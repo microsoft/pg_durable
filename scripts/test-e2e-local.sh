@@ -94,6 +94,7 @@ ALL_PHASES=(
     "http-empty-domains"
     "http-disabled"
     "http-allow-all"
+    "http-concurrency"
 )
 
 PGRX_HOME="$HOME/.pgrx"
@@ -189,6 +190,9 @@ phase_label() {
         http-allow-all)
             echo "HTTP unrestricted startup policy"
             ;;
+        http-concurrency)
+            echo "HTTP concurrency and nonblocking admission"
+            ;;
         *)
             echo "$1"
             ;;
@@ -238,6 +242,9 @@ phase_for_test() {
             ;;
         48_http_allow_all|80_multi_database_http_origin|85_multi_database_http_admission)
             echo "http-allow-all"
+            ;;
+        90_http_concurrency|91_http_policies|92_http_restart)
+            echo "http-concurrency"
             ;;
         *)
             echo "standard"
@@ -665,7 +672,7 @@ configure_phase() {
             set_conf_line "pg_durable.enable_superuser_instances" "on"
             set_conf_line "pg_durable.http_allowed_domains" "'example.com'"
             ;;
-        http-empty-domains|http-allow-all)
+        http-empty-domains|http-allow-all|http-concurrency)
             set_conf_line "shared_preload_libraries" "'pg_durable'"
             set_conf_line "pg_durable.worker_role" "'postgres'"
             set_conf_line "pg_durable.database" "'postgres'"
@@ -673,6 +680,10 @@ configure_phase() {
             set_conf_line "pg_durable.http_allowed_domains" "''"
             if [ "$phase" = "http-allow-all" ]; then
                 set_conf_line "pg_durable.max_user_connections" "1"
+                set_conf_line "pg_durable.reconcile_interval" "0"
+            elif [ "$phase" = "http-concurrency" ]; then
+                set_conf_line "pg_durable.max_activity_concurrency" "4"
+                set_conf_line "pg_durable.max_http_concurrency" "1"
                 set_conf_line "pg_durable.reconcile_interval" "0"
             fi
             ;;
@@ -682,7 +693,7 @@ configure_phase() {
         http-disabled)
             set_conf_line "pg_durable.http_security" "'disabled'"
             ;;
-        http-allow-all)
+        http-allow-all|http-concurrency)
             set_conf_line "pg_durable.http_security" "'unrestricted'"
             ;;
     esac
@@ -762,7 +773,7 @@ prepare_phase() {
         reconcile|maintenance-backlog)
             wait_for_worker_ready
             ;;
-        http-custom-domains|http-empty-domains|http-disabled|http-allow-all)
+        http-custom-domains|http-empty-domains|http-disabled|http-allow-all|http-concurrency)
             ensure_e2e_role
             wait_for_worker_ready
             ;;
@@ -935,7 +946,7 @@ run_http_origin_test() (
         stop_server
         kill "$mock_pid" 2>/dev/null || true
         wait "$mock_pid" 2>/dev/null || true
-        rm -f -- "$work_dir/port" "$work_dir/server.log" "$work_dir/key.pem" "$work_dir/cert.pem" "$work_dir/cert.log" "$work_dir/requests.json" "$work_dir/requests.tmp"
+        rm -f -- "$work_dir/port" "$work_dir/server.log" "$work_dir/key.pem" "$work_dir/cert.pem" "$work_dir/cert.log" "$work_dir/requests.json" "$work_dir/requests.tmp" "$work_dir/capacity-release" "$work_dir/cancel-release"
         rmdir -- "$work_dir"
         if [ -n "$previous_ssl_cert_file" ]; then
             export SSL_CERT_FILE="$previous_ssl_cert_file"
@@ -953,11 +964,47 @@ run_http_origin_test() (
             PGDURABLE_TEST_HTTP_PORT=$(cat "$work_dir/port")
             export PGDURABLE_TEST_SERVER_LOG="$LOG_FILE"
             export PGDURABLE_TEST_HTTP_COUNTS="$work_dir/requests.json"
+            export PGDURABLE_TEST_HTTP_RELEASE="$work_dir/capacity-release"
+            export PGDURABLE_TEST_HTTP_CANCEL_RELEASE="$work_dir/cancel-release"
+            export PGDURABLE_TEST_HTTP_RESTARTED=false
             export SSL_CERT_FILE="$work_dir/cert.pem"
             restart_server
             wait_for_worker_ready
-            run_test_file "$1"
-            return $?
+            run_test_file "$1" || return $?
+            if [ "$(basename "$1" .sql)" = "92_http_restart" ]; then
+                stop_server
+                printf 'release\n' > "$work_dir/capacity-release"
+                python3 - "$PGDURABLE_TEST_HTTP_PORT" "$work_dir/cert.pem" "$work_dir/capacity-release" <<'PY' || return $?
+import http.client
+import pathlib
+import ssl
+import sys
+import time
+
+context = ssl.create_default_context(cafile=sys.argv[2])
+deadline = time.monotonic() + 10
+while True:
+    connection = http.client.HTTPSConnection("127.0.0.1", int(sys.argv[1]), context=context, timeout=5)
+    try:
+        connection.request("POST", "/reset-capacity", body=b"")
+        response = connection.getresponse()
+        response.read()
+        status = response.status
+    finally:
+        connection.close()
+    if status == 204:
+        pathlib.Path(sys.argv[3]).unlink()
+        break
+    if status != 409 or time.monotonic() >= deadline:
+        raise SystemExit(f"TEST FAILED: old HTTP fixture requests did not drain (status {status})")
+    time.sleep(0.025)
+PY
+                restart_server
+                wait_for_worker_ready
+                export PGDURABLE_TEST_HTTP_RESTARTED=true
+                run_test_file "$1" || return $?
+            fi
+            return 0
         fi
         if ! kill -0 "$mock_pid" 2>/dev/null; then
             cat "$work_dir/server.log"
@@ -976,6 +1023,27 @@ run_test_file() {
     local output
 
     test_name=$(basename "$test_file" .sql)
+
+    if [[ "$test_name" = "91_http_policies" || "$test_name" = "92_http_restart" ]] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
+        set_conf_line "pg_durable.max_activity_concurrency" "6"
+        if [ "$test_name" = "91_http_policies" ]; then
+            set_conf_line "pg_durable.max_http_concurrency" "4"
+        else
+            set_conf_line "pg_durable.max_http_concurrency" "3"
+        fi
+        run_http_origin_test "$test_file"
+        return $?
+    fi
+
+    if [ "$test_name" = "90_http_concurrency" ] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
+        local http_limit
+        for http_limit in 1 2; do
+            echo "  Testing HTTP ceiling $http_limit with four activity slots"
+            set_conf_line "pg_durable.max_http_concurrency" "$http_limit"
+            run_http_origin_test "$test_file" || return $?
+        done
+        return 0
+    fi
 
     if [[ "$test_name" = "80_multi_database_http_origin" || "$test_name" = "85_multi_database_http_admission" ]] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
         run_http_origin_test "$test_file"

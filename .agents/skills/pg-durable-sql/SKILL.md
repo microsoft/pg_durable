@@ -73,6 +73,15 @@ df.wait_for_signal(
 ### Control Flow
 
 ```sql
+-- HTTP concurrency constraint on a graph or subtree (0.2.10+).
+-- All enclosing limits apply; inner policies cannot raise outer/server limits.
+-- Scopes are shared across parallel branches and loop iterations.
+df.with_policy(fut TEXT, policy JSONB) → TEXT
+df.with_policy(
+    df.http('https://api.example.com/a', 'GET') & df.http('https://api.example.com/b', 'GET'),
+    '{"http":{"max_concurrency":1}}'::jsonb
+)
+
 -- Sequence (function variant of ~>)
 df.seq(a TEXT, b TEXT) → TEXT
 

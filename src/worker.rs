@@ -148,6 +148,11 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
     // initialization (migrations, provider construction, dispatcher startup).
     const STALE_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+    // Keep one budget across runtime replacement within this worker process.
+    let http_capacity = Arc::new(crate::policies::HttpAdmission::new(
+        crate::MAX_HTTP_CONCURRENCY.get() as usize,
+    ));
+
     let pg_conn_str = postgres_connection_string();
     let management_conn_str =
         postgres_connection_string_with_application_name(WORKER_MANAGEMENT_APPLICATION_NAME);
@@ -298,70 +303,75 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
             duroxide_schema
         );
 
-        let Some((duroxide_runtime, duroxide_store)) = initialize_duroxide_runtime(
-            &pg_conn_str,
-            INIT_RETRY_INTERVAL,
-            &mgmt_pool,
-            &duroxide_schema,
-            epoch_oid,
-            &http_policy,
-        )
-        .await
+        let Some((duroxide_runtime, duroxide_store)) =
+            startup_or_shutdown(initialize_duroxide_runtime(
+                &pg_conn_str,
+                INIT_RETRY_INTERVAL,
+                &mgmt_pool,
+                &duroxide_schema,
+                epoch_oid,
+                &http_policy,
+                &http_capacity,
+            ))
+            .await
+            .flatten()
         else {
             // Shutdown or the installation changed while initializing.
             continue;
         };
 
-        // Test-only pause that widens the window between runtime initialization
-        // and epoch revalidation so a regression test can drop/recreate the
-        // extension deterministically. Compiled out unless `test-hooks` is on.
-        test_pause_before_ready().await;
+        let publication = async {
+            // Test-only pause that widens the window between runtime initialization
+            // and epoch revalidation so a regression test can drop/recreate the
+            // extension deterministically. Compiled out unless `test-hooks` is on.
+            test_pause_before_ready().await;
 
-        // Revalidate the epoch AFTER initialization. If the extension was
-        // dropped/recreated during init, tear down this now-stale runtime and
-        // retry against the current epoch, so a runtime bound to provider
-        // objects that no longer exist is never certified.
-        if extension_epoch_replaced(&poll_pool, epoch_oid).await {
-            log!(
-                "pg_durable: extension replaced during initialization — \
+            // Revalidate the epoch AFTER initialization. If the extension was
+            // dropped/recreated during init, tear down this now-stale runtime and
+            // retry against the current epoch, so a runtime bound to provider
+            // objects that no longer exist is never certified.
+            if extension_epoch_replaced(&poll_pool, epoch_oid).await {
+                log!(
+                    "pg_durable: extension replaced during initialization — \
                  tearing down stale runtime and retrying"
-            );
-            teardown_runtime(duroxide_runtime, duroxide_store).await;
-            if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
-                break;
+                );
+                return None;
             }
-            continue;
-        }
 
-        // Write a sentinel so we can detect drop+recreate even if the
-        // extension is always present in pg_extension between polls.
-        let epoch_id = match write_epoch_sentinel(&poll_pool).await {
-            Ok(id) => {
-                log!("pg_durable: epoch sentinel written ({})", id);
-                Some(id)
+            // Write a sentinel so we can detect drop+recreate even if the
+            // extension is always present in pg_extension between polls.
+            let epoch_id = match write_epoch_sentinel(&poll_pool).await {
+                Ok(id) => {
+                    log!("pg_durable: epoch sentinel written ({})", id);
+                    Some(id)
+                }
+                Err(e) => {
+                    log!("pg_durable: failed to write epoch sentinel: {} — falling back to extension-exists polling", e);
+                    None
+                }
+            };
+
+            // Final epoch check after readiness/sentinel writes and before entering the
+            // processing loop. A drop/recreate in this narrow window would have written
+            // the readiness record and sentinel into the new epoch's `df` schema, so the
+            // processing loop's sentinel check could not detect the replacement. Catch it
+            // here: tear down and retry against the current epoch.
+            if extension_epoch_replaced(&poll_pool, epoch_oid).await {
+                log!(
+                    "pg_durable: extension replaced after readiness publication — \
+                 tearing down stale runtime and retrying"
+                );
+                return None;
             }
-            Err(e) => {
-                log!("pg_durable: failed to write epoch sentinel: {} — falling back to extension-exists polling", e);
-                None
-            }
+            Some(epoch_id)
         };
-
-        // Final epoch check after readiness/sentinel writes and before entering the
-        // processing loop. A drop/recreate in this narrow window would have written
-        // the readiness record and sentinel into the new epoch's `df` schema, so the
-        // processing loop's sentinel check could not detect the replacement. Catch it
-        // here: tear down and retry against the current epoch.
-        if extension_epoch_replaced(&poll_pool, epoch_oid).await {
-            log!(
-                "pg_durable: extension replaced after readiness publication — \
-                 tearing down stale runtime and retrying"
-            );
+        let Some(Some(epoch_id)) = startup_or_shutdown(publication).await else {
             teardown_runtime(duroxide_runtime, duroxide_store).await;
             if !sleep_or_shutdown(STALE_RUNTIME_RETRY_INTERVAL).await {
                 break;
             }
             continue;
-        }
+        };
 
         run_until_extension_dropped_or_shutdown(
             &poll_pool,
@@ -384,6 +394,17 @@ async fn run_duroxide_runtime(http_policy: Arc<HttpPolicy>) {
         tokio::time::timeout(POOL_CLOSE_GRACE, mgmt_pool.close()),
         tokio::time::timeout(POOL_CLOSE_GRACE, poll_pool.close()),
     );
+}
+
+async fn startup_or_shutdown<T>(operation: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = wait_for_shutdown() => {
+            log!("pg_durable: shutdown interrupted runtime initialization");
+            None
+        }
+        result = operation => Some(result),
+    }
 }
 
 async fn wait_for_extension_creation(poll_pool: &sqlx::PgPool, poll_interval: Duration) -> bool {
@@ -683,6 +704,7 @@ async fn initialize_duroxide_runtime(
     schema_name: &str,
     epoch_oid: i64,
     http_policy: &Arc<HttpPolicy>,
+    http_capacity: &Arc<crate::policies::HttpAdmission>,
 ) -> Option<(Arc<runtime::Runtime>, Arc<PostgresProvider>)> {
     log!("pg_durable: initializing duroxide runtime...");
 
@@ -787,13 +809,22 @@ async fn initialize_duroxide_runtime(
             Arc::new(mgmt_pool.clone()),
             user_semaphore.clone(),
             http_policy.clone(),
+            http_capacity.clone(),
         );
         let orchestrations = create_orchestration_registry();
 
         let store_for_client = store.clone();
 
-        let duroxide_runtime =
-            runtime::Runtime::start_with_store(store, activities, orchestrations).await;
+        let duroxide_runtime = runtime::Runtime::start_with_options(
+            store,
+            activities,
+            orchestrations,
+            runtime::RuntimeOptions {
+                worker_concurrency: crate::MAX_ACTIVITY_CONCURRENCY.get() as usize,
+                ..Default::default()
+            },
+        )
+        .await;
 
         log!("pg_durable: duroxide runtime started");
         return Some((duroxide_runtime, store_for_client));
@@ -1880,11 +1911,9 @@ async fn teardown_runtime(
         const POOL_CLOSE_GRACE: Duration = Duration::from_millis(100);
         let _ = tokio::time::timeout(POOL_CLOSE_GRACE, duroxide_store.pool().close()).await;
 
-        // Some(0) is load-bearing on two duroxide internals: a non-zero timeout
-        // is an unconditional sleep rather than a deadline, and the zero branch
-        // returns without setting duroxide's cooperative shutdown_flag. Leaving
-        // that flag unset is only safe because proc_exit() follows immediately.
-        // Re-verify both when upgrading duroxide.
+        // Skip graceful draining while PostgreSQL is terminating backends.
+        // Duroxide signals cancellation and joins its task cleanup even with
+        // a zero grace period.
         duroxide_runtime.shutdown(Some(0)).await;
     } else {
         // Live process: the runtime is being restarted after an extension drop

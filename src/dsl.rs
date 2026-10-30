@@ -504,6 +504,21 @@ fn validate_http_sink_name(config: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Constrains HTTP concurrency throughout a graph or subtree.
+#[pg_extern(schema = "df")]
+pub fn with_policy(fut: &str, policy: pgrx::JsonB) -> String {
+    let policy: crate::policies::WorkflowPolicy = crate::policies::object(policy.0)
+        .unwrap_or_else(|error| pgrx::error!("df.with_policy(): invalid policy: {error}"));
+    let mut node = Durofut::ensure_strict(fut)
+        .unwrap_or_else(|error| pgrx::error!("df.with_policy(): {error}"));
+    if policy.http.is_some() {
+        node.policy
+            .get_or_insert_with(Default::default)
+            .constrain(policy);
+    }
+    node.to_json()
+}
+
 /// Applies HTTP options to a single HTTP or HTTP_MULTIPART node.
 #[pg_extern(schema = "df")]
 pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
