@@ -2011,8 +2011,9 @@ runtime. Distinguish three roles:
     `database` argument selects another database on the same cluster; that target
     does not need the extension unless the SQL itself calls `df` APIs.
 
-Satellite installation requires a compatible control worker with readiness schema
-version `3` (including its origin registry and protected submission accounting).
+Satellite installation requires a compatible control worker with the current
+readiness schema version, including its provider migrations, origin registry,
+and protected submission accounting.
 Provider migrations run only in control through the worker's `ApplyAll`;
 satellite creation never creates control
 automatically. The provider namespace is extension-owned, its contents are created
@@ -2579,12 +2580,18 @@ in SQL before their bounded page is loaded into memory.
 Execution pruning scans at most 1,000 execution keys per slice, including young
 and protected generations. Each batch deletes at most those 1,000 generations;
 this is a work limit, not a generation-count retention policy. Failed pages are
-logged, skipped for the rest of the scan, and retried on the next scan so they
-cannot block later pages. Pruning uses the maintenance connection, not the
-workflow runtime's connection pool, with server-side five-second statement and
+logged. Query cancellations, including statement timeouts, retry the same position
+with smaller pages, down to one execution. The smaller limit is retained for the
+rest of that scan; the next scan starts at 1,000 again. Lock timeouts and other
+failures, or cancellation of a single-execution page, skip that page until the
+next scan so they cannot block later pages. Pruning uses the maintenance
+connection, not the workflow runtime's connection pool, with server-side
+five-second statement and
 1.5-second lock deadlines. A timeout rolls back the batch. The number of history
-events in one generation is not capped; a batch that cannot finish within the
-deadline is deferred.
+events in one generation is not capped; an individual generation that cannot
+finish within the deadline can remain unpruned despite aging past the retention
+window. Smaller pages can lengthen the scan, but other pending maintenance work
+still gets a turn between pruning slices.
 
 Metadata queries have server-side deadlines and satellite operations have a
 15-second overall deadline. The candidate limit bounds materialized rows, not
@@ -2633,10 +2640,12 @@ continued generations from their recorded terminal history events. If an event
 is missing, it logs a migration warning and leaves that generation ineligible for
 age-based pruning rather than guessing its age. This one-time backfill runs
 before the worker becomes ready and can delay workflow processing on a large
-history store. Allow sufficient time for it during upgrade; a role or database
-`statement_timeout` shorter than the backfill will cause startup to retry rather
-than finish. Adjust the worker's migration-session timeout for the upgrade if
-necessary.
+history store. New submissions and engine operations such as signals and
+cancellation must wait for worker readiness. Allow sufficient time for the
+backfill during upgrade: the `statement_timeout` in effect for
+`pg_durable.worker_role` in the control database must permit it to finish.
+Adjust the applicable role or database timeout defaults for the upgrade if
+necessary; otherwise startup retries the backfill instead of completing.
 
 Notes:
 

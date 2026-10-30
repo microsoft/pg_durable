@@ -381,8 +381,11 @@ what the upgrade script handles, and any backward compatibility considerations.
   that page on the maintenance connection under server-side deadlines. It locks
   instances before history and rechecks eligibility after acquiring the locks,
   protecting replacement instances and coordinating with acknowledgement and
-  deletion. Failed pages are revisited next scan; runtime provider connections
-  are not borrowed.
+  deletion. Query cancellation retries the same cursor with a smaller page only
+  after rollback succeeds; the reduced limit lasts until that scan ends.
+  Lock failures and other errors, or a cancelled single-execution page, retain
+  the skip-and-retry-next-scan behavior. Runtime provider connections are not
+  borrowed.
 - **Inspection:** `df.instance_executions()` reads execution details and event
   counts in one MVCC snapshot, so concurrent pruning does not produce spurious
   per-generation not-found errors. Genuine query failures still raise errors.

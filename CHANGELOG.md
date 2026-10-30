@@ -6,6 +6,28 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [Unreleased]
 
+### Changed
+
+- **Historical execution retention (#415):** reconciliation now removes completed,
+  non-current execution generations and their history after
+  `pg_durable.retention_days`, including generations of still-running workflows
+  and nested loops. Current and Running executions remain protected. Cleanup
+  advances through bounded pages under server-side deadlines, reducing the page
+  size after query cancellation so otherwise-prunable generations do not remain
+  stuck in an oversized batch. `pg_durable.reconcile_interval = 0` disables it.
+- **Execution inspection (#415):** `df.instance_executions()` reads execution
+  details and event counts in one snapshot so concurrent pruning does not fail
+  the listing. Pruned generations no longer appear in subsequent inspections.
+
+> **Upgrade:** The worker backfills missing completion timestamps for older
+> continued generations before publishing readiness. Large history stores can
+> extend this initialization window, during which new submissions and engine
+> operations must wait. The `statement_timeout` in effect for
+> `pg_durable.worker_role` in the control database must allow the backfill to
+> complete. Missing terminal history leaves the timestamp NULL with a warning
+> rather than guessing its age. No `ALTER EXTENSION UPDATE` is needed for this
+> provider-managed change. See [Automatic Reconciliation](USER_GUIDE.md#automatic-reconciliation).
+
 ### Security
 
 - **Start admission quotas (#139):** `df.max_concurrent_per_user` (default

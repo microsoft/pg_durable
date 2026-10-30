@@ -1150,6 +1150,7 @@ async fn run_until_extension_dropped_or_shutdown(
     let mut engine_cursor = String::new();
     let mut legacy_cursor = String::new();
     let mut execution_cursor = (String::new(), 0);
+    let mut execution_batch_size = EXECUTION_PRUNE_BATCH_SIZE;
     let mut registration_cursor = (0i64, uuid::Uuid::nil());
     let mut submission_cursor = String::new();
     let mut pending = MaintenanceProgress::new();
@@ -1238,6 +1239,7 @@ async fn run_until_extension_dropped_or_shutdown(
                     pending.executions = match prune_old_executions(
                         maintenance_pool, &schema,
                         retention_cutoff_ms(retention), &mut execution_cursor,
+                        &mut execution_batch_size,
                     ).await {
                         Ok(more) => more,
                         Err(error) => {
@@ -1245,7 +1247,10 @@ async fn run_until_extension_dropped_or_shutdown(
                             execution_cursor != previous_cursor
                         },
                     };
-                    if !pending.executions { execution_cursor = (String::new(), 0); }
+                    if !pending.executions {
+                        execution_cursor = (String::new(), 0);
+                        execution_batch_size = EXECUTION_PRUNE_BATCH_SIZE;
+                    }
                 }
                 if pending.legacy { match reclaim_orphaned_instances(maintenance_pool, &client, &schema, retention, &mut legacy_cursor).await {
                     Ok(reclaimed) if reclaimed > 0 => {
@@ -1320,6 +1325,7 @@ const ORIGIN_BATCH: i64 = 1;
 const ORIGIN_ENGINE_BATCH: i64 = 100;
 const ORIGIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAINTENANCE_CONTINUATION_DELAY: Duration = Duration::from_millis(100);
+const EXECUTION_PRUNE_BATCH_SIZE: i32 = 1_000;
 
 struct MaintenanceProgress {
     control: bool,
@@ -1956,7 +1962,9 @@ async fn prune_old_executions(
     schema: &str,
     completed_before: u64,
     cursor: &mut (String, i64),
+    batch_size: &mut i32,
 ) -> Result<bool, String> {
+    assert!((1..=EXECUTION_PRUNE_BATCH_SIZE).contains(batch_size));
     let completed_before = i64::try_from(completed_before)
         .map_err(|error| format!("invalid pruning cutoff: {error}"))?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
@@ -1975,7 +1983,7 @@ async fn prune_old_executions(
     ))
     .bind(&cursor.0)
     .bind(cursor.1)
-    .bind(i64::from(RECLAIM_BATCH))
+    .bind(i64::from(*batch_size))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| format!("page execution pruning keys: {error}"))?;
@@ -1992,7 +2000,7 @@ async fn prune_old_executions(
     .bind(&after.0)
     .bind(after.1)
     .bind(completed_before)
-    .bind(RECLAIM_BATCH as i32)
+    .bind(*batch_size)
     .fetch_one(&mut *tx)
     .await;
     let batch = match result {
@@ -2001,6 +2009,22 @@ async fn prune_old_executions(
             tx.rollback().await.map_err(|rollback| {
                 format!("execution pruning failed: {error}; rollback failed: {rollback}")
             })?;
+            if *batch_size > 1
+                && error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref()
+                    == Some("57014")
+            {
+                // Query cancellation includes statement timeouts. Retry only after
+                // rollback, keeping the smaller limit for the rest of this scan.
+                *batch_size = (*batch_size / 2).max(1);
+                *cursor = after;
+                log!(
+                    "pg_durable: execution pruning query cancelled: {error}; retrying with at most {batch_size} execution(s)"
+                );
+                return Ok(true);
+            }
             return Err(format!("prune execution batch: {error}"));
         }
     };
@@ -2017,7 +2041,7 @@ async fn prune_old_executions(
             batch.events_deleted,
         );
     }
-    Ok(batch.executions_scanned == i64::from(RECLAIM_BATCH))
+    Ok(batch.executions_scanned == i64::from(*batch_size))
 }
 
 /// From the engine's `Failed` instance ids and the set that still have a
@@ -2681,22 +2705,24 @@ mod tests {
 
                 let cutoff = 1_704_067_200_000;
                 let mut cursor = (String::new(), 0);
+                let mut batch_size = EXECUTION_PRUNE_BATCH_SIZE;
                 assert!(prune_old_executions(
-                    pool, "execution_pruning_test", cutoff, &mut cursor,
+                    pool, "execution_pruning_test", cutoff, &mut cursor, &mut batch_size,
                 )
                 .await
                 .unwrap());
                 assert_eq!(cursor, ("a00001000".to_string(), 1),
                     "protected executions must consume and advance the scanned page");
                 let error = prune_old_executions(
-                    pool, "execution_pruning_test", cutoff, &mut cursor,
+                    pool, "execution_pruning_test", cutoff, &mut cursor, &mut batch_size,
                 )
                 .await
                 .unwrap_err();
                 assert!(error.contains("intentional pruning failure"), "{error}");
+                assert_eq!(batch_size, EXECUTION_PRUNE_BATCH_SIZE);
                 assert_eq!(cursor, ("b00000150".to_string(), 6));
                 let mut pages = 0;
-                while prune_old_executions(pool, "execution_pruning_test", cutoff, &mut cursor)
+                while prune_old_executions(pool, "execution_pruning_test", cutoff, &mut cursor, &mut batch_size)
                     .await.unwrap()
                 {
                     pages += 1;
@@ -2715,7 +2741,7 @@ mod tests {
                     .unwrap();
                 cursor = (String::new(), 0);
                 pages = 0;
-                while prune_old_executions(pool, "execution_pruning_test", cutoff, &mut cursor)
+                while prune_old_executions(pool, "execution_pruning_test", cutoff, &mut cursor, &mut batch_size)
                     .await.unwrap()
                 {
                     pages += 1;
@@ -2741,11 +2767,157 @@ mod tests {
                 .unwrap();
                 assert_eq!(survivors, [2, 3, 4, 5, 6]);
                 assert!(!prune_old_executions(
-                    pool, "execution_pruning_test", cutoff, &mut cursor,
+                    pool, "execution_pruning_test", cutoff, &mut cursor, &mut batch_size,
                 )
                 .await
                 .unwrap(), "an exhausted scan must not restart from protected histories");
                 sqlx::query("DROP SCHEMA execution_pruning_test CASCADE")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                pool.close().await;
+            });
+    }
+
+    #[pg_test]
+    fn execution_pruning_splits_cancelled_batches() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let mut url = url::Url::parse(&postgres_connection_string()).unwrap();
+        url.set_username(&admin).unwrap();
+        url.set_path(&database);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let store = PostgresProvider::new_with_config(worker_provider_config(
+                    url.as_str(),
+                    "pruning_batch_reduction",
+                ))
+                .await
+                .unwrap();
+                let pool = store.pool();
+                sqlx::raw_sql(
+                    "INSERT INTO pruning_batch_reduction.instances
+                         (instance_id,orchestration_name,current_execution_id,created_at,updated_at)
+                     VALUES ('aggregate','test',4,now(),now());
+                     INSERT INTO pruning_batch_reduction.executions
+                         (instance_id,execution_id,status,started_at,completed_at)
+                     SELECT 'aggregate',n,
+                         CASE WHEN n=4 THEN 'Running' ELSE 'ContinuedAsNew' END,
+                         to_timestamp(0),CASE WHEN n<4 THEN to_timestamp(1) END
+                     FROM generate_series(1,4) n;
+                     INSERT INTO pruning_batch_reduction.history
+                         (instance_id,execution_id,event_id,event_type,event_data,created_at)
+                     SELECT instance_id,execution_id,1,'Event','{}',now()
+                     FROM pruning_batch_reduction.executions;
+                     CREATE FUNCTION pruning_batch_reduction.slow_prune() RETURNS trigger
+                     LANGUAGE plpgsql AS $fn$ BEGIN
+                         IF OLD.instance_id='blocked' THEN
+                             RAISE EXCEPTION 'cancelled single generation' USING ERRCODE='57014';
+                         ELSIF OLD.instance_id='aggregate' THEN
+                             PERFORM pg_sleep(2);
+                         END IF;
+                         RETURN OLD;
+                     END $fn$;
+                     CREATE TRIGGER slow_prune BEFORE DELETE ON pruning_batch_reduction.history
+                         FOR EACH ROW EXECUTE FUNCTION pruning_batch_reduction.slow_prune();",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+
+                let mut cursor = (String::new(), 0);
+                let mut batch_size = 4;
+                assert!(tokio::time::timeout(
+                    Duration::from_secs(8),
+                    prune_old_executions(pool, "pruning_batch_reduction", 2000, &mut cursor, &mut batch_size),
+                )
+                .await
+                .unwrap()
+                .unwrap(), "the timed-out aggregate must schedule a smaller retry");
+                assert_eq!(cursor, (String::new(), 0));
+                assert_eq!(batch_size, 2);
+                let histories: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pruning_batch_reduction.history",
+                )
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                assert_eq!(histories, 4, "retry only after atomic rollback");
+                let mut slices = 0;
+                while prune_old_executions(
+                    pool, "pruning_batch_reduction", 2000, &mut cursor, &mut batch_size,
+                )
+                .await
+                .unwrap()
+                {
+                    slices += 1;
+                    assert!(slices < 8, "prunable generations must not retry indefinitely");
+                    assert!(batch_size <= 2, "success must not immediately increase the limit");
+                }
+                let survivors: Vec<i64> = sqlx::query_scalar(
+                    "SELECT execution_id FROM pruning_batch_reduction.executions ORDER BY execution_id",
+                )
+                .fetch_all(pool)
+                .await
+                .unwrap();
+                assert_eq!(survivors, [4]);
+
+                sqlx::raw_sql(
+                    "INSERT INTO pruning_batch_reduction.instances
+                         (instance_id,orchestration_name,current_execution_id,created_at,updated_at)
+                     VALUES ('blocked','test',2,now(),now()),('tail','test',2,now(),now());
+                     INSERT INTO pruning_batch_reduction.executions
+                         (instance_id,execution_id,status,started_at,completed_at)
+                     SELECT id,n,CASE WHEN n=2 THEN 'Running' ELSE 'ContinuedAsNew' END,
+                         to_timestamp(0),CASE WHEN n=1 THEN to_timestamp(1) END
+                     FROM (VALUES ('blocked'),('tail')) ids(id),generate_series(1,2) n;
+                     INSERT INTO pruning_batch_reduction.history
+                         (instance_id,execution_id,event_id,event_type,event_data,created_at)
+                     SELECT instance_id,execution_id,1,'Event','{}',now()
+                     FROM pruning_batch_reduction.executions WHERE instance_id<>'aggregate';",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                batch_size = 1;
+                let error = prune_old_executions(
+                    pool, "pruning_batch_reduction", 2000, &mut cursor, &mut batch_size,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("cancelled single generation"), "{error}");
+                assert_eq!(cursor, ("blocked".to_string(), 1));
+                slices = 0;
+                while prune_old_executions(
+                    pool, "pruning_batch_reduction", 2000, &mut cursor, &mut batch_size,
+                )
+                .await
+                .unwrap()
+                {
+                    slices += 1;
+                    assert!(slices < 8, "a cancelled singleton must not starve later keys");
+                }
+                let survivors: Vec<(String, i64)> = sqlx::query_as(
+                    "SELECT instance_id,execution_id FROM pruning_batch_reduction.executions
+                     ORDER BY instance_id,execution_id",
+                )
+                .fetch_all(pool)
+                .await
+                .unwrap();
+                assert_eq!(survivors, [
+                    ("aggregate".to_string(), 4),
+                    ("blocked".to_string(), 1),
+                    ("blocked".to_string(), 2),
+                    ("tail".to_string(), 2),
+                ]);
+                sqlx::query("DROP SCHEMA pruning_batch_reduction CASCADE")
                     .execute(pool)
                     .await
                     .unwrap();
@@ -2792,7 +2964,8 @@ mod tests {
                 sqlx::query(lock_sql)
                     .bind(id).fetch_one(&mut *blocker).await.unwrap();
                 let mut cursor = (id.to_string(), 0);
-                let pruning = prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor);
+                let mut batch_size = EXECUTION_PRUNE_BATCH_SIZE;
+                let pruning = prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor, &mut batch_size);
                 tokio::pin!(pruning);
                 let deadline = tokio::time::sleep(Duration::from_secs(3));
                 tokio::pin!(deadline);
@@ -2825,10 +2998,12 @@ mod tests {
                  FOR EACH ROW EXECUTE FUNCTION pruning_deadlines.slow_prune();"
             ).execute(store.pool()).await.unwrap();
             let mut cursor = (String::new(), 0);
+            let mut batch_size = 1;
             let error = tokio::time::timeout(Duration::from_secs(7),
-                prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor))
+                prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor, &mut batch_size))
                 .await.unwrap().unwrap_err();
             assert!(error.contains("statement timeout"), "{error}");
+            assert_eq!(batch_size, 1, "an indivisible execution must be deferred");
             tokio::time::timeout(Duration::from_millis(500),
                 sqlx::query("SELECT 1").execute(&maintenance)).await.unwrap().unwrap();
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pruning_deadlines.history")
@@ -2837,7 +3012,8 @@ mod tests {
             sqlx::query("DROP TRIGGER slow_prune ON pruning_deadlines.history")
                 .execute(store.pool()).await.unwrap();
             cursor = (String::new(), 0);
-            assert!(!prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor)
+            batch_size = EXECUTION_PRUNE_BATCH_SIZE;
+            assert!(!prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor, &mut batch_size)
                 .await.unwrap());
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pruning_deadlines.history")
                 .fetch_one(store.pool()).await.unwrap();
