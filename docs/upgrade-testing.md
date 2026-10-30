@@ -358,6 +358,51 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.9 → v0.2.10 (unreleased)
 
+#### Historical execution pruning
+
+- **B1:** background reconciliation prunes completed non-current execution
+  generations using `pg_durable.retention_days`, including running workflows and
+  nested loops in every origin. The query uses existing provider tables, so no
+  extension upgrade DDL or new `df` schema detection is needed.
+- **Provider migrations:** the worker's startup `ApplyAll` applies migration `0027`
+  before starting the runtime. It timestamps `ContinuedAsNew` executions and
+  backfills older NULL timestamps from terminal history events. Unrecoverable
+  timestamps remain NULL with a warning; those generations are not age-pruned.
+  Stop any other runtimes sharing the provider schema during this one-time
+  backfill. Existing histories may make startup slower; any worker-role/database
+  statement timeout must permit that backfill to finish, or startup retries it.
+  This dependency pair also includes `0023` (partial indexes), `0025` (fetch
+  leases), `0026` (renewal and acknowledgement lease locking), and `0028`
+  (cursor-based pruning and consistent instance-lock ordering). Readiness schema
+  version `4` supersedes main's version `3` submission ledger and prevents
+  backends from treating a pre-migration worker marker as ready.
+- **Bounded maintenance:** each slice scans at most 1,000 execution keys, including
+  protected rows. The provider owns deletion predicates and atomically prunes
+  that page on the maintenance connection under server-side deadlines. It locks
+  instances before history and rechecks eligibility after acquiring the locks,
+  protecting replacement instances and coordinating with acknowledgement and
+  deletion. Query cancellation retries the same cursor with a smaller page only
+  after rollback succeeds; the reduced limit lasts until that scan ends.
+  Lock failures and other errors, or a cancelled single-execution page, retain
+  the skip-and-retry-next-scan behavior. Runtime provider connections are not
+  borrowed.
+- **Inspection:** `df.instance_executions()` reads execution details and event
+  counts in one MVCC snapshot, so concurrent pruning does not produce spurious
+  per-generation not-found errors. Genuine query failures still raise errors.
+- **Replay:** no orchestration code, durable-operation inputs, or continuation
+  payloads change. Pruning preserves the current and running executions.
+- **Dependency pair:** duroxide is pinned exactly to `0.1.32`, as required by the
+  provider. Its shutdown operation cancels and joins owned tasks; zero means
+  immediate cancellation rather than a drain grace period. Validate the real
+  previous-binary lifecycle and worker shutdown when updating this pair.
+- **Release blocker:** the provider is pinned to immutable commit
+  `7e5472726c5dbbabf78a0eb08032b1fe605c6760` of
+  [microsoft/duroxide-pg#32](https://github.com/microsoft/duroxide-pg/pull/32).
+  Released provider `0.1.38` does not contain migrations `0027`/`0028`.
+  Replace the `DONOTLAND` git pin with an exact compatible released version and
+  refresh both dependency resolutions together before landing. No local Cargo
+  override is needed to build or test the current pinned commit.
+
 #### `df.start()` admission quotas (#139)
 
 - **DDL/B1:** The upgrade adds `idx_instances_submitted_by` on

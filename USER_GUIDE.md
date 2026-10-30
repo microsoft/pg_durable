@@ -2011,8 +2011,9 @@ runtime. Distinguish three roles:
     `database` argument selects another database on the same cluster; that target
     does not need the extension unless the SQL itself calls `df` APIs.
 
-Satellite installation requires a compatible control worker with readiness schema
-version `3` (including its origin registry and protected submission accounting).
+Satellite installation requires a compatible control worker with the current
+readiness schema version, including its provider migrations, origin registry,
+and protected submission accounting.
 Provider migrations run only in control through the worker's `ApplyAll`;
 satellite creation never creates control
 automatically. The provider namespace is extension-owned, its contents are created
@@ -2533,19 +2534,25 @@ satellite `df._worker_epoch` is normal; satellites do not have separate workers.
 pg_durable tracks each workflow in its own `df` tables, while the durable engine
 keeps workflow state in a separate schema. To keep those two stores consistent —
 and to keep `df.instances`/`df.nodes` from growing without bound — the background
-worker runs a **best-effort reconciliation pass** that does two things:
+worker runs a **best-effort reconciliation pass** that:
 
 - **Removes expired terminal instances.** Old **terminal** instances (status
   `completed`, `failed`, or `cancelled`) and their `df.nodes` rows are deleted,
-    along with their engine records. Retention does not remove running or pending
-    instances from an existing installation, regardless of age.
+  along with their engine records. Retention does not remove running or pending
+  instances from an existing installation, regardless of age.
 - **Reclaims orphaned engine records.** `df.start()` writes the `df` rows in the
   caller's transaction but hands the workflow to the engine over a separate
   connection; if that transaction **rolls back**, the `df` rows vanish while the
   engine keeps an inert record (it can never load its rolled-back graph, so it
   ends up failed). Reconciliation deletes such df-less engine records once they
-  age past `retention_days`. Anything the engine is still tracking with a live
-  `df` row is left untouched.
+  age past `retention_days`. Instances with a live `df` row are not orphans.
+- **Prunes old execution generations.** Loops start a new execution generation
+  on each iteration. Reconciliation removes historical generations and their
+  history events once their completion is older than `retention_days`, including
+  those belonging to still-running workflows and nested loops in any origin.
+  The current execution and any running execution are always preserved. This
+  does not remove the workflow's `df` rows or its current results, but old
+  generations will no longer appear in execution-history inspection.
 
 After the corresponding engine work, history, and origin metadata are gone,
 reconciliation removes the protected submission record and frees its retained
@@ -2570,6 +2577,21 @@ for at most one 1,000-candidate page, then other origins get a turn before a bus
 origin resumes. Only age-expired or excess-over-10,000 rows consume the retention
 candidate budget. Legacy orphan candidates exclude satellite roots and children
 in SQL before their bounded page is loaded into memory.
+Execution pruning scans at most 1,000 execution keys per slice, including young
+and protected generations. Each batch deletes at most those 1,000 generations;
+this is a work limit, not a generation-count retention policy. Failed pages are
+logged. Query cancellations, including statement timeouts, retry the same position
+with smaller pages, down to one execution. The smaller limit is retained for the
+rest of that scan; the next scan starts at 1,000 again. Lock timeouts and other
+failures, or cancellation of a single-execution page, skip that page until the
+next scan so they cannot block later pages. Pruning uses the maintenance
+connection, not the workflow runtime's connection pool, with server-side
+five-second statement and
+1.5-second lock deadlines. A timeout rolls back the batch. The number of history
+events in one generation is not capped; an individual generation that cannot
+finish within the deadline can remain unpruned despite aging past the retention
+window. Smaller pages can lengthen the scan, but other pending maintenance work
+still gets a turn between pruning slices.
 
 Metadata queries have server-side deadlines and satellite operations have a
 15-second overall deadline. The candidate limit bounds materialized rows, not
@@ -2587,12 +2609,13 @@ Two Postmaster-context GUCs govern it (set in `postgresql.conf`, restart to appl
 pg_durable.reconcile_interval = 3600
 
 # Days a terminal instance is retained before reconciliation removes it (and its
-# engine record); also the age bound for reclaiming orphaned engine records.
-# 0 removes terminal instances as soon as the next pass runs.
+# engine record); also the age bound for orphaned engine records and completed
+# historical execution generations. The current execution is never pruned.
+# 0 makes cleanup eligible on the next pass.
 pg_durable.retention_days = 30
 ```
 
-Retention combines that window with a fixed hard cap:
+Terminal-instance retention combines that window with a fixed hard cap:
 
 - **Hard cap per origin — at most 10,000 terminal instances are retained, regardless of
   age.** The newest 10,000 terminal instances are kept; any beyond that are
@@ -2604,9 +2627,29 @@ Equivalently, a terminal instance is retained only while it is **both** among th
 newest 10,000 terminal instances **and** younger than `retention_days`; otherwise
 it is eligible for removal.
 
+Historical execution generations use only the age window, not a count cap.
+Pruning bounds how long completed history is retained, not its byte size: a
+busy workflow can still retain many generations within the window. An execution
+that has not continued into a new generation retains its current history.
+Completed child instances created by earlier loop iterations retain their current
+execution until the owning workflow is removed.
+Setting `reconcile_interval = 0` also disables execution pruning.
+
+On binary upgrade, the worker recovers missing completion timestamps for older
+continued generations from their recorded terminal history events. If an event
+is missing, it logs a migration warning and leaves that generation ineligible for
+age-based pruning rather than guessing its age. This one-time backfill runs
+before the worker becomes ready and can delay workflow processing on a large
+history store. New submissions and engine operations such as signals and
+cancellation must wait for worker readiness. Allow sufficient time for the
+backfill during upgrade: the `statement_timeout` in effect for
+`pg_durable.worker_role` in the control database must permit it to finish.
+Adjust the applicable role or database timeout defaults for the upgrade if
+necessary; otherwise startup retries the backfill instead of completing.
+
 Notes:
 
-- "Age" is measured from `completed_at` when set (instances that reached
+- Terminal-instance "age" is measured from `completed_at` when set (instances that reached
   `completed`), otherwise from `created_at`. `updated_at` is intentionally **not**
   used, because it is user-writable and would let a low-privilege user influence
   what is removed.
