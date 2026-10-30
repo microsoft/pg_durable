@@ -91,7 +91,7 @@ restart with the phase's configuration, not a rebuild.
 | `70_http_allowed_domains_empty.sql` | `http-empty-domains` | Empty restricted-mode allow-list denies all domains |
 | `90_http_concurrency.sql` | `http-concurrency` | Measures HTTP ceilings of one and two; covers both HTTP functions, satellite origins, SQL headroom, queued and active cancellation, queue-independent request timeouts, blocked sink writes, and permit release after failure |
 | `91_http_policies.sql` | `http-concurrency` | Measures nested and sibling policy limits, independent workflow budgets, nonblocking admission, and shared scopes across loop generations |
-| `92_http_restart.sql` | `http-concurrency` | Two-stage test restarts PostgreSQL with active and queued HTTP work; verifies retry, completion, and persisted scope identity |
+| `92_http_restart.sql` | `http-concurrency` | Two-stage test restarts PostgreSQL with active and queued HTTP work; drains old fixture requests, re-arms the gate and resets peak accounting, then measures a lexical cap of one independently of a global ceiling of three |
 
 ## Test Structure
 

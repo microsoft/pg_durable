@@ -33,6 +33,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(parsed.query)
         case = params.get("case", ["default"])[0]
         groups = params.get("group", [])
+        if path == "reset-capacity" and self.command == "POST":
+            with counts_lock:
+                active = counts.get("_capacity", {}).get("active", 0)
+                if active == 0:
+                    counts["_capacity"] = {"active": 0, "peak": 0}
+                    for counter in counts.get("_groups", {}).values():
+                        counter["peak"] = 0
+                    write_counts()
+            self.send_response(204 if active == 0 else 409)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         with counts_lock:
             counts[case] = counts.get(case, 0) + 1
             if path == "capacity":

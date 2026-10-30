@@ -3124,12 +3124,14 @@ cluster's single runtime. It counts an HTTP execution from request preparation
 through response-body processing and optional sink storage, not idle pooled
 connections. It is not a requests-per-second limit.
 
-Requests waiting for HTTP capacity stay in the durable queue. They do not hold
-an execution slot or an origin-database connection, fail due to capacity
-contention, or consume their request timeout while waiting. Cancellation still
-applies. Actual request failures retain their usual behavior.
+Requests waiting for HTTP capacity stay in the durable queue. Between admission
+attempts they retain neither an execution slot nor an origin-database connection.
+They do not fail solely because of capacity contention or consume their request
+timeout while waiting. Cancellation still applies. Actual request failures
+retain their usual behavior.
 
-For non-HTTP headroom, set the HTTP ceiling below total activity capacity:
+To reserve activity slots from admitted HTTP work, set the HTTP ceiling below
+total activity capacity:
 
 ```ini
 pg_durable.max_activity_concurrency = 8
@@ -3140,6 +3142,17 @@ Increasing activity capacity does not increase database connection budgets.
 If both settings are equal, active HTTP requests can occupy all activity slots;
 the unchanged defaults preserve the previous two-activity execution capacity.
 There is no strict fairness guarantee between workflows.
+
+Spare activity slots do not guarantee prompt SQL or status updates under a large
+saturated HTTP backlog. Deferred HTTP work is polled again, and the current
+queue can repeatedly select it ahead of later work. Those polls also reread
+execution history and parse request inputs. Keep fan-out and intermediate
+payloads bounded; these limits are not tenant-isolation or scheduling-fairness
+guarantees.
+
+HTTP capacity is released when the admitted handler returns or its task is
+dropped. Background cleanup of origin metadata connections can finish later;
+it retains the separate origin-connection reservation, not HTTP capacity.
 
 Pending requests use the configured limits after restart; recorded results
 replay unchanged. A crash or cancellation cannot guarantee that a remote server

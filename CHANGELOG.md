@@ -12,7 +12,9 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   and multipart HTTP executions together across all origin databases, while
   `pg_durable.max_activity_concurrency` controls total activity capacity.
   Both default to two and require a server restart. Capacity-blocked HTTP work
-  stays durably queued without occupying execution or origin-connection slots.
+  stays durably queued without retaining execution or origin-connection slots
+  between admission attempts. Large deferred backlogs can still delay other
+  work; these limits do not guarantee scheduling fairness.
 - **Workflow HTTP policies:** `df.with_policy()` adds lexical concurrency
   constraints that compose with enclosing scopes and the global ceiling.
   Policies are shared by branches and loop generations and survive restart.

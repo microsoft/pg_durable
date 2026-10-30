@@ -1302,7 +1302,7 @@ struct PendingGraphNode {
     id: String,
     depth: usize,
     path: String,
-    http_scopes: Vec<crate::policies::HttpScope>,
+    http_scopes: Arc<Vec<crate::policies::HttpScope>>,
 }
 
 /// A node whose graph references and config children have been materialized.
@@ -1338,7 +1338,7 @@ pub(crate) fn flatten_graph(
         id: root_id.clone(),
         depth: 0,
         path: "root".to_string(),
-        http_scopes: Vec::new(),
+        http_scopes: Arc::new(Vec::new()),
     }];
     let mut nodes = Vec::new();
     let mut discovered_nodes = 1;
@@ -1380,7 +1380,7 @@ pub(crate) fn flatten_graph(
             .as_ref()
             .and_then(|policy| policy.http.as_ref())
         {
-            http_scopes.push(crate::policies::HttpScope {
+            Arc::make_mut(&mut http_scopes).push(crate::policies::HttpScope {
                 id: entry.id.clone(),
                 max_concurrency: http.max_concurrency,
             });

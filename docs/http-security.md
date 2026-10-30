@@ -574,6 +574,18 @@ privilege checks, or credential lookup and retained through response processing
 and sink storage. Queued requests hold no HTTP or origin-connection reservation.
 Admission does not replace any execution-time authorization or destination check.
 
+Admission ends when the handler returns or is dropped. Asynchronous metadata
+connection cleanup may outlive that handler while retaining its separate
+origin-connection reservation. Neither release proves that an already-sent HTTP
+request or SQL statement stopped remotely.
+
+These are concurrency bounds, not tenant-isolation guarantees. A role with HTTP
+privilege can occupy the shared ceiling for the duration of its requests.
+Capacity checks precede privilege checks, so even ungranted, handcrafted HTTP
+nodes can contribute to admission load while capacity is saturated. Large
+deferred backlogs can delay SQL and metadata work, and repeated history/input
+processing can be expensive. HTTP grants alone do not eliminate that load.
+
 `df.with_policy()` can further limit HTTP concurrency within a workflow subtree.
 These are voluntary local constraints, not privilege grants: they cannot raise
 the server-wide ceiling or authorize an otherwise blocked destination.

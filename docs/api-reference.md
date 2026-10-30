@@ -958,12 +958,16 @@ inherit the caller's session `SET` overrides. See
 
 Both are `POSTMASTER` settings and require a PostgreSQL restart. An HTTP slot is
 held through preparation, response-body handling, and optional sink storage.
-Requests awaiting capacity remain queued without occupying activity slots or
-origin connections; admission waiting does not consume the request timeout.
+Requests awaiting capacity remain queued without retaining activity slots or
+origin connections between admission attempts; admission waiting does not consume
+the request timeout.
 Contention does not fail the request or count as an execution retry.
 
 HTTP concurrency cannot exceed total activity capacity. Set the HTTP ceiling
-lower than activity capacity to leave headroom for non-HTTP work. These settings
+lower than activity capacity to prevent admitted HTTP from consuming every
+activity slot. Large saturated backlogs can still delay non-HTTP work through
+repeated admission polls; spare slots are not a scheduling-fairness guarantee.
+These settings
 do not raise connection budgets or impose request-rate limits. No extension SQL
 update is required for existing installations to use these settings with the
 new binary. See [Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency).

@@ -974,6 +974,31 @@ run_http_origin_test() (
             if [ "$(basename "$1" .sql)" = "92_http_restart" ]; then
                 stop_server
                 printf 'release\n' > "$work_dir/capacity-release"
+                python3 - "$PGDURABLE_TEST_HTTP_PORT" "$work_dir/cert.pem" "$work_dir/capacity-release" <<'PY' || return $?
+import http.client
+import pathlib
+import ssl
+import sys
+import time
+
+context = ssl.create_default_context(cafile=sys.argv[2])
+deadline = time.monotonic() + 10
+while True:
+    connection = http.client.HTTPSConnection("127.0.0.1", int(sys.argv[1]), context=context, timeout=5)
+    try:
+        connection.request("POST", "/reset-capacity", body=b"")
+        response = connection.getresponse()
+        response.read()
+        status = response.status
+    finally:
+        connection.close()
+    if status == 204:
+        pathlib.Path(sys.argv[3]).unlink()
+        break
+    if status != 409 or time.monotonic() >= deadline:
+        raise SystemExit(f"TEST FAILED: old HTTP fixture requests did not drain (status {status})")
+    time.sleep(0.025)
+PY
                 restart_server
                 wait_for_worker_ready
                 export PGDURABLE_TEST_HTTP_RESTARTED=true
@@ -1004,7 +1029,7 @@ run_test_file() {
         if [ "$test_name" = "91_http_policies" ]; then
             set_conf_line "pg_durable.max_http_concurrency" "4"
         else
-            set_conf_line "pg_durable.max_http_concurrency" "1"
+            set_conf_line "pg_durable.max_http_concurrency" "3"
         fi
         run_http_origin_test "$test_file"
         return $?
