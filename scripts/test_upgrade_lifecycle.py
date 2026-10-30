@@ -44,6 +44,22 @@ def case(shape="seq", waiting=False):
     }
 
 
+class LiteralQuotingTests(unittest.TestCase):
+    def test_quotes_apostrophes_and_backslashes(self):
+        for value, expected in [
+            ("", "''"),
+            ("plain", "'plain'"),
+            ("O'Reilly", "'O''Reilly'"),
+            ("\\", "E'\\\\'"),
+            ("\\' OR TRUE --", "E'\\\\'' OR TRUE --'"),
+            (r"\n\x41\u0041", r"E'\\n\\x41\\u0041'"),
+            ("line one\nline two", "'line one\nline two'"),
+            ("\u00e9\u4e2d\\'", "E'\u00e9\u4e2d\\\\'''"),
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(lifecycle.literal(value), expected)
+
+
 class ValidationTests(unittest.TestCase):
     def test_every_shape_passes_before_and_after(self):
         for shape in lifecycle.FAMILIES:
@@ -114,6 +130,15 @@ class ValidationTests(unittest.TestCase):
         value["marks"][0]["value"] = 2
         self.assertIn("incorrect marker values at r.0",
                       "; ".join(lifecycle.case_problems(value, {})))
+
+    def test_quoting_requires_exact_values_before_and_after_resume(self):
+        for waiting in (True, False):
+            for invalid in (None, 0):
+                value = case("quoting", waiting=waiting)
+                value["marks"][0]["value"] = invalid
+                with self.subTest(waiting=waiting, invalid=invalid):
+                    self.assertIn("incorrect marker values at r.0",
+                                  "; ".join(lifecycle.case_problems(value, {})))
 
     def test_race_requires_exact_loser_and_durable_timer(self):
         for waiting in (True, False):
@@ -251,9 +276,16 @@ class LifecycleTests(unittest.TestCase):
             self.assertLess(alter, validations[3])
             self.assertLess(validations[3], binary_wait_release)
             self.assertLess(binary_wait_release, validations[4])
+            quoting_start = calls.index(unittest.mock.call.cluster.start_case(
+                "quoting-binary-b2", "quoting", True))
+            quoting_release = calls.index(unittest.mock.call.cluster.release("quoting-binary-b2"))
+            self.assertLess(new_install, quoting_start)
+            self.assertLess(quoting_start, validations[2])
+            self.assertLess(validations[3], quoting_release)
+            self.assertLess(quoting_release, validations[4])
             baseline = {f"{family}-{boundary}" for family in lifecycle.FAMILIES
                         for boundary in ("b1", "b2")} | {"seq-done-baseline"}
-            binary = baseline | {"seq-done-b1", "seq-binary-b2"}
+            binary = baseline | {"seq-done-b1", "seq-binary-b2", "quoting-binary-b2"}
             self.assertEqual(cohorts, [
                 baseline, baseline, binary, binary, binary | {"seq-done-b2"},
             ])
@@ -275,7 +307,8 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(cluster.release.call_args_list,
                 [unittest.mock.call(f"{family}-b1") for family in lifecycle.FAMILIES]
                 + [unittest.mock.call(f"{family}-b2") for family in lifecycle.FAMILIES]
-                + [unittest.mock.call("seq-binary-b2")])
+                + [unittest.mock.call("seq-binary-b2"),
+                   unittest.mock.call("quoting-binary-b2")])
             self.assertEqual(cluster.stop.call_count, 2)
             self.assertEqual(len(list(output.glob("*.json"))), 5)
 

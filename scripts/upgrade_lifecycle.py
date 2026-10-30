@@ -25,7 +25,7 @@ ROLE = "upgrade_lifecycle_user"
 # structure and resumed under both the B1 (new binary / old schema) and B2
 # (new binary / new schema) boundaries. Every #410 combinator plus the explicit
 # else and break seeds is represented; df.sql is exercised by every shape.
-FAMILIES = ["seq", "if-then", "if-else", "loop", "break", "join", "race"]
+FAMILIES = ["seq", "if-then", "if-else", "loop", "break", "join", "race", "quoting"]
 
 # Exact marker counts per structural path while the instance is still suspended
 # ("before") and after it resumes and completes ("after"). Paths absent from a
@@ -44,6 +44,9 @@ SHAPES = {
               "before_values": {"r.0": [1]}, "after_values": {"r.0": [1, 2, 3]}},
     "join": {"before": {"r.0": 1, "r.b": 1}, "after": {"r.0": 1, "r.b": 1, "r.1": 1}},
     "race": {"before": {"r.w": 1}, "after": {"r.w": 1, "r.w2": 1}},
+    "quoting": {"before": {"r.0": 1}, "after": {"r.0": 2, "r.1": 2},
+                "before_values": {"r.0": [1]}, "after_values": {"r.0": [1, 1], "r.1": [1, 1]},
+                "result": {"rows": [{"value": 1}], "row_count": 1}},
 }
 
 
@@ -67,7 +70,8 @@ def require_equal(actual, expected):
 
 
 def literal(value):
-    return "'" + value.replace("'", "''") + "'"
+    escaped = value.replace("\\", "\\\\").replace("'", "''")
+    return ("E" if "\\" in value else "") + "'" + escaped + "'"
 
 
 def build(source, output, pg_config, pg_major):
@@ -363,7 +367,8 @@ def exercise(cluster, previous, current, old_package, new_package, output):
             cluster.release(f"{family}-b1")
         cluster.start_sequence("seq-done-b1")
         cluster.start_sequence("seq-binary-b2", waiting=True)
-        names += ["seq-done-b1", "seq-binary-b2"]
+        cluster.start_case("quoting-binary-b2", "quoting", True)
+        names += ["seq-done-b1", "seq-binary-b2", "quoting-binary-b2"]
         check("b1", current, previous)
 
         # B2: new binary, new schema. Resume every -b2 case and start a fresh one.
@@ -372,6 +377,7 @@ def exercise(cluster, previous, current, old_package, new_package, output):
         for family in FAMILIES:
             cluster.release(f"{family}-b2")
         cluster.release("seq-binary-b2")
+        cluster.release("quoting-binary-b2")
         cluster.start_sequence("seq-done-b2")
         names += ["seq-done-b2"]
         check("b2", current, current)

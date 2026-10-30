@@ -964,6 +964,7 @@ CREATE OPERATOR @> (
 mod tests {
     use crate::Durofut;
     use pgrx::prelude::*;
+    use postgres_protocol::escape::escape_literal as sql_literal;
 
     // ========================================================================
     // Test Helpers for Integration Tests
@@ -1092,10 +1093,6 @@ mod tests {
                 .ok()
                 .map(|i| i.status)
         })
-    }
-
-    fn sql_literal(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "''"))
     }
 
     fn test_database_connection_string() -> String {
@@ -2643,6 +2640,263 @@ mod tests {
         });
 
         assert_eq!(steps, vec![1, 2], "Expected steps [1, 2], got {steps:?}");
+    }
+
+    #[pg_test]
+    fn test_literal_quoting_prevents_expression_injection() {
+        use crate::types::{substitute_all, SystemVars};
+        use std::collections::HashMap;
+
+        Spi::run("SET LOCAL standard_conforming_strings = off; SET LOCAL backslash_quote = on")
+            .unwrap();
+        let results = HashMap::from([(
+            "payload".to_string(),
+            serde_json::json!({"rows": [{"value": "\\' OR true --"}]}).to_string(),
+        )]);
+        let query = substitute_all(
+            "SELECT 'victim' OPERATOR(pg_catalog.=) $payload",
+            &results,
+            &HashMap::new(),
+            &SystemVars {
+                instance_id: "literal-quoting".to_string(),
+                label: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(Spi::get_one::<bool>(&query).unwrap(), Some(false));
+    }
+
+    #[pg_test]
+    fn test_literal_quoting_separates_negative_numeric_values() {
+        use crate::types::{
+            substitute_all, substitute_all_with_options, SqlQuotingVersion, SystemVars,
+        };
+        use std::collections::HashMap;
+
+        let results = HashMap::from([(
+            "payload".to_string(),
+            serde_json::json!({"rows": [{"value": -1}]}).to_string(),
+        )]);
+        let vars = HashMap::new();
+        let sys_vars = SystemVars {
+            instance_id: "negative-literal-quoting".to_string(),
+            label: None,
+        };
+        let query = substitute_all(
+            "SELECT count(*) FROM (VALUES (1, false)) AS rows(id, allowed)
+             WHERE id = 1-$payload AND allowed",
+            &results,
+            &vars,
+            &sys_vars,
+        )
+        .unwrap();
+        assert_eq!(Spi::get_one::<i64>(&query).unwrap(), Some(0), "{query}");
+
+        for reference in ["$payload", "$payload?", "$payload.value", "$payload.value?"] {
+            let query =
+                substitute_all(&format!("SELECT 1-{reference}"), &results, &vars, &sys_vars)
+                    .unwrap();
+            assert_eq!(Spi::get_one::<i32>(&query).unwrap(), Some(2), "{query}");
+
+            let query =
+                substitute_all(&format!("SELECT 2^{reference}"), &results, &vars, &sys_vars)
+                    .unwrap();
+            assert_eq!(Spi::get_one::<f64>(&query).unwrap(), Some(0.5), "{query}");
+        }
+
+        let query = substitute_all(
+            "CREATE TEMP SEQUENCE literal_quoting_seq INCREMENT BY $payload",
+            &results,
+            &vars,
+            &sys_vars,
+        )
+        .unwrap();
+        Spi::run(&query).unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT seqincrement FROM pg_catalog.pg_sequence
+                 WHERE seqrelid = 'pg_temp.literal_quoting_seq'::pg_catalog.regclass"
+            )
+            .unwrap(),
+            Some(-1)
+        );
+        assert_eq!(
+            substitute_all_with_options(
+                "SELECT 1-$payload",
+                &results,
+                &vars,
+                &sys_vars,
+                Some(SqlQuotingVersion::Legacy),
+            )
+            .unwrap(),
+            "SELECT 1--1"
+        );
+    }
+
+    #[pg_test]
+    fn test_legacy_sql_quoting_rejects_unsafe_connection_settings() {
+        use crate::activities::execute_sql::prepare_sql_quoting;
+        use crate::types::SqlQuotingVersion;
+        use sqlx::Connection;
+
+        let connection_string = test_database_connection_string();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = sqlx::PgConnection::connect(&connection_string)
+                .await
+                .unwrap();
+            let mut tx = conn.begin().await.unwrap();
+            sqlx::raw_sql(
+                "CREATE SCHEMA quoting_guard_shadow;
+                 CREATE FUNCTION quoting_guard_shadow.current_setting(text)
+                 RETURNS text LANGUAGE sql AS $$ SELECT 'on'::text $$;
+                 CREATE FUNCTION quoting_guard_shadow.set_config(text, text, boolean)
+                 RETURNS text LANGUAGE sql AS $$ SELECT 'on'::text $$;
+                 CREATE FUNCTION quoting_guard_shadow.equal(text, text)
+                 RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+                 CREATE OPERATOR quoting_guard_shadow.= (
+                     FUNCTION = quoting_guard_shadow.equal,
+                     LEFTARG = text, RIGHTARG = text);
+                 SET LOCAL search_path = quoting_guard_shadow, pg_catalog, pg_temp",
+            )
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+            for version in [SqlQuotingVersion::Legacy, SqlQuotingVersion::V1] {
+                for setting in ["on", "off"] {
+                    sqlx::query(&format!(
+                        "SET LOCAL standard_conforming_strings = {setting}"
+                    ))
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                    let result = prepare_sql_quoting(&mut tx, version).await;
+                    if version.is_legacy() && setting == "off" {
+                        assert!(result
+                            .unwrap_err()
+                            .contains("requires standard_conforming_strings=on"));
+                    } else {
+                        result.unwrap();
+                    }
+                    let actual: String = sqlx::query_scalar("SHOW standard_conforming_strings")
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap();
+                    assert_eq!(actual, setting, "must not silently change string semantics");
+                }
+            }
+            tx.rollback().await.unwrap();
+
+            let source_query = "SELECT source FROM pg_catalog.pg_settings
+                 WHERE name OPERATOR(pg_catalog.=) 'standard_conforming_strings'";
+            let source: String = sqlx::query_scalar(source_query)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_ne!(
+                source, "session",
+                "the control connection must not already be pinned"
+            );
+            prepare_sql_quoting(&mut conn, SqlQuotingVersion::Legacy)
+                .await
+                .unwrap();
+            let source: String = sqlx::query_scalar(source_query)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                source, "session",
+                "the pin must outlive the guard's transaction"
+            );
+            conn.close().await.unwrap();
+        });
+    }
+
+    #[pg_test]
+    fn test_literal_quoting_round_trips_all_result_forms() {
+        use crate::types::{substitute_all, substitute_all_raw, SystemVars};
+        use std::collections::HashMap;
+
+        Spi::run(
+            "CREATE SCHEMA literal_quoting_shadow;
+             CREATE FUNCTION literal_quoting_shadow.quote_literal(pg_catalog.text)
+             RETURNS pg_catalog.text LANGUAGE sql AS $$ SELECT 'wrong'::pg_catalog.text $$;
+             SET LOCAL search_path = literal_quoting_shadow, pg_catalog, pg_temp",
+        )
+        .unwrap();
+        let vars = HashMap::new();
+        let sys_vars = SystemVars {
+            instance_id: "literal-quoting".to_string(),
+            label: None,
+        };
+        let check = |query: &str, result: &str, expected: &str| {
+            let results = HashMap::from([("value".to_string(), result.to_string())]);
+            let sql = substitute_all(query, &results, &vars, &sys_vars).unwrap();
+            assert_eq!(
+                Spi::get_one::<String>(&sql).unwrap().as_deref(),
+                Some(expected),
+                "{sql}"
+            );
+        };
+
+        for standard_strings in ["on", "off"] {
+            for backslash_quote in ["on", "off"] {
+                Spi::run(&format!(
+                    "SET LOCAL standard_conforming_strings = {standard_strings};
+                     SET LOCAL backslash_quote = {backslash_quote}"
+                ))
+                .unwrap();
+                for text in [
+                    "",
+                    "plain",
+                    "O'Reilly",
+                    "\\",
+                    "ends with \\",
+                    "\\' OR true --",
+                    "\\\\'",
+                    "\\\\\\'",
+                    r"\n\t\r\b\f\v\123\x41\u0041\U00000041",
+                    "line one\nline two\t\r",
+                    "$value {variable} $$ $tag$",
+                    "\u{e9}\u{4e2d}\u{1f642}\\'",
+                ] {
+                    check("SELECT $value", text, text);
+                    let envelope = serde_json::json!({"body": text}).to_string();
+                    check("SELECT $value", &envelope, &envelope);
+                    check("SELECT $value.body", &envelope, text);
+
+                    for value in [
+                        serde_json::json!(text),
+                        serde_json::json!({"nested": text}),
+                        serde_json::json!([text]),
+                    ] {
+                        let expected = match &value {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        let result = serde_json::json!({"rows": [{"field": value}]}).to_string();
+                        for query in [
+                            "SELECT $value",
+                            "SELECT $value?",
+                            "SELECT $value.field",
+                            "SELECT $value.field?",
+                            "SELECT field FROM $value.*",
+                        ] {
+                            check(query, &result, &expected);
+                        }
+                        let results = HashMap::from([("value".to_string(), result)]);
+                        assert_eq!(
+                            substitute_all_raw("$value.field", &results, &vars, &sys_vars).unwrap(),
+                            expected
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[pg_test]

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::types::{
     is_role_superuser_name, superuser_instances_enabled, FunctionGraph, FunctionNode,
+    SqlQuotingVersion,
 };
 
 /// Activity name for registration and scheduling
@@ -370,6 +371,7 @@ async fn load_visible_graph(
         instance_id,
         root_node_id,
         nodes,
+        sql_quoting_version: SqlQuotingVersion::V1,
     };
 
     ctx.trace_info(format!(

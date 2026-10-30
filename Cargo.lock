@@ -1936,6 +1936,7 @@ dependencies = [
  "percent-encoding",
  "pgrx",
  "pgrx-tests",
+ "postgres-protocol",
  "reqwest",
  "serde",
  "serde_json",
