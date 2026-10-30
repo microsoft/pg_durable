@@ -804,7 +804,14 @@ fn format_value(val: &serde_json::Value, sql_quoting: Option<SqlQuotingVersion>)
                 s.clone()
             }
         }
-        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Number(n) => {
+            let mut value = n.to_string();
+            if sql_quoting == Some(SqlQuotingVersion::V1) && value.starts_with('-') {
+                // Keep a preceding operator from consuming the sign (e.g. 1--1).
+                value.insert(0, ' ');
+            }
+            value
+        }
         serde_json::Value::Bool(b) => b.to_string(),
         _ => {
             if let Some(quoting) = sql_quoting {
@@ -3203,6 +3210,50 @@ mod tests {
             r#"{"instance_id":"instance","root_node_id":"root","nodes":{},"sql_quoting_version":"v2"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn v1_literal_quoting_preserves_recorded_bytes() {
+        for (value, expected) in [
+            ("", "''"),
+            ("plain", "'plain'"),
+            ("O'Reilly", "'O''Reilly'"),
+            ("\\", r" E'\\'"),
+            (r"C:\path\O'Reilly", r" E'C:\\path\\O''Reilly'"),
+            ("\u{e9}\u{4e2d}\\'", " E'\u{e9}\u{4e2d}\\\\'''"),
+            ("line\nbreak", "'line\nbreak'"),
+        ] {
+            assert_eq!(SqlQuotingVersion::V1.quote_literal(value), expected);
+        }
+
+        let results = make_results(&[(
+            "row",
+            r#"{"rows":[{"path":"C:\\path\\O'Reilly","negative":-1}]}"#,
+        )]);
+        assert_eq!(
+            substitute_all("SELECT * FROM $row.*", &results, &empty_vars(), &sys_vars()).unwrap(),
+            r#"SELECT * FROM (VALUES ( E'C:\\path\\O''Reilly'::text,-1)) AS "row"("path", "negative")"#
+        );
+    }
+
+    #[test]
+    fn v1_literal_quoting_separates_negative_numbers_only_in_sql() {
+        for (value, expected) in [
+            (json!(-1), "-1"),
+            (json!(-1.5), "-1.5"),
+            (json!(-0.0), "-0.0"),
+            (json!(i64::MIN), "-9223372036854775808"),
+        ] {
+            assert_eq!(
+                format_value(&value, Some(SqlQuotingVersion::V1)),
+                format!(" {expected}")
+            );
+            assert_eq!(
+                format_value(&value, Some(SqlQuotingVersion::Legacy)),
+                expected
+            );
+            assert_eq!(format_value(&value, None), expected);
+        }
     }
 
     #[test]

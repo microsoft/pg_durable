@@ -2667,6 +2667,73 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_literal_quoting_separates_negative_numeric_values() {
+        use crate::types::{
+            substitute_all, substitute_all_with_options, SqlQuotingVersion, SystemVars,
+        };
+        use std::collections::HashMap;
+
+        let results = HashMap::from([(
+            "payload".to_string(),
+            serde_json::json!({"rows": [{"value": -1}]}).to_string(),
+        )]);
+        let vars = HashMap::new();
+        let sys_vars = SystemVars {
+            instance_id: "negative-literal-quoting".to_string(),
+            label: None,
+        };
+        let query = substitute_all(
+            "SELECT count(*) FROM (VALUES (1, false)) AS rows(id, allowed)
+             WHERE id = 1-$payload AND allowed",
+            &results,
+            &vars,
+            &sys_vars,
+        )
+        .unwrap();
+        assert_eq!(Spi::get_one::<i64>(&query).unwrap(), Some(0), "{query}");
+
+        for reference in ["$payload", "$payload?", "$payload.value", "$payload.value?"] {
+            let query =
+                substitute_all(&format!("SELECT 1-{reference}"), &results, &vars, &sys_vars)
+                    .unwrap();
+            assert_eq!(Spi::get_one::<i32>(&query).unwrap(), Some(2), "{query}");
+
+            let query =
+                substitute_all(&format!("SELECT 2^{reference}"), &results, &vars, &sys_vars)
+                    .unwrap();
+            assert_eq!(Spi::get_one::<f64>(&query).unwrap(), Some(0.5), "{query}");
+        }
+
+        let query = substitute_all(
+            "CREATE TEMP SEQUENCE literal_quoting_seq INCREMENT BY $payload",
+            &results,
+            &vars,
+            &sys_vars,
+        )
+        .unwrap();
+        Spi::run(&query).unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT seqincrement FROM pg_catalog.pg_sequence
+                 WHERE seqrelid = 'pg_temp.literal_quoting_seq'::pg_catalog.regclass"
+            )
+            .unwrap(),
+            Some(-1)
+        );
+        assert_eq!(
+            substitute_all_with_options(
+                "SELECT 1-$payload",
+                &results,
+                &vars,
+                &sys_vars,
+                Some(SqlQuotingVersion::Legacy),
+            )
+            .unwrap(),
+            "SELECT 1--1"
+        );
+    }
+
+    #[pg_test]
     fn test_legacy_sql_quoting_rejects_unsafe_connection_settings() {
         use crate::activities::execute_sql::prepare_sql_quoting;
         use crate::types::SqlQuotingVersion;
@@ -2723,6 +2790,28 @@ mod tests {
                 }
             }
             tx.rollback().await.unwrap();
+
+            let source_query = "SELECT source FROM pg_catalog.pg_settings
+                 WHERE name OPERATOR(pg_catalog.=) 'standard_conforming_strings'";
+            let source: String = sqlx::query_scalar(source_query)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_ne!(
+                source, "session",
+                "the control connection must not already be pinned"
+            );
+            prepare_sql_quoting(&mut conn, SqlQuotingVersion::Legacy)
+                .await
+                .unwrap();
+            let source: String = sqlx::query_scalar(source_query)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                source, "session",
+                "the pin must outlive the guard's transaction"
+            );
             conn.close().await.unwrap();
         });
     }

@@ -11,6 +11,7 @@ END $setup$;
 -- Activities use separate connections, so a caller-session SET cannot test this.
 ALTER ROLE df_literal_quoting_user SET standard_conforming_strings = off;
 ALTER ROLE df_literal_quoting_user SET backslash_quote = on;
+ALTER ROLE df_literal_quoting_user SET client_encoding = 'SJIS';
 ALTER ROLE df_literal_quoting_user SET search_path = test_literal_quoting, pg_catalog, pg_temp;
 SELECT df.grant_usage('df_literal_quoting_user');
 
@@ -42,7 +43,7 @@ SELECT df.start(
     df.seq(
         df.seq(
             df.as(
-                'SELECT value, id, object_value, array_value FROM test_literal_quoting.source ORDER BY id',
+                'SELECT value, id, object_value, array_value, -1 AS negative_value FROM test_literal_quoting.source ORDER BY id',
                 'rows'
             ),
             df.as(
@@ -78,7 +79,8 @@ SELECT df.start(
                         $query$,
                         'SELECT count(*) < 2 FROM test_literal_quoting.copied WHERE variant = ''loop'''
                     ),
-                    'SELECT $guard.matched AS matched'
+                    'SELECT $guard.matched AS matched, 1-$rows.negative_value AS difference,
+                            current_setting(''client_encoding'') AS client_encoding'
                 )
             )
         )
@@ -99,6 +101,12 @@ BEGIN
     END IF;
     IF (df.result(inst_id)::jsonb->'rows'->0->>'matched')::integer IS DISTINCT FROM 0 THEN
         RAISE EXCEPTION 'TEST FAILED: literal escaped into SQL expression';
+    END IF;
+    IF (df.result(inst_id)::jsonb->'rows'->0->>'difference')::integer IS DISTINCT FROM 2 THEN
+        RAISE EXCEPTION 'TEST FAILED: negative result merged with the preceding operator';
+    END IF;
+    IF df.result(inst_id)::jsonb->'rows'->0->>'client_encoding' IS DISTINCT FROM 'UTF8' THEN
+        RAISE EXCEPTION 'TEST FAILED: activity did not override the role client encoding with UTF8';
     END IF;
     IF (SELECT count(*) FROM test_literal_quoting.copied) <> 11 THEN
         RAISE EXCEPTION 'TEST FAILED: expected five row-set, four scalar, and two loop rows';
