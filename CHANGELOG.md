@@ -23,6 +23,10 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 - PostgreSQL shutdown interrupts runtime startup and readiness-publication I/O
   rather than waiting on connections to the stopping server.
+- The merged activity-admission runtime normally resolves activity metadata
+  without rereading execution history on each deferral. Metadata-read failures
+  are handled as infrastructure failures before invoking the activity. The
+  PostgreSQL deferred-queue ordering fix remains a separate provider dependency.
 
 ### Security
 

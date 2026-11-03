@@ -245,7 +245,7 @@ mod tests {
     fn admitted(decision: Result<ActivityAdmission, String>) -> Box<dyn Send> {
         match decision.unwrap() {
             ActivityAdmission::Admit(guard) => guard,
-            ActivityAdmission::Defer(_) => panic!("unexpected deferral"),
+            other => panic!("expected admission, got {other:?}"),
         }
     }
 

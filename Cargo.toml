@@ -73,9 +73,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 
-# Temporary: pin the admission hook until it is available in a released version.
+# Temporary: pin the merged admission hook until it is released.
 [patch.crates-io]
-duroxide = { git = "https://github.com/microsoft/duroxide", rev = "8d1d4f6a5d4d895af174634c8ed825f4098bb2fc" }
+duroxide = { git = "https://github.com/microsoft/duroxide", rev = "36b789d802f98963241a59ee7706e3ce029d583f" }
 
 [profile.dev]
 panic = "unwind"

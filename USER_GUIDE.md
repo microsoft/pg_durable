@@ -3128,7 +3128,9 @@ Requests waiting for HTTP capacity stay in the durable queue. Between admission
 attempts they retain neither an execution slot nor an origin-database connection.
 They do not fail solely because of capacity contention or consume their request
 timeout while waiting. Cancellation still applies. Actual request failures
-retain their usual behavior.
+retain their usual behavior. A committed deferral restores its fetch attempt;
+interrupted deferrals or metadata/storage failures can still consume the retry
+budget and eventually fail an activity before its request is sent.
 
 To reserve activity slots from admitted HTTP work, set the HTTP ceiling below
 total activity capacity:
@@ -3146,7 +3148,9 @@ There is no strict fairness guarantee between workflows.
 Spare activity slots do not guarantee prompt SQL or status updates under a large
 saturated HTTP backlog. Deferred HTTP work is polled again, and the current
 queue can repeatedly select it ahead of later work. Those polls also reread
-execution history and parse request inputs. Keep fan-out and intermediate
+request inputs. Activity metadata normally uses a small instance lookup; it
+falls back to reading the requested execution's history when that lookup is
+unavailable or describes a different execution. Keep fan-out and intermediate
 payloads bounded; these limits are not tenant-isolation or scheduling-fairness
 guarantees.
 

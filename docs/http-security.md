@@ -584,7 +584,10 @@ privilege can occupy the shared ceiling for the duration of its requests.
 Capacity checks precede privilege checks, so even ungranted, handcrafted HTTP
 nodes can contribute to admission load while capacity is saturated. Large
 deferred backlogs can delay SQL and metadata work, and repeated history/input
-processing can be expensive. HTTP grants alone do not eliminate that load.
+processing can be expensive. Normal activity metadata uses an instance lookup
+rather than a full-history read, but older executions or unavailable metadata
+still require the history fallback. Request inputs are processed on every
+attempt. HTTP grants alone do not eliminate that load.
 
 `df.with_policy()` can further limit HTTP concurrency within a workflow subtree.
 These are voluntary local constraints, not privilege grants: they cannot raise

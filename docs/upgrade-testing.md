@@ -373,11 +373,23 @@ what the upgrade script handles, and any backward compatibility considerations.
   and enforced outside orchestration replay. There are no new durable operations,
   timer events, or permit records. Child instances and loop generations retain
   their root engine namespace and lexical scope IDs.
-- **Runtime:** Duroxide moves to the 0.1.32-based admission revision while
-  duroxide-pg stays at 0.1.34. No provider migrations are added. The runtime also
-  brings versioned race/signal fixes and task-owned shutdown cleanup; startup
-  publication is interruptible so PostgreSQL shutdown does not wait on its
-  own terminating connections.
+- **Runtime:** Duroxide is pinned to the merged, 0.1.32-based admission commit
+  `36b789d802f98963241a59ee7706e3ce029d583f`
+  ([microsoft/duroxide#74](https://github.com/microsoft/duroxide/pull/74)) while
+  duroxide-pg stays at 0.1.34. No PostgreSQL provider migrations are added.
+  The runtime also brings versioned race/signal fixes and task-owned shutdown
+  cleanup; startup publication is interruptible so PostgreSQL shutdown does
+  not wait on its own terminating connections.
+  Activity admission keeps its existing callback signature; positive retry
+  delays are clamped to 1 ms through 24 hours (our 100 ms delay is unchanged).
+  Metadata normally uses `get_instance_info`, with execution-specific history
+  fallback when unavailable or stale. Failed fallback reads abandon the fetch
+  with its attempt counted rather than invoking a handler with placeholder
+  metadata. Event and work-item formats are unchanged.
+- **Remaining provider dependency:** The merged runtime's queue-ordering
+  migration is SQLite-only. PostgreSQL still needs the companion
+  [microsoft/duroxide-pg#51](https://github.com/microsoft/duroxide-pg/pull/51);
+  this runtime pin alone does not fix deferred-backlog starvation.
 - **Validation:** Run the N-1 lifecycle and schema suite, shutdown and epoch-race
   tests, and HTTP tests 90-92. The HTTP restart test covers an interrupted request
   and persisted policy metadata; the N-1 lifecycle covers historical graph
