@@ -3145,14 +3145,14 @@ If both settings are equal, active HTTP requests can occupy all activity slots;
 the unchanged defaults preserve the previous two-activity execution capacity.
 There is no strict fairness guarantee between workflows.
 
-Spare activity slots do not guarantee prompt SQL or status updates under a large
-saturated HTTP backlog. Deferred HTTP work is polled again, and the current
-queue can repeatedly select it ahead of later work. Those polls also reread
-request inputs. Activity metadata normally uses a small instance lookup; it
-falls back to reading the requested execution's history when that lookup is
-unavailable or describes a different execution. Keep fan-out and intermediate
-payloads bounded; these limits are not tenant-isolation or scheduling-fairness
-guarantees.
+Deferred HTTP work yields its queue position to work that was already ready,
+so repeated capacity deferrals cannot indefinitely overtake that work. A large
+backlog can still delay SQL and status updates: each activity turn must wait
+its turn, and admission polls reread request inputs. Activity metadata normally
+uses a small instance lookup; it falls back to reading the requested execution's
+history when that lookup is unavailable or describes a different execution.
+Keep fan-out and intermediate payloads bounded; these limits are not
+tenant-isolation or scheduling-fairness guarantees.
 
 HTTP capacity is released when the admitted handler returns or its task is
 dropped. Background cleanup of origin metadata connections can finish later;

@@ -243,7 +243,7 @@ phase_for_test() {
         48_http_allow_all|80_multi_database_http_origin|85_multi_database_http_admission)
             echo "http-allow-all"
             ;;
-        90_http_concurrency|91_http_policies|92_http_restart)
+        90_http_concurrency|91_http_policies|92_http_restart|93_http_admission_progress)
             echo "http-concurrency"
             ;;
         *)
@@ -1023,6 +1023,13 @@ run_test_file() {
     local output
 
     test_name=$(basename "$test_file" .sql)
+
+    if [ "$test_name" = "93_http_admission_progress" ] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
+        set_conf_line "pg_durable.max_activity_concurrency" "2"
+        set_conf_line "pg_durable.max_http_concurrency" "1"
+        run_http_origin_test "$test_file"
+        return $?
+    fi
 
     if [[ "$test_name" = "91_http_policies" || "$test_name" = "92_http_restart" ]] && [ -z "${PGDURABLE_TEST_HTTP_PORT:-}" ]; then
         set_conf_line "pg_durable.max_activity_concurrency" "6"

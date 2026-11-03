@@ -965,10 +965,10 @@ Contention does not fail the request or count as an execution retry.
 
 HTTP concurrency cannot exceed total activity capacity. Set the HTTP ceiling
 lower than activity capacity to prevent admitted HTTP from consuming every
-activity slot. Large saturated backlogs can still delay non-HTTP work through
-repeated admission polls; spare slots are not a scheduling-fairness guarantee.
-These settings
-do not raise connection budgets or impose request-rate limits. No extension SQL
+activity slot. Committed deferrals move behind already-ready work, allowing
+non-HTTP activities to progress under saturation. Large backlogs still add
+latency; spare slots are not a per-workflow fairness or throughput guarantee.
+These settings do not raise connection budgets or impose request-rate limits. No extension SQL
 update is required for existing installations to use these settings with the
 new binary. See [Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency).
 

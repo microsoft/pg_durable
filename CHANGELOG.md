@@ -25,8 +25,11 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
   rather than waiting on connections to the stopping server.
 - The merged activity-admission runtime normally resolves activity metadata
   without rereading execution history on each deferral. Metadata-read failures
-  are handled as infrastructure failures before invoking the activity. The
-  PostgreSQL deferred-queue ordering fix remains a separate provider dependency.
+  are handled as infrastructure failures before invoking the activity.
+- The pinned PostgreSQL provider orders worker items by visibility time and then
+  queue ID, so a saturated deferred HTTP backlog yields to already-ready SQL,
+  graph-loading, and status work. Worker readiness version `4` gates the bundled
+  provider migrations, including the queue-ordering index.
 
 ### Security
 

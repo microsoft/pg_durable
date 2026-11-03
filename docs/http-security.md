@@ -582,9 +582,10 @@ request or SQL statement stopped remotely.
 These are concurrency bounds, not tenant-isolation guarantees. A role with HTTP
 privilege can occupy the shared ceiling for the duration of its requests.
 Capacity checks precede privilege checks, so even ungranted, handcrafted HTTP
-nodes can contribute to admission load while capacity is saturated. Large
-deferred backlogs can delay SQL and metadata work, and repeated history/input
-processing can be expensive. Normal activity metadata uses an instance lookup
+nodes can contribute to admission load while capacity is saturated. Deferred
+items move behind already-ready work rather than repeatedly overtaking it, but
+large backlogs still add SQL and metadata latency, and repeated input processing
+can be expensive. Normal activity metadata uses an instance lookup
 rather than a full-history read, but older executions or unavailable metadata
 still require the history fallback. Request inputs are processed on every
 attempt. HTTP grants alone do not eliminate that load.

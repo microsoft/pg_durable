@@ -37,7 +37,7 @@ percent-encoding = "2.3"
 
 # duroxide integration
 duroxide = "=0.1.32"
-duroxide-pg = "=0.1.34"
+duroxide-pg = "=0.1.38"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # For ExecuteSQL activity (connecting back to PostgreSQL)
@@ -73,9 +73,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 
-# Temporary: pin the merged admission hook until it is released.
+# Temporary integration pins: merged admission support and its pending PostgreSQL companion.
 [patch.crates-io]
 duroxide = { git = "https://github.com/microsoft/duroxide", rev = "36b789d802f98963241a59ee7706e3ce029d583f" }
+duroxide-pg = { git = "https://github.com/microsoft/duroxide-pg", rev = "9ae067b34abc4c1f1f1436329973fe37731edb2a" }
 
 [profile.dev]
 panic = "unwind"

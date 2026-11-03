@@ -86,7 +86,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"o")
             self.wfile.flush()
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + 120
             while not release.exists():
                 if time.monotonic() >= deadline:
                     raise TimeoutError("HTTP capacity fixture was not released")

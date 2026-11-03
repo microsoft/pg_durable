@@ -34,29 +34,38 @@
 
 ## Active Blockers
 
-### HTTP admission: deferred work can starve already-ready activities
+### HTTP admission: provider fix integrated, upstream release pending
 
 | Field | Value |
 |-------|-------|
 | **Companion PR** | [microsoft/duroxide-pg#51](https://github.com/microsoft/duroxide-pg/pull/51) |
-| **Status** | Open; not included in the pinned duroxide-pg 0.1.34 |
+| **Status** | PR open; integrated for testing at `9ae067b34abc4c1f1f1436329973fe37731edb2a` (0.1.38-based) |
 | **Runtime support** | [microsoft/duroxide#74](https://github.com/microsoft/duroxide/pull/74), merged and pinned at `36b789d802f98963241a59ee7706e3ce029d583f` |
 
-The provider fetches visible worker items by their original queue ID. HTTP
-admission deferrals retain that ID, so a sufficiently large saturated backlog
-can repeatedly overtake later SQL, graph-load, or status activities despite
-spare activity slots. Longer bounded retry delays only raise the threshold.
+The previous provider fetched visible worker items by their original queue ID.
+HTTP admission deferrals retained that ID, so a sufficiently large saturated
+backlog could repeatedly overtake later SQL, graph-load, or status activities
+despite spare activity slots. Longer bounded retry delays only raised the
+threshold.
 
-The companion change orders eligible items by visibility time and then ID,
-preserving sessions and tags. It also adds a supporting index through a new
-provider migration. Do not copy its SQL into the extension or edit historical
-migrations; update the compatible provider dependency once the change lands
-and revalidate high-backlog progress and upgrades.
+The pinned companion change orders eligible items by visibility time and then
+ID, preserving sessions and tags. Provider migration `0029` also adds a supporting
+index; worker readiness version `4` is published after migration. The
+[backlog regression](../tests/e2e/sql/93_http_admission_progress.sql) queues 500
+ordinary/multipart HTTP nodes under a role without HTTP permission and verifies
+that independent SQL completes while the HTTP slot remains held.
+
+The Git pin is an integration dependency, not a released provider version.
+Replace it with the approved merged/released revision when available. Do not
+copy its SQL into the extension or edit historical migrations. See
+[upgrade guidance](upgrade-testing.md#http-concurrency-policies) for migration
+locking and rollback constraints.
 
 The merged runtime already avoids a full-history read for normal activity
 metadata. Execution-specific history remains a fallback when metadata is
 unavailable or belongs to a different execution, and each fetch still processes
-the request input. This reduces admission cost but does not fix queue ordering.
+the request input. The metadata and queue-ordering fixes address different costs;
+neither provides per-tenant resource isolation or a latency guarantee.
 
 ---
 

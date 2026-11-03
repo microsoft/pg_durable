@@ -375,8 +375,11 @@ what the upgrade script handles, and any backward compatibility considerations.
   their root engine namespace and lexical scope IDs.
 - **Runtime:** Duroxide is pinned to the merged, 0.1.32-based admission commit
   `36b789d802f98963241a59ee7706e3ce029d583f`
-  ([microsoft/duroxide#74](https://github.com/microsoft/duroxide/pull/74)) while
-  duroxide-pg stays at 0.1.34. No PostgreSQL provider migrations are added.
+  ([microsoft/duroxide#74](https://github.com/microsoft/duroxide/pull/74)).
+  Duroxide-pg is pinned to the pending, 0.1.38-based PostgreSQL companion
+  `9ae067b34abc4c1f1f1436329973fe37731edb2a`
+  ([microsoft/duroxide-pg#51](https://github.com/microsoft/duroxide-pg/pull/51)).
+  These immutable pins prepare the integration for testing before release.
   The runtime also brings versioned race/signal fixes and task-owned shutdown
   cleanup; startup publication is interruptible so PostgreSQL shutdown does
   not wait on its own terminating connections.
@@ -386,15 +389,29 @@ what the upgrade script handles, and any backward compatibility considerations.
   fallback when unavailable or stale. Failed fallback reads abandon the fetch
   with its attempt counted rather than invoking a handler with placeholder
   metadata. Event and work-item formats are unchanged.
-- **Remaining provider dependency:** The merged runtime's queue-ordering
-  migration is SQLite-only. PostgreSQL still needs the companion
-  [microsoft/duroxide-pg#51](https://github.com/microsoft/duroxide-pg/pull/51);
-  this runtime pin alone does not fix deferred-backlog starvation.
+- **Provider migration/readiness:** Worker readiness advances from `3` to `4`;
+  new backend sessions wait for the worker to apply the bundled migrations.
+  Relative to provider 0.1.34, these include partial secondary indexes (`0023`),
+  claim-time orchestration leases (`0025`), serialized orchestration lock
+  mutations (`0026`), and visibility-ordered worker fetch (`0029`).
+  The provider embeds and applies its SQL through worker-only `ApplyAll`; no
+  extension upgrade SQL or copied provider DDL is needed for these changes.
+  This applies equally with old supported extension schemas.
+- **Rollout:** Migration `0029` builds `idx_worker_ready_order` on
+  `worker_queue(visible_at, id)`. Its non-concurrent index creation blocks queue
+  operations until the migration transaction commits, and lock acquisition has
+  no automatic deadline. For large queues, use the provider's
+  [concurrent prebuild guidance](https://github.com/microsoft/duroxide-pg/blob/9ae067b34abc4c1f1f1436329973fe37731edb2a/migrations/README.md#worker-queue-progress-migration-0029);
+  this shortens the build but does not eliminate the migration's lock.
+  Intervening provider migrations also change indexes and lock handling.
+  Older binaries reject newer migration versions on startup, so do not roll
+  back only the binary after applying these migrations.
 - **Validation:** Run the N-1 lifecycle and schema suite, shutdown and epoch-race
-  tests, and HTTP tests 90-92. The HTTP restart test covers an interrupted request
-  and persisted policy metadata; the N-1 lifecycle covers historical graph
-  control-flow families, not historical scoped HTTP configurations (the previous
-  release had no policy helper).
+  tests, and HTTP tests 90-93. The backlog regression holds HTTP capacity while
+  500 unprivileged HTTP activities contend with independent SQL. The HTTP restart
+  test covers an interrupted request and persisted policy metadata; the N-1
+  lifecycle covers historical graph control-flow families, not historical scoped
+  HTTP configurations (the previous release had no policy helper).
 
 #### `df.start()` admission quotas (#139)
 

@@ -65,6 +65,7 @@ SKIP_TESTS=(
     "90_http_concurrency"
     "91_http_policies"
     "92_http_restart"
+    "93_http_admission_progress"
 )
 
 # Defaults
