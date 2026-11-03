@@ -2638,14 +2638,29 @@ Setting `reconcile_interval = 0` also disables execution pruning.
 On binary upgrade, the worker recovers missing completion timestamps for older
 continued generations from their recorded terminal history events. If an event
 is missing, it logs a migration warning and leaves that generation ineligible for
-age-based pruning rather than guessing its age. This one-time backfill runs
-before the worker becomes ready and can delay workflow processing on a large
+age-based pruning rather than guessing its age. Malformed history that cannot be
+decoded as JSONB instead aborts the migration and identifies the affected schema,
+instance, execution, and event in the initialization error. The worker retries
+initialization; it does not skip the malformed history.
+
+This upgrade requires all old provider calls and transactions to finish before
+migrations run, not a rolling upgrade. Pause deletion/pruning jobs and stop and
+drain every provider caller, including clients and direct SQL callers as well as
+workers. A full PostgreSQL stop/start drains pg_durable's old server processes;
+also coordinate any external callers sharing the provider store. The new
+background worker applies migrations automatically. Wait for its readiness
+before resuming provider traffic, and use only updated external callers.
+
+The one-time backfill can delay readiness and generate substantial WAL on a large
 history store. New submissions and engine operations such as signals and
-cancellation must wait for worker readiness. Allow sufficient time for the
-backfill during upgrade: the `statement_timeout` in effect for
+cancellation must wait. Review retention settings before restarting: recovered
+timestamps may make many old generations eligible for deletion on the next scan.
+Allow sufficient time for the backfill: the `statement_timeout` in effect for
 `pg_durable.worker_role` in the control database must permit it to finish.
 Adjust the applicable role or database timeout defaults for the upgrade if
 necessary; otherwise startup retries the backfill instead of completing.
+See [upgrade and repair guidance](docs/upgrade-testing.md#historical-execution-pruning),
+including the special handling of databases that used earlier pre-release pins.
 
 Notes:
 

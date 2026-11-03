@@ -3018,6 +3018,15 @@ mod tests {
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pruning_deadlines.history")
                 .fetch_one(store.pool()).await.unwrap();
             assert_eq!(count, 2, "only current history survives successful retry");
+            let mut blocker = store.pool().begin().await.unwrap();
+            sqlx::query("SELECT 1 FROM pruning_deadlines.instances ORDER BY instance_id FOR NO KEY UPDATE")
+                .fetch_all(&mut *blocker).await.unwrap();
+            cursor = (String::new(), 0);
+            assert!(!tokio::time::timeout(Duration::from_secs(3),
+                prune_old_executions(&maintenance, "pruning_deadlines", 2000, &mut cursor, &mut batch_size))
+                .await.unwrap().expect("protected generations must not wait for instance locks"));
+            assert_eq!(cursor, ("b".to_string(), 2), "protected keys must still advance the cursor");
+            blocker.rollback().await.unwrap();
             maintenance.close().await;
             sqlx::query("DROP SCHEMA pruning_deadlines CASCADE").execute(store.pool()).await.unwrap();
             store.pool().close().await;

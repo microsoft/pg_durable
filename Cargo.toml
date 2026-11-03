@@ -38,7 +38,7 @@ percent-encoding = "2.3"
 # duroxide integration
 duroxide = "=0.1.32"
 # DONOTLAND: migrations 0027/0028 are not released; replace with an exact compatible crates.io pin.
-duroxide-pg = { git = "https://github.com/microsoft/duroxide-pg", rev = "7e5472726c5dbbabf78a0eb08032b1fe605c6760" }
+duroxide-pg = { git = "https://github.com/microsoft/duroxide-pg", rev = "79870890d1a4a14eb840ec1d31d0b6dff0716c0a" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # For ExecuteSQL activity (connecting back to PostgreSQL)
