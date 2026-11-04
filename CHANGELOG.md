@@ -6,6 +6,33 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [Unreleased]
 
+### Changed
+
+- **Historical execution retention (#415):** reconciliation now removes completed,
+  non-current execution generations and their history after
+  `pg_durable.retention_days`, including generations of still-running workflows
+  and nested loops. Current and Running executions remain protected. Cleanup
+  advances through bounded pages under server-side deadlines, reducing the page
+  size after query cancellation so otherwise-prunable generations do not remain
+  stuck in an oversized batch. `pg_durable.reconcile_interval = 0` disables it.
+- **Execution inspection (#415):** `df.instance_executions()` reads execution
+  details and event counts in one snapshot so concurrent pruning does not fail
+  the listing. Pruned generations no longer appear in subsequent inspections.
+
+> **Upgrade:** Stop and drain all provider callers, not just workers, before
+> upgrading. A full PostgreSQL stop/start drains pg_durable's old server
+> processes; coordinate any external clients and deletion jobs sharing the
+> provider store too. The new worker backfills missing completion timestamps
+> before publishing readiness. Large stores can extend this window and generate
+> substantial WAL, while submissions and engine operations must wait. Review
+> retention cutoffs before restarting because recovered timestamps can make old
+> generations eligible for cleanup immediately. The `statement_timeout` in effect for
+> `pg_durable.worker_role` in the control database must allow the backfill to
+> complete. Missing terminal history leaves the timestamp NULL with a warning
+> rather than guessing its age; malformed JSONB aborts the migration with the
+> affected history key in the error. No `ALTER EXTENSION UPDATE` is needed for
+> this provider-managed change. See [upgrade and repair guidance](docs/upgrade-testing.md#historical-execution-pruning).
+
 ### Security
 
 - **Start admission quotas (#139):** `df.max_concurrent_per_user` (default

@@ -358,6 +358,95 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.9 → v0.2.10 (unreleased)
 
+#### Historical execution pruning
+
+- **B1:** background reconciliation prunes completed non-current execution
+  generations using `pg_durable.retention_days`, including running workflows and
+  nested loops in every origin. The query uses existing provider tables, so no
+  extension upgrade DDL or new `df` schema detection is needed.
+- **Provider migrations:** the worker's startup `ApplyAll` applies migration `0027`
+  before starting the runtime. It timestamps `ContinuedAsNew` executions and
+  backfills older NULL timestamps from terminal history events. Unrecoverable
+  timestamps remain NULL with a warning; those generations are not age-pruned.
+  Malformed history that cannot be decoded as JSONB aborts migration `0027`
+  atomically and reports the schema, instance, execution, and event key. The
+  worker logs the initialization error and retries; malformed history is not
+  silently skipped or treated as a missing terminal event.
+  This dependency pair also includes `0023` (partial indexes), `0025` (fetch
+  leases), `0026` (renewal and acknowledgement lease locking), and `0028`
+  (cursor-based pruning and consistent instance-lock ordering). Readiness schema
+  version `4` supersedes main's version `3` submission ledger and prevents
+  backends from treating a pre-migration worker marker as ready.
+- **Drained upgrade:** pause delete/prune jobs and stop and drain every provider
+  caller, including workers, clients, maintenance jobs, and direct SQL callers.
+  Wait for in-flight calls and transactions to finish; stopping only workers
+  does not prevent an old client's deletion logic from removing a pending
+  continuation after backfill. A full PostgreSQL stop/start drains pg_durable's
+  old backend and worker processes. Also coordinate any external callers sharing
+  the provider schema. Restart PostgreSQL with the new extension library and
+  let its worker apply migrations before resuming provider traffic;
+  wait for readiness and restart only updated external callers. No separate
+  migration process is required for pg_durable.
+- **Backfill operations:** allow for initialization time and WAL growth on large
+  stores. Any worker-role/database statement timeout must permit the backfill to
+  finish, or startup retries it. Review retention cutoffs before restarting:
+  recovered timestamps can make many old generations eligible on the next scan.
+  Expect brief workflow turn-latency spikes during those first scans: pruning
+  holds candidate instance-row locks until each batch transaction ends, and
+  acknowledgements for the same running workflows wait on those locks. An
+  expensive batch can hold them for close to the five-second statement deadline;
+  using a maintenance connection does not remove this row-lock contention.
+  If an improperly drained upgrade left NULL timestamps behind, drain all
+  callers first and use the provider's
+  [documented data-only repair](https://github.com/microsoft/duroxide-pg/blob/79870890d1a4a14eb840ec1d31d0b6dff0716c0a/migrations/README.md#repairing-missing-continued-execution-timestamps).
+  Do not delete migration-ledger rows or re-run whole migrations to repair data.
+- **Bounded maintenance:** each slice scans at most 1,000 execution keys, including
+  protected rows. The provider owns deletion predicates and atomically prunes
+  that page on the maintenance connection under server-side deadlines. It first
+  checks eligibility without locking, so protected rows advance the cursor
+  without locking their instances. Deletion candidates still lock instances
+  before history and recheck eligibility after acquiring the locks, protecting
+  replacement instances and coordinating with acknowledgement and deletion.
+  Query cancellation retries the same cursor with a smaller page only after
+  rollback succeeds; the reduced limit lasts until that scan ends.
+  Lock failures and other errors, or a cancelled single-execution page, retain
+  the skip-and-retry-next-scan behavior. Runtime provider connections are not
+  borrowed.
+- **Inspection:** `df.instance_executions()` reads execution details and event
+  counts in one MVCC snapshot, so concurrent pruning does not produce spurious
+  per-generation not-found errors. Genuine query failures still raise errors.
+  The snapshot and pruning pre-scan depend on provider column names and types.
+  `execution_snapshot_matches_provider_api` checks snapshot rows against the
+  provider's public metadata API using a store created by its actual migrations
+  and populated through provider operations. The existing pruning retention and
+  failure-progress test exercises pre-scan key columns against the same migrated
+  schema contract. Run these regressions when changing the provider dependency.
+- **Replay:** no orchestration code, durable-operation inputs, or continuation
+  payloads change. Pruning preserves the current and running executions.
+- **Dependency pair:** the provider accepts duroxide `^0.1.32`; pg_durable chooses
+  the exact `=0.1.32` pin so replay-sensitive dependency updates remain deliberate.
+  The combined release with #429 needs later duroxide changes, so select exact,
+  compatible released runtime/provider pins for both PRs rather than treating
+  `0.1.32` as an upstream requirement. In the currently pinned runtime, shutdown
+  cancels and joins owned tasks; zero means immediate cancellation rather than
+  a drain grace period. Validate the real previous-binary lifecycle and worker
+  shutdown when updating this pair.
+- **Release blocker:** the provider is pinned to immutable commit
+  `79870890d1a4a14eb840ec1d31d0b6dff0716c0a` of
+  [microsoft/duroxide-pg#32](https://github.com/microsoft/duroxide-pg/pull/32).
+  Released provider `0.1.38` does not contain migrations `0027`/`0028`.
+  Replace the `DONOTLAND` git pin with an exact compatible released version and
+  refresh both dependency resolutions together before landing. No local Cargo
+  override is needed to build or test the current pinned commit.
+- **Pre-release databases:** revisions of microsoft/duroxide-pg#32 changed migration
+  `0027`/`0028` bodies without changing their numbers. A store that already
+  recorded those migrations from an earlier pin will not install the revised
+  functions just by loading this binary. Use fresh disposable provider schemas
+  for development validation. Preserving such a store requires a deliberate
+  forward migration; changing the readiness marker or deleting ledger entries
+  is not a substitute. The data-only repair above does not replace functions.
+  Check migration identity again when replacing the pre-release pin.
+
 #### `df.start()` admission quotas (#139)
 
 - **DDL/B1:** The upgrade adds `idx_instances_submitted_by` on

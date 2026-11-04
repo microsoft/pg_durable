@@ -719,8 +719,8 @@ pub fn instance_info(
 ///
 /// Distinguishes "this instance genuinely has no execution history yet" (empty
 /// rowset) from "the execution-history lookup failed" (explicit error). The
-/// latter — failing to build the runtime, connect to the duroxide store, list
-/// executions, or fetch a specific execution's info — now raises an error
+/// latter — failing to build the runtime, connect to the duroxide store, or read
+/// execution details — raises an error
 /// instead of being silently swallowed into an empty rowset. A completed
 /// instance always has at least one execution row, so an empty result for one
 /// previously masked a real lookup failure. See issue #168.
@@ -779,43 +779,316 @@ pub fn instance_executions(
         rt.block_on(async {
             let store = new_backend_provider(&pg_conn_str, provider_schema).await?;
 
-            let client = Client::new(store);
-
-            let execution_ids = client
-                .list_executions(&engine_id)
+            read_execution_snapshot(store.pool(), provider_schema, &engine_id, limit_count)
                 .await
-                .map_err(|e| format!("failed to list executions: {e:?}"))?;
-
-            let mut sorted_ids: Vec<_> = execution_ids.into_iter().collect();
-            sorted_ids.sort_by(|a, b| b.cmp(a));
-            let limited: Vec<_> = sorted_ids.into_iter().take(limit_count as usize).collect();
-
-            let mut rows = Vec::new();
-            for exec_id in limited {
-                let info = client
-                    .get_execution_info(&engine_id, exec_id)
-                    .await
-                    .map_err(|e| format!("failed to fetch info for execution {exec_id}: {e:?}"))?;
-
-                let duration_ms = info
-                    .completed_at
-                    .map(|end| end.saturating_sub(info.started_at))
-                    .unwrap_or(0);
-
-                rows.push((
-                    info.execution_id as i64,
-                    info.status,
-                    info.event_count as i64,
-                    duration_ms as i64,
-                    info.output,
-                ));
-            }
-            Ok(rows)
+                .map_err(|error| format!("failed to read executions: {error}"))
         });
 
     match results {
         Ok(rows) => TableIterator::new(rows),
         Err(e) => pgrx::error!("df.instance_executions: execution history lookup failed: {e}"),
+    }
+}
+
+async fn read_execution_snapshot(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    instance_id: &str,
+    limit: i32,
+) -> Result<Vec<(i64, String, i64, i64, Option<String>)>, sqlx::Error> {
+    let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    // One statement gives details and event counts the same MVCC snapshot,
+    // including when maintenance removes older generations during this read.
+    // execution_snapshot_matches_provider_api checks these column assumptions
+    // against the real provider migrations and its public metadata API.
+    let rows: Vec<(
+        i64,
+        String,
+        i64,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = sqlx::query_as(&format!(
+        "SELECT e.execution_id, e.status,
+             (SELECT pg_catalog.count(*) FROM {schema}.history h
+              WHERE h.instance_id OPERATOR(pg_catalog.=) e.instance_id
+                AND h.execution_id OPERATOR(pg_catalog.=) e.execution_id),
+             e.started_at, e.completed_at, e.output
+         FROM (
+             SELECT instance_id, execution_id, status, started_at, completed_at, output
+             FROM {schema}.executions
+             WHERE instance_id OPERATOR(pg_catalog.=) $1
+             ORDER BY execution_id DESC LIMIT $2
+         ) e ORDER BY e.execution_id DESC"
+    ))
+    .bind(instance_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, status, events, started, completed, output)| {
+            let duration = completed
+                .map(|end| {
+                    end.timestamp_millis()
+                        .saturating_sub(started.timestamp_millis())
+                        .max(0)
+                })
+                .unwrap_or(0);
+            (id, status, events, duration, output)
+        })
+        .collect())
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use super::*;
+    use sqlx::Connection;
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    #[pg_test]
+    fn execution_snapshot_matches_provider_api() {
+        use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
+        use duroxide::{Event, EventKind};
+        use std::sync::Arc;
+
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let mut url = url::Url::parse(&postgres_connection_string()).unwrap();
+        url.set_username(&admin).unwrap();
+        url.set_path(&database);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let schema = "execution_snapshot_contract";
+                let store = Arc::new(
+                    duroxide_pg::PostgresProvider::new_with_config(
+                        crate::types::worker_provider_config(url.as_str(), schema),
+                    )
+                    .await
+                    .expect("initialize the real provider schema for the column contract"),
+                );
+                for (instance, execution, output) in [
+                    ("contract", 1, Some("finished")),
+                    ("contract", 2, None),
+                    ("unrelated", 1, Some("not this instance")),
+                ] {
+                    store
+                        .enqueue_for_orchestrator(
+                            WorkItem::StartOrchestration {
+                                instance: instance.into(),
+                                orchestration: "contract".into(),
+                                input: "{}".into(),
+                                version: Some("1.0.0".into()),
+                                parent_instance: None,
+                                parent_id: None,
+                                parent_execution_id: None,
+                                execution_id: execution,
+                            },
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    let (_, token, _) = store
+                        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
+                        .await
+                        .unwrap()
+                        .expect("fetch the seeded execution");
+                    let mut history = vec![Event::with_event_id(
+                        1,
+                        instance,
+                        execution,
+                        None,
+                        EventKind::OrchestrationStarted {
+                            name: "contract".into(),
+                            version: "1.0.0".into(),
+                            input: "{}".into(),
+                            parent_instance: None,
+                            parent_id: None,
+                            parent_execution_id: None,
+                            carry_forward_events: None,
+                            initial_custom_status: None,
+                        },
+                    )];
+                    if let Some(output) = output {
+                        history.push(Event::with_event_id(
+                            2,
+                            instance,
+                            execution,
+                            None,
+                            EventKind::OrchestrationCompleted {
+                                output: output.into(),
+                            },
+                        ));
+                    }
+                    store
+                        .ack_orchestration_item(
+                            &token,
+                            execution,
+                            history,
+                            vec![],
+                            vec![],
+                            ExecutionMetadata {
+                                orchestration_name: Some("contract".into()),
+                                orchestration_version: Some("1.0.0".into()),
+                                status: Some(
+                                    if output.is_some() {
+                                        "Completed"
+                                    } else {
+                                        "Running"
+                                    }
+                                    .into(),
+                                ),
+                                output: output.map(str::to_string),
+                                ..Default::default()
+                            },
+                            vec![],
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                let client = Client::new(store.clone());
+                let mut expected = Vec::new();
+                for execution in [2, 1] {
+                    let info = client
+                        .get_execution_info("contract", execution)
+                        .await
+                        .unwrap();
+                    expected.push((
+                        i64::try_from(info.execution_id).unwrap(),
+                        info.status,
+                        i64::try_from(info.event_count).unwrap(),
+                        i64::try_from(
+                            info.completed_at
+                                .map(|end| end.saturating_sub(info.started_at))
+                                .unwrap_or(0),
+                        )
+                        .unwrap(),
+                        info.output,
+                    ));
+                }
+                assert_eq!(expected[0], (2, "Running".into(), 1, 0, None));
+                assert_eq!(expected[1].1, "Completed");
+                assert_eq!(expected[1].2, 2);
+                assert_eq!(expected[1].4.as_deref(), Some("finished"));
+                assert_eq!(
+                    read_execution_snapshot(store.pool(), schema, "contract", 5)
+                        .await
+                        .expect(
+                            "provider executions/history columns must support snapshot inspection"
+                        ),
+                    expected,
+                );
+                assert_eq!(
+                    read_execution_snapshot(store.pool(), schema, "contract", 1)
+                        .await
+                        .unwrap(),
+                    expected[..1],
+                    "limit and newest-first ordering must match the provider API",
+                );
+                assert!(read_execution_snapshot(store.pool(), schema, "missing", 5)
+                    .await
+                    .unwrap()
+                    .is_empty());
+                sqlx::query("DROP SCHEMA execution_snapshot_contract CASCADE")
+                    .execute(store.pool())
+                    .await
+                    .unwrap();
+                store.pool().close().await;
+            });
+    }
+
+    #[pg_test]
+    fn execution_snapshot_survives_concurrent_pruning() {
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut control = crate::origin::metadata_test_connection(&admin, &database).await;
+            let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(
+                sqlx::postgres::PgConnectOptions::from_str(&postgres_connection_string()).unwrap()
+                    .username(&admin).database(&database),
+            ).await.unwrap();
+            sqlx::raw_sql(
+                "CREATE SCHEMA execution_snapshot;
+                 CREATE TABLE execution_snapshot.rows(instance_id text,execution_id bigint,status text,
+                     started_at timestamptz,completed_at timestamptz,output text);
+                 CREATE TABLE execution_snapshot.history(instance_id text,execution_id bigint);
+                 INSERT INTO execution_snapshot.rows VALUES
+                     ('live',1,'ContinuedAsNew',to_timestamp(1),to_timestamp(2.25),'old'),
+                     ('live',2,'Running',to_timestamp(3),NULL,NULL);
+                 INSERT INTO execution_snapshot.history VALUES ('live',1),('live',1),('live',2);
+                 CREATE FUNCTION execution_snapshot.gate(status text) RETURNS text LANGUAGE plpgsql AS $fn$
+                 BEGIN PERFORM pg_advisory_xact_lock(477832); RETURN status; END $fn$;
+                 CREATE VIEW execution_snapshot.executions AS
+                     SELECT instance_id,execution_id,execution_snapshot.gate(status) AS status,
+                         started_at,completed_at,output FROM execution_snapshot.rows;
+                 CREATE FUNCTION execution_snapshot.unexpected(text,text) RETURNS boolean
+                     LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'snapshot operator trap'; END $fn$;
+                 CREATE OPERATOR execution_snapshot.= (LEFTARG=text,RIGHTARG=text,
+                     FUNCTION=execution_snapshot.unexpected);
+                 SELECT pg_advisory_lock(477832);"
+            ).execute(&mut control).await.unwrap();
+            sqlx::raw_sql(
+                "SET search_path=execution_snapshot,pg_catalog;
+                 CREATE TEMP TABLE history(instance_id text,execution_id bigint);
+                 CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (false);"
+            ).execute(&pool).await.unwrap();
+            let trap = sqlx::query("SELECT 'x'::pg_catalog.text = 'x'::pg_catalog.text")
+                .execute(&pool).await.unwrap_err();
+            assert!(trap.to_string().contains("snapshot operator trap"));
+            let blocked_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&pool).await.unwrap();
+            let read = read_execution_snapshot(&pool, "execution_snapshot", "live", 5);
+            tokio::pin!(read);
+            let deadline = tokio::time::sleep(Duration::from_secs(3));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    result = &mut read => panic!("snapshot must wait at test barrier: {result:?}"),
+                    _ = &mut deadline => panic!("snapshot barrier was not reached"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        let waiting: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                            .bind(blocked_pid).fetch_one(&mut control).await.unwrap();
+                        if waiting { break; }
+                    }
+                }
+            }
+            sqlx::raw_sql(
+                "BEGIN;
+                 DELETE FROM execution_snapshot.history WHERE execution_id=1;
+                 DELETE FROM execution_snapshot.rows WHERE execution_id=1;
+                 COMMIT;
+                 SELECT pg_advisory_unlock(477832);"
+            ).execute(&mut control).await.unwrap();
+            let rows = tokio::time::timeout(Duration::from_secs(3), &mut read).await.unwrap().unwrap();
+            assert_eq!(rows, [
+                (2, "Running".into(), 1, 0, None),
+                (1, "ContinuedAsNew".into(), 2, 1250, Some("old".into())),
+            ], "details and history counts must use one snapshot");
+            assert_eq!(read_execution_snapshot(&pool, "execution_snapshot", "live", 1).await.unwrap(),
+                [(2, "Running".into(), 1, 0, None)]);
+            sqlx::query("ALTER TABLE execution_snapshot.history RENAME TO missing_history")
+                .execute(&mut control).await.unwrap();
+            let error = read_execution_snapshot(&pool, "execution_snapshot", "live", 1).await.unwrap_err();
+            assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("42P01"),
+                "real lookup failures must not become empty history");
+            pool.close().await;
+            sqlx::query("DROP SCHEMA execution_snapshot CASCADE").execute(&mut control).await.unwrap();
+            control.close().await.unwrap();
+        });
     }
 }
 
