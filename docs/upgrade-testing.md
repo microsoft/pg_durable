@@ -423,10 +423,14 @@ what the upgrade script handles, and any backward compatibility considerations.
   schema contract. Run these regressions when changing the provider dependency.
 - **Replay:** no orchestration code, durable-operation inputs, or continuation
   payloads change. Pruning preserves the current and running executions.
-- **Dependency pair:** duroxide is pinned exactly to `0.1.32`, as required by the
-  provider. Its shutdown operation cancels and joins owned tasks; zero means
-  immediate cancellation rather than a drain grace period. Validate the real
-  previous-binary lifecycle and worker shutdown when updating this pair.
+- **Dependency pair:** the provider accepts duroxide `^0.1.32`; pg_durable chooses
+  the exact `=0.1.32` pin so replay-sensitive dependency updates remain deliberate.
+  The combined release with #429 needs later duroxide changes, so select exact,
+  compatible released runtime/provider pins for both PRs rather than treating
+  `0.1.32` as an upstream requirement. In the currently pinned runtime, shutdown
+  cancels and joins owned tasks; zero means immediate cancellation rather than
+  a drain grace period. Validate the real previous-binary lifecycle and worker
+  shutdown when updating this pair.
 - **Release blocker:** the provider is pinned to immutable commit
   `79870890d1a4a14eb840ec1d31d0b6dff0716c0a` of
   [microsoft/duroxide-pg#32](https://github.com/microsoft/duroxide-pg/pull/32).
