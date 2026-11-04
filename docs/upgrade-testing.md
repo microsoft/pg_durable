@@ -393,6 +393,13 @@ verify migration body identity when replacing any pre-release pin.
   schema. The SQL helper requires the extension update; scope descriptors use
   the existing HTTP node configuration text, so execution needs no schema
   detection or new columns.
+- **Submission authorization:** New starts must have the matching HTTP function
+  privileges before enqueueing, including raw JSON and untaken branches. This
+  binary-only behavior change applies to the current and legacy `df.start`
+  bindings and both transaction modes: missing privileges now raise `42501`
+  instead of returning an instance that fails later. No SQL DDL is needed.
+  Existing histories replay unchanged and activities retain their execution-time
+  checks, including after privileges are revoked.
 - **Replay:** Unconfigured graphs retain byte-identical HTTP configurations.
   Scopes are assigned at graph materialization, carried in the immutable graph,
   and enforced outside orchestration replay. There are no new durable operations,

@@ -43,6 +43,15 @@ CREATE TEMP TABLE _endpoint_http_cases (instance_id text, expected text, error_p
 GRANT SELECT, INSERT ON _endpoint_http_cases TO df_e2e_user, eh_no_http, eh_raw_http, eh_typed_http, eh_revoked_http;
 CREATE TEMP TABLE _endpoint_revoked_nodes (node text);
 GRANT SELECT, INSERT ON _endpoint_revoked_nodes TO eh_revoked_http;
+CREATE FUNCTION pg_temp.endpoint_expect_http_denied(node text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        PERFORM df.start(node, 'endpoint-denied-at-submission');
+        RAISE EXCEPTION 'TEST FAILED: wrong HTTP function grant allowed submission';
+    EXCEPTION WHEN insufficient_privilege THEN
+        IF SQLERRM NOT LIKE '%does not have EXECUTE privilege%' THEN RAISE; END IF;
+    END;
+END $$;
 
 SET SESSION AUTHORIZATION eh_revoked_http;
 INSERT INTO _endpoint_revoked_nodes VALUES
@@ -54,7 +63,7 @@ RESET SESSION AUTHORIZATION;
 SELECT df.revoke_usage('eh_revoked_http');
 SELECT df.grant_usage('eh_revoked_http');
 SET SESSION AUTHORIZATION eh_revoked_http;
-INSERT INTO _endpoint_http_cases SELECT df.start(node, 'endpoint-helper-revoked'), 'failed', '%EXECUTE%' FROM _endpoint_revoked_nodes;
+SELECT pg_temp.endpoint_expect_http_denied(node) FROM _endpoint_revoked_nodes;
 RESET SESSION AUTHORIZATION;
 
 SET SESSION AUTHORIZATION df_e2e_user;
@@ -103,21 +112,26 @@ RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION eh_raw_http;
 INSERT INTO _endpoint_http_cases VALUES
     (df.start(df.http('https://httpbingo.org/status/204', 'GET'), 'endpoint-raw-grant'), 'completed', NULL),
-    (df.start(df.http_multipart('https://httpbingo.org/status/204', parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-raw-multipart-grant'), 'completed', NULL),
-    (df.start('{"node_type":"HTTP","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"GET\"}"}', 'endpoint-forged-raw-grant'), 'failed', '%EXECUTE%df.http()%'),
-    (df.start('{"node_type":"HTTP_MULTIPART","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}', 'endpoint-forged-raw-multipart-grant'), 'failed', '%EXECUTE%df.http_multipart()%');
+    (df.start(df.http_multipart('https://httpbingo.org/status/204', parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-raw-multipart-grant'), 'completed', NULL);
+SELECT pg_temp.endpoint_expect_http_denied(
+    '{"node_type":"HTTP","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"GET\"}"}');
+SELECT pg_temp.endpoint_expect_http_denied(
+    '{"node_type":"HTTP_MULTIPART","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}');
 RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION eh_typed_http;
 INSERT INTO _endpoint_http_cases VALUES
     (df.start(df.http(df.endpoint('eh_none', '/204'), 'GET'), 'endpoint-typed-grant'), 'completed', NULL),
-    (df.start(df.http_multipart(df.endpoint('eh_none', '/204'), parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-typed-multipart-grant'), 'completed', NULL),
-    (df.start('{"node_type":"HTTP","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"GET\"}"}', 'endpoint-forged-typed-grant'), 'failed', '%EXECUTE%df.http()%'),
-    (df.start('{"node_type":"HTTP_MULTIPART","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}', 'endpoint-forged-typed-multipart-grant'), 'failed', '%EXECUTE%df.http_multipart()%');
+    (df.start(df.http_multipart(df.endpoint('eh_none', '/204'), parts => '[{"name":"file","data_b64":"aA=="}]'), 'endpoint-typed-multipart-grant'), 'completed', NULL);
+SELECT pg_temp.endpoint_expect_http_denied(
+    '{"node_type":"HTTP","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"GET\"}"}');
+SELECT pg_temp.endpoint_expect_http_denied(
+    '{"node_type":"HTTP_MULTIPART","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}');
 RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION eh_no_http;
-INSERT INTO _endpoint_http_cases VALUES
-    (df.start('{"node_type":"HTTP","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"GET\"}"}', 'endpoint-forged-no-http'), 'failed', '%EXECUTE%df.http()%'),
-    (df.start('{"node_type":"HTTP_MULTIPART","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}', 'endpoint-forged-no-multipart'), 'failed', '%EXECUTE%df.http_multipart()%');
+SELECT pg_temp.endpoint_expect_http_denied(
+    '{"node_type":"HTTP","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"GET\"}"}');
+SELECT pg_temp.endpoint_expect_http_denied(
+    '{"node_type":"HTTP_MULTIPART","query":"{\"endpoint\":\"eh_none\",\"url\":\"/204\",\"method\":\"POST\",\"parts\":[{\"name\":\"file\",\"data_b64\":\"aA==\"}]}"}');
 RESET SESSION AUTHORIZATION;
 
 DO $$

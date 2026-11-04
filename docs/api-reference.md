@@ -552,6 +552,13 @@ database privileges. Install in `pg_durable.database` first and wait for control
 readiness before creating satellites; see
 [Multi-Database Support](../USER_GUIDE.md#multi-database-support).
 
+Every HTTP or multipart node, including nodes in untaken branches, requires the
+submitting `current_user` to hold `EXECUTE` on its matching URL/endpoint function
+in the origin database. Missing privileges raise SQLSTATE `42501` before
+instance/node persistence or enqueueing, including for raw graph JSON and
+`transaction_mode => 'new'`. Inherited grants and `SECURITY DEFINER` identities
+follow PostgreSQL rules. Activities still recheck privileges at execution time.
+
 Non-superuser starts are subject to `df.max_concurrent_per_user` (default `100`)
 and `df.max_instances_per_user` (default `10000`) in their origin database.
 Rejection raises SQLSTATE `53400` with a tuning hint before any insert or enqueue.

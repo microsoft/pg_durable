@@ -53,7 +53,9 @@ ID, preserving sessions and tags. Provider migration `0029` also adds a supporti
 index; worker readiness version `4` is published after migration. The
 [backlog regression](../tests/e2e/sql/93_http_admission_progress.sql) queues 500
 ordinary/multipart HTTP nodes under a role without HTTP permission and verifies
-that independent SQL completes while the HTTP slot remains held.
+that independent SQL completes while the HTTP slot remains held. The backlog
+is submitted while authorized and its privileges are revoked afterward, so the
+test also verifies the execution-time check independently of submission checks.
 
 The Git pin is an integration dependency, not a released provider version.
 It omits pending migrations `0027`/`0028`, so its ledger is not an upgradeable

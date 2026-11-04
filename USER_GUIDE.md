@@ -1074,6 +1074,13 @@ URLs and endpoints. After upgrading an existing installation, run the helper for
 roles that need the newly added endpoint support. Existing URL calls retain their
 permissions.
 
+`df.start()` checks the submitting `current_user` for the required HTTP function
+privileges in the origin database before creating or enqueueing an instance.
+This includes raw JSON nodes, multipart requests, and HTTP nodes inside branches
+that may never run. URL and endpoint overloads require their respective grants.
+Both transaction modes reject missing privileges with SQLSTATE `42501`.
+Execution-time checks remain in place for later revocation and older workflows.
+
 The path starts with one `/` and is appended to the server's base path prefix:
 `https://host/api/` plus `/items` becomes `https://host/api/items`. Absolute URLs,
 protocol-relative paths (`//host`), backslashes, fragments, whitespace, dot

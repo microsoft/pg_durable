@@ -22,24 +22,13 @@ use crate::types::HttpConfig;
 /// Activity name for registration and scheduling
 pub const NAME: &str = "pg_durable::activity::execute-http";
 
-/// Check the HTTP privilege required by the request's destination and body mode.
-///
-/// This closes the bypass path where a user crafts a raw Durofut JSON and
-/// passes it directly to `df.start()`, inserting an HTTP node without going
-/// through the DSL guard in `df.http()`.
-pub(crate) async fn check_http_privilege(
-    pool: &PgPool,
-    submitted_by: &str,
+pub(crate) fn http_privilege_signatures(
     endpoint: bool,
     multipart: bool,
-    origin: Option<&crate::origin::Origin>,
-) -> Result<(), String> {
-    let mut tx = crate::origin::begin_metadata(pool, origin)
-        .await
-        .map_err(|error| format!("HTTP origin validation failed: {error}"))?;
+) -> (&'static str, &'static str) {
     // Resolve a search_path-independent spelling, but report the conventional
     // signature that users write in GRANT/REVOKE.
-    let (qualified_signature, signature) = match (multipart, endpoint) {
+    match (multipart, endpoint) {
         (false, false) => (
             "df.http(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.int4)",
             "df.http(text,text,text,jsonb,integer)",
@@ -56,7 +45,21 @@ pub(crate) async fn check_http_privilege(
             "df.http_multipart(df.http_endpoint,pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.int4)",
             "df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer)",
         ),
-    };
+    }
+}
+
+/// Recheck privileges after submission, including for historical or modified graphs.
+pub(crate) async fn check_http_privilege(
+    pool: &PgPool,
+    submitted_by: &str,
+    endpoint: bool,
+    multipart: bool,
+    origin: Option<&crate::origin::Origin>,
+) -> Result<(), String> {
+    let mut tx = crate::origin::begin_metadata(pool, origin)
+        .await
+        .map_err(|error| format!("HTTP origin validation failed: {error}"))?;
+    let (qualified_signature, signature) = http_privilege_signatures(endpoint, multipart);
     let function = if multipart {
         "df.http_multipart"
     } else {

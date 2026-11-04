@@ -495,10 +495,10 @@ fn classify_new_transaction_start_error(err: sqlx::Error) -> Box<ErrorReport> {
         .as_database_error()
         .and_then(|e| e.try_downcast_ref::<sqlx::postgres::PgDatabaseError>());
     let sqlstate = database_error.map(|e| e.code());
-    let code = if sqlstate == Some("53400") {
-        PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
-    } else {
-        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+    let code = match sqlstate {
+        Some("53400") => PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
+        Some("42501") => PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        _ => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
     };
     let mut report = ErrorReport::new(
         code,

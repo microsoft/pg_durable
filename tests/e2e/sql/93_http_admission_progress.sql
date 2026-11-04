@@ -1,4 +1,4 @@
--- Keep HTTP saturated while a large, unprivileged backlog competes with SQL.
+-- Admit the backlog while authorized, then revoke HTTP before it can dispatch.
 \getenv e93_port PGDURABLE_TEST_HTTP_PORT
 \getenv e93_counts PGDURABLE_TEST_HTTP_COUNTS
 \getenv e93_release PGDURABLE_TEST_HTTP_RELEASE
@@ -16,14 +16,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 CREATE ROLE _e93_no_http LOGIN;
-SELECT df.grant_usage('_e93_no_http', include_http => false);
-DO $$ BEGIN
-    IF has_function_privilege('_e93_no_http', 'df.http(text,text,text,jsonb,integer)', 'EXECUTE')
-        OR has_function_privilege('_e93_no_http',
-            'df.http_multipart(text,text,jsonb,jsonb,integer)', 'EXECUTE') THEN
-        RAISE EXCEPTION 'TEST SETUP ERROR: backlog role must not have HTTP privileges';
-    END IF;
-END $$;
+SELECT df.grant_usage('_e93_no_http', include_http => true);
 
 CREATE TEMP TABLE _e93_cases(kind text, id text PRIMARY KEY);
 GRANT SELECT, INSERT ON _e93_cases TO _e93_no_http;
@@ -67,6 +60,17 @@ SET ROLE _e93_no_http;
 INSERT INTO _e93_cases SELECT 'backlog', df.start(graph, 'e93-backlog-' || n)
     FROM _e93_graph CROSS JOIN generate_series(1, 25) n;
 RESET ROLE;
+REVOKE EXECUTE ON FUNCTION df.http(text,text,text,jsonb,integer),
+    df.http(df.http_endpoint,text,text,jsonb,integer),
+    df.http_multipart(text,text,jsonb,jsonb,integer),
+    df.http_multipart(df.http_endpoint,text,jsonb,jsonb,integer) FROM _e93_no_http;
+DO $$ BEGIN
+    IF has_function_privilege('_e93_no_http', 'df.http(text,text,text,jsonb,integer)', 'EXECUTE')
+        OR has_function_privilege('_e93_no_http',
+            'df.http_multipart(text,text,jsonb,jsonb,integer)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'TEST SETUP ERROR: HTTP privileges must be revoked before release';
+    END IF;
+END $$;
 
 SELECT pg_temp.e93_wait(format($check$
     SELECT count(*) = 500

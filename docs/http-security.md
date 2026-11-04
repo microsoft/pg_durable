@@ -98,7 +98,7 @@ replay normally. HTTP privileges are unchanged.
 │  Layer 0: PostgreSQL Privilege Check                     │
 │                                                          │
 │  • submitted_by role must have EXECUTE on df.http()      │
-│  • Checked at execution time against the live catalog    │
+│  • Checked at submission and again at execution           │
 │  • Blocks bypass via raw df.start() JSON injection       │
 │  • Runs before any network activity                      │
 │                                                          │
@@ -137,9 +137,18 @@ A user granted `df.grant_usage()` can call `df.start()` directly with a
 hand-crafted `Durofut` JSON string, inserting an HTTP node without ever calling
 `df.http()`.  The DSL-time guard inside `df.http()` does not run in that path.
 
-To close this gap, `execute_http` checks at execution time whether the
-`submitted_by` role recorded in the node still holds `EXECUTE` privilege on
-`df.http()`.  If the role's grant has been revoked since the node was created,
+`df.start()` closes this gap before enqueueing: it checks the actual
+`current_user` against each required HTTP function variant in the origin
+database, including nested or untaken branches. Missing privileges raise
+SQLSTATE `42501` before instance/node persistence or protected submission
+accounting. The check applies to both transaction modes and the legacy start
+binding. A `submitted_by` value in supplied JSON cannot override the caller.
+URL and endpoint overloads, and ordinary and multipart requests, require their
+respective function grants. Submission does not resolve endpoints or credentials.
+
+The activities also check at execution time whether the `submitted_by` role
+recorded in the node still holds the required `EXECUTE` privilege. If the role's
+grant has been revoked since submission,
 and no other effective grant remains, the next execution attempt fails before
 sending a request. Revocation does not cancel a request already in progress.
 The check is repeated immediately before sending, after credential-catalog waits
@@ -149,8 +158,9 @@ privilege revocation.
 
 ### 3.2 Mechanism
 
-The activity selects the required HTTP function signature from the node's actual
-destination and body mode, then checks the submitting role before network activity:
+Submission and execution share the mapping from destination/body mode to the
+required function signature. Submission checks the current role OID through
+SPI; the activity rechecks the recorded role before network activity:
 
 ```sql
 SELECT COALESCE(pg_catalog.has_function_privilege(
@@ -176,8 +186,8 @@ HTTP permission set through `df.grant_usage` and `df.revoke_usage`.
 
 `df.with_http_options(text,jsonb)` is a node modifier, not a network operation.
 Like other combinators, it uses ordinary `df` schema access and default PUBLIC
-`EXECUTE`. Wrapping a hand-crafted HTTP node does not bypass the activity's
-privilege check. It supports [explicit secret bindings](#37-explicit-secret-bindings)
+`EXECUTE`. Wrapping a hand-crafted HTTP node bypasses neither the submission nor
+the execution privilege check. It supports [explicit secret bindings](#37-explicit-secret-bindings)
 and [body limits and response retention](../USER_GUIDE.md#body-limits-and-response-retention).
 SQL `NULL` and `{}` preserve the original node text.
 
@@ -581,8 +591,10 @@ request or SQL statement stopped remotely.
 
 These are concurrency bounds, not tenant-isolation guarantees. A role with HTTP
 privilege can occupy the shared ceiling for the duration of its requests.
-Capacity checks precede privilege checks, so even ungranted, handcrafted HTTP
-nodes can contribute to admission load while capacity is saturated. Deferred
+New starts reject ungranted HTTP nodes before they enter the queue. Activity
+capacity checks still precede execution-time privilege rechecks, so previously
+queued nodes, or nodes whose privileges were revoked after submission, can
+contribute to admission load while capacity is saturated. Deferred
 items move behind already-ready work rather than repeatedly overtaking it, but
 large backlogs still add SQL and metadata latency, and repeated input processing
 can be expensive. Normal activity metadata uses an instance lookup
@@ -743,7 +755,8 @@ by attempts whose completion was never recorded. See
 
 | Scenario | Message |
 |----------|---------|
-| No HTTP EXECUTE privilege | `Blocked: role '{role}' does not have EXECUTE privilege on {function}() for this request.` The error identifies the required signature and recommends `df.grant_usage` with `include_http => true`. |
+| No HTTP EXECUTE privilege at submission | `df.start rejected: role '{role}' does not have EXECUTE privilege on {signature}` (`42501`). No instance or work item is created; the hint identifies the needed grant. |
+| Missing or revoked HTTP privilege at execution | `Blocked: role '{role}' does not have EXECUTE privilege on {function}() for this request.` The error identifies the required signature and recommends `df.grant_usage` with `include_http => true`. |
 | HTTP disabled | `Blocked: outbound HTTP requests are disabled. Configure pg_durable.http_security = 'restricted' and restart the server to enable them.` |
 | Plaintext HTTP in restricted mode | `Blocked: plaintext HTTP is not permitted in restricted mode. HTTPS is required.` |
 | Unsupported scheme | `Blocked: unsupported URL scheme. Only {allowed} is allowed.` where `{allowed}` is `https` in restricted mode or `http and https` in unrestricted mode |

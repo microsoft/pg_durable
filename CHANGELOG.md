@@ -44,6 +44,11 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Security
 
+- `df.start()` now checks the submitter's HTTP function privileges before
+  persisting or enqueueing any workflow, including raw JSON and untaken branches.
+  URL/endpoint and ordinary/multipart overloads retain their separate grants.
+  Both transaction modes reject missing privileges with SQLSTATE `42501`.
+  Execution-time checks remain in place for later revocation and older workflows.
 - **Start admission quotas (#139):** `df.max_concurrent_per_user` (default
   `100`) and `df.max_instances_per_user` (default `10000`) limit active and
   retained instances per submitting role and origin database. Both are

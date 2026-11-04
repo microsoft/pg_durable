@@ -118,9 +118,16 @@ INSERT INTO _binding_cases VALUES (df.start(df.with_http_options(
 
 RESET SESSION AUTHORIZATION;
 SET SESSION AUTHORIZATION sb_no_http;
-INSERT INTO _binding_cases VALUES (df.start(
-    '{"node_type":"HTTP","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"GET\",\"secret_bindings\":{\"headers\":{\"X-Key\":{\"server\":\"sb_service\",\"key\":\"private\"}}}}"}',
-    'binding-forged-no-http', database => '_test_binding_sql_target'), 'failed', '%EXECUTE%df.http()%', false);
+DO $$ BEGIN
+    BEGIN
+        PERFORM df.start(
+            '{"node_type":"HTTP","query":"{\"url\":\"https://httpbingo.org/status/204\",\"method\":\"GET\",\"secret_bindings\":{\"headers\":{\"X-Key\":{\"server\":\"sb_service\",\"key\":\"private\"}}}}"}',
+            'binding-forged-no-http', database => '_test_binding_sql_target');
+        RAISE EXCEPTION 'TEST FAILED: secret bindings bypassed HTTP submission authorization';
+    EXCEPTION WHEN insufficient_privilege THEN
+        IF SQLERRM NOT LIKE '%does not have EXECUTE privilege%' THEN RAISE; END IF;
+    END;
+END $$;
 RESET SESSION AUTHORIZATION;
 
 DO $$
