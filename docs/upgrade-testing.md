@@ -391,6 +391,11 @@ what the upgrade script handles, and any backward compatibility considerations.
   stores. Any worker-role/database statement timeout must permit the backfill to
   finish, or startup retries it. Review retention cutoffs before restarting:
   recovered timestamps can make many old generations eligible on the next scan.
+  Expect brief workflow turn-latency spikes during those first scans: pruning
+  holds candidate instance-row locks until each batch transaction ends, and
+  acknowledgements for the same running workflows wait on those locks. An
+  expensive batch can hold them for close to the five-second statement deadline;
+  using a maintenance connection does not remove this row-lock contention.
   If an improperly drained upgrade left NULL timestamps behind, drain all
   callers first and use the provider's
   [documented data-only repair](https://github.com/microsoft/duroxide-pg/blob/79870890d1a4a14eb840ec1d31d0b6dff0716c0a/migrations/README.md#repairing-missing-continued-execution-timestamps).

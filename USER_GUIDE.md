@@ -2593,6 +2593,14 @@ finish within the deadline can remain unpruned despite aging past the retention
 window. Smaller pages can lengthen the scan, but other pending maintenance work
 still gets a turn between pruning slices.
 
+Pruning old generations holds instance-row locks until the batch transaction
+ends. Acknowledgements for those same workflows can wait even though their
+current generations are preserved and pruning uses a separate connection.
+Expect brief turn-latency spikes during scans; an expensive batch can hold those
+locks for close to the five-second statement deadline. The first scans after
+upgrade can cause more contention because backfill makes accumulated history
+eligible at once.
+
 Metadata queries have server-side deadlines and satellite operations have a
 15-second overall deadline. The candidate limit bounds materialized rows, not
 every row PostgreSQL might examine when determining the newest retained set.
