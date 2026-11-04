@@ -799,6 +799,8 @@ async fn read_execution_snapshot(
     let schema = format!("\"{}\"", schema.replace('"', "\"\""));
     // One statement gives details and event counts the same MVCC snapshot,
     // including when maintenance removes older generations during this read.
+    // execution_snapshot_matches_provider_api checks these column assumptions
+    // against the real provider migrations and its public metadata API.
     let rows: Vec<(
         i64,
         String,
@@ -845,6 +847,165 @@ mod tests {
     use sqlx::Connection;
     use std::str::FromStr;
     use std::time::Duration;
+
+    #[pg_test]
+    fn execution_snapshot_matches_provider_api() {
+        use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
+        use duroxide::{Event, EventKind};
+        use std::sync::Arc;
+
+        let admin = Spi::get_one::<String>("SELECT current_user::text")
+            .unwrap()
+            .unwrap();
+        let database = Spi::get_one::<String>("SELECT current_database()::text")
+            .unwrap()
+            .unwrap();
+        let mut url = url::Url::parse(&postgres_connection_string()).unwrap();
+        url.set_username(&admin).unwrap();
+        url.set_path(&database);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let schema = "execution_snapshot_contract";
+                let store = Arc::new(
+                    duroxide_pg::PostgresProvider::new_with_config(
+                        crate::types::worker_provider_config(url.as_str(), schema),
+                    )
+                    .await
+                    .expect("initialize the real provider schema for the column contract"),
+                );
+                for (instance, execution, output) in [
+                    ("contract", 1, Some("finished")),
+                    ("contract", 2, None),
+                    ("unrelated", 1, Some("not this instance")),
+                ] {
+                    store
+                        .enqueue_for_orchestrator(
+                            WorkItem::StartOrchestration {
+                                instance: instance.into(),
+                                orchestration: "contract".into(),
+                                input: "{}".into(),
+                                version: Some("1.0.0".into()),
+                                parent_instance: None,
+                                parent_id: None,
+                                parent_execution_id: None,
+                                execution_id: execution,
+                            },
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    let (_, token, _) = store
+                        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
+                        .await
+                        .unwrap()
+                        .expect("fetch the seeded execution");
+                    let mut history = vec![Event::with_event_id(
+                        1,
+                        instance,
+                        execution,
+                        None,
+                        EventKind::OrchestrationStarted {
+                            name: "contract".into(),
+                            version: "1.0.0".into(),
+                            input: "{}".into(),
+                            parent_instance: None,
+                            parent_id: None,
+                            parent_execution_id: None,
+                            carry_forward_events: None,
+                            initial_custom_status: None,
+                        },
+                    )];
+                    if let Some(output) = output {
+                        history.push(Event::with_event_id(
+                            2,
+                            instance,
+                            execution,
+                            None,
+                            EventKind::OrchestrationCompleted {
+                                output: output.into(),
+                            },
+                        ));
+                    }
+                    store
+                        .ack_orchestration_item(
+                            &token,
+                            execution,
+                            history,
+                            vec![],
+                            vec![],
+                            ExecutionMetadata {
+                                orchestration_name: Some("contract".into()),
+                                orchestration_version: Some("1.0.0".into()),
+                                status: Some(
+                                    if output.is_some() {
+                                        "Completed"
+                                    } else {
+                                        "Running"
+                                    }
+                                    .into(),
+                                ),
+                                output: output.map(str::to_string),
+                                ..Default::default()
+                            },
+                            vec![],
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                let client = Client::new(store.clone());
+                let mut expected = Vec::new();
+                for execution in [2, 1] {
+                    let info = client
+                        .get_execution_info("contract", execution)
+                        .await
+                        .unwrap();
+                    expected.push((
+                        i64::try_from(info.execution_id).unwrap(),
+                        info.status,
+                        i64::try_from(info.event_count).unwrap(),
+                        i64::try_from(
+                            info.completed_at
+                                .map(|end| end.saturating_sub(info.started_at))
+                                .unwrap_or(0),
+                        )
+                        .unwrap(),
+                        info.output,
+                    ));
+                }
+                assert_eq!(expected[0], (2, "Running".into(), 1, 0, None));
+                assert_eq!(expected[1].1, "Completed");
+                assert_eq!(expected[1].2, 2);
+                assert_eq!(expected[1].4.as_deref(), Some("finished"));
+                assert_eq!(
+                    read_execution_snapshot(store.pool(), schema, "contract", 5)
+                        .await
+                        .expect(
+                            "provider executions/history columns must support snapshot inspection"
+                        ),
+                    expected,
+                );
+                assert_eq!(
+                    read_execution_snapshot(store.pool(), schema, "contract", 1)
+                        .await
+                        .unwrap(),
+                    expected[..1],
+                    "limit and newest-first ordering must match the provider API",
+                );
+                assert!(read_execution_snapshot(store.pool(), schema, "missing", 5)
+                    .await
+                    .unwrap()
+                    .is_empty());
+                sqlx::query("DROP SCHEMA execution_snapshot_contract CASCADE")
+                    .execute(store.pool())
+                    .await
+                    .unwrap();
+                store.pool().close().await;
+            });
+    }
 
     #[pg_test]
     fn execution_snapshot_survives_concurrent_pruning() {

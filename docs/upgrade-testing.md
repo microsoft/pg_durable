@@ -410,6 +410,12 @@ what the upgrade script handles, and any backward compatibility considerations.
 - **Inspection:** `df.instance_executions()` reads execution details and event
   counts in one MVCC snapshot, so concurrent pruning does not produce spurious
   per-generation not-found errors. Genuine query failures still raise errors.
+  The snapshot and pruning pre-scan depend on provider column names and types.
+  `execution_snapshot_matches_provider_api` checks snapshot rows against the
+  provider's public metadata API using a store created by its actual migrations
+  and populated through provider operations. The existing pruning retention and
+  failure-progress test exercises pre-scan key columns against the same migrated
+  schema contract. Run these regressions when changing the provider dependency.
 - **Replay:** no orchestration code, durable-operation inputs, or continuation
   payloads change. Pruning preserves the current and running executions.
 - **Dependency pair:** duroxide is pinned exactly to `0.1.32`, as required by the

@@ -1973,6 +1973,8 @@ async fn prune_old_executions(
         .map_err(|error| error.to_string())?;
     // Remember the scanned page before deletion, so a failed page cannot starve
     // later keys. Neither eligibility nor the number of deletions drives progress.
+    // execution_pruning_retention_and_failure_progress tests these key columns
+    // against the real provider schema, not a local imitation.
     let scanned_through: Option<(String, i64)> = sqlx::query_as(&format!(
         "SELECT instance_id, execution_id FROM (
              SELECT instance_id, execution_id FROM {schema}.executions
