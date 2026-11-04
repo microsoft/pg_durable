@@ -6,6 +6,14 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [Unreleased]
 
+> **Pre-release databases:** The temporary duroxide-pg pin includes migration
+> `0029` without the pending `0027`/`0028` migrations. Its recorded migration
+> ledger is not a prefix of the combined provider stack, so those stores cannot
+> upgrade to that stack in place. Use this branch only with disposable databases,
+> including when testing a binary-only upgrade. Before retaining a database,
+> replace the pin with a compatible combined/released provider. See
+> [pre-release provider guidance](docs/upgrade-testing.md#pre-release-provider-databases).
+
 ### Added
 
 - **HTTP execution limits:** `pg_durable.max_http_concurrency` bounds ordinary

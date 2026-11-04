@@ -56,10 +56,13 @@ ordinary/multipart HTTP nodes under a role without HTTP permission and verifies
 that independent SQL completes while the HTTP slot remains held.
 
 The Git pin is an integration dependency, not a released provider version.
-Replace it with the approved merged/released revision when available. Do not
-copy its SQL into the extension or edit historical migrations. See
-[upgrade guidance](upgrade-testing.md#http-concurrency-policies) for migration
-locking and rollback constraints.
+It omits pending migrations `0027`/`0028`, so its ledger is not an upgradeable
+prefix of the combined provider stack. **Use disposable databases only.**
+Replace it with an approved combined/released revision before retaining a
+database. Do not copy its SQL into the extension or edit historical migrations.
+See [pre-release provider guidance](upgrade-testing.md#pre-release-provider-databases)
+and [upgrade guidance](upgrade-testing.md#http-concurrency-policies) for the
+ledger incompatibility, migration locking, and rollback constraints.
 
 The merged runtime already avoids a full-history read for normal activity
 metadata. Execution-specific history remains a fallback when metadata is

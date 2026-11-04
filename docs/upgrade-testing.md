@@ -358,6 +358,31 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.9 → v0.2.10 (unreleased)
 
+#### Pre-release provider databases
+
+**Do not use the current development pin with a database or workflow history
+that must be preserved.** The immutable duroxide-pg pin
+`9ae067b34abc4c1f1f1436329973fe37731edb2a` contains migration `0029` but not the
+pending `0027`/`0028` migrations from
+[microsoft/duroxide-pg#32](https://github.com/microsoft/duroxide-pg/pull/32).
+It records a ledger ending in `0026, 0029`. The combined stack expects
+`0026, 0027, 0028, 0029` (and later `0030`), and its ordered-prefix validation
+rejects the earlier ledger rather than applying the missing migrations out of
+order.
+
+This affects any control provider schema initialized or migrated by this binary,
+even without `ALTER EXTENSION UPDATE`. Use fresh disposable databases for
+development validation. Before keeping a database, replace the `DONOTLAND` pin
+with a portable combined provider revision or compatible release containing the
+complete migration prefix, and validate upgrades against it.
+
+Existing development stores from this pin must be recreated for combined-stack
+testing. Preserving one requires a deliberate upstream forward-migration plan.
+Do not delete or renumber migration ledger rows, apply missing migrations out of
+order, or change the worker readiness marker as a repair. Neither the readiness
+marker nor an extension SQL update changes provider migration history. Also
+verify migration body identity when replacing any pre-release pin.
+
 #### HTTP concurrency policies
 
 - **DDL:** Adds `df.with_policy(fut text, policy jsonb) RETURNS text`, with

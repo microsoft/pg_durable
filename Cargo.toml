@@ -74,6 +74,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pgrx-tests = "=0.16.1"
 
 # Temporary integration pins: merged admission support and its pending PostgreSQL companion.
+# DONOTLAND: this provider pin requires disposable databases; see docs/upgrade-testing.md.
 [patch.crates-io]
 duroxide = { git = "https://github.com/microsoft/duroxide", rev = "36b789d802f98963241a59ee7706e3ce029d583f" }
 duroxide-pg = { git = "https://github.com/microsoft/duroxide-pg", rev = "9ae067b34abc4c1f1f1436329973fe37731edb2a" }
