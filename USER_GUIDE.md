@@ -3154,6 +3154,15 @@ history when that lookup is unavailable or describes a different execution.
 Keep fan-out and intermediate payloads bounded; these limits are not
 tenant-isolation or scheduling-fairness guarantees.
 
+Waiting for capacity is not idle: each admission retry fetches and updates a
+queue row, reads activity metadata, and commits a deferral. Repeated updates
+generate index writes and WAL for as long as saturation lasts, even though no
+HTTP request is sent and successful deferrals do not consume execution attempts.
+Monitor queue churn and WAL volume as well as request concurrency. See
+[measured admission polling costs](docs/http-security.md#admission-polling-cost)
+for one saturated-backlog measurement. Retry-delay tuning is separate work;
+longer delays reduce polling at the cost of slower admission after capacity frees.
+
 HTTP capacity is released when the admitted handler returns or its task is
 dropped. Background cleanup of origin metadata connections can finish later;
 it retains the separate origin-connection reservation, not HTTP capacity.

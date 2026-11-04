@@ -600,6 +600,39 @@ separate from connection-pool size and from the total activity capacity set by
 [Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency)
 for headroom, timeout, cancellation, and crash semantics.
 
+#### Admission polling cost
+
+The current admission retry delay is 100 ms. Each unsuccessful attempt fetches
+the durable work item, reads activity metadata, and abandons the item with a
+future visibility time. Fetch and abandon update the worker queue and generate
+WAL. Visibility and lock-related index entries prevent these updates from being
+HOT updates; the work continues for the duration of saturation.
+
+A single 9.3-second measurement during the full-stack review used PostgreSQL 17,
+two activity slots, one held HTTP request, and 500 deferred ordinary/multipart
+requests in 25 instances on an oversubscribed runner:
+
+| Metric | Observation |
+|--------|---------------|
+| Worker-queue row updates | 568/s, approximately 284 fetch/defer cycles/s |
+| HOT updates | 0 |
+| Cluster WAL generation | 535,568 bytes/s (about 0.51 MiB/s) |
+| Cluster commits | 882/s |
+| Revisit interval per deferred item | About 1.7 seconds |
+
+If sustained, that measured WAL rate is about 1.8 GiB/hour. These are one-run,
+whole-workload observations, not per-request costs or guaranteed rates.
+Independent `SELECT 42` workflows took 12.4 and 10.1 seconds in two runs.
+The maximum observed `attempt_count` remained one, as intended for successful
+deferrals.
+
+Visibility ordering prevents deferred items from repeatedly overtaking ready
+work; it does not eliminate polling load. Bound fan-out and saturation duration,
+and budget for queue writes, WAL retention, and metadata/input processing.
+Adaptive, jittered, or longer retry delays are a follow-up that needs separate
+measurement of database load versus admission latency. The retry delay remains
+fixed in this version.
+
 ---
 
 ## 7. Audit Logging
