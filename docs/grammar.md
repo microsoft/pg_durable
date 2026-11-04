@@ -68,7 +68,13 @@ node_function ::= df.sql( QUERY )
                   )
                 | df.break( [value] )
                 | df.as( expression, NAME )
+                | df.with_policy( expression, POLICY_JSON )
 ```
+
+`df.with_policy()` annotates the enclosed graph rather than adding an executable
+node. `POLICY_JSON` is a JSONB object such as
+`'{"http":{"max_concurrency":2}}'::jsonb`; all enclosing concurrency constraints
+apply to HTTP and multipart executions in that subtree.
 
 > **Experimental:** The `continue_on_failure` syntax is subject to change in
 > future releases.

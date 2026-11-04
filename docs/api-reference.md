@@ -433,6 +433,31 @@ df.secret('partner_api', 'token') || '{"prefix":"Bearer "}'::jsonb
 
 See [Explicit Secret Bindings](../USER_GUIDE.md#explicit-secret-bindings).
 
+### df.with_policy(fut, policy)
+
+**Added in 0.2.10.**
+
+Returns a graph with a lexical HTTP concurrency constraint; does not execute it.
+
+| Parameter | Type | Auto-wrap | Description |
+|-----------|------|-----------|-------------|
+| `fut` | TEXT | Yes | Any workflow graph or SQL node |
+| `policy` | JSONB | No | An object such as `{"http":{"max_concurrency":2}}` |
+
+`http.max_concurrency` must be a positive 32-bit unsigned integer. `{}` adds no
+constraint. Unknown keys, JSON `null`, malformed objects, arrays, and invalid
+limits raise an error; SQL `NULL` for either argument returns SQL `NULL`.
+
+Every HTTP or multipart execution reserves capacity against all enclosing
+scopes and the server-wide HTTP ceiling. Nested policies only constrain, never
+override. Reapplying a policy to the same root keeps the smaller limit. Scopes
+are shared by that subtree's parallel branches and loop generations, but not by
+separately started workflows or different occurrences of a reused fragment.
+Policies survive restart and are shown by `df.explain()`.
+
+See [Workflow HTTP Policies](../USER_GUIDE.md#workflow-http-policies) for examples
+and the distinction from administrator limits and request timeouts.
+
 ### df.with_http_options(fut, options)
 
 **Added in 0.2.9.**
@@ -526,6 +551,13 @@ uses its APIs. SQL executes as captured `current_user`, with that role's target
 database privileges. Install in `pg_durable.database` first and wait for control
 readiness before creating satellites; see
 [Multi-Database Support](../USER_GUIDE.md#multi-database-support).
+
+Every HTTP or multipart node, including nodes in untaken branches, requires the
+submitting `current_user` to hold `EXECUTE` on its matching URL/endpoint function
+in the origin database. Missing privileges raise SQLSTATE `42501` before
+instance/node persistence or enqueueing, including for raw graph JSON and
+`transaction_mode => 'new'`. Inherited grants and `SECURITY DEFINER` identities
+follow PostgreSQL rules. Activities still recheck privileges at execution time.
 
 Non-superuser starts are subject to `df.max_concurrent_per_user` (default `100`)
 and `df.max_instances_per_user` (default `10000`) in their origin database.
@@ -921,6 +953,31 @@ the engine record and accounting.
 `transaction_mode => 'new'` uses its separate session's defaults and does not
 inherit the caller's session `SET` overrides. See
 [Instance Limits](../USER_GUIDE.md#instance-limits) for tuning and admission waits.
+
+---
+
+### pg_durable.max_activity_concurrency / pg_durable.max_http_concurrency
+
+| Setting | Meaning | Default | Range |
+|---------|---------|---------|-------|
+| `pg_durable.max_activity_concurrency` | Concurrent activities in the shared runtime, including SQL, HTTP, and metadata | `2` | `1` to `1000` |
+| `pg_durable.max_http_concurrency` | Concurrent HTTP and multipart HTTP activities combined, across all origin databases | `2` | `1` to `1000` |
+
+Both are `POSTMASTER` settings and require a PostgreSQL restart. An HTTP slot is
+held through preparation, response-body handling, and optional sink storage.
+Requests awaiting capacity remain queued without retaining activity slots or
+origin connections between admission attempts; admission waiting does not consume
+the request timeout.
+Contention does not fail the request or count as an execution retry.
+
+HTTP concurrency cannot exceed total activity capacity. Set the HTTP ceiling
+lower than activity capacity to prevent admitted HTTP from consuming every
+activity slot. Committed deferrals move behind already-ready work, allowing
+non-HTTP activities to progress under saturation. Large backlogs still add
+latency; spare slots are not a per-workflow fairness or throughput guarantee.
+These settings do not raise connection budgets or impose request-rate limits. No extension SQL
+update is required for existing installations to use these settings with the
+new binary. See [Activity and HTTP Concurrency](../USER_GUIDE.md#activity-and-http-concurrency).
 
 ---
 

@@ -694,7 +694,22 @@ fn format_node_display(node: &ExplainNode) -> String {
                     (method.to_string(), display_url)
                 })
                 .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
-            format!("{} {method} {url}{name_suffix}", node.node_type)
+            let policy_suffix = match node.query.as_deref().map(crate::policies::http_scopes) {
+                Some(Ok(scopes)) if !scopes.is_empty() => format!(
+                    " [HTTP limits: {}]",
+                    scopes
+                        .iter()
+                        .map(|scope| format!("{}={}", scope.id, scope.max_concurrency))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some(Err(error)) => format!(" [invalid HTTP policy: {error}]"),
+                _ => String::new(),
+            };
+            format!(
+                "{} {method} {url}{name_suffix}{policy_suffix}",
+                node.node_type
+            )
         }
         "SIGNAL" => {
             // Parse config to get signal name and timeout

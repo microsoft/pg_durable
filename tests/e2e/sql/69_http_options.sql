@@ -343,37 +343,24 @@ CREATE ROLE http_options_denied LOGIN;
 SELECT df.grant_usage('http_options_denied');
 SET SESSION AUTHORIZATION http_options_denied;
 
-CREATE TEMP TABLE _test_http_options_denied (instance_id TEXT, node_type TEXT);
-INSERT INTO _test_http_options_denied
-SELECT df.start(df.with_http_options(
-           jsonb_build_object('node_type', node_type, 'query', config)::text, '{}'
-       ), 'test-http-options-denied'), node_type
-FROM (VALUES
-    ('HTTP', '{"url":"https://api.github.com/","method":"GET","timeout_seconds":1}'),
-    ('HTTP_MULTIPART', '{"url":"https://api.github.com/","method":"POST","parts":[{"name":"field","data_b64":"aGk="}],"timeout_seconds":1}')
-) AS requests(node_type, config);
-
 DO $$
-DECLARE
-    test_case RECORD;
-    status TEXT;
-    node_result TEXT;
+DECLARE test_case RECORD;
 BEGIN
-    FOR test_case IN SELECT * FROM _test_http_options_denied LOOP
-        SELECT df.await_instance(test_case.instance_id) INTO status;
-        SELECT node.result::text INTO node_result
-        FROM df.nodes AS node
-        WHERE node.instance_id = test_case.instance_id AND node.node_type = test_case.node_type;
-
-        IF status IS DISTINCT FROM 'failed'
-           OR node_result IS NULL
-           OR node_result NOT LIKE '%does not have EXECUTE privilege%' THEN
-            RAISE EXCEPTION 'TEST FAILED: options bypassed HTTP privilege checks: %, %', status, node_result;
-        END IF;
+    FOR test_case IN SELECT * FROM (VALUES
+        ('HTTP', '{"url":"https://api.github.com/","method":"GET","timeout_seconds":1}'),
+        ('HTTP_MULTIPART', '{"url":"https://api.github.com/","method":"POST","parts":[{"name":"field","data_b64":"aGk="}],"timeout_seconds":1}')
+    ) AS requests(node_type, config) LOOP
+        BEGIN
+            PERFORM df.start(df.with_http_options(
+                jsonb_build_object('node_type', test_case.node_type, 'query', test_case.config)::text, '{}'),
+                'test-http-options-denied');
+            RAISE EXCEPTION 'TEST FAILED: HTTP options bypassed submission privileges';
+        EXCEPTION WHEN insufficient_privilege THEN
+            IF SQLERRM NOT LIKE '%does not have EXECUTE privilege%' THEN RAISE; END IF;
+        END;
     END LOOP;
 END $$;
 
-DROP TABLE _test_http_options_denied;
 RESET SESSION AUTHORIZATION;
 DROP OWNED BY http_options_denied;
 DROP ROLE http_options_denied;

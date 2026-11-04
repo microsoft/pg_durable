@@ -1331,6 +1331,7 @@ struct PendingGraphNode {
     id: String,
     depth: usize,
     path: String,
+    http_scopes: Arc<Vec<crate::policies::HttpScope>>,
 }
 
 /// A node whose graph references and config children have been materialized.
@@ -1366,6 +1367,7 @@ pub(crate) fn flatten_graph(
         id: root_id.clone(),
         depth: 0,
         path: "root".to_string(),
+        http_scopes: Arc::new(Vec::new()),
     }];
     let mut nodes = Vec::new();
     let mut discovered_nodes = 1;
@@ -1400,6 +1402,18 @@ pub(crate) fn flatten_graph(
                 message,
             })?;
 
+        let mut http_scopes = entry.http_scopes;
+        if let Some(http) = entry
+            .node
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.http.as_ref())
+        {
+            Arc::make_mut(&mut http_scopes).push(crate::policies::HttpScope {
+                id: entry.id.clone(),
+                max_concurrency: http.max_concurrency,
+            });
+        }
         let mut children = Vec::new();
         let mut parse_child = |raw: &serde_json::value::RawValue, segment: String| {
             let path = format!("{}.{}", entry.path, segment);
@@ -1426,6 +1440,7 @@ pub(crate) fn flatten_graph(
                 id: id.clone(),
                 depth: entry.depth + 1,
                 path,
+                http_scopes: http_scopes.clone(),
             });
             Ok::<String, GraphError>(id)
         };
@@ -1464,7 +1479,7 @@ pub(crate) fn flatten_graph(
             Vec::new()
         };
 
-        let query = entry
+        let mut query = entry
             .node
             .materialized_query(condition_node.as_deref(), &extra_nodes)
             .map_err(|message| GraphError {
@@ -1472,6 +1487,21 @@ pub(crate) fn flatten_graph(
                 message,
             })?;
 
+        if matches!(entry.node.node_type.as_str(), "HTTP" | "HTTP_MULTIPART") {
+            query = Some(
+                crate::policies::compile_http_query(
+                    query.as_deref().ok_or_else(|| GraphError {
+                        path: entry.path.clone(),
+                        message: "HTTP node has no configuration".to_string(),
+                    })?,
+                    &http_scopes,
+                )
+                .map_err(|message| GraphError {
+                    path: entry.path.clone(),
+                    message,
+                })?,
+            );
+        }
         nodes.push(MaterializedNode {
             id: entry.id,
             node_type: entry.node.node_type,
@@ -1925,6 +1955,12 @@ pub struct Durofut {
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policies::present"
+    )]
+    pub policy: Option<crate::policies::WorkflowPolicy>,
 }
 
 impl Durofut {

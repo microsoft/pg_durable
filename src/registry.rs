@@ -18,11 +18,13 @@ pub fn create_activity_registry(
     pool: Arc<PgPool>,
     semaphore: Arc<Semaphore>,
     http_policy: Arc<HttpPolicy>,
+    http_capacity: Arc<crate::policies::HttpAdmission>,
 ) -> ActivityRegistry {
     let sql_semaphore = semaphore.clone();
     let http_semaphore = semaphore.clone();
     let multipart_semaphore = semaphore;
     let multipart_policy = http_policy.clone();
+    let multipart_capacity = http_capacity.clone();
     let router = Arc::new(crate::origin::Router::new(pool));
     let sql_pool = router.clone();
     let graph_pool = router.clone();
@@ -143,8 +145,9 @@ pub fn create_activity_registry(
                 }
             },
         )
-        .register(
+        .register_with_admission(
             activities::execute_http::NAME,
+            move |ctx, input| http_capacity.try_admit(ctx.instance_id(), input),
             move |ctx: ActivityContext, config_json: String| {
                 let pool = http_pool.clone();
                 let semaphore = http_semaphore.clone();
@@ -164,8 +167,9 @@ pub fn create_activity_registry(
                 }
             },
         )
-        .register(
+        .register_with_admission(
             activities::execute_multipart::NAME,
+            move |ctx, input| multipart_capacity.try_admit(ctx.instance_id(), input),
             move |ctx: ActivityContext, config_json: String| {
                 let pool = multipart_pool.clone();
                 let semaphore = multipart_semaphore.clone();

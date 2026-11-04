@@ -358,6 +358,93 @@ what the upgrade script handles, and any backward compatibility considerations.
 
 ### v0.2.9 → v0.2.10 (unreleased)
 
+#### Pre-release provider databases
+
+**Do not use the current development pin with a database or workflow history
+that must be preserved.** The immutable duroxide-pg pin
+`9ae067b34abc4c1f1f1436329973fe37731edb2a` contains migration `0029` but not the
+pending `0027`/`0028` migrations from
+[microsoft/duroxide-pg#32](https://github.com/microsoft/duroxide-pg/pull/32).
+It records a ledger ending in `0026, 0029`. The combined stack expects
+`0026, 0027, 0028, 0029` (and later `0030`), and its ordered-prefix validation
+rejects the earlier ledger rather than applying the missing migrations out of
+order.
+
+This affects any control provider schema initialized or migrated by this binary,
+even without `ALTER EXTENSION UPDATE`. Use fresh disposable databases for
+development validation. Before keeping a database, replace the `DONOTLAND` pin
+with a portable combined provider revision or compatible release containing the
+complete migration prefix, and validate upgrades against it.
+
+Existing development stores from this pin must be recreated for combined-stack
+testing. Preserving one requires a deliberate upstream forward-migration plan.
+Do not delete or renumber migration ledger rows, apply missing migrations out of
+order, or change the worker readiness marker as a repair. Neither the readiness
+marker nor an extension SQL update changes provider migration history. Also
+verify migration body identity when replacing any pre-release pin.
+
+#### HTTP concurrency policies
+
+- **DDL:** Adds `df.with_policy(fut text, policy jsonb) RETURNS text`, with
+  `STRICT` null handling and the `with_policy_wrapper` C symbol, matching fresh
+  installation. Existing function signatures and privileges do not change.
+  No node types, columns, or policy tables are added.
+- **B1:** The new binary enforces the global HTTP ceiling on every supported
+  schema. The SQL helper requires the extension update; scope descriptors use
+  the existing HTTP node configuration text, so execution needs no schema
+  detection or new columns.
+- **Submission authorization:** New starts must have the matching HTTP function
+  privileges before enqueueing, including raw JSON and untaken branches. This
+  binary-only behavior change applies to the current and legacy `df.start`
+  bindings and both transaction modes: missing privileges now raise `42501`
+  instead of returning an instance that fails later. No SQL DDL is needed.
+  Existing histories replay unchanged and activities retain their execution-time
+  checks, including after privileges are revoked.
+- **Replay:** Unconfigured graphs retain byte-identical HTTP configurations.
+  Scopes are assigned at graph materialization, carried in the immutable graph,
+  and enforced outside orchestration replay. There are no new durable operations,
+  timer events, or permit records. Child instances and loop generations retain
+  their root engine namespace and lexical scope IDs.
+- **Runtime:** Duroxide is pinned to the merged, 0.1.32-based admission commit
+  `36b789d802f98963241a59ee7706e3ce029d583f`
+  ([microsoft/duroxide#74](https://github.com/microsoft/duroxide/pull/74)).
+  Duroxide-pg is pinned to the pending, 0.1.38-based PostgreSQL companion
+  `9ae067b34abc4c1f1f1436329973fe37731edb2a`
+  ([microsoft/duroxide-pg#51](https://github.com/microsoft/duroxide-pg/pull/51)).
+  These immutable pins prepare the integration for testing before release.
+  The runtime also brings versioned race/signal fixes and task-owned shutdown
+  cleanup; startup publication is interruptible so PostgreSQL shutdown does
+  not wait on its own terminating connections.
+  Activity admission keeps its existing callback signature; positive retry
+  delays are clamped to 1 ms through 24 hours (our 100 ms delay is unchanged).
+  Metadata normally uses `get_instance_info`, with execution-specific history
+  fallback when unavailable or stale. Failed fallback reads abandon the fetch
+  with its attempt counted rather than invoking a handler with placeholder
+  metadata. Event and work-item formats are unchanged.
+- **Provider migration/readiness:** Worker readiness advances from `3` to `4`;
+  new backend sessions wait for the worker to apply the bundled migrations.
+  Relative to provider 0.1.34, these include partial secondary indexes (`0023`),
+  claim-time orchestration leases (`0025`), serialized orchestration lock
+  mutations (`0026`), and visibility-ordered worker fetch (`0029`).
+  The provider embeds and applies its SQL through worker-only `ApplyAll`; no
+  extension upgrade SQL or copied provider DDL is needed for these changes.
+  This applies equally with old supported extension schemas.
+- **Rollout:** Migration `0029` builds `idx_worker_ready_order` on
+  `worker_queue(visible_at, id)`. Its non-concurrent index creation blocks queue
+  operations until the migration transaction commits, and lock acquisition has
+  no automatic deadline. For large queues, use the provider's
+  [concurrent prebuild guidance](https://github.com/microsoft/duroxide-pg/blob/9ae067b34abc4c1f1f1436329973fe37731edb2a/migrations/README.md#worker-queue-progress-migration-0029);
+  this shortens the build but does not eliminate the migration's lock.
+  Intervening provider migrations also change indexes and lock handling.
+  Older binaries reject newer migration versions on startup, so do not roll
+  back only the binary after applying these migrations.
+- **Validation:** Run the N-1 lifecycle and schema suite, shutdown and epoch-race
+  tests, and HTTP tests 90-93. The backlog regression holds HTTP capacity while
+  500 unprivileged HTTP activities contend with independent SQL. The HTTP restart
+  test covers an interrupted request and persisted policy metadata; the N-1
+  lifecycle covers historical graph control-flow families, not historical scoped
+  HTTP configurations (the previous release had no policy helper).
+
 #### `df.start()` admission quotas (#139)
 
 - **DDL/B1:** The upgrade adds `idx_instances_submitted_by` on

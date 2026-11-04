@@ -504,6 +504,21 @@ fn validate_http_sink_name(config: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Constrains HTTP concurrency throughout a graph or subtree.
+#[pg_extern(schema = "df")]
+pub fn with_policy(fut: &str, policy: pgrx::JsonB) -> String {
+    let policy: crate::policies::WorkflowPolicy = crate::policies::object(policy.0)
+        .unwrap_or_else(|error| pgrx::error!("df.with_policy(): invalid policy: {error}"));
+    let mut node = Durofut::ensure_strict(fut)
+        .unwrap_or_else(|error| pgrx::error!("df.with_policy(): {error}"));
+    if policy.http.is_some() {
+        node.policy
+            .get_or_insert_with(Default::default)
+            .constrain(policy);
+    }
+    node.to_json()
+}
+
 /// Applies HTTP options to a single HTTP or HTTP_MULTIPART node.
 #[pg_extern(schema = "df")]
 pub fn with_http_options(fut: &str, options: Option<pgrx::JsonB>) -> String {
@@ -1493,6 +1508,7 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
         Err(e) => pgrx::error!("Invalid durable function graph: {}", e),
     };
 
+    let mut checked_http_signatures = std::collections::BTreeSet::new();
     for node in &nodes {
         if matches!(node.node_type.as_str(), "HTTP" | "HTTP_MULTIPART") {
             if let Some(config) = node
@@ -1500,6 +1516,35 @@ fn start_in_caller_transaction(fut: &str, label: Option<&str>, database: Option<
                 .as_deref()
                 .and_then(|query| serde_json::from_str::<serde_json::Value>(query).ok())
             {
+                let (qualified_signature, signature) =
+                    crate::activities::execute_http::http_privilege_signatures(
+                        config.get("endpoint").is_some_and(|value| !value.is_null()),
+                        node.node_type == "HTTP_MULTIPART",
+                    );
+                if checked_http_signatures.insert(qualified_signature) {
+                    let allowed = Spi::get_one_with_args::<bool>(
+                        "SELECT COALESCE(pg_catalog.has_function_privilege(
+                            $1::pg_catalog.oid,
+                            pg_catalog.to_regprocedure($2::pg_catalog.text)::pg_catalog.oid,
+                            'EXECUTE'), false)",
+                        &[current_user_oid.into(), qualified_signature.into()],
+                    )
+                    .unwrap_or_else(|error| {
+                        pgrx::error!("HTTP submission privilege check failed: {error}")
+                    });
+                    if allowed != Some(true) {
+                        ErrorReport::new(
+                            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                            format!(
+                                "df.start rejected: role '{current_user_name}' does not have \
+                                 EXECUTE privilege on {signature}"
+                            ),
+                            function_name!(),
+                        )
+                        .set_hint("Use df.grant_usage with include_http => true, or grant EXECUTE on the required HTTP function.")
+                        .report(PgLogLevel::ERROR);
+                    }
+                }
                 validate_http_sink_name(&config)
                     .unwrap_or_else(|error| pgrx::error!("Invalid HTTP request: {}", error));
                 crate::types::check_http_request_size(&config, true)

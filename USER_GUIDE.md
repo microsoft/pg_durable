@@ -1074,6 +1074,13 @@ URLs and endpoints. After upgrading an existing installation, run the helper for
 roles that need the newly added endpoint support. Existing URL calls retain their
 permissions.
 
+`df.start()` checks the submitting `current_user` for the required HTTP function
+privileges in the origin database before creating or enqueueing an instance.
+This includes raw JSON nodes, multipart requests, and HTTP nodes inside branches
+that may never run. URL and endpoint overloads require their respective grants.
+Both transaction modes reject missing privileges with SQLSTATE `42501`.
+Execution-time checks remain in place for later revocation and older workflows.
+
 The path starts with one `/` and is appended to the server's base path prefix:
 `https://host/api/` plus `/items` becomes `https://host/api/items`. Absolute URLs,
 protocol-relative paths (`//host`), backslashes, fragments, whitespace, dot
@@ -3108,6 +3115,112 @@ enqueues are recorded even while limits are disabled.
 
 pg_durable uses separate limits for control management, provider, origin metadata,
 SQL execution, and independent-start connections.
+
+### Activity and HTTP Concurrency
+
+Connection budgets are separate from execution capacity:
+
+| Setting | Default | Scope |
+|---------|---------|-------|
+| `pg_durable.max_activity_concurrency` | 2 | All concurrently executing activities, including SQL, HTTP, and metadata work |
+| `pg_durable.max_http_concurrency` | 2 | HTTP and multipart HTTP activities combined |
+
+Both settings accept integers from 1 to 1000 and require a PostgreSQL restart.
+The HTTP ceiling is shared across users, workflows, and databases served by the
+cluster's single runtime. It counts an HTTP execution from request preparation
+through response-body processing and optional sink storage, not idle pooled
+connections. It is not a requests-per-second limit.
+
+Requests waiting for HTTP capacity stay in the durable queue. Between admission
+attempts they retain neither an execution slot nor an origin-database connection.
+They do not fail solely because of capacity contention or consume their request
+timeout while waiting. Cancellation still applies. Actual request failures
+retain their usual behavior. A committed deferral restores its fetch attempt;
+interrupted deferrals or metadata/storage failures can still consume the retry
+budget and eventually fail an activity before its request is sent.
+
+To reserve activity slots from admitted HTTP work, set the HTTP ceiling below
+total activity capacity:
+
+```ini
+pg_durable.max_activity_concurrency = 8
+pg_durable.max_http_concurrency = 4
+```
+
+Increasing activity capacity does not increase database connection budgets.
+If both settings are equal, active HTTP requests can occupy all activity slots;
+the unchanged defaults preserve the previous two-activity execution capacity.
+There is no strict fairness guarantee between workflows.
+
+Deferred HTTP work yields its queue position to work that was already ready,
+so repeated capacity deferrals cannot indefinitely overtake that work. A large
+backlog can still delay SQL and status updates: each activity turn must wait
+its turn, and admission polls reread request inputs. Activity metadata normally
+uses a small instance lookup; it falls back to reading the requested execution's
+history when that lookup is unavailable or describes a different execution.
+Keep fan-out and intermediate payloads bounded; these limits are not
+tenant-isolation or scheduling-fairness guarantees.
+
+Waiting for capacity is not idle: each admission retry fetches and updates a
+queue row, reads activity metadata, and commits a deferral. Repeated updates
+generate index writes and WAL for as long as saturation lasts, even though no
+HTTP request is sent and successful deferrals do not consume execution attempts.
+Monitor queue churn and WAL volume as well as request concurrency. See
+[measured admission polling costs](docs/http-security.md#admission-polling-cost)
+for one saturated-backlog measurement. Retry-delay tuning is separate work;
+longer delays reduce polling at the cost of slower admission after capacity frees.
+
+HTTP capacity is released when the admitted handler returns or its task is
+dropped. Background cleanup of origin metadata connections can finish later;
+it retains the separate origin-connection reservation, not HTTP capacity.
+
+Pending requests use the configured limits after restart; recorded results
+replay unchanged. A crash or cancellation cannot guarantee that a remote server
+stops processing an already-sent request. Limits bound local executions, not
+remote effects, and do not provide exactly-once HTTP delivery.
+
+### Workflow HTTP Policies
+
+Use `df.with_policy(fut TEXT, policy JSONB) RETURNS TEXT` to add a local HTTP
+concurrency constraint to a whole workflow or any subtree. Like other DSL
+functions, it builds a graph; only `df.start()` executes it.
+
+```sql
+SELECT df.start(
+    df.with_policy(
+        df.join3(
+            df.http('https://api.github.com/repos/microsoft/pg_durable', 'GET'),
+            df.http('https://api.github.com/repos/microsoft/duroxide', 'GET'),
+            df.http('https://api.github.com/repos/microsoft/duroxide-pg', 'GET')
+        ),
+        '{"http": {"max_concurrency": 2}}'::jsonb
+    ),
+    'repository-metadata'
+);
+```
+
+All enclosing limits apply together. If an outer policy allows two HTTP
+executions and each of three inner branches allows one, at most two run across
+the outer scope and at most one runs in each branch. Inner policies cannot
+raise an outer limit or the server-wide ceiling. Applying another policy to the
+same subtree root keeps the smaller limit.
+
+Ordinary and multipart requests share the scope. Parallel branches, internal
+child workflows, and loop iterations use the same enclosing allowance, including
+after restart. Separately started workflows have independent local budgets, and
+reusing a graph fragment in two positions creates separate scopes. A workflow
+started by another workflow's SQL does not implicitly inherit its caller's policy.
+
+The policy must be a JSON object. The supported option is
+`http.max_concurrency`, an integer from 1 to 4294967295; omission of `http` adds
+no constraint. Unknown keys, JSON `null`, arrays, zero, and negative or noninteger
+limits are errors. SQL `NULL` for either argument returns SQL `NULL`. Limits are
+captured with the graph, not read from session settings at execution time.
+`df.explain()` shows the enclosing scope IDs and limits on each HTTP node.
+
+Available after `ALTER EXTENSION pg_durable UPDATE TO '0.2.10'`.
+HTTP privileges and destination restrictions are unchanged. Request timeout caps,
+admission timeouts, workflow deadlines, and rate limits are not policy options.
 
 ### Connection Architecture
 

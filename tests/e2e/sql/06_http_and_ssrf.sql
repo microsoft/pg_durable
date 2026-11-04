@@ -1472,46 +1472,23 @@ END $$;
 
 DROP TABLE _test_http_priv1;
 
--- Permission Test 2: After REVOKE, user is blocked at execution time even via raw JSON
+-- Permission Test 2: After REVOKE, raw HTTP JSON is rejected before enqueueing.
 REVOKE EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) FROM http_priv_alice;
 
 SET SESSION AUTHORIZATION http_priv_alice;
-CREATE TEMP TABLE _test_http_priv2 (instance_id TEXT);
-INSERT INTO _test_http_priv2
-SELECT df.start(
-    '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
-    'test-http-grant-revoked'
-);
-RESET SESSION AUTHORIZATION;
-
 DO $$
-DECLARE
-    inst_id     TEXT;
-    status      TEXT;
-    node_result TEXT;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_http_priv2;
-
-    SELECT df.await_instance(inst_id, 30) INTO status;
-
-    IF status != 'failed' THEN
-        RAISE EXCEPTION 'TEST FAILED: expected status = failed after privilege revocation, got %', status;
-    END IF;
-
-    SELECT result::text INTO node_result
-    FROM df.nodes
-    WHERE instance_id = inst_id AND node_type = 'HTTP';
-
-    IF node_result IS NULL OR node_result NOT ILIKE '%does not have EXECUTE privilege%' THEN
-        RAISE EXCEPTION
-            'TEST FAILED: expected privilege-denied message in node result, got: %',
-            node_result;
-    END IF;
-
-    RAISE NOTICE 'TEST PASSED: http_grant_revoked_blocks_execution';
+    BEGIN
+        PERFORM df.start(
+            '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+            'test-http-grant-revoked');
+        RAISE EXCEPTION 'TEST FAILED: revoked HTTP grant allowed submission';
+    EXCEPTION WHEN insufficient_privilege THEN
+        IF SQLERRM NOT LIKE '%does not have EXECUTE privilege%' THEN RAISE; END IF;
+    END;
+    RAISE NOTICE 'TEST PASSED: http_grant_revoked_blocks_submission';
 END $$;
-
-DROP TABLE _test_http_priv2;
+RESET SESSION AUTHORIZATION;
 
 -- Permission Test 3: Restore grant and confirm access works again
 GRANT EXECUTE ON FUNCTION df.http(text, text, text, jsonb, integer) TO http_priv_alice;
@@ -1552,46 +1529,23 @@ END $$;
 
 DROP TABLE _test_http_priv3;
 
--- Permission Test 4: grant_usage default (include_http => false) blocks HTTP at execution
+-- Permission Test 4: grant_usage's default blocks raw HTTP submission.
 SELECT df.grant_usage('http_priv_bob');
 
 SET SESSION AUTHORIZATION http_priv_bob;
-CREATE TEMP TABLE _test_http_priv4 (instance_id TEXT);
-INSERT INTO _test_http_priv4
-SELECT df.start(
-    '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
-    'test-http-no-grant'
-);
-RESET SESSION AUTHORIZATION;
-
 DO $$
-DECLARE
-    inst_id     TEXT;
-    status      TEXT;
-    node_result TEXT;
 BEGIN
-    SELECT instance_id INTO inst_id FROM _test_http_priv4;
-
-    SELECT df.await_instance(inst_id, 30) INTO status;
-
-    IF status != 'failed' THEN
-        RAISE EXCEPTION 'TEST FAILED: expected status = failed for role without HTTP grant, got %', status;
-    END IF;
-
-    SELECT result::text INTO node_result
-    FROM df.nodes
-    WHERE instance_id = inst_id AND node_type = 'HTTP';
-
-    IF node_result IS NULL OR node_result NOT ILIKE '%does not have EXECUTE privilege%' THEN
-        RAISE EXCEPTION
-            'TEST FAILED: expected privilege-denied message in node result, got: %',
-            node_result;
-    END IF;
-
-    RAISE NOTICE 'TEST PASSED: http_no_grant_blocks_execution';
+    BEGIN
+        PERFORM df.start(
+            '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+            'test-http-no-grant');
+        RAISE EXCEPTION 'TEST FAILED: missing HTTP grant allowed submission';
+    EXCEPTION WHEN insufficient_privilege THEN
+        IF SQLERRM NOT LIKE '%does not have EXECUTE privilege%' THEN RAISE; END IF;
+    END;
+    RAISE NOTICE 'TEST PASSED: http_no_grant_blocks_submission';
 END $$;
-
-DROP TABLE _test_http_priv4;
+RESET SESSION AUTHORIZATION;
 
 -- Permission Test 5: Superuser always passes the execution-time privilege check
 CREATE TEMP TABLE _test_http_priv5 (instance_id TEXT);

@@ -508,8 +508,9 @@ runtime routing. It does not change recorded orchestration or activity payloads.
 ## Deferred Lifetime Guarantees
 
 The autocommit, short metadata transaction and pre-dispatch source-fencing changes
-do not solve the preexisting runtime/task and server-side cancellation problems.
-These remain separate review/release considerations, not claims of this feature.
+do not by themselves guarantee server-side cancellation or quiescence. The runtime
+ownership fix described below closes one part of this gap; the remaining gates
+still need separate integration evidence.
 
 | Gate | Required behavior |
 |------|-------------------|
@@ -519,16 +520,14 @@ These remain separate review/release considerations, not claims of this feature.
 | Sent HTTP | Prevent pre-send work after shutdown; accepted requests may still complete remotely and require application idempotency. |
 | Churn/scale | Repeated replacement epochs must not accumulate tasks/connections/permits or double execution limits. Exercise more origins than connection slots with unavailable peers. |
 
-The pinned Duroxide 0.1.30 `Runtime::shutdown` retains only outer dispatcher
-handles. A barrier-based live-Tokio reproduction allows a held handler to emit
-an in-process notification after shutdown returns for both `Some(0)` and a
-positive timeout. This proves detached handler lifetime, not SQL/HTTP effects.
-An upstream change should track the complete task tree, signal shutdown on every
-path, prevent new dispatch/acknowledgment after the shutdown boundary, and abort
-and join remaining children before returning. The regression must hold a handler,
-await shutdown, then release the handler barrier and assert no post-stop
-notification, live descendant or acknowledgment. A provider-only bump is not
-a runtime task-ownership fix.
+The 0.1.32-based Duroxide runtime now owns dispatcher, handler, and renewal tasks;
+`Runtime::shutdown` cancels and joins them even with `Some(0)`. A positive timeout
+is a grace period, not an unconditional sleep or a hard return deadline.
+pg_durable also interrupts startup I/O on PostgreSQL shutdown. The locked
+shutdown suite checks stop latency and restart, and the HTTP suite checks
+capacity release after active cancellation and recovery of interrupted requests.
+These checks do not establish remote SQL/HTTP quiescence or every
+replacement-epoch acknowledgment guarantee.
 
 Separately, pg_durable needs owned SQL cancellation/termination and confirmed
 backend drain before it can promise server-side quiescence. Dropping a Rust

@@ -6,8 +6,49 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ## [Unreleased]
 
+> **Pre-release databases:** The temporary duroxide-pg pin includes migration
+> `0029` without the pending `0027`/`0028` migrations. Its recorded migration
+> ledger is not a prefix of the combined provider stack, so those stores cannot
+> upgrade to that stack in place. Use this branch only with disposable databases,
+> including when testing a binary-only upgrade. Before retaining a database,
+> replace the pin with a compatible combined/released provider. See
+> [pre-release provider guidance](docs/upgrade-testing.md#pre-release-provider-databases).
+
+### Added
+
+- **HTTP execution limits:** `pg_durable.max_http_concurrency` bounds ordinary
+  and multipart HTTP executions together across all origin databases, while
+  `pg_durable.max_activity_concurrency` controls total activity capacity.
+  Both default to two and require a server restart. Capacity-blocked HTTP work
+  stays durably queued without retaining execution or origin-connection slots
+  between admission attempts. Large deferred backlogs can still delay other
+  work; these limits do not guarantee scheduling fairness.
+- **Workflow HTTP policies:** `df.with_policy()` adds lexical concurrency
+  constraints that compose with enclosing scopes and the global ceiling.
+  Policies are shared by branches and loop generations and survive restart.
+
+### Fixed
+
+- HTTP permit cleanup no longer panics on inconsistent counters or a poisoned
+  lock. Recovery is logged, existing reservations are retained, and one activity
+  failure does not permanently poison HTTP admission across all databases.
+- PostgreSQL shutdown interrupts runtime startup and readiness-publication I/O
+  rather than waiting on connections to the stopping server.
+- The merged activity-admission runtime normally resolves activity metadata
+  without rereading execution history on each deferral. Metadata-read failures
+  are handled as infrastructure failures before invoking the activity.
+- The pinned PostgreSQL provider orders worker items by visibility time and then
+  queue ID, so a saturated deferred HTTP backlog yields to already-ready SQL,
+  graph-loading, and status work. Worker readiness version `4` gates the bundled
+  provider migrations, including the queue-ordering index.
+
 ### Security
 
+- `df.start()` now checks the submitter's HTTP function privileges before
+  persisting or enqueueing any workflow, including raw JSON and untaken branches.
+  URL/endpoint and ordinary/multipart overloads retain their separate grants.
+  Both transaction modes reject missing privileges with SQLSTATE `42501`.
+  Execution-time checks remain in place for later revocation and older workflows.
 - **Start admission quotas (#139):** `df.max_concurrent_per_user` (default
   `100`) and `df.max_instances_per_user` (default `10000`) limit active and
   retained instances per submitting role and origin database. Both are

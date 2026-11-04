@@ -89,6 +89,11 @@ restart with the phase's configuration, not a rebuild.
 | `48_http_allow_all.sql` | `http-allow-all` | Unrestricted mode admits plaintext HTTP, unlisted domains, and private destinations for both HTTP activities |
 | `69_http_allowed_domains.sql` | `http-custom-domains` | Custom allow-list enforcement, malformed startup rejection, protected mode settings, and restart-only policy changes |
 | `70_http_allowed_domains_empty.sql` | `http-empty-domains` | Empty restricted-mode allow-list denies all domains |
+| `90_http_concurrency.sql` | `http-concurrency` | Measures HTTP ceilings of one and two; covers both HTTP functions, satellite origins, SQL headroom, queued and active cancellation, queue-independent request timeouts, blocked sink writes, and permit release after failure |
+| `91_http_policies.sql` | `http-concurrency` | Measures nested and sibling policy limits, independent workflow budgets, nonblocking admission, and shared scopes across loop generations |
+| `92_http_restart.sql` | `http-concurrency` | Two-stage test restarts PostgreSQL with active and queued HTTP work; drains old fixture requests, re-arms the gate and resets peak accounting, then measures a lexical cap of one independently of a global ceiling of three |
+| `93_http_admission_progress.sql` | `http-concurrency` | Holds the sole HTTP slot while 500 requests are submitted with permission, then revokes HTTP grants; verifies unrelated SQL progress before release and execution-time denial afterward |
+| `94_http_submission_privileges.sql` | `standard` | Rejects raw/nested HTTP across all four function variants and both transaction modes before persistence/enqueue, including under hostile search paths; verifies inherited grants and SECURITY DEFINER identity |
 
 ## Test Structure
 

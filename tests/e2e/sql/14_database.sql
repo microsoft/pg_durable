@@ -273,10 +273,20 @@ SELECT dblink_exec('satellite', $remote$
         ~> 'INSERT INTO public.test_satellite_log (marker) VALUES (''cancelled'')',
         'test-satellite-cancel'
     );
-    INSERT INTO _satellite_state SELECT 'http', df.start(
-        '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
-        'test-satellite-http-denied'
-    );
+    DO $denied$
+    BEGIN
+        BEGIN
+            PERFORM df.start(
+                '{"node_type":"HTTP","query":"{\"url\":\"https://api.github.com/\",\"method\":\"GET\",\"body\":null,\"headers\":null,\"timeout_seconds\":5}"}',
+                'test-satellite-http-denied');
+            RAISE EXCEPTION 'TEST FAILED: control HTTP permission authorized satellite submission';
+        EXCEPTION WHEN insufficient_privilege THEN
+            IF SQLERRM NOT LIKE '%does not have EXECUTE privilege%' THEN RAISE; END IF;
+        END;
+        IF EXISTS (SELECT 1 FROM df.instances WHERE label = 'test-satellite-http-denied') THEN
+            RAISE EXCEPTION 'TEST FAILED: denied satellite HTTP submission persisted an instance';
+        END IF;
+    END $denied$;
 $remote$);
 
 SELECT dblink_exec('satellite', $remote$
@@ -307,7 +317,6 @@ SELECT dblink_exec('satellite', $remote$
     DO $check$
     DECLARE
         inst_id TEXT;
-        node_result TEXT;
     BEGIN
         SELECT instance_id INTO inst_id FROM _satellite_state WHERE name = 'cancel';
         IF df.await_instance(inst_id, 30) IS DISTINCT FROM 'cancelled' THEN
@@ -319,15 +328,6 @@ SELECT dblink_exec('satellite', $remote$
             (SELECT count(*) FROM public.test_satellite_log WHERE marker IN ('left', 'right')) <> 2 OR
             (SELECT value FROM public.test_satellite_log WHERE marker = 'loop') IS DISTINCT FROM 2 THEN
             RAISE EXCEPTION 'TEST FAILED: satellite parallel or loop children misrouted';
-        END IF;
-        SELECT instance_id INTO inst_id FROM _satellite_state WHERE name = 'http';
-        IF df.await_instance(inst_id, 30) IS DISTINCT FROM 'failed' THEN
-            RAISE EXCEPTION 'TEST FAILED: control HTTP permission authorized satellite request';
-        END IF;
-        SELECT result::text INTO node_result FROM df.nodes
-            WHERE instance_id = inst_id AND node_type = 'HTTP';
-        IF node_result IS NULL OR node_result NOT ILIKE '%does not have EXECUTE privilege%' THEN
-            RAISE EXCEPTION 'TEST FAILED: expected origin HTTP privilege denial, got %', node_result;
         END IF;
         IF EXISTS (SELECT 1 FROM public.test_satellite_log
             WHERE marker IN ('rolled-back', 'cancelled') OR db_name <> '_test_satellite_db'

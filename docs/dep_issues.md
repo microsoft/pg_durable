@@ -2,7 +2,7 @@
 
 **Purpose:** Track duroxide-pg issues/limitations that require workarounds in pg_durable.
 
-**Last Updated:** 2026-01-06
+**Last Updated:** 2026-11-03
 
 **GitHub Query:** [All pg_durable issues in duroxide-pg](https://github.com/microsoft/duroxide-pg/issues?q=is%3Aissue+label%3Apg_durable)
 
@@ -34,7 +34,43 @@
 
 ## Active Blockers
 
-_No active blockers at this time._
+### HTTP admission: provider fix integrated, upstream release pending
+
+| Field | Value |
+|-------|-------|
+| **Companion PR** | [microsoft/duroxide-pg#51](https://github.com/microsoft/duroxide-pg/pull/51) |
+| **Status** | PR open; integrated for testing at `9ae067b34abc4c1f1f1436329973fe37731edb2a` (0.1.38-based) |
+| **Runtime support** | [microsoft/duroxide#74](https://github.com/microsoft/duroxide/pull/74), merged and pinned at `36b789d802f98963241a59ee7706e3ce029d583f` |
+
+The previous provider fetched visible worker items by their original queue ID.
+HTTP admission deferrals retained that ID, so a sufficiently large saturated
+backlog could repeatedly overtake later SQL, graph-load, or status activities
+despite spare activity slots. Longer bounded retry delays only raised the
+threshold.
+
+The pinned companion change orders eligible items by visibility time and then
+ID, preserving sessions and tags. Provider migration `0029` also adds a supporting
+index; worker readiness version `4` is published after migration. The
+[backlog regression](../tests/e2e/sql/93_http_admission_progress.sql) queues 500
+ordinary/multipart HTTP nodes under a role without HTTP permission and verifies
+that independent SQL completes while the HTTP slot remains held. The backlog
+is submitted while authorized and its privileges are revoked afterward, so the
+test also verifies the execution-time check independently of submission checks.
+
+The Git pin is an integration dependency, not a released provider version.
+It omits pending migrations `0027`/`0028`, so its ledger is not an upgradeable
+prefix of the combined provider stack. **Use disposable databases only.**
+Replace it with an approved combined/released revision before retaining a
+database. Do not copy its SQL into the extension or edit historical migrations.
+See [pre-release provider guidance](upgrade-testing.md#pre-release-provider-databases)
+and [upgrade guidance](upgrade-testing.md#http-concurrency-policies) for the
+ledger incompatibility, migration locking, and rollback constraints.
+
+The merged runtime already avoids a full-history read for normal activity
+metadata. Execution-specific history remains a fallback when metadata is
+unavailable or belongs to a different execution, and each fetch still processes
+the request input. The metadata and queue-ordering fixes address different costs;
+neither provides per-tenant resource isolation or a latency guarantee.
 
 ---
 
