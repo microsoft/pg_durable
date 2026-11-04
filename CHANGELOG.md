@@ -29,6 +29,9 @@ Pre-1.0 note: while `pg_durable` is in major version `0`, minor releases may inc
 
 ### Fixed
 
+- HTTP permit cleanup no longer panics on inconsistent counters or a poisoned
+  lock. Recovery is logged, existing reservations are retained, and one activity
+  failure does not permanently poison HTTP admission across all databases.
 - PostgreSQL shutdown interrupts runtime startup and readiness-publication I/O
   rather than waiting on connections to the stopping server.
 - The merged activity-admission runtime normally resolves activity metadata

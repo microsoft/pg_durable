@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use duroxide::runtime::ActivityAdmission;
@@ -145,6 +145,14 @@ impl HttpAdmission {
         }
     }
 
+    fn lock_state(&self) -> MutexGuard<'_, AdmissionState> {
+        self.state.lock().unwrap_or_else(|error| {
+            tracing::error!("Recovering poisoned HTTP admission state");
+            self.state.clear_poison();
+            error.into_inner()
+        })
+    }
+
     pub(crate) fn try_admit(
         self: &Arc<Self>,
         engine_instance: &str,
@@ -161,10 +169,7 @@ impl HttpAdmission {
             .iter()
             .map(|scope| (root.to_string(), scope.id.clone()))
             .collect();
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "HTTP admission state poisoned")?;
+        let mut state = self.lock_state();
         let mut saturated = state.active >= self.limit;
         for (key, scope) in keys.iter().zip(&scopes) {
             if let Some(counter) = state.scopes.get(key) {
@@ -203,26 +208,32 @@ struct HttpPermit {
 
 impl Drop for HttpPermit {
     fn drop(&mut self) {
-        let mut state = self
-            .admission
-            .state
-            .lock()
-            .expect("HTTP admission state poisoned");
-        assert!(
-            state.active > 0,
-            "HTTP permit released without a reservation"
-        );
-        state.active -= 1;
+        let mut state = self.admission.lock_state();
+        let empty_global = state.active == 0;
+        let mut missing_scopes = 0;
+        let mut empty_scopes = 0;
+        state.active = state.active.saturating_sub(1);
         for key in &self.keys {
-            let counter = state.scopes.get_mut(key).expect("HTTP scope disappeared");
-            assert!(
-                counter.active > 0,
-                "HTTP scope released without a reservation"
-            );
-            counter.active -= 1;
+            let Some(counter) = state.scopes.get_mut(key) else {
+                missing_scopes += 1;
+                continue;
+            };
+            if counter.active == 0 {
+                empty_scopes += 1;
+            }
+            counter.active = counter.active.saturating_sub(1);
             if counter.active == 0 {
                 state.scopes.remove(key);
             }
+        }
+        drop(state);
+        if empty_global || missing_scopes > 0 || empty_scopes > 0 {
+            tracing::error!(
+                empty_global,
+                missing_scopes,
+                empty_scopes,
+                "Inconsistent HTTP admission counters while releasing capacity"
+            );
         }
     }
 }
@@ -246,6 +257,80 @@ mod tests {
         match decision.unwrap() {
             ActivityAdmission::Admit(guard) => guard,
             other => panic!("expected admission, got {other:?}"),
+        }
+    }
+
+    fn poison_state(admission: &HttpAdmission) {
+        assert!(std::panic::catch_unwind(|| {
+            let _state = admission.state.lock().unwrap();
+            panic!("injected admission-state panic");
+        })
+        .is_err());
+        assert!(admission.state.is_poisoned());
+    }
+
+    #[test]
+    fn policy_poison_recovery_preserves_live_reservations() {
+        let admission = Arc::new(HttpAdmission::new(2));
+        let scopes = input(&[("scope", 1)]);
+        let first = admitted(admission.try_admit("first", &scopes));
+        poison_state(&admission);
+
+        assert!(matches!(
+            admission.try_admit("first", &scopes).unwrap(),
+            ActivityAdmission::Defer(_)
+        ));
+        assert!(!admission.state.is_poisoned());
+        let second = admitted(admission.try_admit("second", &scopes));
+        assert!(matches!(
+            admission.try_admit("third", "{}").unwrap(),
+            ActivityAdmission::Defer(_)
+        ));
+        drop((first, second));
+        assert_eq!(admission.lock_state().active, 0);
+        assert!(admission.lock_state().scopes.is_empty());
+    }
+
+    #[test]
+    fn policy_permit_drop_recovers_poisoned_state() {
+        let admission = Arc::new(HttpAdmission::new(1));
+        let scopes = input(&[("scope", 1)]);
+        let permit = admitted(admission.try_admit("root", &scopes));
+        poison_state(&admission);
+        drop(permit);
+
+        assert!(!admission.state.is_poisoned());
+        drop(admitted(admission.try_admit("root", &scopes)));
+        assert_eq!(admission.lock_state().active, 0);
+        assert!(admission.lock_state().scopes.is_empty());
+    }
+
+    #[test]
+    fn policy_permit_drop_handles_inconsistent_counters_without_panicking() {
+        for fault in ["global", "empty-scope", "missing-scope"] {
+            let admission = Arc::new(HttpAdmission::new(1));
+            let scopes = input(&[("scope", 1)]);
+            let permit = admitted(admission.try_admit("root", &scopes));
+            {
+                let mut state = admission.lock_state();
+                let key = ("root".to_string(), "scope".to_string());
+                match fault {
+                    "global" => state.active = 0,
+                    "empty-scope" => state.scopes.get_mut(&key).unwrap().active = 0,
+                    "missing-scope" => {
+                        state.scopes.remove(&key);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit))).is_ok(),
+                "{fault}"
+            );
+            assert!(!admission.state.is_poisoned(), "{fault}");
+            drop(admitted(admission.try_admit("root", &scopes)));
+            assert_eq!(admission.lock_state().active, 0, "{fault}");
+            assert!(admission.lock_state().scopes.is_empty(), "{fault}");
         }
     }
 
