@@ -24,10 +24,10 @@ for focused guidance. The project website is
 ## Install from PGXN
 
 PGXN distributes source, not binaries. Installation requires PostgreSQL 17 or
-18 development files, Rust, pgxnclient, and cargo-pgrx 0.16.1:
+18 development files, Rust, pgxnclient, and cargo-pgrx 0.20.1:
 
 ```bash
-cargo install --locked cargo-pgrx --version 0.16.1
+cargo install --locked cargo-pgrx --version 0.20.1
 pgxn install --sudo -- pg_durable
 ```
 

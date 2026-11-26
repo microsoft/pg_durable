@@ -179,7 +179,7 @@ Prerequisites:
 - cargo-pgrx, matching the `pgrx` version pinned in `Cargo.toml`:
 
   ```bash
-  cargo install --locked cargo-pgrx --version 0.16.1
+  cargo install --locked cargo-pgrx --version 0.20.1
   ```
 
 Then, for a PostgreSQL installed from a package:
@@ -220,7 +220,7 @@ and run `CREATE EXTENSION pg_durable` as described above.
 
 - PostgreSQL 17 or 18
 - Rust (stable)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.16.1
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.20.1
 
 ### GitHub Codespace
 

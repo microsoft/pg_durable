@@ -1372,7 +1372,7 @@ pub(crate) fn flatten_graph(
 
     while let Some(entry) = pending.pop() {
         #[cfg(not(test))]
-        pgrx::check_for_interrupts!();
+        pgrx::check_for_interrupts();
         if entry.depth > MAX_GRAPH_DEPTH {
             return Err(GraphError {
                 path: entry.path,
