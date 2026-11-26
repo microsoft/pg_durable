@@ -9,27 +9,22 @@ description = "Durable SQL Functions for PostgreSQL"
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "pgrx_embed_pg_durable"
-path = "./src/bin/pgrx_embed.rs"
-
 [features]
 default = ["pg17"]
 # Compiles the background worker's timing hooks (see `test_pause_before_ready`).
 # Never enable in a shipped build: the hooks let the process environment stall
 # worker initialization.
 test-hooks = []
-pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
-pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15" ]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16" ]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17" ]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18" ]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19" ]
 unsafe = ["pgrx/unsafe-postgres"]
 pg_test = []
 
 [dependencies]
-pgrx = "=0.16.1"
+pgrx = "=0.20.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -72,7 +67,7 @@ base64 = "0.23"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-pgrx-tests = "=0.16.1"
+pgrx-tests = "=0.20.1"
 
 [profile.dev]
 panic = "unwind"

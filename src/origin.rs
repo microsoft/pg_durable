@@ -510,7 +510,7 @@ where
                 // DROP waits for all backends, including this pg_test backend,
                 // to acknowledge its storage-manager process-signal barrier.
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    pgrx::check_for_interrupts!();
+                    pgrx::check_for_interrupts();
                 }
             }
         }
